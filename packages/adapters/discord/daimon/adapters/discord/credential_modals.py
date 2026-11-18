@@ -162,7 +162,6 @@ from daimon.core.mcp_token_connect import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
-from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -411,7 +410,6 @@ class _DiscordCredentialPort:
             err_type=type(err).__name__,
             **{name: value for name, value in fields.items() if value is not None},
         )
-        capture_exception_with_scope(err)
 
 
 class EnvCredentialModal(discord.ui.Modal):

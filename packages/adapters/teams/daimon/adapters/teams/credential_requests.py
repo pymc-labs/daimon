@@ -1067,5 +1067,7 @@ class _TeamsCredentialPort:
     async def resume(self, row: CredentialRequestRow) -> None:
         await self.requests._resume(row, self.service_url)  # pyright: ignore[reportPrivateUsage]
 
-    def write_failed(self, kind: str, err: Exception) -> None:
+    def write_failed(
+        self, kind: str, err: Exception, *, key: str | None = None, key_count: int | None = None
+    ) -> None:
         log.error("teams.credential.save_failed", kind=kind, err_type=type(err).__name__)
