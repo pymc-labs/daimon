@@ -336,6 +336,8 @@ async def test_a_failed_submit_reports_nothing_that_could_carry_the_value(
             failed = await post_activity(service, _submit(row.token))
     assert failed["task"]["value"] == module.FAILED
     sentry.assert_not_called()
+    causes = logs[-1].pop("causes")
+    assert "boom" not in str(causes), f"the cause is logged by closed labels only: {causes}"
     assert logs[-1] == {
         "event": "teams.credential.failed",
         "err_type": "DaimonError",
