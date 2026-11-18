@@ -1002,7 +1002,10 @@ async def _capture_source_capabilities(
                         for path, body in sorted(retained.items())
                     )
                 )
-                if request_digest(canonical.model_dump(mode="json")) != item.target.digest:
+                from mux.drivers.openai import bundle_digest
+
+                # The digest the driver pinned: of the bytes it uploads (`plain_bundle`).
+                if bundle_digest(canonical) != item.target.digest:
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
