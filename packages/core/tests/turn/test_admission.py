@@ -2928,3 +2928,83 @@ async def test_delegated_admission_never_caches_admin_authority(
     assert admission.is_admin and not admission.is_platform_admin
     account = await get_account(db_session, admission.account_id)
     assert account is not None and account.role is Role.USER
+
+
+_RELAY_APP = "https://daimon.example.com"
+
+
+async def _admit_with_servers(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    server_urls: list[str],
+    *,
+    channel_id: str = "chan-1",
+) -> Admission:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            mcp_servers=[
+                {"type": "url", "name": f"s{i}", "url": url} for i, url in enumerate(server_urls)
+            ],
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        public_url=f"{_RELAY_APP}/mcp",
+    )
+    CACHE.clear()
+    return await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id=channel_id,
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+
+
+async def test_admit_holds_a_relay_agent_to_its_channel_and_drops_its_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An agent with an identity-relay server runs held to the channel the relay signs,
+    with no admin standing and no long-term memory."""
+    admission = await _admit_with_servers(
+        db_session, db_session_factory, tmp_path, [f"{_RELAY_APP}/mcp-identity/grove"]
+    )
+    assert admission.hold is not None
+    assert (admission.hold.channel_id, admission.hold.client) == ("chan-1", False)
+    assert admission.grant is not None and admission.grant.hold == admission.hold
+    assert not admission.grant.subject.is_admin and not admission.is_admin
+    identity = admission.identity
+    assert not (identity.personal_memory or identity.shared_memory or identity.channel_memory)
+    assert not admission.feature_on("repo_memory")
+    assert admission.origin_seal_ids == {"chan-1"}, "its session is sealed to its channel"
+
+
+async def test_admit_leaves_an_agent_without_a_relay_server_as_it_was(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No relay server (none, or another server): no hold, admin kept, memory on."""
+    for urls in ([], ["https://tools.example.com/mcp", f"{_RELAY_APP}/mcp"]):
+        admission = await _admit_with_servers(
+            db_session, db_session_factory, tmp_path, urls, channel_id=f"chan-{len(urls)}"
+        )
+        assert admission.hold is None
+        assert admission.grant is not None and admission.grant.hold is None
+        assert admission.grant.subject.is_admin
+        identity = admission.identity
+        assert identity.personal_memory and identity.shared_memory and identity.channel_memory
+        assert admission.feature_on("repo_memory")
+        assert not admission.origin_seal_ids and not admission.source_sealed

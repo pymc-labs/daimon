@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or Gemini model sets its provider. Who may switch, the provider allowlist,
   prices and daily caps are unchanged, and a switch button posted earlier applies
   the switch when pressed.
+- **An agent with a signed-identity MCP server stays in its channel and keeps no
+  memory.** Its channel turns run held: they post only in their channel and its
+  threads, send no DMs and have no admin tools. It keeps no long-term memory, and
+  its sessions are sealed to the channel. Agents without such a server are unchanged.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
   change.** An agent whose Daimon tool list was long no longer fails to start on
   OpenAI, and a provider that is set up is never reported as missing.

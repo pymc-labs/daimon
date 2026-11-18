@@ -100,6 +100,11 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.relay_scope import (
+    agent_has_identity_relay,
+    relay_seal_ids,
+    without_long_term_memory,
+)
 from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
@@ -1446,6 +1451,15 @@ async def _admit_gates(
     # role is the adapter's live one, never a stored role. ---
     from daimon.core.turn.invocation import human_invocation
 
+    # An agent with a signed-identity MCP server answers with what its channel's
+    # readers can read, so its turn stays in that channel (`daimon.core.relay_scope`).
+    relay_agent = agent_has_identity_relay(
+        (server.url for server in agent.mcp_servers), public_url=deps.public_url
+    )
+    if relay_agent and hold is None and not is_dm:
+        hold = TurnHold(platform, channel_id, client=False)
+        subject = replace(subject, is_admin=False)
+        effective_admin = False
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
@@ -1486,6 +1500,10 @@ async def _admit_gates(
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
     seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
+    if relay_agent and not is_dm:
+        # What the relay answers is for this channel's readers: the session stays
+        # sealed to the channel (and thread) it ran in, as for any limited channel.
+        seal_ids |= relay_seal_ids(channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = _memory_read_only(
         policy, grant, source_sealed, await _dm_memory_read_only(deps, grant)
@@ -1983,6 +2001,8 @@ async def _admit_gates(
             account_id=principal.account_id,
             now=now,
         )
+    if relay_agent and result.features is not None:
+        result = replace(result, features=without_long_term_memory(result.features))
     mark("result")
     _log.info(
         "turn.admission_timing",
