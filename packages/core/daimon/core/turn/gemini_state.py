@@ -265,7 +265,12 @@ class _GeminiStorage:
             loop = asyncio.get_running_loop()
             records = await loop.run_in_executor(_CODEC, _load, payload.body)
             yield records
-            await payload.save(await loop.run_in_executor(_CODEC, _dump, records))
+
+            async def save() -> None:
+                # One uncancellable unit: an encoded body always reaches its save.
+                await payload.save(await loop.run_in_executor(_CODEC, _dump, records))
+
+            await complete(save())
 
 
 @runtime_checkable
