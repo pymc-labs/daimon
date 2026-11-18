@@ -27,10 +27,7 @@ in one conversation.
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
 
-A provider that cannot meet a channel's requirements refuses the reply. When a
-switch needs confirming again, a person's new conversation runs on Anthropic
-and the switch card is offered again. A conversation already on the switched
-provider, a routine and an unattended turn refuse instead.
+A provider that cannot meet a channel's requirements refuses the reply.
 
 ### What is not supported yet
 
@@ -41,8 +38,8 @@ provider, a routine and an unattended turn refuse instead.
 - **OpenAI and Gemini:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
-  names clash with Gemini's own, is named on the switch card as a loss, and so
-  is a web search that must ask first.
+  names clash with Gemini's own, is off there, and so is a web search that
+  must ask first.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
@@ -77,23 +74,20 @@ stop.
 Picking a model on another provider is the switch. `/model` on Discord, the
 Model shortcut on Slack, the `model` command on Teams, the web model editor and
 chat header, and the agent panels all list every model your install can run with
-its price. A pick that loses nothing applies at once. A pick that loses
-something, or meets a shared-thread limit, shows a card naming it, and
-**Switch** accepts those losses.
-Earlier messages carry over, and so do saved files where the new provider keeps
-a workspace. A refusal names its cause and changes nothing.
+its price. A pick applies at once, like any model change. What the new
+provider can't carry is off there and named after the pick, until you switch
+back. Earlier messages carry over, and so do saved files where the new provider
+keeps a workspace. A refusal names its cause and changes nothing.
 
 Picking a model for one conversation, in chat or with the MCP tool
 `set_thread_model`, leaves the agent on its own model everywhere else. Only the
 agent's owner or an admin may do it, unless the `thread_providers` feature is
 on. It is off by default and lets anyone who may change a conversation's model
-do it. After an admin edits the agent, the next message in that conversation
-checks the pick again, and asks only if something stops working.
+do it. The pick stays when an admin edits the agent.
 
-An admin can **Switch back to Claude** from a refused reply, a switch card or
-a panel, when the install has an Anthropic key. MCP tools and the CLI take
-`--model provider:id`, for example `openai:gpt-6-luna`, with `--yes` and
-`--accept-drops`.
+An admin can **Switch back to Claude** from a refused reply or a panel, when
+the install has an Anthropic key. MCP tools and the CLI take
+`--model provider:id`, for example `openai:gpt-6-luna`, with `--yes`.
 
 ### Convert an agent in either direction
 
