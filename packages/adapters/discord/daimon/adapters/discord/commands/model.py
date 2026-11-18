@@ -7,9 +7,9 @@ Run inside a conversation thread. With no choice it names the thread's model;
 with one it keeps that choice for every later reply (`daimon.core.thread_models`).
 Anyone who may start a turn in the thread may switch it, decided by the same
 access policy check admission makes. Where provider choice is on, the choices are
-the catalog with prices, and a pick that loses something names it and asks once
-(`daimon.core.thread_model_switch.pick_thread_or_card`). Asking in words reaches the same
-setting through the agent's `set_thread_model` tool.
+the catalog with prices, and a pick applies at once; the reply names anything off on the
+new provider (`daimon.core.thread_model_switch.pick_thread`). Asking in words reaches the
+same setting through the agent's `set_thread_model` tool.
 """
 
 import uuid
@@ -22,20 +22,16 @@ from daimon.adapters.discord.checks import (
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.views import GuardedView
 from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
-from daimon.core.thread_model_flow import thread_pick_result
+from daimon.core.thread_model_flow import NO_AGENT, thread_pick_result
 from daimon.core.thread_model_switch import (
     ThreadPick,
-    confirm_thread_or_refusal,
-    pick_thread_or_card,
+    pick_thread,
     pick_value,
     thread_model_picker,
     thread_pick_for,
@@ -62,59 +58,6 @@ _LEGACY = (
     app_commands.Choice(name="Agent default", value="default"),
 )
 _AUTOCOMPLETE_LIMIT = 25
-_CONFIRM_TIMEOUT_SECONDS = 300.0
-
-
-class _ConfirmView(GuardedView):
-    """Cancel, then Switch: the card for a pick that loses something."""
-
-    def __init__(
-        self,
-        *,
-        allowed_user_id: int,
-        pick: ThreadPick,
-        value: str,
-        shown: ModelSwitchPreview,
-        thread_id: str,
-        admin: bool,
-    ) -> None:
-        super().__init__(allowed_user_id=allowed_user_id, timeout=_CONFIRM_TIMEOUT_SECONDS)
-        self._pick = pick
-        self._value = value
-        self._shown = shown
-        self._thread_id = thread_id
-        self._admin = admin
-        self.confirm.disabled = not shown.allowed
-
-    @discord.ui.button(label=CANCEL_LABEL, style=discord.ButtonStyle.secondary)
-    async def cancel(
-        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
-    ) -> None:
-        self._finalize()
-        await interaction.response.edit_message(
-            content="Nothing changed.", view=None, allowed_mentions=discord.AllowedMentions.none()
-        )
-
-    @discord.ui.button(label=SWITCH_LABEL, style=discord.ButtonStyle.primary)
-    async def confirm(
-        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
-    ) -> None:
-        self._finalize()
-        await interaction.response.defer()
-        done = await confirm_thread_or_refusal(
-            self._pick,
-            self._value,
-            thread_id=self._thread_id,
-            digest=self._shown.digest,
-            revision=self._shown.revision,
-            admin=self._admin,
-        )
-        text = done.line if isinstance(done, SwitchRefusal) else done.note
-        if isinstance(done, SwitchRefusal):
-            text += " Nothing changed."
-        await interaction.edit_original_response(
-            content=text, view=None, allowed_mentions=discord.AllowedMentions.none()
-        )
 
 
 def _runtime_of(interaction: BotInteraction) -> DiscordRuntime:
@@ -196,7 +139,6 @@ class ModelCog(commands.Cog):
     @require_registered_guild
     async def model(self, interaction: BotInteraction, choice: str | None = None) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        view: discord.ui.View | None = None
         try:
             runtime = _runtime_of(interaction)
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
@@ -213,9 +155,9 @@ class ModelCog(commands.Cog):
             else:
                 if not await may_switch_thread(interaction, tenant_id, thread):
                     raise UserFacingError(_NOT_ALLOWED)
-                text, view = await self._pick(interaction, tenant_id, thread, choice)
+                text = await self._pick(interaction, tenant_id, thread, choice)
             await interaction.edit_original_response(
-                content=text, view=view, allowed_mentions=discord.AllowedMentions.none()
+                content=text, allowed_mentions=discord.AllowedMentions.none()
             )
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.edit_original_response(
@@ -226,8 +168,8 @@ class ModelCog(commands.Cog):
 
     async def _pick(
         self, interaction: BotInteraction, tenant_id: uuid.UUID, thread: discord.Thread, choice: str
-    ) -> tuple[str, discord.ui.View | None]:
-        """Keep a pick that loses nothing; otherwise show the card that asks once."""
+    ) -> str:
+        """Keep the pick at once; the note names anything off on the new provider."""
         runtime = _runtime_of(interaction)
         word = choice.strip().lower()
         legacy = word == "default" or not channel_backend.backend_selection_enabled(
@@ -241,25 +183,13 @@ class ModelCog(commands.Cog):
                 thread_id=str(thread.id),
                 choice=choice,
             )
-            return change.note, None
+            return change.note
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
         pick = await thread_pick_of(interaction, thread, admin=admin)
         if pick is None:
-            raise UserFacingError("No agent answers in this conversation yet.")
-        value = pick_value(choice)
-        done = await pick_thread_or_card(pick, value, thread_id=str(thread.id), admin=admin)
-        result = thread_pick_result(value, done)
-        if not isinstance(done, ModelSwitchPreview):
-            return result.text, None
-        view = _ConfirmView(
-            allowed_user_id=interaction.user.id,
-            pick=pick,
-            value=value,
-            shown=done,
-            thread_id=str(thread.id),
-            admin=admin,
-        )
-        return "\n".join(result.lines), view
+            raise UserFacingError(NO_AGENT)
+        done = await pick_thread(pick, pick_value(choice), thread_id=str(thread.id), admin=admin)
+        return thread_pick_result(done)
 
     @model.autocomplete("choice")
     async def _choices(

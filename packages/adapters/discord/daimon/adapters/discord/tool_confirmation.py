@@ -476,7 +476,11 @@ def discord_confirmation_hook(
         return await tenant_guild(client, runtime.sessionmaker, tenant_id)
 
     if runtime is not None:
-        from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+        from daimon.core.channel_backend import (
+            NO_CAPTURE,
+            backend_selection_enabled,
+            make_backend_service,
+        )
 
         if backend_selection_enabled(runtime.settings.turn):
             from daimon.adapters.discord.bot import requester_role
@@ -494,62 +498,15 @@ def discord_confirmation_hook(
                 role, _ = await requester_role(guild, clicker)
                 return role is Role.ADMIN
 
-            async def current_admin(clicker: str) -> bool:
-                guild = await role_guild()
-                if guild is None:
-                    return False
-                role, _roles = await requester_role(guild, clicker)
-                async with runtime.sessionmaker() as session:
-                    subject = await load_live_subject(
-                        session,
-                        tenant_id=tenant_id,
-                        platform="discord",
-                        caller=AdminCaller(
-                            platform_user_id=clicker,
-                            is_server_admin=role is Role.ADMIN,
-                            role_ids=tuple(_roles),
-                        ),
-                        action=DelegatedAction.AGENT_SETTINGS,
-                    )
-                return subject.is_admin
-
-            from daimon.core.turn.admission import capture_admitted_backend_source
-
-            capture = partial(
-                capture_admitted_backend_source,
-                runtime.turn_deps,
-                admission=admission,
-                tenant_id=tenant_id,
-                account_id=account_id,
-                platform="discord",
-                # A mention in a channel is admitted before its reply thread opens.
-                opened_thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
-                opened_thread_parent_id=(
-                    str(channel.parent_id) if isinstance(channel, discord.Thread) else None
-                ),
-            )
-
+            # The admin cards set the allowed providers or clear a pin: no agent source.
             prepare_admin, check_admin = backend_switch_callbacks(
                 make_backend_service(
-                    runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                    runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
                 ),
                 sessionmaker=runtime.sessionmaker,
-                anthropic=runtime.anthropic,
                 tenant_id=tenant_id,
                 account_id=account_id,
-                current_admin=current_admin,
                 current_platform_admin=current_platform_admin,
-                answering_agent_name=(
-                    getattr(getattr(admission, "config", None), "agent_name", None)
-                ),
-                default_agent_name=runtime.deployment_default.agent_name,
-                place_word="server",
-                # A hand-off earlier in this thread decides whose conversation moves.
-                handoff_thread=(
-                    ("discord", str(channel.parent_id), str(channel.id))
-                    if isinstance(channel, discord.Thread)
-                    else None
-                ),
                 # A channel-pin card clears only the channel this turn runs in.
                 pin_channel=ChannelRef(
                     tenant_id=str(tenant_id),
