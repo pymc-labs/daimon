@@ -124,8 +124,9 @@ async def test_a_pick_off_the_agents_provider_needs_the_owner(switching):
 
 async def test_a_lossy_pick_is_kept_at_once_and_runs_this_conversation_only(switching):
     """Sandbox is off on OpenAI: said as information, kept in one call, audited."""
-    service, agent, actor, sessions, _, _ = switching
+    service, agent, actor, sessions, _, reads = switching
     change = await _keep(_pick(service, agent, actor, sessions))
+    assert reads == [agent], "one source read: the stored run's preview is the one shown"
     assert "Off on OpenAI: sandbox." in change.note, change.note
     assert "?" not in change.note, "information, never a question"
     thread = await _thread(sessions, agent)
