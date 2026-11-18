@@ -10,7 +10,7 @@ The channel default and channel environment rows have no guard in the model yet.
 from __future__ import annotations
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -690,6 +690,15 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="T1", parent_channel_id="C_ACME", setup_thread=True),
         },
         ALLOW,
+    ),
+    (
+        "isolation server admin never runs a home agent in web chat, even with web in its rule",
+        TenantAccessPolicy(
+            channel_rules={"C_ACME": ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme": AgentRule(runs_in=("C_ACME", "web"))},
+        ),
+        {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.WEB, "agent": ACME},
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation server admin never runs a home agent in their own DM",

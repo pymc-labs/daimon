@@ -612,7 +612,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # A web chat is in no channel, so an agent kept to channels never answers there,
         # whoever asks, unless every rule on it names the web chat.
         if req.surface is Surface.WEB and agent.resolved:
-            if _channel_bound(agent):
+            # A channel's own agent answers only in its home, even with "web" in its rule.
+            if _channel_bound(agent) or agent.permissions.home is not None:
                 return _deny("runs_elsewhere")
             if agent.permissions.runs_in:
                 return ALLOW
@@ -809,10 +810,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
-    # Admins are trusted to READ any channel conversation of the agent from
-    # their own hub session, limited or not, anyone's -- never another
-    # person's private DM, and never to continue it (a follow-up would join
-    # the channel's session). Their own sessions, DMs included, are read
+    # Admins are trusted to READ another person's open channel conversation of
+    # the agent from their own hub session -- never one from a sealed or limited
+    # channel, never another person's private DM, and never to continue it (a
+    # follow-up would join the channel's session). Their own sessions, DMs included, are read
     # without the readers filter: ownership was already proven by the caller.
     hub_read = req.action is Action.READ_SESSION and req.surface is Surface.HUB
     admin_hub_read = (

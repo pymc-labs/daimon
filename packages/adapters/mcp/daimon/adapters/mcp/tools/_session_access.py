@@ -42,8 +42,9 @@ class _HubAccess:
 # Set only by the hub, for every caller (`load_hub_subject`): who is calling
 # and which hub action is running -- "read" (list/get/events) or "continue" --
 # so the session checks below ask `authorize` on the hub surface. The decision
-# itself is `authorize(READ_SESSION / CONTINUE_SESSION)`: an admin may read any
-# channels they administer, never a private DM, never to continue it. Agent
+# itself is `authorize(READ_SESSION / CONTINUE_SESSION)`: an admin may read
+# other people's open channel conversations, never a sealed or limited channel's,
+# never a private DM, never to continue one. Agent
 # keys (agent chat), chat turns and routines never set it.
 _HUB_ACCESS: ContextVar[_HubAccess | None] = ContextVar("daimon_hub_access", default=None)
 
@@ -255,9 +256,18 @@ async def _legacy_threads(
     auth: AuthIdentity,
     read: ChannelReadPolicy,
     sessions: Sequence[BetaManagedAgentsSession],
+    *,
+    hub_read: bool = False,
 ) -> dict[str, str]:
     unstamped = [s.id for s in sessions if MA_METADATA_KEY_CHANNEL not in (s.metadata or {})]
-    if not unstamped or not read.withholds_hits:
+    # A hub read of another account's unstamped session needs its thread too: it
+    # is a channel conversation only if a thread ran on it (`authorize`).
+    others = hub_read and any(
+        (s.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id)
+        for s in sessions
+        if s.id in unstamped
+    )
+    if not unstamped or not (read.withholds_hits or others):
         return {}
     async with runtime.session_factory() as db:
         return await thread_ids_for_sessions(db, tenant_id=auth.tenant_id, ma_session_ids=unstamped)
@@ -275,7 +285,8 @@ async def sessions_outside_seals(
     ``origin_context_id`` is the calling turn's origin, checked as the channel
     read tools check it (`load_read_policy`); without one every sealed
     conversation is dropped -- except inside `hub_session_access(..., "read")`,
-    where an admin's hub read keeps sealed channel sessions, anyone's, and a
+    where an admin's hub read keeps the caller's own sealed sessions and other
+    people's open channel sessions, never another person's sealed one, and a
     caller first). Only a chat turn's own credential can claim one:
     an agent key (``agent_id``) runs outside every channel, unless it was minted
     in one (`token_channel_id`), which then counts as its origin. Call after the
@@ -289,7 +300,7 @@ async def sessions_outside_seals(
     read = await load_read_policy(
         runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
     )
-    legacy = await _legacy_threads(runtime, auth, read, sessions)
+    legacy = await _legacy_threads(runtime, auth, read, sessions, hub_read=hub[1] is Surface.HUB)
     account = str(auth.account_id)
     return [
         s

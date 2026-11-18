@@ -283,6 +283,20 @@ async def test_an_admin_never_reads_another_members_legacy_sealed_conversation(h
     assert hub.sent == []
 
 
+async def test_an_admin_reads_another_members_legacy_open_conversation(hub: _Hub) -> None:
+    """With nothing sealed, a pre-stamp session found by its thread mapping is an open one."""
+    await set_access_policy(hub.db, tenant_id=hub.tenant_id, policy=TenantAccessPolicy())
+    await hub.db.commit()
+    hub.add_session("ses_legacy", account=uuid.uuid4())
+    await _map_thread(hub, "ses_legacy", "thr-legacy")
+    await _as(hub, Role.ADMIN)
+
+    assert "ses_legacy" in str(await hub.call("list_my_sessions"))
+    events = await hub.call("list_events", handle="ses_legacy")
+    assert not events.get("isError") and _TOPIC in str(events), events
+    assert hub.sent == []
+
+
 @pytest.mark.parametrize("tool", ["continue_turn", "ask"])
 async def test_an_admin_never_continues_another_members_legacy_conversation(
     hub: _Hub, tool: str

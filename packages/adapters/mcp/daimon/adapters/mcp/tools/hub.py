@@ -462,9 +462,9 @@ def register_hub_tools(
         Other people's conversations with the same Daimon are not listed and
         their handles are not accepted; nor are conversations from a sealed
         channel, which can only be read from inside it. An admin also
-        sees everyone's channel conversations with this Daimon, sealed ones
-        included, and can read them with ``get_session``/``list_events``, but
-        for the channels they administer.
+        sees everyone's open channel conversations with this Daimon, and can
+        read them with ``get_session``/``list_events``. No one, admins
+        included, sees another person's conversation from a sealed channel.
         """
         _, agent, auth = await _identity(runtime, ctx, daimon_id)
         with hub_session_access(await load_hub_subject(runtime, auth), "read"):
