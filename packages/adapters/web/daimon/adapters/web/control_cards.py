@@ -16,7 +16,7 @@ from typing import Final
 import structlog
 from daimon.adapters.web.cards import CardChoice
 from daimon.adapters.web.lifecycle import WebTurnLifecycle
-from daimon.core import host_calls, switch_cards
+from daimon.core import host_calls
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.stores import host_call_cards
@@ -156,24 +156,8 @@ class WebControlCards:
             text, settled = press.text, press.approved
             wake_agent = row.executing_ma_agent_id if press.approved else None
         else:
-            pressed = await switch_cards.press_switch_card(
-                deps=deps,
-                sessionmaker=deps.sessionmaker,
-                anthropic=deps.anthropic,
-                turn_settings=self._settings.turn,
-                deployment_default=deps.deployment_default,
-                tenant_id=thread.tenant_id,
-                card_id=record,
-                action="confirm" if approved else "cancel",
-                clicker=clicker,
-                current_admin=current_admin,
-                place_word="workspace",
-                now=now,
-                message_id=card_id,
-            )
-            if pressed is None or not pressed.closed:
-                raise ControlRefused(NOT_YOURS if pressed is None else pressed.text)
-            text, settled = pressed.text, pressed.applied
+            # Switches apply at once now: an older card only closes as expired.
+            text, settled = host_calls.EXPIRED_TEXT, False
         log.info("web.control_card.answered", kind=kind, settled=settled)
         message = await self._settle(thread.id, card_id, text, approved=settled)
         return ControlAnswered(message=message, wake_agent=wake_agent)
