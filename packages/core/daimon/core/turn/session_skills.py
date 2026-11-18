@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AnthropicError, AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError, TurnError
@@ -269,7 +270,9 @@ async def source_skill_archive(
             stored = await catalog.get_agent_skill(scope, record, pin)
         except (MuxError, SQLAlchemyError) as error:
             log.warning(
-                "session_skills.catalog_unread", skill_id=skill_id, error=type(error).__name__
+                "session_skills.catalog_unread",
+                skill_id=skill_id,
+                causes=backend_refusal_causes(error),
             )
             stored = None
         if stored is not None:
@@ -386,7 +389,9 @@ def _measuring(
         if _IN_FLIGHT.get(key) is done:
             del _IN_FLIGHT[key]
         if not done.cancelled() and (error := done.exception()) is not None:
-            log.warning("skill_size.measure_failed", skill_id=pin[0], error=type(error).__name__)
+            log.warning(
+                "skill_size.measure_failed", skill_id=pin[0], causes=backend_refusal_causes(error)
+            )
 
     task.add_done_callback(settle)
     return task
@@ -409,7 +414,9 @@ async def _measure_one(
     except (AnthropicError, DaimonError, MuxError) as error:
         if (busy := read_blip(error)) is not None:
             raise busy from error
-        log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
+        log.warning(
+            "skill_size.measure_failed", skill_id=skill_id, causes=backend_refusal_causes(error)
+        )
         return None
     row = measure_archive(tenant_id, skill_id, version, data)
     async with sessionmaker.begin() as db:
@@ -504,10 +511,7 @@ async def copy_skills(
             log.warning(
                 "session_skills.copy_failed",
                 skill_id=pin.id,
-                error=type(error).__name__,
-                native_message=getattr(error, "native_message", None),
-                native_code=getattr(error, "native_error_code", None),
-                native_param=getattr(error, "native_param", None),
+                causes=backend_refusal_causes(error),
             )
             losses.append(f"skill:{pin.id}")
             continue
@@ -619,7 +623,9 @@ async def measure_carried_skills(
             if (busy := read_blip(error)) is not None:
                 raise busy from error
             log.warning(
-                "source_capture.skill_unresolved", skill_id=attached.id, error=type(error).__name__
+                "source_capture.skill_unresolved",
+                skill_id=attached.id,
+                causes=backend_refusal_causes(error),
             )
             return SkillRef(id=attached.id, version=attached.version)
         return SkillRef(id=attached.id, version=version)
@@ -662,7 +668,9 @@ async def channel_session_skills(
             if (busy := read_blip(error)) is not None:
                 raise busy from error
             log.warning(
-                "session_skills.unresolved", skill_id=skill.skill_id, error=type(error).__name__
+                "session_skills.unresolved",
+                skill_id=skill.skill_id,
+                causes=backend_refusal_causes(error),
             )
             return None
         return SkillRef(id=skill.skill_id, version=version)
@@ -778,4 +786,4 @@ async def _tell_missing_skills(
                 texts=[missing_skills_notice(sorted({names.get(i, i) for i in ids}))],
             )
     except SQLAlchemyError as error:  # the notice is advisory; never block the reply
-        log.warning("session_skills.notice_failed", error=type(error).__name__)
+        log.warning("session_skills.notice_failed", causes=backend_refusal_causes(error))

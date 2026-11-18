@@ -321,12 +321,8 @@ def test_every_logged_provider_failure_handler_logs_its_causes() -> None:
 
     root = Path(__file__).resolve().parents[4] / "packages"
     provider = {"ProviderError", "MuxError", "APIStatusError", "APIError", "AnthropicError"}
-    # Wired when the in-flight session_skills.py change merges.
-    pending = {"session_skills.py"}
     missing: list[str] = []
     for path in [*root.glob("core/daimon/**/*.py"), *root.glob("adapters/*/daimon/**/*.py")]:
-        if path.name in pending:
-            continue
         for handler in ast.walk(ast.parse(path.read_text())):
             if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
                 continue
