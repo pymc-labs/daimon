@@ -21,6 +21,7 @@ from typing import Literal
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_ownership import account_owns_agent
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target, require_setup
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.agent_view import people_by_account
 from daimon.core.authz import build_agent_ref
 from daimon.core.mcp_auth import (
@@ -340,6 +341,8 @@ async def revoke_agent_coding_key(
 ) -> None:
     """Revoke one coding key of this agent: any for an admin, the actor's own for an owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    if target.sealed:
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     access = coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned)
     if access is None:
         raise AgentEditError("No such key.", kind="not_found")

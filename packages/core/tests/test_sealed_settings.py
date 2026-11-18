@@ -8,7 +8,10 @@ directly. These tests fail when an action, or a call that decides one, is left o
 from __future__ import annotations
 
 import ast
+import datetime as dt
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
@@ -332,3 +335,62 @@ def test_only_listed_read_only_functions_use_the_view_only_setup_property() -> N
     assert used == set(VIEW_ONLY_READERS), (
         f"unlisted view-only reader, or a listed one is gone: {used ^ set(VIEW_ONLY_READERS)}"
     )
+
+
+# Callers of `load_target` that change nothing, or whose change is refused further down.
+_LOAD_TARGET_UNGUARDED = {
+    ("agent_tool_rule_admin.py", "list_agent_rules"): "read only",
+    (
+        "agent_tool_rule_admin.py",
+        "set_agent_rule",
+    ): "the rule store refuses it (stores/agent_tool_rules.set_rule)",
+    ("follows.py", "agent_follows"): "read only",
+}
+
+
+def test_every_load_target_caller_guards_its_change() -> None:
+    """A function that loads an agent target refuses a private channel's own agent before it
+    changes anything: `require_setup`, a `.sealed` or `sees_setup` check, or a listed reason."""
+    from daimon.core.agent_target import VIEW_ONLY_READERS
+
+    missed: set[tuple[str, str]] = set()
+    for path in (PACKAGES / "core/daimon/core").rglob("*.py"):
+        if path.name == "agent_target.py":
+            continue
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = {getattr(n.func, "id", "") for n in ast.walk(fn) if isinstance(n, ast.Call)}
+            if "load_target" not in calls:
+                continue
+            attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+            key = (path.name, fn.name)
+            if "require_setup" in calls or attrs & {"sealed", "sees_setup"}:
+                continue
+            if key in VIEW_ONLY_READERS or key in _LOAD_TARGET_UNGUARDED:
+                continue
+            missed.add(key)
+    assert not missed, f"guard these, or list them with a reason: {sorted(missed)}"
+
+
+async def test_an_admin_outside_revokes_no_coding_key_of_a_private_channels_agent() -> None:
+    from unittest.mock import AsyncMock, patch
+
+    from daimon.core import coding_keys
+    from daimon.core.agent_editing import AgentEditError as Refused
+
+    target = SimpleNamespace(sealed=True, owned=False, agent_id=uuid.uuid4())
+    revoke = AsyncMock()
+    with (
+        patch.object(coding_keys, "load_target", AsyncMock(return_value=target)),
+        patch.object(coding_keys, "revoke_coding_key", revoke),
+        pytest.raises(Refused, match="private"),
+    ):
+        await coding_keys.revoke_agent_coding_key(
+            SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+            actor=SimpleNamespace(subject=OUTSIDE, tenant_id=uuid.uuid4()),  # pyright: ignore[reportArgumentType]
+            ma_agent_id="ag",
+            jti=uuid.uuid4(),
+            now=dt.datetime.now(dt.UTC),
+        )
+    revoke.assert_not_awaited()
