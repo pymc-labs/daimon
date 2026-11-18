@@ -28,7 +28,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import change_note, listed, view_json
+from daimon.core.features.surface import agent_listed, change_note, view_json
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -99,7 +99,7 @@ async def _get_settings_impl(
     place = await _place(runtime, auth, origin_context_id, change=False)
     views = await read_features(runtime.session_factory, runtime.settings, place)
     return SettingsResult(
-        [view_json(view, place.platform) for view in listed(views, runtime.settings, place)]
+        [view_json(view, place.platform) for view in agent_listed(views, runtime.settings, place)]
     )
 
 
