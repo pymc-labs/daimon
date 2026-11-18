@@ -8,12 +8,11 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.middleware import capability_gate
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware, caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
@@ -183,27 +182,23 @@ async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
     mcp = await _app(sessionmaker)
     tenant_id = await _tenant(sessionmaker)
     await _set(sessionmaker, tenant_id, "github", "off", FeatureTarget("channel", channel_id="c1"))
-    await _set(sessionmaker, tenant_id, "web_awareness", "off", FeatureTarget("agent", "agent_k"))
-    monkeypatch.setattr(capability_gate, "_key_agent_id", AsyncMock(return_value="agent_k"))
     agent_id = str(uuid.uuid4())
-    _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c1")
+    # Self-hosted: the key's agent is looked up in the records, where it has none.
+    key = {"platform": "discord", "agent_id": agent_id, "anthropic_disabled": True}
+    _as(monkeypatch, tenant_id, **key, bound_channel_id="c1")
     async with Client(mcp) as client:
         bound = await _error(client, "github_connect", {})
-        _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c2")
+        _as(monkeypatch, tenant_id, **key, bound_channel_id="c2")
         elsewhere = await _error(client, "github_connect", {})
-        web = await _error(client, "list_web_invites", {})
-        lookup = await _error(client, "list_web_people", {})
     assert OFF in bound, f"the key bound to the Off channel reached github_connect: {bound!r}"
     assert OFF not in elsewhere, f"a key in another channel was refused: {elsewhere!r}"
-    assert OFF in web, f"the key's agent has the web app Off but reached it: {web!r}"
-    assert OFF not in lookup, f"allowances and owners need the people lookup: {lookup!r}"
 
 
-async def test_an_agent_key_whose_agent_has_the_web_app_off_gets_no_web_links(
-    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+async def test_an_agent_key_whose_agent_has_the_web_app_off_is_kept_from_the_web_app(
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
+    """The key's derived uuid maps to its agent, whose agent-tier Off then applies."""
     tenant_id = await _tenant(sessionmaker)
-    monkeypatch.setattr(capability_gate, "_key_agent_id", AsyncMock(return_value="agent_k"))
     web = WebSettings(public_url="https://app.example.com/")  # type: ignore[arg-type]
     runtime = McpRuntime(
         session_factory=sessionmaker,
@@ -211,16 +206,22 @@ async def test_an_agent_key_whose_agent_has_the_web_app_off_gets_no_web_links(
         settings=_set_up().model_copy(update={"web": web}),
         deployment_default=DeploymentDefault(),
     )
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_k")
+    runtime.resolver_cache.derived_agent_ids[(tenant_id, derived)] = "agent_k"
     auth = AuthIdentity(
         account_id=uuid.uuid4(),
         tenant_id=tenant_id,
         role=Role.ADMIN,
         platform="discord",
-        agent_id=uuid.uuid4(),
+        agent_id=derived,
     )
     assert await tenant_links(runtime, auth) is not None, "On: the caller gets links"
     await _set(sessionmaker, tenant_id, "web_awareness", "off", FeatureTarget("agent", "agent_k"))
     assert await tenant_links(runtime, auth) is None, "Off at the key's agent: no web_url"
+    web_tool = await _gate(sessionmaker, auth, "list_web_invites", runtime)
+    lookup = await _gate(sessionmaker, auth, "list_web_people", runtime)
+    assert OFF in web_tool, f"the key's agent has the web app Off but reached it: {web_tool!r}"
+    assert OFF not in lookup, f"allowances and owners need the people lookup: {lookup!r}"
 
 
 async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_external_client(
@@ -332,10 +333,14 @@ class _Context:
 
 
 async def _gate(
-    sessionmaker: async_sessionmaker[AsyncSession], auth: AuthIdentity, tool: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    tool: str,
+    runtime: McpRuntime | None = None,
 ) -> str:
     gate = CapabilityGateMiddleware(
-        McpRuntime(
+        runtime
+        or McpRuntime(
             session_factory=sessionmaker,
             client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
             settings=_set_up(),

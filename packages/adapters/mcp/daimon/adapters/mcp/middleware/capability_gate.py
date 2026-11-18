@@ -114,20 +114,32 @@ async def caller_places(
 
 
 async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:
-    """An agent key's own agent id, so its agent-tier values apply rather than the channel's."""
-    if auth.anthropic_disabled or anthropic_disabled():
-        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
-            resource_scope(tenant_id=str(auth.tenant_id)), derived
-        )
-        return None if record is None else record.ref.id
-    agent = await find_agent_by_derived_uuid_cached(
-        runtime.client,
-        runtime.resolver_cache,
-        tenant_id=auth.tenant_id,
-        agent_id=derived,
-        records=runtime.session_factory,
-    )
-    return None if agent is None else agent.id
+    """An agent key's own agent id, so its agent-tier values apply rather than the channel's.
+    Cached; a failed lookup is logged and leaves the agent tier out, never refusing."""
+    key = (auth.tenant_id, derived)
+    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
+        return cached
+    try:
+        if auth.anthropic_disabled or anthropic_disabled():
+            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+                resource_scope(tenant_id=str(auth.tenant_id)), derived
+            )
+            found = None if record is None else record.ref.id
+        else:
+            agent = await find_agent_by_derived_uuid_cached(
+                runtime.client,
+                runtime.resolver_cache,
+                tenant_id=auth.tenant_id,
+                agent_id=derived,
+                records=runtime.session_factory,
+            )
+            found = None if agent is None else agent.id
+    except Exception:  # named boundary: the agent tier is extra; its lookup never refuses
+        log.warning("capability_gate.key_agent_lookup_failed", exc_info=True)
+        return None
+    if found is not None:
+        runtime.resolver_cache.derived_agent_ids[key] = found
+    return found
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:
