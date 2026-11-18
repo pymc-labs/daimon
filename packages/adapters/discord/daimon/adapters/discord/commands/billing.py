@@ -98,7 +98,7 @@ class BillingCog(commands.Cog):
                     runtime,
                     interaction.guild_id,
                     is_admin=is_admin,
-                    channel_id=invoking_channel_id(interaction),
+                    interaction=interaction,
                 ),
             )
             await interaction.followup.send(

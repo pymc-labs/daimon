@@ -8,7 +8,7 @@ from typing import cast
 
 import anthropic
 import structlog
-from daimon.adapters.discord.billing_panel.read import invoking_channel_id
+from daimon.adapters.discord.billing_panel.read import invoking_channel_id, invoking_thread_id
 from daimon.adapters.discord.checks import (
     require_manage_guild,
     require_registered_guild,
@@ -75,7 +75,12 @@ class RoutinesCog(commands.Cog):
                 links=await links_at(
                     runtime.sessionmaker,
                     runtime.settings,
-                    FeaturePlace.of(tenant_id, "discord", invoking_channel_id(interaction)),
+                    FeaturePlace.of(
+                        tenant_id,
+                        "discord",
+                        invoking_channel_id(interaction),
+                        invoking_thread_id(interaction),
+                    ),
                     panel_links(runtime.settings.web, tenant_id, admin=True),
                     Assignment(
                         runtime.deployment_default, runtime.anthropic, runtime.resolver_cache

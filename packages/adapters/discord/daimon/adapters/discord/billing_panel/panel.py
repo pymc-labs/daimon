@@ -33,6 +33,7 @@ import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
+    invoking_thread_id,
     is_platform_admin,
     load_billing_snapshot,
 )
@@ -411,15 +412,16 @@ class _InvokerOnly(discord.ui.LayoutView):
 
 
 async def web_spend_url(
-    runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool, channel_id: str | None
+    runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool, interaction: BotInteraction
 ) -> str | None:
     """The web page of this server's spend, or None with no web app or where
-    `web_awareness` is Off at the invoking channel."""
+    `web_awareness` is Off at the invoking channel or thread."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+    channel_id, thread_id = invoking_channel_id(interaction), invoking_thread_id(interaction)
     links = await links_at(
         runtime.sessionmaker,
         runtime.settings,
-        FeaturePlace.of(tenant_id, "discord", channel_id),
+        FeaturePlace.of(tenant_id, "discord", channel_id, thread_id),
         panel_links(runtime.settings.web, tenant_id, admin=is_admin),
         Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
     )
@@ -602,7 +604,7 @@ async def _rerender(
             runtime,
             interaction.guild_id,
             is_admin=is_admin,
-            channel_id=invoking_channel_id(bot_interaction),
+            interaction=bot_interaction,
         ),
     )
     await interaction.edit_original_response(
