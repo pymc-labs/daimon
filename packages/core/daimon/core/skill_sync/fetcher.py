@@ -13,6 +13,7 @@ import io
 
 import httpx
 import structlog
+from daimon.core.errors import DaimonError
 from daimon.core.github_rate_limit import (
     GitHubRateLimitError,
     is_rate_limit_response,
@@ -31,7 +32,7 @@ class GitHubUnreachable(Exception):
     """404 from GitHub — repo or branch does not exist (or the credential cannot see it)."""
 
 
-class TarballTooLarge(Exception):
+class TarballTooLarge(DaimonError):
     """Tarball download exceeded the configured raw byte cap (Content-Length or
     cumulative streamed body). Distinct from GitHubUnreachable (404) so the
     orchestrator's skipped_repos entries carry an accurate reason (RESEARCH
@@ -68,7 +69,6 @@ class GitHubTarballFetcher:
         headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
         if credential is not None:
             headers["Authorization"] = f"token {credential}"
-        cap = self._max_tarball_bytes
         async with self._http.stream(
             "GET",
             api,
@@ -92,27 +92,25 @@ class GitHubTarballFetcher:
                 raise GitHubUnreachable(url)
             resp.raise_for_status()
 
-            if cap > 0:
-                content_length = resp.headers.get("content-length")
-                if content_length is not None and int(content_length) > cap:
-                    _log.warning(
-                        "skill_sync.fetcher.tarball_too_large",
-                        url=url,
-                        cap=cap,
-                        content_length=content_length,
-                    )
-                    raise TarballTooLarge(
-                        f"tarball for {url} exceeds max_tarball_bytes cap of {cap} bytes "
-                        f"(Content-Length={content_length})"
-                    )
+            return await read_capped(resp, url=url, cap=self._max_tarball_bytes)
 
-            buf = io.BytesIO()
-            async for chunk in resp.aiter_bytes():
-                if cap > 0 and buf.tell() + len(chunk) > cap:
-                    _log.warning("skill_sync.fetcher.tarball_too_large", url=url, cap=cap)
-                    raise TarballTooLarge(
-                        f"tarball for {url} exceeds max_tarball_bytes cap of {cap} bytes "
-                        "(streamed body)"
-                    )
-                buf.write(chunk)
-            return buf.getvalue()
+
+async def read_capped(resp: httpx.Response, *, url: str, cap: int) -> bytes:
+    """The streamed body, refused past ``cap`` bytes (0: no cap) by Content-Length, then as
+    it streams, so an oversize tarball is never held in memory."""
+    content_length = resp.headers.get("content-length")
+    if cap > 0 and content_length is not None and int(content_length) > cap:
+        _log.warning("skill_sync.fetcher.tarball_too_large", url=url, cap=cap)
+        raise TarballTooLarge(
+            f"tarball for {url} exceeds max_tarball_bytes cap of {cap} bytes "
+            f"(Content-Length={content_length})"
+        )
+    buf = io.BytesIO()
+    async for chunk in resp.aiter_bytes():
+        if cap > 0 and buf.tell() + len(chunk) > cap:
+            _log.warning("skill_sync.fetcher.tarball_too_large", url=url, cap=cap)
+            raise TarballTooLarge(
+                f"tarball for {url} exceeds max_tarball_bytes cap of {cap} bytes (streamed body)"
+            )
+        buf.write(chunk)
+    return buf.getvalue()
