@@ -704,14 +704,39 @@ async def archive_sealed_refusal(
     channel the caller is outside of picks the environment. The words name the
     channel to change first. Call it before the first write of every archive path.
     """
-    policy = await load_access_policy(session, tenant_id=tenant_id)
     picks = await _load_picks(session, tenant_id=tenant_id)
+    return await sealed_pick_refusal(
+        session,
+        tenant_id=tenant_id,
+        channels=[c for c, picked in picks.channels.items() if picked == environment_name],
+        subject=subject,
+        picks=f"the {environment_name} environment",
+        change="its environment",
+    )
+
+
+async def sealed_pick_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channels: Iterable[str],
+    subject: Subject,
+    picks: str,
+    change: str,
+) -> str | None:
+    """Why `subject` may not clear a pick that `channels` hold, or None when it may.
+
+    Archiving an environment or an agent clears every channel's pick of it. A
+    private channel's settings change only from inside it (`sealed_outside`), so
+    the first of `channels` the caller is outside of refuses the archive. The words
+    name that channel. Call it before the first write of every archive path.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
     sealed = next(
         (
             channel
-            for channel, picked in sorted(picks.channels.items())
-            if picked == environment_name
-            and sealed_outside(
+            for channel in sorted(set(channels))
+            if sealed_outside(
                 policy, subject.inside, channel_ids=(channel,), operator=subject.operator
             )
         ),
@@ -722,8 +747,8 @@ async def archive_sealed_refusal(
     name = await get_channel_name_any_platform(session, tenant_id=tenant_id, channel_id=sealed)
     where = f"#{name}" if name else sealed
     return (
-        f"{SEALED_REFUSAL} {where} picks the {environment_name} environment. "
-        f"Change its environment from inside {where} first. Nothing changed."
+        f"{SEALED_REFUSAL} {where} picks {picks}. "
+        f"Change {change} from inside {where} first. Nothing changed."
     )
 
 

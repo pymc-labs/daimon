@@ -18,7 +18,11 @@ from daimon.core.agent_editing import (
     system_agent_rejection,
 )
 from daimon.core.agent_fork import AgentCopy, copy_agent
-from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
+from daimon.core.agent_lifecycle import (
+    archive_memory_store_best_effort,
+    archive_sealed_refusal,
+    forget_archived_agent,
+)
 from daimon.core.agent_ownership import agent_name_lock
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target
 from daimon.core.authz import Action, agent_names, authorize
@@ -194,6 +198,12 @@ async def archive(
             f"{agent.name} is managed by the server and can't be archived.", kind="forbidden"
         )
     name = _display_name(agent)
+    async with deps.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session, tenant_id=actor.tenant_id, name=name, agent=agent, subject=actor.subject
+        )
+    if refusal is not None:
+        raise AgentEditError(refusal, kind="forbidden")
     await archive_agent(deps.client, agent.id, scope=actor.scope(), records=deps.session_factory)
     await archive_memory_store_best_effort(
         anthropic=deps.client,

@@ -28,7 +28,6 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app  # pyright: ignore[reportUnknownVariableType]
 from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
-from daimon.core._models import Base
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import SEALED_REFUSAL
@@ -39,6 +38,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.effect_recorder import database_metadata
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from fastmcp.exceptions import ToolError
@@ -638,7 +638,7 @@ async def _server(
 async def _tenant_rows(session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, list[str]]:
     """Every row of every table that carries the workspace's id, so any change shows."""
     rows: dict[str, list[str]] = {}
-    for table in Base.metadata.sorted_tables:
+    for table in database_metadata().sorted_tables:
         if "tenant_id" not in table.c:
             continue
         found = await session.execute(select(table).where(table.c.tenant_id == tenant_id))

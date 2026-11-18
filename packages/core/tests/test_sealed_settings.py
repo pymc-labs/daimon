@@ -394,3 +394,37 @@ async def test_an_admin_outside_revokes_no_coding_key_of_a_private_channels_agen
             now=dt.datetime.now(dt.UTC),
         )
     revoke.assert_not_awaited()
+
+
+# Archive paths that clear channel picks without the seal check, each with its reason.
+_ARCHIVE_UNGUARDED = {
+    ("adapters/cli/daimon/adapters/cli/commands/agents.py", "agents_archive"): "operator CLI",
+    ("adapters/cli/daimon/adapters/cli/commands/environments.py", "_clear_picks"): "operator CLI",
+    ("adapters/slack/daimon/adapters/slack/agent_setup/write.py", "delete_agent"): (
+        "no caller: the Slack panel archives nothing"
+    ),
+}
+
+
+def test_every_archive_path_checks_the_channels_that_pick_it() -> None:
+    """Archive clears every channel's pick (`forget_archived_agent`,
+    `clear_environment_references`), so each path asks `archive_sealed_refusal` first."""
+    clears = {"forget_archived_agent", "clear_environment_references"}
+    missed: set[tuple[str, str]] = set()
+    for path in PACKAGES.rglob("*.py"):
+        if "/tests/" in str(path) or path.name in {"agent_lifecycle.py", "scoped_config_write.py"}:
+            continue
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            called = {
+                getattr(n.func, "id", None) or getattr(n.func, "attr", "")
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+            }
+            if not called & clears or "archive_sealed_refusal" in called:
+                continue
+            key = (str(path.relative_to(PACKAGES)), fn.name)
+            if key not in _ARCHIVE_UNGUARDED:
+                missed.add(key)
+    assert not missed, f"check the seal first, or list the path with a reason: {sorted(missed)}"

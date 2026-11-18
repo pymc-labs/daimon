@@ -62,7 +62,7 @@ from daimon.core.agent_catalog import provider_efforts
 from daimon.core.agent_changes import change_model
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import queue_agent_face
-from daimon.core.agent_lifecycle import forget_archived_agent
+from daimon.core.agent_lifecycle import archive_sealed_refusal, forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
 from daimon.core.anthropic_guard import anthropic_configured
@@ -1512,6 +1512,16 @@ async def _archive_agent_impl(
     )
     _reject_system_agent(agent)
     await require_unsealed_agent(runtime, auth, agent)
+    async with runtime.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session,
+            tenant_id=auth.tenant_id,
+            name=name,
+            agent=agent,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
+        )
+    if refusal is not None:
+        raise ToolError(f"{refusal} Do not retry.")
     await archive_agent(
         runtime.client,
         agent.id,

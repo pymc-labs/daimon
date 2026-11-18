@@ -170,6 +170,10 @@ channel count as inside. The web app, the hub, a DM, an agent key, a resumed tur
 and a routine do not. The web app still shows the channel read-only. The
 operator CLI is the recovery path.
 
+Archiving an agent or an environment clears every channel that picks it. So the
+archive is refused while a private channel picks it, unless you are inside that
+channel. Pick another one in the channel first.
+
 ## Agents, forks and skills
 
 Agents are tenant objects, and one tenant's agent cannot be resolved by
