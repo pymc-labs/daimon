@@ -8,6 +8,7 @@ import os
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,7 +19,7 @@ import httpx
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_host
+from daimon.core.turn.selfhosted_host import HOST, SelfHostedHostRuntime
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, SessionSpec
@@ -36,6 +37,7 @@ from pydantic import (
 
 if TYPE_CHECKING:
     from daimon.core.config import SelfHostedSettings
+    from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.tool_safety import ToolSafetyPolicy
     from mux.drivers.selfhosted import HarnessConfig
@@ -885,20 +887,11 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     )
 
 
-def register_runtime() -> None:
+def _tariffs() -> Mapping[tuple[str, str], ProviderPrice]:
     from daimon.core.config import load_billing_settings
     from daimon.core.selfhosted_usage import selfhosted_prices
-    from daimon.core.turn.runtimes import register_channel_runtime
 
-    register_host()
-    register_channel_runtime(
-        PROFILE,
-        build_selfhosted_runtime,
-        authorizations=authorized_deployments,
-        tariffs=lambda: selfhosted_prices(load_billing_settings().selfhosted),
-        fallback=True,
-        agent_grants=agent_deployments,
-    )
+    return selfhosted_prices(load_billing_settings().selfhosted)
 
 
 async def _require_pinned_environment(
@@ -915,3 +908,12 @@ async def _require_pinned_environment(
     pinned = setting if setting is not None else request.admission.backend_agent_revision
     if pinned is None or pinned.environment != deployment.environment_id:
         raise AdmissionDenied(reason="backend_unsupported")
+
+
+BACKEND = replace(
+    HOST,
+    runtime=build_selfhosted_runtime,
+    authorizations=authorized_deployments,
+    tariffs=_tariffs,
+    agent_grants=agent_deployments,
+)

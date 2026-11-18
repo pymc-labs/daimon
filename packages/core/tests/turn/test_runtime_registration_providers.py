@@ -1,7 +1,7 @@
-"""Installed OpenAI/Gemini distributions register their complete host edges.
+"""OpenAI/Gemini backends load their complete host hooks without credentials.
 
-These cases need the provider host modules and their runtime entry points, so
-they live with the provider runtimes rather than the neutral registry tests.
+These cases need the provider host modules, so they live with the provider
+runtimes rather than the neutral backend table tests.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .test_provider_dispatch import PROFILE
 
 
 @pytest.mark.parametrize("profile", [PROFILE, "gemini.inline_reuse"])
-def test_installed_provider_registers_all_host_edges_without_credentials_or_clients(profile):
+def test_selected_provider_loads_all_host_hooks_without_credentials_or_clients(profile):
     code = rf"""
 import json
 import os
@@ -29,8 +29,7 @@ def no_client(*args, **kwargs):
     raise AssertionError("registration constructed a provider client")
 for client_type in (AsyncAnthropic, AsyncOpenAI, Client):
     client_type.__init__ = no_client
-from daimon.core import mux_backend
-from daimon.core.turn import io, prepare, runtimes
+from daimon.core.turn import runtimes
 from daimon.testing.key_presence import called_by_key_presence
 profile = {profile!r}
 original_get = os.environ.get
@@ -41,16 +40,10 @@ def no_secret(name, *args):
         raise AssertionError("registration read a credential")
     return original_get(name, *args)
 os.environ.get = no_secret
-assert runtimes.ensure_channel_runtime(profile)
-assert profile in mux_backend._TURN_BACKENDS
-assert profile in io._TURN_CODECS
-assert profile in prepare._PROVIDER_PREPARATIONS
-assert profile in runtimes._RUNTIME_FACTORIES
-other = "gemini.inline_reuse" if profile == "openai.persistent_workspace" else "openai.persistent_workspace"
-assert other not in mux_backend._TURN_BACKENDS
-assert other not in io._TURN_CODECS
-assert other not in prepare._PROVIDER_PREPARATIONS
-assert runtimes.ensure_channel_runtime(profile)
+backend = runtimes.hosted_backend(profile)
+assert None not in (backend.runtime, backend.backend, backend.codec, backend.prepare, backend.reader)
+assert set(runtimes._BACKENDS) == {{profile}}
+assert runtimes.hosted_backend(profile) is backend
 print(json.dumps({{"selected_registered": True, "other_registered": False}}))
 """
     environment = {
@@ -90,33 +83,26 @@ def no_client(*args, **kwargs):
     raise RuntimeError("cold registration constructed a native client")
 for client_type in (AsyncAnthropic, AsyncOpenAI, Client):
     client_type.__init__ = no_client
-from daimon.core import mux_backend
-from daimon.core.turn import io, prepare, runtimes
+from daimon.core.turn import prepare, runtimes
 from daimon.testing.key_presence import called_by_key_presence
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 sys.path.insert(0, os.path.join(os.getcwd(), "packages/core/tests"))
 from turn.test_provider_dispatch import ACCOUNT, TENANT, admission, deps_for_pinned_mux
 profile = {profile!r}
-if profile in prepare._PROVIDER_PREPARATIONS:
-    raise RuntimeError("test did not start with a cold native preparation edge")
+if runtimes._BACKENDS:
+    raise RuntimeError("test did not start with a cold backend table")
 class FactoryReached(Exception):
     pass
 calls = []
 reads = []
-install_results = []
-install = prepare.ensure_channel_runtime
-def observed_install(*args, **kwargs):
-    result = install(*args, **kwargs)
-    install_results.append(result)
-    return result
-prepare.ensure_channel_runtime = observed_install
 def factory(request):
     calls.append(request.admission.backend_revision.profile)
     raise FactoryReached()
 def authorizations(tenant):
     reads.append(tenant)
     return ()
-runtimes.register_channel_runtime(profile, factory, authorizations=authorizations)
+runtimes._BACKENDS[profile] = replace(
+    runtimes.hosted_backend(profile), runtime=factory, authorizations=authorizations)
 original_get = os.environ.get
 def no_secret(name, *args):
     if name in {{"DAIMON_TURN__PROVIDER_RUNTIME_FILE", "DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"}} and not called_by_key_presence():
@@ -139,13 +125,13 @@ async def prove():
         pass
     else:
         raise RuntimeError("actual native preparer did not reach the explicit constructor")
-    if calls != [profile] or install_results != [True]:
-        raise RuntimeError("explicit constructor or completed installation differs")
-    if any(profile not in owner for owner in (mux_backend._TURN_BACKENDS, io._TURN_CODECS, prepare._PROVIDER_PREPARATIONS)):
+    if calls != [profile]:
+        raise RuntimeError("explicit constructor differs")
+    record = runtimes.hosted_backend(profile)
+    if None in (record.backend, record.codec, record.prepare):
         raise RuntimeError("provider host bundle remained incomplete")
-    record = runtimes._RUNTIME_FACTORIES[profile]
-    if record.factory is not factory or record.authorizations is not authorizations:
-        raise RuntimeError("provider registrar replaced an explicit callback")
+    if record.runtime is not factory or record.authorizations is not authorizations:
+        raise RuntimeError("provider module replaced an explicit callback")
     if runtimes.authorized_channel_deployments(profile, "tenant") != () or reads != ["tenant"]:
         raise RuntimeError("explicit resource authorization was not retained")
     return {{"constructor_calls": len(calls), "host_bundle_complete": True, "explicit_reader_retained": True}}

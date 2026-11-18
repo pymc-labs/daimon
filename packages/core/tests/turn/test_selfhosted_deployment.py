@@ -109,8 +109,7 @@ def test_disabled_operator_switch_refuses_before_resource_or_transport_dependenc
 
 
 def test_installed_tariffs_load_without_database_or_provider_credentials(tmp_path, monkeypatch):
-    from daimon.core.turn.runtimes import channel_runtime_prices
-    from daimon.core.turn.selfhosted_deployment import register_runtime
+    from daimon.core.turn.selfhosted_deployment import BACKEND
 
     monkeypatch.chdir(tmp_path)
     for name in (
@@ -139,8 +138,8 @@ def test_installed_tariffs_load_without_database_or_provider_credentials(tmp_pat
             }
         ),
     )
-    register_runtime()
-    prices = channel_runtime_prices()
+    assert BACKEND.tariffs is not None
+    prices = BACKEND.tariffs()
     assert prices[("selfhosted", "offline-deployment")].input == 2
     assert ("selfhosted", "unknown-model") not in prices
 

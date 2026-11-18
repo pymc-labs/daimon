@@ -118,11 +118,10 @@ def test_channel_backend_admission_gate_both_legs(
     """Legacy refuses at the gate; mux passes it and reaches the profile's runtime."""
     reached_runtime_lookup: list[str] = []
 
-    def runtime_unavailable(profile: str, **_: object) -> bool:
+    def runtime_unavailable(profile: str) -> None:
         reached_runtime_lookup.append(profile)
-        return False
 
-    monkeypatch.setattr(runtime_module, "ensure_channel_runtime", runtime_unavailable)
+    monkeypatch.setattr(runtime_module, "hosted_backend", runtime_unavailable)
 
     with pytest.raises(AdmissionDenied) as refused:
         runtime_module.build_channel_runtime(_request(leg))
@@ -137,12 +136,11 @@ def test_channel_backend_admission_follows_the_selected_leg(
     selected = turn_leg()
     seen: list[ProviderPreparationRequest] = []
 
-    def runtime_unavailable(profile: str, **_: object) -> bool:
+    def runtime_unavailable(profile: str) -> None:
         seen.append(request)
-        return False
 
     request = _request(selected)
-    monkeypatch.setattr(runtime_module, "ensure_channel_runtime", runtime_unavailable)
+    monkeypatch.setattr(runtime_module, "hosted_backend", runtime_unavailable)
 
     with pytest.raises(AdmissionDenied):
         runtime_module.build_channel_runtime(request)

@@ -16,20 +16,19 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
-from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
-from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
 from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.openai_environment import EnvironmentPort
-from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
+from daimon.core.turn.openai_host import HOST, OpenAIHostRuntime, driver
 from daimon.core.turn.openai_late_usage import LATE_USAGE
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -733,20 +732,12 @@ def _side_call_completions() -> Completions:
     return configured_completions(api_key=os.environ.get(DEFAULT_KEY_ENV["openai"]) or "")
 
 
-def register_runtime() -> None:
-    """Install the provider's host callbacks without transports or credential access."""
-    if provider_key_present("openai"):
-        register_completions("openai", _side_call_completions)
-    from daimon.core.turn.runtimes import register_channel_runtime
-
-    register_host()
-    for profile in PROFILES:
-        register_channel_runtime(
-            profile,
-            build_openai_runtime,
-            authorizations=partial(authorized_deployments, profile=profile),
-            tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
-            fallback=True,
-            prepare=prepare_tenant_environment if profile == PROFILE else None,
-            shares_agent_threads=True,
-        )
+BACKEND = replace(
+    HOST,
+    runtime=build_openai_runtime,
+    authorizations=partial(authorized_deployments, profile=PROFILE),
+    tariffs=partial(provider_prices, PROFILE),
+    prepare_runtime=prepare_tenant_environment,
+    shares_agent_threads=True,
+    completions=_side_call_completions,
+)

@@ -7,9 +7,12 @@ import os
 import subprocess
 import sys
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from daimon.core.scope import ResolvedConfig
+from daimon.core.turn import runtimes
 from daimon.core.turn.admission import Admission
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -37,6 +40,12 @@ def admission() -> Admission:
         backend_revision=REVISION,
         backend_revision_origin="channel",
     )
+
+
+def patch_hosted(monkeypatch: pytest.MonkeyPatch, profile: str = PROFILE, **hooks: object) -> None:
+    """Replace some of `profile`'s host hooks for one test; the others stay real."""
+    base = runtimes.hosted_backend(profile) or runtimes.HostedBackend()
+    monkeypatch.setitem(runtimes._BACKENDS, profile, replace(base, **hooks))  # pyright: ignore[reportPrivateUsage, reportArgumentType]
 
 
 async def record_usage(event: object) -> None:

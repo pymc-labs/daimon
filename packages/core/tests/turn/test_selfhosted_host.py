@@ -664,7 +664,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.admission import admit
     from daimon.core.turn.outcomes import drain_outcomes
     from daimon.core.turn.persistence import current_persistence
-    from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
+    from daimon.core.turn.runtimes import build_channel_runtime, hosted_backend
     from daimon.core.turn_hold import RequesterOrg
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
@@ -1227,7 +1227,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             return event
 
         monkeypatch.setattr(_HostedStream, "__anext__", disconnect_after_record)
-    assert ensure_channel_runtime(PROFILE)
+    assert hosted_backend(PROFILE) is not None
     admitted = await admit(
         request.deps,
         origin="chat",

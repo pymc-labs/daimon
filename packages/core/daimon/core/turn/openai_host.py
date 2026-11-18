@@ -22,7 +22,6 @@ from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
     TurnRuntime,
-    register_turn_backend,
 )
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ReplaceSession
@@ -31,14 +30,13 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import (
     carry_on_adoption,
-    register_session_reader,
     replaced_session,
 )
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.hosted_io import OpenAITurnIO
-from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
+from daimon.core.turn.io import TurnCodecRequest, TurnIO
 from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
@@ -50,7 +48,6 @@ from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
     ProviderPreparationRequest,
-    register_turn_preparation,
 )
 from daimon.core.turn.replace_binding import (
     BindingFacts,
@@ -61,6 +58,7 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
+from daimon.core.turn.runtimes import HostedBackend
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.digest import digest_body
@@ -758,13 +756,5 @@ def _old_session(
     return OldSession(binding=binding, ref=ref, backend=driver(host, revision, scope, binding))
 
 
-def register_host() -> None:
-    """Fill missing host callbacks while preserving explicit application overrides."""
-    for profile in PROFILES:
-        register_session_reader(profile, _old_session)
-        register_turn_backend(profile, _backend, fallback=True)
-        register_turn_codec(profile, _codec, fallback=True)
-        register_turn_preparation(profile, prepare_openai, fallback=True)
-
-
-register_host()
+#: The host half of the backend; the deployment module adds its runtime.
+HOST = HostedBackend(backend=_backend, codec=_codec, prepare=prepare_openai, reader=_old_session)
