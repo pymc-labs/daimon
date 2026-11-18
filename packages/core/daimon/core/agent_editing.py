@@ -76,7 +76,7 @@ from daimon.core.permissions import (
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec, merge_default_agent_toolset
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.channel_changes import write_channel_default
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.tenants import get_tenant
@@ -856,7 +856,22 @@ async def set_places(
         raise AgentEditError(str(exc), kind="invalid") from exc
     turn_on, turn_off = default_changes(before, after)
     async with deps.session_factory.begin() as session:
+        # Re-checked at the write: a pick an inside admin made after `check_places`
+        # read it is still that private channel's setting.
+        await lock_access_policy(session, tenant_id=actor.tenant_id)
+        locked = await load_access_policy(session, tenant_id=actor.tenant_id)
+
+        def refuse_sealed(channel_id: str) -> None:
+            if sealed_outside(
+                locked,
+                actor.subject.inside,
+                channel_ids=(channel_id,),
+                operator=actor.subject.operator,
+            ):
+                raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
+
         for channel_id in turn_on:
+            refuse_sealed(channel_id)
             await write_channel_default(
                 session,
                 tenant_id=actor.tenant_id,
@@ -871,6 +886,7 @@ async def set_places(
             scope = ChannelScopeRef(tenant_id=actor.tenant_id, channel_id=channel_id)
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
+                refuse_sealed(channel_id)
                 await write_channel_default(
                     session,
                     tenant_id=actor.tenant_id,
