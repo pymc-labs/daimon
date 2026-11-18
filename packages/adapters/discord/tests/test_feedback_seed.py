@@ -23,12 +23,12 @@ from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.errors import TurnError
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.message_feedback import THUMBS_DOWN, THUMBS_UP
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.support_escalation import ESCALATE
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -144,12 +144,10 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
     anthropic = build_stub_anthropic(resolved_agent_env_router().dispatch)
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(

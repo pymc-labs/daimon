@@ -31,6 +31,7 @@ from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.thread_handoff import HANDOVER_FALLBACK_SEED
 from daimon.core.turn.agent_notices import HANDED_OVER_NOTICE
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
@@ -241,7 +242,6 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
 
     from daimon.adapters.discord import bot as bot_module
     from daimon.adapters.discord.button_message import ButtonMessage
-    from daimon.adapters.discord.runtime import DiscordRuntime
     from daimon.core.config import McpSettings
     from daimon.core.membership import Membership
     from daimon.core.notebooks._rate_limit import RateLimiter
@@ -279,12 +279,11 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     settings.billing.markup = Decimal("1")
     settings.discord.max_concurrent_turns_per_tenant = 3
     bot = make_bot(
-        DiscordRuntime(
+        discord_runtime(
             settings=settings,
             anthropic=client,
             sessionmaker=db_session_factory,
             notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=default,
             resolver_cache=deps.resolver_cache,
             turn_deps=deps,

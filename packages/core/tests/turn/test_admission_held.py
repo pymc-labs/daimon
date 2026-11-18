@@ -15,9 +15,10 @@ from daimon.core.stores.identity import (
     mark_principal_foreign,
 )
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
-from daimon.core.turn.admission import Admission, AdmissionDenied, admit, reauthorize
+from daimon.core.turn.admission import Admission, AdmissionDenied, reauthorize
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_hold import RequesterOrg, TurnHold
+from daimon.testing.builders import admit_chat
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,10 +49,9 @@ async def _admit(
     channel_id: str = CHANNEL,
     user: str = USER,
 ) -> Admission:
-    return await admit(
+    return await admit_chat(
         _deps_for(factory, tmp_path, tenant),
-        origin="chat",
-        tenant_id=tenant.id,
+        tenant,
         platform=PLATFORM,
         external_user_id=user,
         channel_id=channel_id,
@@ -349,10 +349,9 @@ async def test_a_dm_move_from_a_shared_channel_is_refused_before_history_is_read
     deps = _deps_for(db_session_factory, tmp_path, tenant)
 
     async def move(*, channel_shared: bool | None) -> Admission:
-        return await admit(
+        return await admit_chat(
             deps,
-            origin="chat",
-            tenant_id=tenant.id,
+            tenant,
             platform=PLATFORM,
             external_user_id="U_MEMBER",
             channel_id=CHANNEL,
@@ -360,7 +359,6 @@ async def test_a_dm_move_from_a_shared_channel_is_refused_before_history_is_read
             role=Role.USER,
             is_dm=True,
             dm_source_channel_id=CHANNEL,
-            requester_org=RequesterOrg.HOST,
             channel_shared=channel_shared,
         )
 
@@ -445,10 +443,9 @@ async def test_reauthorize_never_relaxes_a_hold(
 
 
 async def _admit_dm(deps: TurnDeps, tenant: TenantRow) -> Admission:
-    return await admit(
+    return await admit_chat(
         deps,
-        origin="chat",
-        tenant_id=tenant.id,
+        tenant,
         platform=PLATFORM,
         external_user_id=USER,
         channel_id=CHANNEL,
@@ -456,7 +453,6 @@ async def _admit_dm(deps: TurnDeps, tenant: TenantRow) -> Admission:
         role=Role.USER,
         is_dm=True,
         dm_source_channel_id=CHANNEL,
-        requester_org=RequesterOrg.HOST,
     )
 
 

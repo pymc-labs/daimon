@@ -35,9 +35,9 @@ from daimon.core.scope import (
 )
 from daimon.core.stores import github_access, github_app_installations, scoped_config_write
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -277,9 +277,9 @@ async def test_load_agent_details_reads_the_agent_once_and_wires_its_stored_rows
         granted_by_account_id=None,
         is_working_repo=True,
     )
-    await put_agent_file(
+    await new_agent_file(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         agent_id=agent_uuid,
         key="LINEAR_API_KEY",
         content="super-secret",

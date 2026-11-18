@@ -27,6 +27,7 @@ from daimon.adapters.discord.routines_panel.state import (
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
+from daimon.testing.builders import new_routine
 from sqlalchemy.exc import SQLAlchemyError
 
 
@@ -773,19 +774,17 @@ async def test_private_delivery_choice_belongs_to_owner_only(
     db_session_factory, monkeypatch, clicker
 ):
     from daimon.adapters.discord.routines_panel import panel as panel_mod
-    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.core.stores.routines import get_routine
     from daimon.testing.factories import make_tenant
 
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord")
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id="123",
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="summary",
         )
     glyph, color = derive_state(row)
@@ -822,19 +821,17 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
     from daimon.adapters.discord.routines_panel import panel as panel_mod
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.core.stores.routines import get_routine
     from daimon.testing.factories import make_tenant
 
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="424242")
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id="123",
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="summary",
             destination_kind="thread",
             destination_id="789",
@@ -913,19 +910,17 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
 async def test_legacy_private_output_button_checks_owner(
     db_session_factory, monkeypatch, clicker, failed
 ):
-    from daimon.core.stores.routines import create_routine, get_routine, record_result
+    from daimon.core.stores.routines import get_routine, record_result
     from daimon.testing.factories import make_tenant
 
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord")
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id="123",
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="legacy",
             enabled=False,
         )

@@ -33,8 +33,8 @@ from daimon.adapters.discord.context import (
     build_context_xml,
     build_delta_xml,
 )
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.turn_keys import list_mounted_key_names
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,14 +97,7 @@ async def _seed_stored_keys(session: AsyncSession) -> None:
         (_STORED_KEY_ONE, _STORED_VALUE_ONE),
         (_STORED_KEY_TWO, _STORED_VALUE_TWO),
     ):
-        await put_agent_file(
-            session,
-            tenant_id=tenant.id,
-            agent_id=tenant.id,
-            key=key,
-            content=value,
-            set_by_account_id=None,
-        )
+        await new_agent_file(session, tenant, agent_id=tenant.id, key=key, content=value)
 
 
 def _assert_keys_named_never_valued(xml: str, names: tuple[str, ...], *, builder_name: str) -> None:
@@ -189,13 +182,8 @@ async def test_build_context_xml_omits_keys_when_the_mounted_env_is_stale(
     actually read.
     """
     tenant = await make_tenant(db_session)
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=tenant.id,
-        key=_STORED_KEY_ONE,
-        content=_STORED_VALUE_ONE,
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=tenant.id, key=_STORED_KEY_ONE, content=_STORED_VALUE_ONE
     )
 
     key_names = await list_mounted_key_names(

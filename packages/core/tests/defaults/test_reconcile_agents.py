@@ -9,7 +9,6 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
 from daimon.core.agent_guidance import (
     CREDENTIAL_GUIDANCE_BLOCK,
     apply_credential_guidance,
@@ -24,6 +23,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -194,17 +194,7 @@ async def test_reconcile_agent_creates_with_custom_skills() -> None:
         "GET",
         r"/v1/skills",
         lambda req, _m: list_response(
-            [
-                SkillListResponse(
-                    id="sk_resolved",
-                    type="custom",
-                    display_title=canonical_title,
-                    latest_version="1",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    source="custom",
-                ).model_dump(mode="json")
-            ]
+            [skill_listed(id="sk_resolved", display_title=canonical_title).model_dump(mode="json")]
         ),
     )
     router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
@@ -1290,14 +1280,10 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
         update={"skills": [ref for ref in shipped.skills if ref.platforms is None]}
     )
     listing = [
-        SkillListResponse(
+        skill_listed(
             id=f"sk_{ref.skill_id}",
             type="skill",
             display_title=tenant_scoped_display_title(tenant_id=TENANT_ID, name=ref.skill_id),
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
         ).model_dump(mode="json")
         for ref in without.skills
     ]

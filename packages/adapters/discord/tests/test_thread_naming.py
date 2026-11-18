@@ -26,14 +26,14 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_naming import generate_thread_name
 from daimon.core.config import McpSettings, ThreadNamingSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import provision_workspace
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.membership import FixtureMembershipResolver
@@ -305,12 +305,10 @@ def _runtime(
     anthropic = build_fake_anthropic(router.dispatch)
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
@@ -423,12 +421,7 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     does with the answer.
     """
     guild_id = str(801000777 + len(content) * 10 + len(files) + (0 if enabled else 5))
-    await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=guild_id,
-        signup_credit=Decimal("5.00"),
-    )
+    await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
     mock_resolve_config.return_value = ResolvedConfig(
         agent_name="test-agent",

@@ -10,19 +10,16 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 import anthropic
 import httpx
-from anthropic import AsyncAnthropic
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
 
 from .conftest import make_agent_message, make_end_turn, make_requires_action, make_status_idle
 
-_EXEMPT = BillingExempt(reason="cli-operator-run")
 _STUCK = (
     "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
     "'message': 'Invalid user.message event at events[0]: waiting on responses to events "
@@ -88,16 +85,7 @@ async def test_a_stuck_session_is_interrupted_and_the_turn_runs() -> None:
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=1)
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="are you there?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, user_message="are you there?", now=_now)
 
     assert final.error is None
     assert final.content == [TextBlock(kind="text", text="hello again")]
@@ -111,16 +99,7 @@ async def test_a_session_still_stuck_after_the_interrupt_says_start_a_new_thread
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=2)
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="are you there?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, user_message="are you there?", now=_now)
 
     assert final.error is not None and final.error.kind == "upstream"
     sent = [batch[0]["type"] for _sid, batch in fa.beta.sessions.events.sent_events]
@@ -151,16 +130,7 @@ async def test_a_failed_interrupt_still_ends_the_turn_through_the_normal_failure
     events.send = send  # type: ignore[method-assign]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="are you there?",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, user_message="are you there?", lifecycle=lc, now=_now)
 
     assert final.error is not None and final.error.kind == "upstream"
     assert len(lc.terminal_failures) == 1, "the normal failure callbacks ran"
@@ -178,16 +148,7 @@ async def test_stop_during_recovery_ends_the_turn_as_stopped() -> None:
     asyncio.get_running_loop().call_later(0.2, cancel.set)
 
     final = await asyncio.wait_for(
-        run_turn_on_leg(
-            anthropic=cast(AsyncAnthropic, fa),
-            session_id="sess_1",
-            user_message="are you there?",
-            lifecycle=RecordingLifecycle(),
-            cancel=cancel,
-            render_interval_s=0.001,
-            now=_now,
-            billing=_EXEMPT,
-        ),
+        run_turn_on_leg(fa, user_message="are you there?", cancel=cancel, now=_now),
         timeout=5,
     )
 
@@ -223,16 +184,7 @@ async def test_a_failed_recovery_never_opens_another_stream() -> None:
 
     events.send = send  # type: ignore[method-assign]
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="are you there?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, user_message="are you there?", now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 1, "no second stream after a failed recovery"
     assert final.error is not None and final.error.kind == "upstream"
@@ -252,16 +204,7 @@ async def test_the_retry_waits_until_ma_has_taken_the_interrupt() -> None:
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=1, interrupt_lag_s=0.6)
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="are you there?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, user_message="are you there?", now=_now)
 
     assert final.error is None
     assert final.content == [TextBlock(kind="text", text="hello again")]
@@ -281,16 +224,7 @@ async def test_an_idle_with_no_idle_history_is_not_settled() -> None:
     asyncio.get_running_loop().call_later(1.2, cancel.set)
 
     final = await asyncio.wait_for(
-        run_turn_on_leg(
-            anthropic=cast(AsyncAnthropic, fa),
-            session_id="sess_1",
-            user_message="are you there?",
-            lifecycle=RecordingLifecycle(),
-            cancel=cancel,
-            render_interval_s=0.001,
-            now=_now,
-            billing=_EXEMPT,
-        ),
+        run_turn_on_leg(fa, user_message="are you there?", cancel=cancel, now=_now),
         timeout=5,
     )
 

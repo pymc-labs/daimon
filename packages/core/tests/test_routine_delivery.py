@@ -34,7 +34,6 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     claim_routine_deliveries,
-    create_routine,
     get_routine,
     record_result,
     settle_routine_delivery,
@@ -42,6 +41,7 @@ from daimon.core.stores.routines import (
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.web_links import WebLinks
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -456,14 +456,11 @@ async def _routine(
     session: AsyncSession, *, platform: str = "discord", destination: bool = True
 ) -> RoutineRow:
     tenant = await make_tenant(session, platform=platform)  # type: ignore[arg-type]
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="U1",
         agent_id="ag",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
         trigger_message="go",
         destination_kind="channel" if destination else None,
         destination_id="123" if destination else None,

@@ -20,7 +20,6 @@ import pytest
 import sentry_sdk
 from daimon.adapters.discord import bot as bot_module
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import (
     AnthropicSettings,
@@ -31,7 +30,6 @@ from daimon.core.config import (
     TurnSettings,
 )
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import scoped_config_write, tenant_ledger
 from daimon.core.stores.access_policy import (
@@ -44,6 +42,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.membership import FixtureMembershipResolver
@@ -195,12 +194,10 @@ async def ingress(
     )
 
     deps = dataclasses.replace(deps, turn_runtime_factory=None, turn_runtimes={})
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=client,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=deps,

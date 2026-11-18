@@ -10,7 +10,6 @@ import httpx
 import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
-    SkillListResponse,
 )
 from daimon.core.defaults import apply_defaults
 from daimon.core.defaults.metadata import (
@@ -18,6 +17,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DefaultsError
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, json_body, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -405,15 +405,9 @@ async def test_apply_sweeps_previously_seeded_brainstorming_skill(
     tenant_id_str = str(tenant_id)
     brainstorming_title = tenant_scoped_display_title(tenant_id=tenant_id, name="brainstorming")
 
-    existing_skill = SkillListResponse(
-        id="sk_old",
-        type="custom",
-        display_title=brainstorming_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    existing_skill = skill_listed(id="sk_old", display_title=brainstorming_title).model_dump(
+        mode="json"
+    )
     existing_agent = ma_agent(
         id="ag_old",
         name="daimon",
@@ -501,10 +495,9 @@ async def test_sweep_spares_a_skill_only_a_channel_rule_adds(
             actor_account_id=None,
         )
     title = tenant_scoped_display_title(tenant_id=tenant_id, name="qa-haiku-canary")
-    skill = SkillListResponse(
+    skill = skill_listed(
         id="sk_chan",
         display_title=title,
-        source="custom",
         type="skill",
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",

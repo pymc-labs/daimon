@@ -34,19 +34,17 @@ from daimon.core.channel_backend import (
     check_backend,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ResolvedConfig
 from daimon.core.shared_threads import shared_owner, shared_slot
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import openai_host
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
@@ -162,23 +160,13 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnDeps:
     def no_anthropic(request: Any) -> Any:
         raise AssertionError(f"an explicit provider turn reached Anthropic: {request.url.path}")
 
-    return TurnDeps(
-        anthropic=build_fake_anthropic(no_anthropic),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
+    return plain_turn_deps(
+        build_fake_anthropic(no_anthropic),
+        sessionmaker,
         defaults_root=Path("/unused"),
-        mcp=McpSettings(),
-        billing_config=None,
         markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
         turn_path="mux",
         channel_backends=True,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 

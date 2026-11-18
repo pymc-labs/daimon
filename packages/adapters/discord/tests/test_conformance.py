@@ -19,13 +19,8 @@ import discord
 import pytest
 import pytest_asyncio
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings, TurnQueueSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault
 from daimon.testing.adapters.discord.conformance import (
     AdmissionBarrier,
     MentionTurn,
@@ -33,7 +28,8 @@ from daimon.testing.adapters.discord.conformance import (
     ThreadInputs,
     multi_human_evidence,
 )
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.builders import provision_workspace
+from daimon.testing.discord_builders import discord_runtime
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .harness import make_bot
@@ -55,24 +51,13 @@ async def bot(db_engine: AsyncEngine, db_clean: None) -> DaimonBot:
     # Admission reads can overlap while the first real ingress task is held.
     # Give each production session its own pooled connection.
     sessions = async_sessionmaker(bind=db_engine, expire_on_commit=False)
-    await provision_tenant(
-        sessions, platform="discord", workspace_id="60", signup_credit=Decimal("10")
-    )
+    await provision_workspace(sessions, "60", signup_credit=Decimal("10"))
     settings = MagicMock()
     settings.mcp = McpSettings()
     settings.turn_queue = TurnQueueSettings()
     settings.discord.max_concurrent_turns_per_tenant = 100
     settings.discord.max_concurrent_turns = None
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=AsyncMock(),
-        sessionmaker=sessions,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
-    )
+    runtime = discord_runtime(settings=settings, anthropic=AsyncMock(), sessionmaker=sessions)
     return make_bot(runtime)
 
 

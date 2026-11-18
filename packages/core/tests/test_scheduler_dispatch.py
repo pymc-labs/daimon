@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow, TenantRow
-from daimon.core.stores.routines import create_routine, get_routine, update_routine
+from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter
@@ -40,17 +41,8 @@ async def seed(
     tenant: TenantRow | None = None,
 ) -> RoutineRow:
     tenant = tenant or await make_tenant(session)
-    row = await create_routine(
-        session,
-        tenant_id=tenant.id,
-        created_by_user_id=None,
-        agent_id="agent",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="run",
-        next_fire_at=due,
-        catch_up_policy=policy,
+    row = await new_routine(
+        session, tenant, agent_id="agent", next_fire_at=due, catch_up_policy=policy
     )
     await session.commit()
     return row

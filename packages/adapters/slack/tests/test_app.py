@@ -67,6 +67,7 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.testing.builders import provision_workspace
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
@@ -1235,8 +1236,8 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
     event_ts = thread_ts
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     # Pre-create the principal so account_id is known for the row verification query.
     # _orchestrate uses external_id=str(event["user"]) = "U_TEST_FIRST".
@@ -1729,8 +1730,8 @@ async def test_orchestrate_continuation_when_live_session_exists_calls_build_del
     prior_watermark = "9000000002.000002"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     # Pre-create the principal so account_id is known for both the seed row and the verify query.
     # _orchestrate uses external_id=str(event["user"]) = "U_TEST_CONT".
@@ -1844,8 +1845,8 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
     event_ts2 = "9000000003.000002"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
 
     app, _ = make_orchestrate_app(db_session_factory)
@@ -2107,8 +2108,8 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
     event_ts3 = "9000000009.000003"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
 
     app, _ = make_orchestrate_app(db_session_factory)
@@ -2406,8 +2407,8 @@ async def test_drain_merges_each_authors_files_and_never_crosses_them_between_au
     team_id, channel = "T_DRAIN_FILES", "C_TEST"
     thread_ts = "9100000001.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -2474,8 +2475,8 @@ async def test_drain_runs_remaining_authors_when_one_authors_turn_raises(
     team_id, channel = "T_DRAIN_ISOLATE", "C_TEST"
     thread_ts = "9100000002.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -2540,8 +2541,8 @@ async def test_drain_skips_an_event_with_no_author_and_still_runs_the_real_ones(
     team_id, channel = "T_DRAIN_NOAUTHOR", "C_TEST"
     thread_ts = "9100000003.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -2595,8 +2596,8 @@ def _cleared_pending_reactions(fake: Any) -> list[str]:
 async def _provisioned_drain_app(
     db_session_factory: async_sessionmaker[AsyncSession], team_id: str
 ) -> tuple[Any, uuid.UUID]:
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
     return app, derive_tenant_uuid(platform="slack", workspace_id=team_id)
@@ -2983,8 +2984,8 @@ async def test_run_thread_turn_text_only_turn_spawns_no_output_sweep(
     thread_ts = "9000000020.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -3059,8 +3060,8 @@ async def test_run_thread_turn_output_sweep_is_detached_from_turn_path(
     thread_ts = "9000000021.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -3156,8 +3157,8 @@ async def test_run_thread_turn_two_turns_same_session_chain_sweeps_serially(
     event_ts2 = "9000000022.000002"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
 
@@ -3372,8 +3373,8 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
     event_ts = thread_ts
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
 
     app, _ = make_orchestrate_app(db_session_factory)
@@ -4623,8 +4624,8 @@ async def test_run_thread_turn_pump_phase_ceiling_renders_terminal_error_in_thre
     thread_ts = "9000000045.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
 
     app, _ = make_orchestrate_app(db_session_factory)
@@ -4824,8 +4825,8 @@ async def test_interstitial_failure_clears_the_marker_and_the_cancel_registry(
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     await upsert_slack_bot_token(
         db_session,
@@ -4908,8 +4909,8 @@ async def test_run_thread_turn_clears_the_active_turn_marker_on_success(
     thread_ts = "9000000044.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         pre_principal = await get_or_create_platform_principal(
@@ -5013,8 +5014,8 @@ async def test_marker_is_written_with_channel_before_the_turn_runs(
     thread_ts = "9000000045.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         pre_principal = await get_or_create_platform_principal(
@@ -5156,8 +5157,8 @@ async def test_a_recovered_turn_keeps_editing_the_card_the_marker_points_at(
     thread_ts = "9000000050.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         await get_or_create_platform_principal(
@@ -6105,8 +6106,8 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     await upsert_slack_bot_token(
         db_session,
@@ -6295,8 +6296,8 @@ class TestPerTurnRoleUpsert:
         thread_ts = "9100000001.000001"
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-        await provision_tenant(
-            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        await provision_workspace(
+            db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
         )
         async with db_session_factory() as s:
             principal = await get_or_create_platform_principal(
@@ -6398,8 +6399,8 @@ class TestPerTurnRoleUpsert:
         thread_ts = "9100000002.000001"
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-        await provision_tenant(
-            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        await provision_workspace(
+            db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
         )
         async with db_session_factory() as s:
             principal = await get_or_create_platform_principal(
@@ -6497,8 +6498,8 @@ class TestPerTurnRoleUpsert:
         thread_ts = "9100000003.000001"
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-        await provision_tenant(
-            db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+        await provision_workspace(
+            db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
         )
         async with db_session_factory() as s:
             principal = await get_or_create_platform_principal(
@@ -7310,8 +7311,8 @@ async def test_orchestrate_over_the_tenant_cap_queues_behind_the_ordinary_card(
     channel = "C_TEST"
     event_ts = "9000000070.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory, max_concurrent_turns_per_tenant=1)
     held = app.turn_queue.claim(tenant_id)  # the workspace's one slot is taken
@@ -7392,8 +7393,8 @@ async def test_orchestrate_with_a_stale_setup_posts_the_out_of_date_notice(
     """A setup whose agent is gone gets the two plain lines, a blank line between."""
     team_id = "T_ORCH_STALE"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(db_session_factory)
     event: dict[str, Any] = {

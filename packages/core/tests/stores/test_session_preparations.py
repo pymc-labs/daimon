@@ -20,7 +20,7 @@ from daimon.core.stores.session_preparations import (
     get_preparation,
     upsert_preparation,
 )
-from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,13 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 @pytest_asyncio.fixture
 async def mapping_id(db_session: AsyncSession) -> uuid.UUID:
     tenant = await make_tenant(db_session)
-    row = await create_thread_session(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="prep-thread",
-        account_id=uuid.uuid4(),
-        ma_session_id="sess_prep",
+    row = await new_thread_session(
+        db_session, tenant_id=tenant.id, thread_id="prep-thread", ma_session_id="sess_prep"
     )
     return row.id
 

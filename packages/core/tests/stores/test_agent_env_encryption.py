@@ -15,6 +15,7 @@ from daimon.core.stores.agent_files import (
     put_agent_file,
     put_agent_file_if_unchanged,
 )
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -344,13 +345,8 @@ async def test_legacy_update_after_encryption_remains_readable_and_reversible(
     )
     assert row is not None and row.content == "third"
     assert (await _stored(db_session))["TOKEN"][1] == "fernet_v1"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_id,
-        key="KEEPER",
-        content="still-encrypted",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant_id, agent_id=agent_id, key="KEEPER", content="still-encrypted"
     )
     # Same transaction as the new writes: the marker must not leak to later SQL.
     updated = await db_session.execute(
@@ -442,14 +438,7 @@ async def test_encrypt_plaintext_rewrites_legacy_rows_and_verify_counts_them(
     tenant = await make_tenant(db_session)
     agent = uuid.uuid4()
     for key in ("A", "B"):
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent,
-            key=key,
-            content=f"value-{key}",
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=agent, key=key, content=f"value-{key}")
     before = {
         r.key: r.updated_at
         for r in await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent)

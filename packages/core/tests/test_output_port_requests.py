@@ -15,6 +15,7 @@ from daimon.core.output_ports_compat import (
     read_output_record,
 )
 from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from mux.contracts.ids import ResourceRef
 from mux.drivers.anthropic.outputs import Outputs
 from mux.errors import ScopeViolation
@@ -31,15 +32,7 @@ MA_BETA = "managed-agents-2026-04-01"
 async def test_output_requests_and_errors_match_the_original(
     operation: Literal["list", "read", "delete"], status: int
 ) -> None:
-    metadata = FileMetadata(
-        id="file_output",
-        filename="output.txt",
-        mime_type="text/plain",
-        size_bytes=3,
-        created_at=NOW,
-        type="file",
-        downloadable=True,
-    )
+    metadata = file_meta(id="file_output", filename="output.txt", size_bytes=3)
     method, path = {
         "list": ("GET", "/v1/files"),
         "read": ("GET", "/v1/files/file_output/content"),

@@ -15,7 +15,8 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core.stores import mux_state
-from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
+from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.db import (
     _create_schema_with_tables,  # pyright: ignore[reportPrivateUsage]
     _drop_schema,  # pyright: ignore[reportPrivateUsage]
@@ -177,10 +178,9 @@ async def test_backfill_binds_caller_rows_and_leaves_readers_unchanged(
         db_session, tenant_id=tenant.id, platform="discord", thread_id="th", account_id=ACCOUNT_A
     )
     assert live is not None and live.id == second and live.ma_session_id == "s_new"
-    created = await create_thread_session(
+    created = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="th2",
         account_id=ACCOUNT_A,
         ma_session_id="s_fresh",

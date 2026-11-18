@@ -14,7 +14,6 @@ from daimon.core.errors import StoreError
 from daimon.core.stores.domain import RoutineRow, SandboxPin
 from daimon.core.stores.routines import (
     clear_sandbox_drift,
-    create_routine,
     get_routine,
     pause_routine,
     record_result,
@@ -22,6 +21,7 @@ from daimon.core.stores.routines import (
     set_sandbox_tools,
     update_routine,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,14 +42,11 @@ async def tenant_id(db_session: AsyncSession) -> uuid.UUID:
 async def _routine(
     session: AsyncSession, tenant_id: uuid.UUID, owner: str = "owner-1"
 ) -> RoutineRow:
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id=owner,
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="nightly",
     )
 
@@ -268,14 +265,11 @@ async def test_schedule_edits_pause_and_unchanged_values_keep_the_opt_in(
 
 async def _dm_ready(session: AsyncSession, tenant_id: uuid.UUID) -> RoutineRow:
     """A channel-less routine created with known provenance, so it may turn into a DM one."""
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="1001",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="nightly",
         source_provenance_known=True,
     )

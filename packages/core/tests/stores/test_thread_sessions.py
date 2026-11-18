@@ -34,7 +34,6 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
-    create_thread_session,
     get_latest_thread_session,
     get_live_thread_session,
     get_thread_session_by_id,
@@ -48,6 +47,7 @@ from daimon.core.stores.thread_sessions import (
     update_mutable_fingerprint,
     update_watermark,
 )
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -64,10 +64,9 @@ async def test_create_then_get_live_returns_row(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="111",
         account_id=account_id,
         ma_session_id="sess_a",
@@ -91,19 +90,17 @@ async def test_get_live_newest_row_wins(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="111",
         account_id=account_id,
         ma_session_id="sess_old",
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="111",
         account_id=account_id,
         ma_session_id="sess_new",
@@ -128,10 +125,9 @@ async def test_mark_dead_excludes_from_live_but_keeps_row(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="222",
         account_id=account_id,
         ma_session_id="sess_b",
@@ -162,10 +158,9 @@ async def test_update_watermark_persists(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="333",
         account_id=account_id,
         ma_session_id="sess_c",
@@ -217,10 +212,9 @@ async def test_restart_resume_reads_same_live_row(
     """
     account_id = uuid.uuid4()
     # Create in the shared test session and commit so it is visible to a fresh session.
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="444",
         account_id=account_id,
         ma_session_id="sess_restart",
@@ -265,18 +259,16 @@ async def test_get_live_thread_session_filters_by_account_id(
     account_a = uuid.uuid4()
     account_b = uuid.uuid4()
 
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="filter-test",
         account_id=account_a,
         ma_session_id="sess_a",
     )
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="filter-test",
         account_id=account_b,
         ma_session_id="sess_b",
@@ -361,10 +353,9 @@ async def test_create_thread_session_persists_account_id(
 ) -> None:
     """account_id passed to create_thread_session must round-trip through model_validate."""
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="persist-test",
         account_id=account_id,
         ma_session_id="sess_persist",
@@ -394,19 +385,17 @@ async def test_get_latest_thread_session_returns_newest_row_across_accounts(
     """Unlike get_live_thread_session, this ignores account_id entirely."""
     account_a = uuid.uuid4()
     account_b = uuid.uuid4()
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="latest-test",
         account_id=account_a,
         ma_session_id="sess_old",
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="latest-test",
         account_id=account_b,
         ma_session_id="sess_new",
@@ -431,10 +420,9 @@ async def test_get_latest_thread_session_ignores_dead_rows(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="latest-dead-test",
         account_id=account_id,
         ma_session_id="sess_dead",
@@ -475,13 +463,8 @@ async def test_healthy_threads_are_never_reported_as_orphans(
     it would mark every working thread failed. Only an explicit in-flight
     marker may qualify a row.
     """
-    await create_thread_session(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        thread_id="healthy-1",
-        account_id=uuid.uuid4(),
-        ma_session_id="sess_healthy",
+    await new_thread_session(
+        db_session, tenant_id=tenant_id, thread_id="healthy-1", ma_session_id="sess_healthy"
     )
 
     orphans = await list_orphaned_turns(db_session, platform="discord")
@@ -493,13 +476,8 @@ async def test_marked_turn_is_listed_then_cleared(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        thread_id="inflight-1",
-        account_id=uuid.uuid4(),
-        ma_session_id="sess_inflight",
+    row = await new_thread_session(
+        db_session, tenant_id=tenant_id, thread_id="inflight-1", ma_session_id="sess_inflight"
     )
     started = datetime.now(UTC)
 
@@ -521,12 +499,11 @@ async def test_orphan_listing_is_scoped_to_one_platform(
     tenant_id: uuid.UUID,
 ) -> None:
     """A Discord boot must not retire Slack's in-flight turns."""
-    slack_row = await create_thread_session(
+    slack_row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="slack-1",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack",
     )
     await mark_turn_active(
@@ -544,12 +521,11 @@ async def test_slack_marked_turn_lists_back_with_its_channel(
     tenant_id: uuid.UUID,
 ) -> None:
     """A Slack message is addressed by (channel, ts); the sweep needs the channel."""
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000100",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_sweep",
     )
 
@@ -572,12 +548,10 @@ async def test_mark_turn_active_without_channel_defaults_to_none(
     tenant_id: uuid.UUID,
 ) -> None:
     """Discord's call site passes no channel; a Discord message id is globally addressable."""
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="discord-no-channel",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_discord_no_channel",
     )
 
@@ -595,12 +569,11 @@ async def test_clear_active_turn_nulls_all_three_marker_columns(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000300",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_clear",
     )
     await mark_turn_active(
@@ -624,12 +597,11 @@ async def test_clear_active_turn_if_message_id_clears_when_the_marker_still_matc
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000500",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_conditional_match",
     )
     await mark_turn_active(
@@ -659,12 +631,11 @@ async def test_clear_active_turn_if_message_id_leaves_a_marker_that_moved(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000600",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_conditional_moved",
     )
     await mark_turn_active(
@@ -703,12 +674,11 @@ async def test_clear_active_turn_if_message_id_is_a_no_op_on_an_already_cleared_
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000700",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_conditional_already_cleared",
     )
     await mark_turn_active(
@@ -731,20 +701,18 @@ async def test_clear_active_turn_if_message_id_never_touches_another_row(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    first = await create_thread_session(
+    first = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000800",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_conditional_row_a",
     )
-    second = await create_thread_session(
+    second = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
         thread_id="1700000000.000900",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_slack_conditional_row_b",
     )
     await mark_turn_active(
@@ -806,12 +774,10 @@ async def test_created_row_returns_the_snapshot_it_was_given(
     tenant_id: uuid.UUID,
 ) -> None:
     snapshot = _snapshot()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="snapshot-on-create",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_snapshot_create",
         effective_config=snapshot,
         identity_fingerprint="ident-1",
@@ -829,12 +795,10 @@ async def test_record_snapshot_backfills_a_row_that_had_none(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="snapshot-backfill",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_snapshot_backfill",
     )
     assert row.effective_config is None, "a pre-continuity row starts with no snapshot"
@@ -859,21 +823,17 @@ async def test_app_token_refresh_updates_live_session_snapshots(
     tenant_id: uuid.UUID,
 ) -> None:
     snapshot = _snapshot().model_copy(update={"github_mode": "app", "repo_token_issued_at": 100})
-    live = await create_thread_session(
+    live = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="refresh-live",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_refresh",
         effective_config=snapshot,
     )
-    dead = await create_thread_session(
+    dead = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="refresh-dead",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_refresh",
         effective_config=snapshot,
     )
@@ -893,12 +853,10 @@ async def test_single_installation_refresh_uses_legacy_refresh_timestamp(
     tenant_id: uuid.UUID,
 ) -> None:
     snapshot = _snapshot().model_copy(update={"github_mode": "app", "repo_token_issued_at": 100})
-    live = await create_thread_session(
+    live = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="single_refresh",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_single_refresh",
         effective_config=snapshot,
     )
@@ -937,12 +895,10 @@ async def test_contraction_keeps_both_retained_chunk_ages(
             "repo_token_issued_at": old,
         }
     )
-    live = await create_thread_session(
+    live = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="contract_chunks",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_contract_chunks",
         effective_config=snapshot,
     )
@@ -991,12 +947,10 @@ async def test_partial_app_rotation_records_exclusion_in_live_snapshot(
             "token_repo_urls": (url,),
         }
     )
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="partial-rotation",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_partial_rotation",
         effective_config=snapshot,
         identity_fingerprint=fingerprint_identity(snapshot),
@@ -1022,12 +976,10 @@ async def test_update_mutable_fingerprint_leaves_the_identity_fingerprint_alone(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="in-place-refresh",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_in_place",
         effective_config=_snapshot(),
         identity_fingerprint="ident-frozen",
@@ -1058,19 +1010,17 @@ async def test_exactly_one_row_stays_live_when_a_session_is_superseded(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    old = await create_thread_session(
+    old = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="supersede",
         account_id=account_id,
         ma_session_id="sess_old",
         created_at=datetime(2026, 9, 13, 10, 0, tzinfo=UTC),
     )
-    new = await create_thread_session(
+    new = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="supersede",
         account_id=account_id,
         ma_session_id="sess_new",
@@ -1118,10 +1068,9 @@ async def test_a_retired_row_is_invisible_to_the_caller_scoped_lookup(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="fresh-start",
         account_id=account_id,
         ma_session_id="sess_retired",
@@ -1147,12 +1096,10 @@ async def test_fresh_start_request_is_recorded_then_cleared(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="fresh-start-flag",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_fresh_flag",
     )
     requested_at = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
@@ -1177,27 +1124,24 @@ async def test_lineage_returns_the_whole_chain_oldest_first(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    first = await create_thread_session(
+    first = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="lineage",
         account_id=account_id,
         ma_session_id="sess_lineage_1",
     )
-    second = await create_thread_session(
+    second = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="lineage",
         account_id=account_id,
         ma_session_id="sess_lineage_2",
         predecessor_id=first.id,
     )
-    third = await create_thread_session(
+    third = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="lineage",
         account_id=account_id,
         ma_session_id="sess_lineage_3",
@@ -1225,10 +1169,9 @@ async def test_mark_dead_still_only_changes_status(
 ) -> None:
     """Regression guard: continuity added statuses, it did not touch recovery."""
     account_id = uuid.uuid4()
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="dead-unchanged",
         account_id=account_id,
         ma_session_id="sess_dead",
@@ -1262,13 +1205,8 @@ async def test_pending_unsaved_work_round_trips_and_the_last_answer_wins(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        thread_id="unsaved-work",
-        account_id=uuid.uuid4(),
-        ma_session_id="sess_unsaved",
+    row = await new_thread_session(
+        db_session, tenant_id=tenant_id, thread_id="unsaved-work", ma_session_id="sess_unsaved"
     )
     assert row.pending_unsaved_work is None, "a new row carries no answer"
 
@@ -1290,19 +1228,17 @@ async def test_superseding_a_row_clears_the_answer_it_was_given_for(
     tenant_id: uuid.UUID,
 ) -> None:
     account_id = uuid.uuid4()
-    old = await create_thread_session(
+    old = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="unsaved-work-supersede",
         account_id=account_id,
         ma_session_id="sess_unsaved_old",
     )
     await set_pending_unsaved_work(db_session, id=old.id, choice="leave")
-    new = await create_thread_session(
+    new = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="unsaved-work-supersede",
         account_id=account_id,
         ma_session_id="sess_unsaved_new",
@@ -1321,12 +1257,10 @@ async def test_retiring_a_row_clears_the_answer_it_was_given_for(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         thread_id="unsaved-work-retire",
-        account_id=uuid.uuid4(),
         ma_session_id="sess_unsaved_retire",
     )
     await set_pending_unsaved_work(db_session, id=row.id, choice="copy")
@@ -1344,10 +1278,9 @@ async def _two_mappings(
 ) -> tuple[ThreadSessionRow, ThreadSessionRow]:
     account_id = uuid.uuid4()
     rows = [
-        await create_thread_session(
+        await new_thread_session(
             db_session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id=thread_id,
             account_id=account_id,
             ma_session_id=f"sess_{thread_id}_{suffix}",

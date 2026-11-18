@@ -11,7 +11,8 @@ from daimon.adapters.cli.commands.routines import run_sandbox_tools
 from daimon.core.errors import UserFacingError
 from daimon.core.routine_sandbox import SandboxPinUnavailable
 from daimon.core.stores.domain import SandboxPin
-from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
+from daimon.core.stores.routines import get_routine, sandbox_tools_history
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 
@@ -35,14 +36,12 @@ async def _routines(db_session_factory, count: int):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, workspace_id="cutover-guild")
         rows = [
-            await create_routine(
+            await new_routine(
                 session,
-                tenant_id=tenant.id,
+                tenant,
                 created_by_user_id="owner",
                 agent_id="ag",
-                agent_name="daimon",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message=f"routine {n}",
             )
             for n in range(count)
@@ -144,14 +143,12 @@ async def test_off_reverts_an_opt_in(db_session_factory) -> None:
 async def test_a_listed_dm_routine_refuses_the_whole_batch(db_session_factory) -> None:
     tenant_id, rows = await _routines(db_session_factory, 1)
     async with db_session_factory.begin() as session:
-        dm = await create_routine(
+        dm = await new_routine(
             session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id="1001",
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="private",
             source_provenance_known=True,
             destination_kind="dm",

@@ -6,7 +6,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
@@ -25,6 +24,7 @@ from daimon.core.reader_agent import (
     ensure_reader_variant,
 )
 from daimon.core.specs import AgentSpec, SkillRef
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -219,14 +219,11 @@ def _router(agents: list[dict[str, Any]]) -> MARouter:
         r"/v1/skills",
         lambda req, _m: list_response(
             [
-                SkillListResponse(
+                skill_listed(
                     id="sk_reader_resolved",
-                    type="custom",
                     display_title=canonical_title,
-                    latest_version="1",
                     created_at="2026-09-01T00:00:00Z",
                     updated_at="2026-09-01T00:00:00Z",
-                    source="custom",
                 ).model_dump(mode="json")
             ]
         ),

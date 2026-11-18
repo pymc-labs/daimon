@@ -13,7 +13,7 @@ from daimon.core.config import Settings, TurnSettings
 from daimon.core.routine_service import RoutineRefused
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.turn_router import AGENT_ID
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -119,14 +119,13 @@ async def test_a_members_drawer_opens_when_routines_cannot_be_checked(
         admin.as_member()
         empty = await admin.client.get("/api/channels/c1/settings")
         async with db_session_factory.begin() as db:
-            await create_routine(
+            await new_routine(
                 db,
-                tenant_id=admin.ws.tenant_id,
+                admin.ws.tenant_id,
                 created_by_user_id=str(admin.member.id),
                 agent_id=AGENT_ID,
                 agent_name=DEFAULT_AGENT_NAME,
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="mine",
                 next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                 destination_kind="channel",
@@ -154,14 +153,13 @@ async def test_a_member_reads_no_spend_or_budget_and_only_the_routines_they_may_
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             for owner, message in ((str(admin.member.id), "mine"), ("someone-else", "theirs")):
-                await create_routine(
+                await new_routine(
                     db,
-                    tenant_id=admin.ws.tenant_id,
+                    admin.ws.tenant_id,
                     created_by_user_id=owner,
                     agent_id=AGENT_ID,
                     agent_name=DEFAULT_AGENT_NAME,
                     cron_expr="0 9 * * *",
-                    timezone_="UTC",
                     trigger_message=message,
                     next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                     destination_kind="channel",
@@ -191,14 +189,13 @@ async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
 ) -> None:
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
-            await create_routine(
+            await new_routine(
                 db,
-                tenant_id=admin.ws.tenant_id,
+                admin.ws.tenant_id,
                 created_by_user_id=str(admin.member.id),
                 agent_id=AGENT_ID,
                 agent_name="ghost",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="hi",
                 next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
                 destination_kind="channel",

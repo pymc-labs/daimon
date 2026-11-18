@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -29,6 +29,7 @@ from daimon.core.skills.add import (
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.archives import make_tarball
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -47,14 +48,8 @@ def _md(body: str = "Write them down.") -> str:
 
 
 def _skill(skill_id: str, title: str) -> dict[str, Any]:
-    return SkillListResponse(
-        id=skill_id,
-        type="custom",
-        display_title=title,
-        latest_version="1",
-        created_at=_TS,
-        updated_at=_TS,
-        source="custom",
+    return skill_listed(
+        id=skill_id, display_title=title, created_at=_TS, updated_at=_TS
     ).model_dump(mode="json")
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -122,24 +122,18 @@ async def test_migration_0014_backfill_derives_per_row_tenant(
     result_b = await provision_tenant(db_session_factory, platform="discord", workspace_id="222")
     assert result_a.tenant_id != result_b.tenant_id, "two guilds must yield distinct tenants"
 
-    routine_a = await create_routine(
+    routine_a = await new_routine(
         db_session,
-        tenant_id=result_a.tenant_id,
+        result_a.tenant_id,
         created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="a",
     )
-    routine_b = await create_routine(
+    routine_b = await new_routine(
         db_session,
-        tenant_id=result_b.tenant_id,
+        result_b.tenant_id,
         created_by_user_id="u2",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="b",
     )
 

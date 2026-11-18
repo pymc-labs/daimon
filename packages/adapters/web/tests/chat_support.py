@@ -17,7 +17,6 @@ from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.invites import issue_link
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.config import Settings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import (
@@ -32,6 +31,7 @@ from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import WebMessageBlocks, WebMessageRow, WebPersonRow, WebThreadRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_router import AGENT_ID, ENV_ID
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
@@ -56,11 +56,8 @@ class Workspace:
 
 async def funded_workspace(factory: async_sessionmaker[AsyncSession]) -> Workspace:
     """A provisioned workspace with credit and one member signed up on the web."""
-    tenant = await provision_tenant(
-        factory,
-        platform="discord",
-        workspace_id=f"g-{uuid.uuid4().hex[:8]}",
-        signup_credit=Decimal("100"),
+    tenant = await provision_workspace(
+        factory, f"g-{uuid.uuid4().hex[:8]}", signup_credit=Decimal("100")
     )
     person_id = uuid.uuid4()
     async with factory.begin() as session:

@@ -32,7 +32,6 @@ from daimon.core.continuity.messages import (
     render_current_work_must_finish,
 )
 from daimon.core.ma_resolver import ResolverCache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
@@ -47,6 +46,7 @@ from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import render_turn_origin as real_render_turn_origin
 from daimon.core.turn_origin import turn_origin as real_turn_origin
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -166,12 +166,10 @@ def _make_runtime(
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(

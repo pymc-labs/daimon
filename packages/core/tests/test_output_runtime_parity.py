@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import cast
 
 import httpx
-from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import (
     DeliverableFile,
     NoticedFiles,
@@ -28,6 +27,7 @@ from daimon.core.output_delivery import (
     sweep_outputs,
 )
 from daimon.core.output_runtime import AnthropicOutputRuntime, ArtifactOutputRuntime, OutputRuntime
+from daimon.testing.builders import file_meta
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -78,15 +78,9 @@ def _anthropic() -> tuple[OutputRuntime, list[str]]:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id=id_,
-                    created_at=NOW,
-                    filename=name,
-                    mime_type="text/plain",
-                    size_bytes=len(body),
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json")
+                file_meta(id=id_, created_at=NOW, filename=name, size_bytes=len(body)).model_dump(
+                    mode="json"
+                )
                 for id_, (name, body) in live.items()
             ]
         )

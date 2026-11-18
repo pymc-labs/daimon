@@ -28,7 +28,6 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import ResolverCache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -48,6 +47,8 @@ from daimon.core.stores.turn_card_intents import (
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
+from daimon.testing.builders import new_thread_session
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_channel_budget
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import mock_settings
@@ -117,12 +118,10 @@ def _make_runtime(
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(
@@ -2655,12 +2654,10 @@ class TestResolverSelfHeal:
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
+        runtime = discord_runtime(
             settings=settings,
             anthropic=anthropic,
             sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             turn_deps=_make_turn_deps(
@@ -2784,12 +2781,10 @@ class TestResolverSelfHeal:
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
+        runtime = discord_runtime(
             settings=settings,
             anthropic=anthropic,
             sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             turn_deps=_make_turn_deps(
@@ -2974,7 +2969,6 @@ class TestSessionReuse:
     ) -> None:
         """The drain's content override must reach a reused thread session."""
         from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -2984,11 +2978,10 @@ class TestSessionReuse:
         await db_session.commit()
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id="sesn_queued_existing"))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5555",
                 account_id=principal.account_id,
                 ma_session_id="sesn_queued_existing",
@@ -3211,7 +3204,6 @@ class TestSessionReuse:
         from daimon.core.errors import TurnError
         from daimon.core.stores.identity import get_or_create_platform_principal
         from daimon.core.stores.thread_sessions import (
-            create_thread_session,
             get_live_thread_session,
         )
         from daimon.core.turn.state import TurnState
@@ -3231,11 +3223,10 @@ class TestSessionReuse:
         old_session_id = "sesn_old_dead_001"
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id=old_session_id))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5557",
                 account_id=principal.account_id,
                 ma_session_id=old_session_id,
@@ -3912,7 +3903,6 @@ class TestOwnCardIsNotContext:
         seeded_watermark: str | None,
     ) -> None:
         from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -3923,11 +3913,10 @@ class TestOwnCardIsNotContext:
         if seeded_watermark is not None:
             async with db_session_factory() as seed_session:
                 snapshot = _snapshot_of(ma_session(id="sesn_card_existing"))
-                await create_thread_session(
+                await new_thread_session(
                     seed_session,
                     ma_agent_id="ag_test",
                     tenant_id=tenant.id,
-                    platform="discord",
                     thread_id="5557",
                     account_id=principal.account_id,
                     ma_session_id="sesn_card_existing",

@@ -15,10 +15,10 @@ from daimon.core.stores.agent_files import (
     get_agent_file,
     list_agent_file_revisions,
     list_agent_files,
-    put_agent_file,
     put_agent_file_if_unchanged,
 )
 from daimon.core.stores.domain import AgentFileRow
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,14 +31,7 @@ async def test_put_agent_file_inserts_new_row_when_key_unseen(
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
 
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="AGENT_MD",
-        content="hello",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="AGENT_MD", content="hello")
 
     row = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="AGENT_MD")
     assert row is not None, "row should exist after put"
@@ -54,25 +47,11 @@ async def test_put_agent_file_upserts_and_bumps_updated_at_when_key_exists(
     """AF-02: second put on the same key overwrites and advances updated_at."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="k",
-        content="v1",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="k", content="v1")
     first = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="k")
     assert first is not None
 
-    second = await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="k",
-        content="v2",
-        set_by_account_id=None,
-    )
+    second = await new_agent_file(db_session, tenant, agent_id=agent_id, key="k", content="v2")
     assert second.content == "v2", "upsert return should reflect overwritten content"
     assert second.updated_at >= first.updated_at, (
         "updated_at must advance (or equal) on upsert; func.now() in set_ enforces this"
@@ -103,14 +82,7 @@ async def test_put_agent_file_raises_store_error_when_key_is_empty(
     """AF-03: empty key validator rejects with StoreError."""
     tenant = await make_tenant(db_session)
     with pytest.raises(StoreError, match="empty"):
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=uuid.uuid4(),
-            key="",
-            content="x",
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=uuid.uuid4(), key="", content="x")
 
 
 @pytest.mark.asyncio
@@ -120,14 +92,7 @@ async def test_get_agent_file_returns_pydantic_row_when_present(
     """AF-04: get returns AgentFileRow (Pydantic), not the ORM AgentFile."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="k",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="k", content="v")
     row = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="k")
     assert isinstance(row, AgentFileRow), "store must return Pydantic, not ORM"
     assert not isinstance(row, AgentFile), "ORM must not leak past the store boundary"
@@ -153,14 +118,7 @@ async def test_list_agent_files_returns_keys_ordered_when_multiple_present(
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
     for k in ["b", "a", "c"]:
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            key=k,
-            content=k,
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=agent_id, key=k, content=k)
     rows = await list_agent_files(db_session, tenant_id=tenant.id, agent_id=agent_id)
     assert [r.key for r in rows] == ["a", "b", "c"], "list should be ordered by key"
 
@@ -178,14 +136,7 @@ async def _store_collation_sensitive_keys(
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
     for key in _COLLATION_SENSITIVE_KEYS:
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            key=key,
-            content="1",
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=agent_id, key=key, content="1")
     return tenant.id, agent_id
 
 
@@ -288,15 +239,9 @@ async def test_list_agent_files_scopes_to_tenant_and_agent(
     t2 = await make_tenant(db_session)
     a1 = uuid.uuid4()
     a2 = uuid.uuid4()
-    await put_agent_file(
-        db_session, tenant_id=t1.id, agent_id=a1, key="k1", content="x", set_by_account_id=None
-    )
-    await put_agent_file(
-        db_session, tenant_id=t1.id, agent_id=a2, key="k2", content="x", set_by_account_id=None
-    )
-    await put_agent_file(
-        db_session, tenant_id=t2.id, agent_id=a1, key="k3", content="x", set_by_account_id=None
-    )
+    await new_agent_file(db_session, t1, agent_id=a1, key="k1", content="x")
+    await new_agent_file(db_session, t1, agent_id=a2, key="k2", content="x")
+    await new_agent_file(db_session, t2, agent_id=a1, key="k3", content="x")
 
     rows = await list_agent_files(db_session, tenant_id=t1.id, agent_id=a1)
     assert [r.key for r in rows] == ["k1"], (
@@ -311,14 +256,7 @@ async def test_delete_agent_file_removes_row_when_present(
     """AF-08: delete removes the row; subsequent get returns None."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="k",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="k", content="v")
     await delete_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="k")
     row = await get_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="k")
     assert row is None, "row should be gone after delete"
@@ -331,14 +269,7 @@ async def test_tenant_delete_cascades_to_agent_files(
     """AF-09: deleting the tenant removes its agent_files via FK CASCADE."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="k",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="k", content="v")
 
     await db_session.execute(sa.text("DELETE FROM tenants WHERE id = :tid"), {"tid": tenant.id})
     await db_session.flush()
@@ -357,9 +288,9 @@ async def test_put_agent_file_records_creator_on_insert_and_setter_on_update(
     replacer = await make_account(db_session, tenant=tenant)
     agent_id = uuid.uuid4()
 
-    created = await put_agent_file(
+    created = await new_agent_file(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         agent_id=agent_id,
         key="TOGGL_TOKEN",
         content="v1",
@@ -368,9 +299,9 @@ async def test_put_agent_file_records_creator_on_insert_and_setter_on_update(
     assert created.created_by_account_id == creator.id, "insert must record the creator"
     assert created.last_set_by_account_id == creator.id, "insert must also record the setter"
 
-    replaced = await put_agent_file(
+    replaced = await new_agent_file(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         agent_id=agent_id,
         key="TOGGL_TOKEN",
         content="v2",
@@ -414,14 +345,7 @@ async def test_put_agent_file_if_unchanged_writes_when_updated_at_matches(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     agent_id = uuid.uuid4()
-    before = await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="K",
-        content="v1",
-        set_by_account_id=None,
-    )
+    before = await new_agent_file(db_session, tenant, agent_id=agent_id, key="K", content="v1")
 
     row = await put_agent_file_if_unchanged(
         db_session,
@@ -445,26 +369,12 @@ async def test_put_agent_file_if_unchanged_returns_none_when_row_changed_since(
     """A stale card must not clobber the value that replaced the one it saw."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    stale = await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="K",
-        content="v1",
-        set_by_account_id=None,
-    )
+    stale = await new_agent_file(db_session, tenant, agent_id=agent_id, key="K", content="v1")
     # Separate transactions: `updated_at` is `now()`, which is transaction
     # time, so two writes inside one transaction would share a timestamp — and
     # a real race is between transactions anyway.
     await db_session.commit()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="K",
-        content="v2-someone-else",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_id, key="K", content="v2-someone-else")
 
     row = await put_agent_file_if_unchanged(
         db_session,
@@ -491,13 +401,8 @@ async def test_put_agent_file_if_unchanged_returns_none_when_key_appeared_since(
     """The card promised the key did not exist; someone created it first."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="K",
-        content="created-by-someone-else",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant, agent_id=agent_id, key="K", content="created-by-someone-else"
     )
 
     row = await put_agent_file_if_unchanged(
@@ -523,14 +428,7 @@ async def test_put_agent_file_if_unchanged_returns_none_when_key_removed_since(
     """Removed and overwritten are the same failure: the card's promise no longer holds."""
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
-    before = await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_id,
-        key="K",
-        content="v1",
-        set_by_account_id=None,
-    )
+    before = await new_agent_file(db_session, tenant, agent_id=agent_id, key="K", content="v1")
     await delete_agent_file(db_session, tenant_id=tenant.id, agent_id=agent_id, key="K")
 
     row = await put_agent_file_if_unchanged(
@@ -560,14 +458,7 @@ async def test_put_agent_file_refuses_a_key_the_sandbox_would_export_unsafely(
     tenant = await make_tenant(db_session)
     agent_id = uuid.uuid4()
     with pytest.raises(StoreError):
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=agent_id,
-            key=key,
-            content="/tmp/evil.so",
-            set_by_account_id=None,
-        )
+        await new_agent_file(db_session, tenant, agent_id=agent_id, key=key, content="/tmp/evil.so")
     with pytest.raises(StoreError):
         await put_agent_file_if_unchanged(
             db_session,
@@ -587,12 +478,7 @@ async def test_put_agent_file_refuses_a_nul_without_echoing_the_value(
 ) -> None:
     tenant = await make_tenant(db_session)
     with pytest.raises(StoreError) as caught:
-        await put_agent_file(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=uuid.uuid4(),
-            key="API_KEY",
-            content="sec\0ret",
-            set_by_account_id=None,
+        await new_agent_file(
+            db_session, tenant, agent_id=uuid.uuid4(), key="API_KEY", content="sec\0ret"
         )
     assert "sec" not in str(caught.value), "the error must not carry the value"

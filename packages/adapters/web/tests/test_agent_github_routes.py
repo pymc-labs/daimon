@@ -9,7 +9,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills.version_list_response import VersionListResponse
 from cryptography.fernet import Fernet
 from daimon.core import agent_github
@@ -23,6 +22,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import create_platform_principal
 from daimon.core.stores.user_skills import upsert_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import (
     make_account,
     make_github_app_installation,
@@ -193,12 +193,11 @@ async def test_get_panel_when_version_lookup_fails_then_null_time_and_retried_th
     pinned = {"type": "custom", "skill_id": "skill_pin", "version": "1"}
     agents, owner, _other = await agent_people(db_session, skills=[pinned])
     agents.skills = [
-        SkillListResponse(
+        skill_listed(
             id="skill_pin",
             created_at="2030-01-01T00:00:00Z",
             display_title="Deploy",
             latest_version="3",
-            source="custom",
             type="skill",
             updated_at="2030-01-03T00:00:00Z",
         ).model_dump(mode="json")

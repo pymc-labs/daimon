@@ -25,7 +25,7 @@ from daimon.core.config import SupportSettings
 from daimon.core.message_feedback import CUSTOM_ID_PATTERN
 from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
-from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -711,10 +711,9 @@ async def test_ma_session_id_populated_from_newest_live_session(
     )
     await db_session.commit()
     async with db_session_factory() as seed_session:
-        await create_thread_session(
+        await new_thread_session(
             seed_session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="2001",
             account_id=principal.account_id,
             ma_session_id="sesn_live_001",

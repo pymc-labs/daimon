@@ -1,6 +1,5 @@
 """Regression: recovery adopts only a session matching the current decision, and decides again before its send."""
 
-import asyncio
 from dataclasses import replace
 
 import pytest
@@ -11,10 +10,10 @@ from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.turn import prepare as prep_mod
 from daimon.core.turn.admission import AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
-from daimon.core.turn.run import _replace_dead_session, run_prepared_turn
+from daimon.core.turn.run import _replace_dead_session
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import run_prepared
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from .test_action_time_races import setup
@@ -143,19 +142,13 @@ async def test_recovery_reseed_policy_change_before_send(db_session, db_committi
         return "reseeded member request"
 
     async def run():
-        return await run_prepared_turn(
+        return await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-2",
-            external_user_id="user-1",
-            user_message="hello",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
             reseed_user_message=reseed,
             recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
 
     if change == "none":

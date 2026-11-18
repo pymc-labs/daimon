@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.skills.discover import DiscoveredSkill
 from daimon.core.skills.sync import summarize_failed_imports, sync_skills
 from daimon.core.specs import SkillSpec
+from daimon.testing.builders import skill_listed
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
@@ -41,15 +41,7 @@ def _skill(tmp_path: Path, name: str = "brainstorming") -> DiscoveredSkill:
 
 
 def _skill_row(id_: str, name: str) -> dict[str, Any]:
-    return SkillListResponse(
-        id=id_,
-        type="custom",
-        display_title=name,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    return skill_listed(id=id_, display_title=name).model_dump(mode="json")
 
 
 def _parse_display_title_from_multipart(req: httpx.Request) -> str:
@@ -99,15 +91,7 @@ async def test_sync_creates_new_skill(tmp_path: Path) -> None:
         create_requests.append(req)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title=canonical,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title=canonical).model_dump(mode="json"),
         )
 
     router.add("POST", r"/v1/skills", on_create)
@@ -231,15 +215,7 @@ async def test_sync_continues_after_failure(tmp_path: Path) -> None:
             return httpx.Response(500, json={"error": "internal error"})
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_beta",
-                type="custom",
-                display_title=canonical_b,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_beta", display_title=canonical_b).model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -301,15 +277,7 @@ async def test_sync_creates_distinct_skills_when_two_tenants_sync_same_named_ski
         idx = len(create_request_titles) - 1
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=f"sk_{idx}",
-                type="custom",
-                display_title=title,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=f"sk_{idx}", display_title=title).model_dump(mode="json"),
         )
 
     # Tenant A syncs against empty MA state.
@@ -461,14 +429,8 @@ async def test_sync_refuses_a_seeded_skill_name_without_touching_ma(tmp_path: Pa
         r"/v1/skills$",
         lambda req, _m: httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title=_parse_display_title_from_multipart(req),
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
+            json=skill_listed(
+                id="sk_new", display_title=_parse_display_title_from_multipart(req)
             ).model_dump(mode="json"),
         ),
     )

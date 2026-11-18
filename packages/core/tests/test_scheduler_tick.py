@@ -21,7 +21,8 @@ import structlog
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import FeatureTarget, RoutineRow
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.routines import create_routine, get_routine, record_result
+from daimon.core.stores.routines import get_routine, record_result
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -46,14 +47,10 @@ async def _seed_due_routine(
     created_by_user_id: str | None = None,
 ) -> RoutineRow:
     tenant = await make_tenant(session)
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id=created_by_user_id,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
         trigger_message=trigger,
         next_fire_at=now - timedelta(minutes=1),
     )

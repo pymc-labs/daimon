@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -18,17 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def test_routine_migration_defaults_existing_rows_to_skip(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     due = datetime(2026, 9, 28, tzinfo=UTC)
-    routine = await create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id=None,
-        agent_id="agent",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="run",
-        next_fire_at=due,
-    )
+    routine = await new_routine(db_session, tenant, agent_id="agent", next_fire_at=due)
     await db_session.execute(
         text(
             "ALTER TABLE routines DROP COLUMN catch_up_policy, DROP COLUMN last_skipped_from, "

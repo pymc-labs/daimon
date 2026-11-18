@@ -28,11 +28,12 @@ from typing import Any
 import httpx
 import pytest
 from daimon.core._models import ThreadSession
-from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
+from daimon.core.stores.thread_sessions import mark_dead
 from daimon.core.turn import prepare as prepare_module
 from daimon.core.turn import run as run_module
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import CreatedSession, create_ma_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter
@@ -406,10 +407,9 @@ async def test_recovery_adopting_another_turns_replacement_archives_nothing(
         ma_session_id="sess_old",
     )
     await mark_dead(db_session, id=dead_row.id)
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-adopt",
         account_id=account.id,
         ma_session_id="sess_other_turn",

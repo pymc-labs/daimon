@@ -56,13 +56,14 @@ from daimon.core.stores.github_issued_tokens import (
     session_installations_needing_rotation,
     session_token_needs_rotation,
 )
-from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
+from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.prepare import (
     _delivered_app_snapshot_state,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.builders import new_thread_session
 from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
 from sqlalchemy import select
@@ -928,12 +929,10 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
             session_id="live-session",
         )
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="two-installations",
-            account_id=uuid.uuid4(),
             ma_session_id="live-session",
             effective_config=SessionSnapshot.model_validate(
                 {
@@ -1209,12 +1208,10 @@ async def test_contraction_of_501_repo_installation_enters_legacy_mode_once(
             session_id="live-501",
         )
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="contraction-501",
-            account_id=uuid.uuid4(),
             ma_session_id="live-501",
             effective_config=SessionSnapshot.model_validate(
                 {
@@ -1685,12 +1682,10 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
     read_url = "https://github.com/example/read"
     write_url = "https://github.com/example/write"
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="rotation-refusal",
-            account_id=uuid.uuid4(),
             ma_session_id="live-session",
             effective_config=SessionSnapshot.model_validate(
                 {

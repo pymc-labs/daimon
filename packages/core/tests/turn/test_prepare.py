@@ -14,7 +14,6 @@ import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import httpx
 import pytest
@@ -30,8 +29,7 @@ from daimon.core.config import McpSettings
 from daimon.core.errors import TurnError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ResolvedConfig
 from daimon.core.session_compat import ChangeReason
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -45,17 +43,16 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import AccountRow, TenantRow, ThreadSessionRow, TransferKind
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_sessions import (
-    create_thread_session,
     get_live_thread_session,
     get_thread_session_by_id,
     mark_turn_active,
 )
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import prepare as prepare_mod
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_session
+from daimon.testing.builders import new_thread_session, plain_turn_deps
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -133,10 +130,9 @@ async def _make_snapshotted_thread_session(
     the drifted session reused rather than replaced.
     """
     snapshot = _snapshot(ma_agent_id=ma_agent_id, model_id=model_id, environment_id=environment_id)
-    row = await create_thread_session(
+    row = await new_thread_session(
         session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id=thread_id,
         account_id=account.id,
         ma_session_id=ma_session_id,
@@ -207,22 +203,7 @@ def _deps(
     sessionmaker: async_sessionmaker[AsyncSession],
     router: MARouter,
 ) -> TurnDeps:
-    return TurnDeps(
-        anthropic=build_fake_anthropic(router.dispatch),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    return plain_turn_deps(build_fake_anthropic(router.dispatch), sessionmaker)
 
 
 async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exists(

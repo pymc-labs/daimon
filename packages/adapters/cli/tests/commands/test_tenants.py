@@ -43,6 +43,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
+from daimon.testing.builders import provision_workspace
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 from sqlalchemy import text
@@ -86,9 +87,7 @@ async def test_credit_is_positive_and_idempotent(
 ) -> None:
     rt = build_cli_runtime(db_session_factory)
     console = _make_console()
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="credit-guild"
-    )
+    result = await provision_workspace(db_session_factory, "credit-guild")
     async with db_session_factory() as s:
         before = await tenant_ledger.get_balance(s, tenant_id=result.tenant_id)
     for _ in range(2):
@@ -213,9 +212,7 @@ async def test_tenants_delete_refuses_when_dependents_exist_without_cascade(
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     console = _make_console()
 
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-456"
-    )
+    result = await provision_workspace(db_session_factory, "guild-456")
     tenant_id = result.tenant_id
 
     async with db_session_factory() as s, s.begin():
@@ -249,9 +246,7 @@ async def test_tenants_delete_cascade_deletes_tenant_when_dependents_exist(
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
     console = _make_console()
 
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-789"
-    )
+    result = await provision_workspace(db_session_factory, "guild-789")
     tenant_id = result.tenant_id
 
     async with db_session_factory() as s, s.begin():
@@ -615,9 +610,7 @@ async def test_access_policy_set_refuses_to_overwrite_an_unreadable_row_until_cl
     stub_anthropic: AsyncAnthropic,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-ap4"
-    )
+    result = await provision_workspace(db_session_factory, "guild-ap4")
     async with db_session_factory() as s, s.begin():
         await s.execute(
             text("INSERT INTO tenant_access_policies (tenant_id, policy) VALUES (:t, 'null')"),
@@ -959,9 +952,7 @@ async def test_invoker_roles_refuse_unsupported_platform(
 
 async def test_dm_policy_inspect_set_clear_preserves_enablement(db_session_factory):
     rt = build_cli_runtime(db_session_factory)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="700000101"
-    )
+    result = await provision_workspace(db_session_factory, "700000101")
     initial = await tenants_mod.tenants_dm_policy(
         rt=rt, platform="discord", external_id="700000101"
     )

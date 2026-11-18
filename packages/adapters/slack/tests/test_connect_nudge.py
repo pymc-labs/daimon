@@ -11,9 +11,9 @@ from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.testing.builders import provision_workspace
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -32,8 +32,8 @@ async def test_first_mention_posts_no_connect_tip(
     thread_ts = "9000000099.000001"
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
 
     app, _ = make_orchestrate_app(db_session_factory, app_root_url="https://daimon.example.com")

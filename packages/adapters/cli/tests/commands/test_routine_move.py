@@ -14,7 +14,8 @@ from daimon.adapters.cli.commands.routines import (
 )
 from daimon.core.errors import UserFacingError
 from daimon.core.routine_move import RoutineSeedEntry
-from daimon.core.stores.routines import create_routine, get_routine, resume_routine
+from daimon.core.stores.routines import get_routine, resume_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 
@@ -46,16 +47,12 @@ def test_invalid_entries_report_id(tmp_path, entry, message):
 async def test_cli_preview_and_apply(db_session_factory):
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
+            tenant,
             agent_id="ag",
             source_routine_id=uuid.uuid4(),
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
-            trigger_message="run",
             enabled=False,
         )
     entries = [
@@ -125,16 +122,12 @@ async def test_handback_cli_preview_apply_and_preserve(db_session_factory):
     next_run = datetime(2026, 10, 27, 13, tzinfo=UTC)
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
+            tenant,
             source_routine_id=uuid.uuid4(),
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
-            trigger_message="run",
             enabled=False,
         )
         await resume_routine(
@@ -164,16 +157,8 @@ async def test_link_source_cli_preview_and_apply(db_session_factory):
     source_id = uuid.uuid4()
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
-        row = await create_routine(
-            session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
-            agent_id="ag",
-            agent_name="daimon",
-            cron_expr="0 * * * *",
-            timezone_="UTC",
-            trigger_message="run",
-            enabled=False,
+        row = await new_routine(
+            session, tenant, agent_id="ag", cron_expr="0 * * * *", enabled=False
         )
     output = StringIO()
     for apply in (False, True):

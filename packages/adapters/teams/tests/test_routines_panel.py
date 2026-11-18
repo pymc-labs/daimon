@@ -16,7 +16,8 @@ from daimon.adapters.teams.routines_panel import ADMIN_ONLY, GONE, NOT_OWNER
 from daimon.core import routine_service
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
+from daimon.core.stores.routines import get_routine, list_routines_for_tenant
+from daimon.testing.builders import new_routine
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -65,14 +66,12 @@ async def _routine(
     db_factory: async_sessionmaker[AsyncSession], *, owner: str, message: str
 ) -> RoutineRow:
     async with db_factory.begin() as session:
-        return await create_routine(
+        return await new_routine(
             session,
-            tenant_id=TENANT,
+            TENANT,
             created_by_user_id=owner,
             agent_id="agent_1",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message=message,
             next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -13,9 +12,8 @@ from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.config import BackendConfig
 
 from ..turn_path_support import TurnIOSpy
@@ -82,7 +80,7 @@ async def _run_channel_turn(host, deps, thread_id: str):
     async def reseed_user_message() -> str:
         return "which provider answers?"
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=TENANT,
@@ -90,8 +88,6 @@ async def _run_channel_turn(host, deps, thread_id: str):
         thread_id=thread_id,
         external_user_id="caller",
         user_message="which provider answers?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
         reseed_user_message=reseed_user_message,
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         render_interval_s=0.01,

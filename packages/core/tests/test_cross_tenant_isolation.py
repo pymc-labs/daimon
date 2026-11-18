@@ -17,9 +17,9 @@ from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_environment_by_daimon_tag,
 )
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache, resolve_agent
+from daimon.testing.builders import provision_workspace
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -29,12 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 async def test_cross_tenant_find_agent_returns_own_only(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result_a = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-aaa"
-    )
-    result_b = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-bbb"
-    )
+    result_a = await provision_workspace(db_session_factory, "guild-aaa")
+    result_b = await provision_workspace(db_session_factory, "guild-bbb")
     assert result_a.tenant_id != result_b.tenant_id, (
         "two distinct guilds must derive distinct tenant ids"
     )
@@ -69,12 +65,8 @@ async def test_cross_tenant_find_agent_returns_own_only(
 async def test_cross_tenant_find_environment_returns_own_only(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result_a = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-aaa"
-    )
-    result_b = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-bbb"
-    )
+    result_a = await provision_workspace(db_session_factory, "guild-aaa")
+    result_b = await provision_workspace(db_session_factory, "guild-bbb")
     assert result_a.tenant_id == derive_tenant_uuid(platform="discord", workspace_id="guild-aaa"), (
         "tenant A id must be the derived identity"
     )
@@ -108,12 +100,8 @@ async def test_cross_tenant_find_environment_returns_own_only(
 async def test_cross_tenant_resolve_agent_misses_for_other_tenant(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result_a = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-aaa"
-    )
-    result_b = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-bbb"
-    )
+    result_a = await provision_workspace(db_session_factory, "guild-aaa")
+    result_b = await provision_workspace(db_session_factory, "guild-bbb")
     assert result_a.tenant_id == derive_tenant_uuid(platform="discord", workspace_id="guild-aaa"), (
         "tenant A id must be the derived identity"
     )

@@ -14,7 +14,8 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core.turn.posture import Billed, BillingExempt
+from daimon.core.turn import run_turn
+from daimon.core.turn.posture import Billed
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
@@ -56,15 +57,7 @@ async def test_driver_invokes_billed_record_on_model_request_end_event() -> None
     async def fake_record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         calls.append(event)
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_123",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=Billed(record=fake_record),
-    )
+    await run_turn_on_leg(fa, session_id="sess_123", billing=Billed(record=fake_record))
 
     assert len(calls) == 1, "record invoked exactly once for the single model_request_end event"
     assert calls[0] == mre, "record received the model_request_end event"
@@ -84,15 +77,7 @@ async def test_driver_does_not_invoke_billed_record_on_other_events() -> None:
     async def fake_record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         calls.append(event)
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=Billed(record=fake_record),
-    )
+    await run_turn_on_leg(fa, billing=Billed(record=fake_record))
 
     assert calls == [], "record must not be invoked when no model_request_end events stream"
 
@@ -111,15 +96,7 @@ async def test_driver_propagates_billed_record_exception() -> None:
         raise RuntimeError("metering down")
 
     with pytest.raises(RuntimeError, match="metering down"):
-        await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            render_interval_s=0.001,
-            billing=Billed(record=boom_record),
-        )
+        await run_turn_on_leg(fa, billing=Billed(record=boom_record))
 
 
 async def test_driver_billing_exempt_invokes_no_recorder() -> None:
@@ -131,15 +108,7 @@ async def test_driver_billing_exempt_invokes_no_recorder() -> None:
         ]
     ]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=BillingExempt(reason="cli-operator-run"),
-    )
+    final = await run_turn_on_leg(fa)
 
     assert final.stop_reason is not None, "turn reached terminal idle under BillingExempt"
 
@@ -157,15 +126,7 @@ async def test_driver_billing_exempt_logs_exactly_once_per_turn_with_multiple_ev
     ]
 
     with structlog.testing.capture_logs() as logs:
-        await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            render_interval_s=0.001,
-            billing=BillingExempt(reason="cli-operator-run"),
-        )
+        await run_turn_on_leg(fa)
 
     exempt_logs = [e for e in logs if e["event"] == "turn.billing_exempt"]
     assert len(exempt_logs) == 1, (
@@ -183,7 +144,7 @@ async def test_run_turn_without_billing_raises_type_error() -> None:
     ]
 
     with pytest.raises(TypeError):
-        await run_turn_on_leg(  # type: ignore[call-arg]
+        await run_turn(  # type: ignore[call-arg]
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",

@@ -16,7 +16,6 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -47,8 +46,7 @@ from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.session_preparation import (
     PreparationBusy,
     PreparationDeferred,
@@ -61,7 +59,7 @@ from daimon.core.session_snapshot import hash_env_bytes, hash_tools
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import (
     get_memory_store_id,
     get_personal_memory_store_id,
@@ -73,7 +71,6 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
-    create_thread_session,
     get_live_thread_session,
     get_thread_session_by_id,
     mark_turn_active,
@@ -94,12 +91,14 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.turn_hold import RequesterOrg, TurnHold
+from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_sweep import settle_stamped_session
+from daimon.testing.builders import admit_chat, new_agent_file, new_thread_session, plain_turn_deps
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.membership import FixtureMembershipResolver
+from daimon.testing.turn_fakes import run_prepared
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.state.lease import Slot
@@ -294,22 +293,8 @@ async def _settle_every_session(
 
 
 def _deps(sessionmaker: async_sessionmaker[AsyncSession], transport: _Transport) -> TurnDeps:
-    return TurnDeps(
-        membership_resolver=FixtureMembershipResolver("user-1"),
-        anthropic=transport.client(),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
+    return plain_turn_deps(
+        transport.client(), sessionmaker, membership_resolver=FixtureMembershipResolver("user-1")
     )
 
 
@@ -1172,14 +1157,7 @@ async def test_a_new_key_is_swapped_into_the_live_session_without_replacing_it(
     assert row is not None
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID)
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
-            session,
-            tenant_id=tenant.id,
-            agent_id=agent_uuid,
-            key="TOGGL_TOKEN",
-            content="tok",
-            set_by_account_id=None,
-        )
+        await new_agent_file(session, tenant, agent_id=agent_uuid, key="TOGGL_TOKEN", content="tok")
 
     second = await _prepare(deps, admission, tenant=tenant, account=account)
 
@@ -1256,13 +1234,12 @@ async def test_an_in_place_change_is_deferred_while_a_turn_is_running(
     assert row is not None
 
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
+        await new_agent_file(
             session,
-            tenant_id=tenant.id,
+            tenant,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
             key="KEY",
             content="v",
-            set_by_account_id=None,
         )
         await mark_turn_active(session, id=row.id, active_turn_message_id="msg-in-flight", now=_NOW)
     before = len(transport.calls)
@@ -2167,13 +2144,12 @@ async def test_two_callers_in_one_thread_each_refresh_only_their_own_session(
     their_resources_before = list(transport.state.resources[theirs.ma_session_id])
 
     async with db_session_factory() as session, session.begin():
-        await put_agent_file(
+        await new_agent_file(
             session,
-            tenant_id=tenant.id,
+            tenant,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
             key="KEY",
             content="v",
-            set_by_account_id=None,
         )
 
     refreshed = await _prepare(
@@ -2205,10 +2181,9 @@ async def test_a_legacy_row_without_a_snapshot_is_backfilled_and_reused(
     created = await client.beta.sessions.create(agent=_AGENT_ID, environment_id=_ENV_ID)
 
     async with db_session_factory() as session, session.begin():
-        legacy = await create_thread_session(
+        legacy = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id=created.id,
@@ -2254,10 +2229,9 @@ async def test_retired_github_key_session_starts_fresh_without_its_env_mount(
     assert any(resource.type == "file" for resource in transport.state.resources[created.id])
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID)
     async with db_session_factory() as session, session.begin():
-        mapping = await create_thread_session(
+        mapping = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id=created.id,
@@ -2760,7 +2734,6 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import resolved_agent_env_router
 
@@ -2795,17 +2768,8 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     admission_deps = replace(
         deps, anthropic=build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
     )
-    admission = await admit(
-        admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id="channel-1",
-        thread_id="thread-1",
-        is_dm=is_dm,
-        now=_NOW,
+    admission = await admit_chat(
+        admission_deps, tenant, channel_id="channel-1", thread_id="thread-1", is_dm=is_dm, now=_NOW
     )
     fresh = await create_fresh_session(
         deps,
@@ -2828,10 +2792,9 @@ async def test_restricted_turn_replaces_a_missing_legacy_session_safely(
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    legacy = await create_thread_session(
+    legacy = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-1",
         account_id=account.id,
         ma_session_id="ses_gone",
@@ -3060,10 +3023,9 @@ async def test_a_successor_of_an_unreadable_predecessor_is_sealed_to_its_thread(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     async with db_session_factory() as session, session.begin():
-        gone = await create_thread_session(
+        gone = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id="sess_gone",
@@ -3118,7 +3080,6 @@ async def _changed_channel_agent(
     Returns the tenant, the sessions transport, the prepare deps, the admission
     deps (whose MA serves both agents) and the first prepared turn.
     """
-    from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
     from daimon.testing.ma import resolved_agent_env_router
     from mux.testing.drivers.anthropic.ma import MARouter
@@ -3147,16 +3108,8 @@ async def _changed_channel_agent(
     resolved_agent_env_router(daimon, environment, router=router)
     router.add_agent(research)
     admission_deps = replace(deps, anthropic=build_fake_anthropic(router.dispatch))
-    first_admission = await admit(
-        admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id="channel-1",
-        thread_id="thread-1",
-        now=_NOW,
+    first_admission = await admit_chat(
+        admission_deps, tenant, channel_id="channel-1", thread_id="thread-1", now=_NOW
     )
     account = await _account_of(db_session_factory, first_admission.account_id)
     first = await _prepare(deps, first_admission, tenant=tenant, account=account)
@@ -3183,18 +3136,9 @@ async def _account_of(
 
 
 async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
-    from daimon.core.turn.admission import admit
 
-    return await admit(
-        admission_deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id="channel-1",
-        thread_id="thread-1",
-        now=_NOW,
+    return await admit_chat(
+        admission_deps, tenant, channel_id="channel-1", thread_id="thread-1", now=_NOW
     )
 
 
@@ -3318,10 +3262,9 @@ async def test_missing_legacy_source_is_not_retrieved_again_for_memory_replaceme
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     async with db_session_factory.begin() as session:
-        await create_thread_session(
+        await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
             account_id=account.id,
             ma_session_id="sess_missing",
@@ -4451,7 +4394,6 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
 async def test_prepared_turn_cannot_resume_retired_session(
     db_session, db_committing_engine, monkeypatch
 ):
-    from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.turn_fakes import RecordingLifecycle
 
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
@@ -4470,19 +4412,15 @@ async def test_prepared_turn_cannot_resume_retired_session(
     from daimon.core.session_mutation import SessionRetired
 
     with pytest.raises(SessionRetired):
-        await run_prepared_turn(
+        await run_prepared(
             deps,
             first,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-1",
-            external_user_id="user-1",
             user_message="stale prepared turn",
             lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
             reseed_user_message=reseed,
             recovery_lifecycle=lambda _: RecordingLifecycle(),
-            render_interval_s=0.001,
         )
     assert len(transport.state.events.get(first.ma_session_id, [])) == before
     # Which path refused it: the mux binding check answers before the turn

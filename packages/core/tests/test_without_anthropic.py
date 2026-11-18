@@ -46,11 +46,11 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from daimon.core.stores.tenants import set_funding_mode
-from daimon.core.turn.admission import AdmissionDenied, admit
+from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from daimon.testing.turn_fakes import deps_for_pinned_mux
 from mux.contracts.ids import Provider, ResourceRef, Revision
@@ -266,15 +266,8 @@ async def _admit(client, db_session_factory, tenant_id, provider: str):
         agent_backends=True,
         turn_runtimes=_fake_runtime(provider),
     )
-    return await admit(
-        deps,
-        origin="chat",
-        tenant_id=tenant_id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="caller",
-        channel_id="channel",
-        now=datetime.now(UTC),
+    return await admit_chat(
+        deps, tenant_id, external_user_id="caller", channel_id="channel", now=datetime.now(UTC)
     )
 
 

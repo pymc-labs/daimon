@@ -46,6 +46,7 @@ from daimon.core.stores.user_skills import (
     upsert_user_skill,
 )
 from daimon.testing.archives import make_tarball
+from daimon.testing.builders import skill_listed
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_cli_principal
 from daimon.testing.ma_models import ma_agent
@@ -199,15 +200,7 @@ async def test_first_sync_creates_new_skill(
         create_calls.append(req)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="anything").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -435,15 +428,7 @@ async def test_re_run_no_changes_yields_zero_synced_zero_updated(
         create_count += 1
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_first",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_first", display_title="anything").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -506,15 +491,7 @@ async def test_upload_concurrency_capped_at_six(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_x",
-                type="custom",
-                display_title="x",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_x", display_title="x").model_dump(mode="json"),
         )
 
     router = MARouter()
@@ -714,17 +691,7 @@ async def test_duplicate_display_title_recovery_lands_a_new_version(
     def on_list(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         list_calls.append(req)
         return _list_envelope(
-            [
-                SkillListResponse(
-                    id="sk_orphan",
-                    type="custom",
-                    display_title=formatted_title,
-                    latest_version="3",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    source="custom",
-                )
-            ]
+            [skill_listed(id="sk_orphan", display_title=formatted_title, latest_version="3")]
         )
 
     def on_version(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -802,15 +769,7 @@ async def test_recovery_raises_skills_list_truncated_error_on_full_page(
     # A full page — triggers SkillsListTruncatedError in strict mode. Sized off
     # the constant so raising the limit cannot turn this into a partial page.
     full_page = [
-        SkillListResponse(
-            id=f"sk_{i:03d}",
-            type="custom",
-            display_title=f"unrelated-{i}",
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
-        )
+        skill_listed(id=f"sk_{i:03d}", display_title=f"unrelated-{i}")
         for i in range(_SKILLS_PAGE_LIMIT)
     ]
 
@@ -1630,15 +1589,7 @@ async def test_sync_agent_skills_attaches_uploaded_skills_to_ma_agent(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="agent/r",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json"),
         )
 
     def on_list_agents(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -1836,15 +1787,7 @@ async def test_sync_agent_skills_skips_attach_when_agent_not_found(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="agent/r",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json"),
         )
 
     # MA list_agents returns no match for this tenant/name.
@@ -1959,15 +1902,7 @@ async def test_bundled_sync_two_repos_same_trailing_segment_keeps_both_skills(
             display_title = "agent/orgb-skills"
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=sk_id,
-                type="custom",
-                display_title=display_title,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=sk_id, display_title=display_title).model_dump(mode="json"),
         )
 
     delete_calls: list[httpx.Request] = []
@@ -2112,15 +2047,7 @@ async def test_sync_creates_two_distinct_skills_when_two_tenants_sync_same_named
         sk_id = f"sk_{_create_id_counter[0]:03d}"
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=sk_id,
-                type="custom",
-                display_title="placeholder",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=sk_id, display_title="placeholder").model_dump(mode="json"),
         )
 
     def on_version(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -2244,15 +2171,7 @@ async def test_recovery_refuses_to_push_version_onto_foreign_tenant_skill(
         "test setup: foreign title must not share caller tenant prefix"
     )
 
-    foreign_skill = SkillListResponse(
-        id="sk_foreign",
-        type="custom",
-        display_title=foreign_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    )
+    foreign_skill = skill_listed(id="sk_foreign", display_title=foreign_title)
 
     version_calls: list[httpx.Request] = []
 
@@ -2757,15 +2676,7 @@ async def test_first_sync_refuses_create_when_registry_skill_takes_the_mount_nam
     )
 
     registry_title = tenant_scoped_display_title(tenant_id=cli.tenant_id, name="o-r")
-    registry_skill = SkillListResponse(
-        id="sk_registry",
-        type="custom",
-        display_title=registry_title,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    )
+    registry_skill = skill_listed(id="sk_registry", display_title=registry_title)
 
     create_calls: list[httpx.Request] = []
 
@@ -2841,25 +2752,15 @@ async def test_attach_refuses_union_when_legacy_registry_skill_shares_mount_name
         version=10,
     ).model_dump(mode="json")
 
-    registry_skill = SkillListResponse(
+    registry_skill = skill_listed(
         id="sk_registry",
-        type="custom",
         display_title=tenant_scoped_display_title(tenant_id=cli.tenant_id, name="my-skill"),
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
     )
-    scoped_skill = SkillListResponse(
+    scoped_skill = skill_listed(
         id="sk_scoped",
-        type="custom",
         display_title=tenant_scoped_display_title(
             tenant_id=cli.tenant_id, name="my-skill", agent_name="agent"
         ),
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
     )
 
     update_calls: list[httpx.Request] = []
@@ -2957,15 +2858,9 @@ async def test_sync_duplicate_name_across_repos_still_uploads_every_other_skill(
         created_titles.append(title)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id=f"sk_{len(created_titles)}",
-                type="custom",
-                display_title=title,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=f"sk_{len(created_titles)}", display_title=title).model_dump(
+                mode="json"
+            ),
         )
 
     router = MARouter()
@@ -3091,15 +2986,7 @@ async def test_sync_never_reattaches_a_detached_upload(
     http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda req: httpx.Response(200, content=tarball))
     )
-    created = SkillListResponse(
-        id="sk_new",
-        type="custom",
-        display_title="agent/r",
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    created = skill_listed(id="sk_new", display_title="agent/r").model_dump(mode="json")
     agent = ma_agent(id="ag_target", name="agent", tenant_id=cli.tenant_id, version=7)
     updates: list[dict[str, object]] = []
 

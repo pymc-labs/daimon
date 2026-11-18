@@ -7,18 +7,14 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from daimon.core.config import McpSettings, ThreadParticipationSettings
+from daimon.core.config import ThreadParticipationSettings
 from daimon.core.features.snapshot import CACHE
-from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.participation_gates import ParticipationGates
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget, TenantRow
 from daimon.core.stores.feature_values import clear_feature_value, set_feature_value
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.progress_plans import guidance_block, progress_plans_prefix
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat, plain_turn_deps
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -34,22 +30,7 @@ def _deps(tenant: TenantRow, sessions: async_sessionmaker[AsyncSession], root: P
         ma_agent(id=AGENT, name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
-    return TurnDeps(
-        anthropic=build_fake_anthropic(router.dispatch),
-        sessionmaker=sessions,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=root,
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    return plain_turn_deps(build_fake_anthropic(router.dispatch), sessions, defaults_root=root)
 
 
 async def _set(
@@ -98,16 +79,8 @@ async def test_a_locked_workspace_and_the_agent_tier_hold_on_the_runtime_paths(
     )
 
     async def plans() -> str:
-        admission = await admit(
-            deps,
-            origin="chat",
-            tenant_id=tenant.id,
-            requester_org=RequesterOrg.HOST,
-            platform="discord",
-            external_user_id="user-1",
-            channel_id=CHANNEL,
-            thread_id=THREAD,
-            now=datetime.now(UTC),
+        admission = await admit_chat(
+            deps, tenant, channel_id=CHANNEL, thread_id=THREAD, now=datetime.now(UTC)
         )
         resolved = admission.resolved("progress_plans")
         return progress_plans_prefix(resolved, platform="discord", chat_rendered=True)

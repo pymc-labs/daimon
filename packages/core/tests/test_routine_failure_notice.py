@@ -22,12 +22,12 @@ from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
-    create_routine,
     get_routine,
     record_result,
 )
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -53,14 +53,12 @@ async def _routine(
     next_fire_at: datetime | None = None,
 ) -> RoutineRow:
     tenant = await make_tenant(session)
-    row = await create_routine(
+    row = await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="u1",
-        agent_id="agent_a",
         agent_name="team-020-analyst",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="summarize",
         next_fire_at=next_fire_at,
         destination_kind="channel" if destination else None,

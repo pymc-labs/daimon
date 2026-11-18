@@ -16,7 +16,7 @@ from daimon.core.routine_sandbox import (
     run_matches_pin,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -59,14 +59,12 @@ async def test_current_pin_reads_the_agent_version_and_environment_revision(
     db_session, db_session_factory
 ) -> None:
     tenant = await make_tenant(db_session)
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="u1",
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="go",
     )
     await db_session.commit()
@@ -80,14 +78,12 @@ async def test_current_pin_reads_the_agent_version_and_environment_revision(
 
 async def test_current_pin_refuses_an_archived_agent(db_session, db_session_factory) -> None:
     tenant = await make_tenant(db_session)
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="u1",
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="go",
     )
     await db_session.commit()

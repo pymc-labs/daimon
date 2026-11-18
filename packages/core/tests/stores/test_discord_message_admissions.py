@@ -10,7 +10,8 @@ from daimon.core.stores.discord_message_admissions import (
     finish_messages,
     replay_channels,
 )
-from daimon.core.stores.thread_sessions import create_thread_session, update_watermark
+from daimon.core.stores.thread_sessions import update_watermark
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -104,10 +105,9 @@ async def test_replay_channels_are_bounded_and_include_a_pending_message_before_
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="100",
         channel_id="parent",
         account_id=uuid4(),
@@ -153,10 +153,9 @@ async def test_replay_does_not_repeat_an_opening_turn_from_before_receipts(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await create_thread_session(
+    await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="200",
         account_id=uuid4(),
         ma_session_id="sesn_old",
@@ -170,10 +169,9 @@ async def test_new_ledger_channel_does_not_use_an_answer_watermark_to_hide_misse
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="100",
         account_id=uuid4(),
         ma_session_id="sesn_long",

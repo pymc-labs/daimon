@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,10 +22,8 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.errors import DaimonError
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.discord_builders import discord_runtime
 from structlog.typing import EventDict
 
 from .harness import make_bot
@@ -42,15 +39,11 @@ def _runtime() -> DiscordRuntime:
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
     settings.discord = None
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=AsyncMock(),
         sessionmaker=MagicMock(),
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=DeploymentDefault(agent_name=None),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
     )
 
 

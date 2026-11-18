@@ -20,6 +20,7 @@ from daimon.core.skill_sync.orchestrator import SyncReport
 from daimon.core.stores.domain import UserSkillRow
 from daimon.core.stores.github_access import AgentRepo
 from daimon.testing import ma_agent
+from daimon.testing.builders import skill_listed
 
 TENANT = uuid.UUID("12345678-0000-0000-0000-000000000000")
 AGENT = uuid.uuid4()
@@ -75,12 +76,11 @@ def _row(
 
 
 def _listed(skill_id: str, title: str | None, latest: str = "3") -> SkillListResponse:
-    return SkillListResponse(
+    return skill_listed(
         id=skill_id,
         created_at="2030-01-01T00:00:00Z",
         display_title=title,
         latest_version=latest,
-        source="custom",
         type="skill",
         updated_at="2030-01-03T00:00:00Z",
     )

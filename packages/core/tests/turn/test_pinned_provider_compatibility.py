@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -19,9 +18,8 @@ from daimon.core.stores.access_policy import (
 from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.config import BackendConfig
 from pydantic import ValidationError
 
@@ -91,7 +89,7 @@ async def _run_legacy_turn(host, thread_id: str, turn_io_used: TurnIOSpy) -> Non
     async def reseed_user_message() -> str:
         return "compatibility question"
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=TENANT,
@@ -99,8 +97,6 @@ async def _run_legacy_turn(host, thread_id: str, turn_io_used: TurnIOSpy) -> Non
         thread_id=thread_id,
         external_user_id="caller",
         user_message="compatibility question",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
         reseed_user_message=reseed_user_message,
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         render_interval_s=0.01,
