@@ -123,7 +123,7 @@ class RoutinesPanel:
         is_admin: bool,
         notice: str | None = None,
         foreign: bool = False,
-        where: tuple[str | None, str | None] = (None, None),
+        where: tuple[str | None, str | None],
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
