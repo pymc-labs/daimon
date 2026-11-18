@@ -314,6 +314,8 @@ _UNGATED_LINKS = {
     "core/turn/admission.py": "same: the test above checks every render gets the turn features",
     "core/features/eval_key.py": "a fixed example turn for the model-input eval, never sent",
 }
+# `load_here_card` asks `links_at` itself, at the agent its card finds answering.
+_LINK_GATES = {"links_at", "load_here_card"}
 
 
 def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
@@ -331,7 +333,7 @@ def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
     assert len(builders) >= 5, "the web link builders moved; point this test at them"
     for path in builders:
         rel = next((r for r in _UNGATED_LINKS if path.as_posix().endswith(r)), None)
-        assert rel is not None or "links_at" in _calls(path), (
+        assert rel is not None or _LINK_GATES & _calls(path), (
             f"{path.name} builds web links without `links_at`; gate them or list it with a reason"
         )
     registered = {

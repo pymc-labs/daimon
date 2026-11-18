@@ -8,7 +8,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware.capability_gate import caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.web_admin import WebAdmin
-from daimon.core.web_links import TenantLinks, links_at, panel_links
+from daimon.core.web_links import Assignment, TenantLinks, links_at, panel_links
 from daimon.core.web_roles_rules import is_admin, role_of_account
 from pydantic import Field
 
@@ -21,7 +21,8 @@ async def _where_aware(
 ) -> TenantLinks | None:
     """`links` when `web_awareness` is On at every place the call may run (`caller_places`)."""
     for place in await caller_places(runtime, auth, None) if links is not None else ():
-        links = await links_at(runtime.session_factory, runtime.settings, place, links)
+        assignment = Assignment(runtime.deployment_default, runtime.client, runtime.resolver_cache)
+        links = await links_at(runtime.session_factory, runtime.settings, place, links, assignment)
     return links
 
 

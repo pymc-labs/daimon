@@ -7,7 +7,7 @@ from typing import Any
 
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, links_at, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, TenantLinks, links_at, panel_links
 
 
 def open_in_web_button(url: str) -> dict[str, Any]:
@@ -37,6 +37,7 @@ async def web_links_at(
         runtime.settings,
         place,
         panel_links(runtime.settings.web, tenant_id, admin=admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
     )
 
 

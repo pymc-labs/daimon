@@ -13,9 +13,19 @@ from dataclasses import dataclass, replace
 from typing import Final, Literal, NamedTuple
 from urllib.parse import quote
 
+import structlog
+from anthropic import AsyncAnthropic
+from daimon.core.anthropic_guard import anthropic_configured, anthropic_disabled
 from daimon.core.config import Settings, WebModuleKey, WebSettings
+from daimon.core.defaults.owned import resolve_owned_agent
 from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
-from daimon.core.stores.thread_sessions import get_answering_agent
+from daimon.core.ma_resolver import ResolverCache, find_agent_id_cached
+from daimon.core.mux_backend import resource_scope
+from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.stores.scoped_config_read import resolve
+from mux.errors import ProviderError
+
+log = structlog.get_logger(__name__)
 
 OPEN_IN_WEB: Final = "Open in web"
 """The label of every panel button that opens the web app, on every platform."""
@@ -224,28 +234,57 @@ def panel_links(
     return None if links is None else links.for_tenant(tenant_id, admin=admin)
 
 
+class Assignment(NamedTuple):
+    """What names the agent assigned to a channel: the deployment default and the runtime's
+    Managed Agents client and resolver cache."""
+
+    default: DeploymentDefault
+    anthropic: AsyncAnthropic
+    cache: ResolverCache
+
+
+async def _assigned_agent(
+    sessions: Sessions, place: FeaturePlace, assignment: Assignment
+) -> str | None:
+    """The id (as the agent tier keys it) of the agent assigned to `place`'s channel: the
+    channel's, else the workspace's, else the deployment default. None when none is live."""
+    async with sessions() as session:
+        context = ScopeContext(tenant_id=place.tenant_id, channel_id=place.channel_id)
+        name = (await resolve(session, context=context, default=assignment.default)).agent_name
+    if name is None:
+        return None
+    try:
+        scope = resource_scope(tenant_id=str(place.tenant_id))
+        return (await resolve_owned_agent(sessions, scope, name)).ref.id
+    except ProviderError as miss:
+        if miss.category != "not_found":
+            raise
+    if anthropic_disabled() or not anthropic_configured(assignment.anthropic):
+        return None
+    return await find_agent_id_cached(
+        assignment.anthropic, assignment.cache, tenant_id=place.tenant_id, name=name
+    )
+
+
 async def links_at(
     sessions: Sessions,
     settings: Settings | None,
     place: FeaturePlace,
     links: TenantLinks | None,
+    assignment: Assignment | None = None,
 ) -> TenantLinks | None:
     """`links` where `web_awareness` is On at `place`; None when it is Off or unreadable. A
-    place with a channel but no agent takes the agent answering there (`get_answering_agent`).
+    place with a channel but no agent takes the agent assigned there, given `assignment`.
     Every path that tells the agent about the web app or puts a link to it on a card asks
     this (a turn's controls ask its snapshot in `render_turn_origin`)."""
     if links is None:
         return None
-    if place.agent_id is None and place.channel_id is not None and place.platform:
-        # A card in a channel follows the agent that answers there (#1775).
-        async with sessions() as session:
-            agent = await get_answering_agent(
-                session,
-                tenant_id=place.tenant_id,
-                platform=place.platform,
-                channel_id=place.channel_id,
-                thread_key=place.thread_key,
-            )
-        place = replace(place, agent_id=agent)
+    if place.agent_id is None and place.channel_id is not None and assignment is not None:
+        # A card in a channel follows the agent assigned there (#1775).
+        try:
+            place = replace(place, agent_id=await _assigned_agent(sessions, place, assignment))
+        except Exception:  # A failed lookup offers no link, as an unreadable feature does.
+            log.warning("web_links.assigned_agent_failed", exc_info=True)
+            return None
     found = await place_feature_or_none(sessions, settings, place, "web_awareness")
     return links if found is not None and found.on else None

@@ -19,12 +19,11 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.here_card import HereCard, load_here_card, render_here_card, render_here_card_text
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import find_platform_principal
-from daimon.core.web_links import OPEN_IN_WEB, links_at, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, panel_links
 
 import discord
 from discord import Interaction, app_commands
@@ -145,12 +144,8 @@ class HereCog(commands.Cog):
                     if runtime.settings.mcp.public_url is not None
                     else None,
                     is_admin=routing_admin,
-                    web=await links_at(
-                        runtime.sessionmaker,
-                        runtime.settings,
-                        FeaturePlace.of(tenant_id, "discord", str(channel.id), thread_id),
-                        panel_links(runtime.settings.web, tenant_id, admin=routing_admin),
-                    ),
+                    web=panel_links(runtime.settings.web, tenant_id, admin=routing_admin),
+                    settings=runtime.settings,
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,

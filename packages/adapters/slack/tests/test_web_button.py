@@ -10,6 +10,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.web_button import spend_url, web_links_at
 from daimon.core.config import WebSettings
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_tenant
@@ -27,7 +29,16 @@ TARGETS = [
 def _runtime(sessions: async_sessionmaker[AsyncSession]) -> SlackRuntime:
     settings = mock_settings()
     settings.web = WebSettings(public_url="https://app.example.com/")  # type: ignore[arg-type]
-    return cast(SlackRuntime, SimpleNamespace(settings=settings, sessionmaker=sessions))
+    return cast(
+        SlackRuntime,
+        SimpleNamespace(
+            settings=settings,
+            sessionmaker=sessions,
+            deployment_default=DeploymentDefault(),
+            anthropic=None,
+            resolver_cache=new_resolver_cache(),
+        ),
+    )
 
 
 @pytest.mark.parametrize("target", [None, *TARGETS], ids=["on", "workspace", "channel", "agent"])

@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import uuid
+from typing import cast
 
+from anthropic import AsyncAnthropic
 from daimon.core.config import WebSettings
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.core.web_links import WebLinks, links_at
-from daimon.testing.factories import make_account, make_tenant
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.web_links import Assignment, TenantLinks, WebLinks, links_at
+from daimon.testing.factories import make_tenant, make_tenant_config
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.UUID("11111111-2222-3333-4444-555555555555")
@@ -82,23 +86,15 @@ def test_pages_leave_out_modules_that_are_off_but_keep_the_profile() -> None:
     assert set(pages) == {"chat", "profile"}, "every other page belongs to a module that is off"
 
 
-async def test_a_channel_card_follows_the_agent_answering_there(
+async def test_a_channel_card_follows_the_agent_assigned_there(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """An agent's Off reaches a card in a channel that agent answers, and only there."""
+    """An agent's Off reaches a card in a channel assigned to it before anyone used it there,
+    and leaves once the channel is reassigned; a channel on the workspace default keeps it."""
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db)
-        account = await make_account(db, tenant=tenant)
-        await create_thread_session(
-            db,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="T1",
-            account_id=account.id,
-            ma_session_id="sesn_1",
-            ma_agent_id="agent_off",
-            channel_id="C1",
-        )
+        await make_tenant_config(db, tenant=tenant, agent_name="on-agent", mode="agent")
+        await _assign(db, tenant.id, "off-agent")
         await set_feature_value(
             db,
             tenant_id=tenant.id,
@@ -108,7 +104,22 @@ async def test_a_channel_card_follows_the_agent_answering_there(
             set_by=None,
             surface="chat",
         )
+    cache = new_resolver_cache()
+    cache[(tenant.id, "agent", "off-agent")] = "agent_off"
+    cache[(tenant.id, "agent", "on-agent")] = "agent_on"
+    assignment = Assignment(DeploymentDefault(), cast(AsyncAnthropic, object()), cache)
     links = _links().for_tenant(tenant.id, admin=False)
-    at = [FeaturePlace(tenant.id, "discord", channel) for channel in ("C1", "C2")]
-    found = [await links_at(db_session_factory, None, place, links) for place in at]
-    assert found == [None, links], "Off for the agent answering in C1 only, not in C2"
+
+    async def at(channel: str) -> TenantLinks | None:
+        place = FeaturePlace(tenant.id, "discord", channel)
+        return await links_at(db_session_factory, None, place, links, assignment)
+
+    assert [await at("C1"), await at("C2")] == [None, links], "Off for C1's agent only"
+    async with db_session_factory.begin() as db:
+        await _assign(db, tenant.id, "on-agent")
+    assert await at("C1") == links, "C1 now assigned to an agent with it On"
+
+
+async def _assign(db: AsyncSession, tenant_id: uuid.UUID, agent_name: str) -> None:
+    scope = ChannelScopeRef(tenant_id=tenant_id, channel_id="C1")
+    await set_fields(db, scope=scope, tenant_id=tenant_id, agent_name=agent_name, mode="agent")

@@ -25,7 +25,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
-from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, links_at, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, TenantLinks, links_at, panel_links
 from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
@@ -244,6 +244,7 @@ async def web_links(
         runtime.settings,
         place,
         panel_links(runtime.settings.web, tenant_id, admin=admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
     )
 
 

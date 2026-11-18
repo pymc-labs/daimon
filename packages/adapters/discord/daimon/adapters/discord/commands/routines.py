@@ -23,7 +23,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.web_links import links_at, panel_links
+from daimon.core.web_links import Assignment, links_at, panel_links
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -77,6 +77,9 @@ class RoutinesCog(commands.Cog):
                     runtime.settings,
                     FeaturePlace.of(tenant_id, "discord", invoking_channel_id(interaction)),
                     panel_links(runtime.settings.web, tenant_id, admin=True),
+                    Assignment(
+                        runtime.deployment_default, runtime.anthropic, runtime.resolver_cache
+                    ),
                 ),
             )
             view = RoutinesPanelView(

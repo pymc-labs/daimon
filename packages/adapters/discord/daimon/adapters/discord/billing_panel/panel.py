@@ -85,7 +85,7 @@ from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
     turn_count_for_user_in_tenant_since,
 )
-from daimon.core.web_links import OPEN_IN_WEB, links_at, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, links_at, panel_links
 
 import discord
 from discord import Interaction
@@ -421,6 +421,7 @@ async def web_spend_url(
         runtime.settings,
         FeaturePlace.of(tenant_id, "discord", channel_id),
         panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
     )
     return None if links is None else links.spend()
 

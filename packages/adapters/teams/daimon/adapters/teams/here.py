@@ -19,7 +19,6 @@ from daimon.adapters.teams.billing_panel import plain_name
 from daimon.adapters.teams.card_actions import (
     heading,
     open_in_web,
-    web_links,
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
@@ -32,6 +31,7 @@ from daimon.core.here_card import (
     render_here_card,
 )
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.web_links import panel_links
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
@@ -95,14 +95,10 @@ async def _load(context: CommandContext) -> HereCard:
             visible_channel_ids={asked.channel_id},
             bot_can_view=True,
             caller_can_view=True,
-            web=await web_links(
-                runtime,
-                context.tenant_id,
-                admin=context.is_admin,
-                foreign=asked.is_foreign,
-                channel_id=asked.channel_id,
-                thread_id=thread_id,
-            ),
+            web=None
+            if asked.is_foreign
+            else panel_links(runtime.settings.web, context.tenant_id, admin=context.is_admin),
+            settings=runtime.settings,
             records=runtime.sessionmaker,
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
