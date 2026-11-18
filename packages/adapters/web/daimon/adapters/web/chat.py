@@ -17,14 +17,12 @@ from daimon.adapters.web.chat_thread_model import (
     Picked,
     ThreadModels,
     keep_thread_model,
-    preview_thread,
     thread_models,
 )
 from daimon.adapters.web.control_cards import ControlRefused, is_control_card
 from daimon.adapters.web.credential_cards import CredentialRefused
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.files import PERSON_UPLOAD_QUOTA_BYTES, download, open_attachment
-from daimon.adapters.web.model_preview import ModelPreview
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.stream import OTHER_TURN, Event, sse_response
@@ -327,15 +325,6 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         async with runtime.sessionmaker() as db:
             thread = await thread_of(db, caller, session_id)
         return await thread_models(runtime, caller, thread)
-
-    @router.get("/sessions/{session_id}/model-preview")
-    async def model_preview(  # pyright: ignore[reportUnusedFunction]
-        session_id: uuid.UUID, caller: Caller, value: str
-    ) -> ModelPreview:
-        """What picking `value` (`provider:id`) changes for this chat, or why it can't."""
-        async with runtime.sessionmaker() as db:
-            thread = await thread_of(db, caller, session_id)
-        return await preview_thread(runtime, caller, thread, value)
 
     @router.put("/sessions/{session_id}/model")
     async def pick_model(session_id: uuid.UUID, body: PickModel, caller: Caller) -> Picked:  # pyright: ignore[reportUnusedFunction]

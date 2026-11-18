@@ -11,7 +11,6 @@ from __future__ import annotations
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.agent_access import actor_of, change_deps
 from daimon.adapters.web.caller import WebCaller
-from daimon.adapters.web.model_preview import ModelPreview, preview_doc, refused_doc
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_backend import BackendActor, load_backend_agent
 from daimon.core.model_switch import SwitchRefusal
@@ -21,7 +20,6 @@ from daimon.core.thread_model_switch import (
     ThreadPick,
     pick_thread,
     pick_value,
-    preview_thread_or_refusal,
     thread_model_picker,
 )
 from daimon.core.thread_models import choose_thread_model
@@ -93,17 +91,6 @@ async def thread_models(
             for c in picker.choices
         ],
     )
-
-
-async def preview_thread(
-    runtime: WebRuntime, caller: WebCaller, thread: WebThreadRow, value: str
-) -> ModelPreview:
-    """What picking `value` changes for this chat, or why it can't be picked."""
-    pick = await thread_pick(runtime, caller, thread)
-    found = await preview_thread_or_refusal(pick, pick_value(value), admin=is_admin(caller.role))
-    if isinstance(found, SwitchRefusal):
-        return refused_doc(found)
-    return preview_doc(found)
 
 
 async def keep_thread_model(

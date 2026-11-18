@@ -394,16 +394,6 @@ export const chatHandlers: HttpHandler[] = [
     await sleep(150)
     return HttpResponse.json({ current: chatPick, choices: CHAT_MODELS })
   }),
-  http.get("/api/chat/sessions/:id/model-preview", async ({ request }) => {
-    await sleep(150)
-    const value = new URL(request.url).searchParams.get("value") ?? ""
-    const base = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], lines: [], drops: [], refusal: null }
-    if (value.startsWith("anthropic:")) return HttpResponse.json(base)
-    return HttpResponse.json({
-      ...base, moves: true, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
-      lines: ["Stops working: memory and Pricing playbook skill"],
-    })
-  }),
   http.put("/api/chat/sessions/:id/model", async ({ params, request }) => {
     const p = session.user()
     const s = p && find(p.id, String(params.id))

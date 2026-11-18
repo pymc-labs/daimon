@@ -110,9 +110,6 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         offered = (await client.get(f"{base}/models", headers=_OWN)).json()
         assert haiku in {c["value"] for c in offered["choices"]}, offered
         assert offered["current"] is None
-        shown = (await client.get(f"{base}/model-preview?value={haiku}", headers=_OWN)).json()
-        assert shown["moves"] is False and shown["refusal"] is None, shown
-        assert shown["lines"] == [], "a pick that loses nothing says nothing is off"
         kept = await client.put(base + "/model", json={"value": haiku}, headers=_OWN)
         assert kept.status_code == 200, kept.text
         assert (await client.get(f"{base}/models", headers=_OWN)).json()["current"] == haiku
@@ -125,7 +122,5 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         agents, owner.tenant_id, db_session_factory, token, settings=settings, with_turns=True
     ) as client:
         base = f"/api/chat/sessions/{threads[1].id}"
-        refused = (await client.get(f"{base}/model-preview?value={luna}", headers=_OWN)).json()
-        assert refused["refusal"] is not None and refused["allowed"] is False, refused
         put = await client.put(base + "/model", json={"value": luna}, headers=_OWN)
         assert put.status_code == 403, put.text
