@@ -34,7 +34,6 @@ import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.adapters.teams import card
 from daimon.adapters.teams.image_preview import MAX_PREVIEWS
-from daimon.adapters.teams.progress_receipt import InitialProgressReceipt
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post, relabel_turn_post
@@ -195,7 +194,6 @@ class TeamsTurnLifecycle(OutputGate):
         markup: Decimal = Decimal(1),
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         budget_channel_id: str | None = None,
-        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         acknowledge: Callable[[Acknowledgment], None] | None = None,
         hold_controls: bool = False,
         ma_agent_id: str | None = None,
@@ -229,7 +227,6 @@ class TeamsTurnLifecycle(OutputGate):
         self._markup = markup
         self._sessionmaker = sessionmaker
         self._budget_channel_id = budget_channel_id
-        self._on_initial_progress = on_initial_progress
         self._ping = completion_ping and not unprompted
         self._requester = requester if self._ping else None
         self._requester_user_id = requester_user_id
@@ -363,19 +360,8 @@ class TeamsTurnLifecycle(OutputGate):
         if self._unprompted:
             return
         activity = self._status()
-        operation = "edit" if self._message_id is not None else "send"
         self._message_id = await self._send(activity, message_id=self._message_id, role="status")
         self._last_flush = self._clock()
-        if self._on_initial_progress is not None:
-            self._on_initial_progress(
-                InitialProgressReceipt(
-                    operation=operation,
-                    destination_id=self._conversation_id,
-                    message_id=self._message_id,
-                    rendered_json=activity.model_dump_json(by_alias=True, exclude_none=True),
-                    observed_s=self._clock(),
-                )
-            )
 
     @property
     def stopping(self) -> bool:

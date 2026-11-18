@@ -17,14 +17,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
-import json
 import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from anthropic.types import RawMessageStreamEvent
@@ -41,7 +40,6 @@ from daimon.adapters.discord.embed import (
 from daimon.adapters.discord.errors import bound_request_id
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import AnswerMessage
-from daimon.adapters.discord.progress_receipt import InitialProgressReceipt
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.adapters.discord.tables import render_discord_tables
 from daimon.adapters.discord.thread_gone import ThreadStopped
@@ -397,7 +395,6 @@ class DiscordTurnLifecycle(OutputGate):
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: uuid.UUID | None = None,
         budget_channel_id: str | None = None,
-        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         thread_stopped: Callable[[], bool] | None = None,
     ) -> None:
@@ -420,7 +417,6 @@ class DiscordTurnLifecycle(OutputGate):
         self._sessionmaker = sessionmaker
         self._tenant_id = tenant_id
         self._budget_channel_id = budget_channel_id
-        self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
         self._edit = self.guarded_output(edit)
         self._urgent_edit = self.guarded_output(urgent_edit) if urgent_edit is not None else None
@@ -582,7 +578,7 @@ class DiscordTurnLifecycle(OutputGate):
         """
         if self._unprompted:
             return
-        await self._maybe_flush(initial=True)
+        await self._maybe_flush()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -932,7 +928,7 @@ class DiscordTurnLifecycle(OutputGate):
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         return [embed]
 
-    async def _maybe_flush(self, *, initial: bool = False) -> None:
+    async def _maybe_flush(self) -> None:
         """Post or edit the embeds, subject to debounce. No-op after terminal."""
         if self._terminal or self._thread_stopped():
             return
@@ -941,15 +937,12 @@ class DiscordTurnLifecycle(OutputGate):
             # First post — immediate, no debounce
             self._first_post_attempted = True
             embeds = self._build_embeds(now)
-            rendered_json = self._initial_render_json(embeds) if initial else None
             message = await self._send_message(embeds=embeds, view=self._cancel_view)
             self._message_ref = message
             self._card_message_ref = message
             self._card_writes.track(message)
             self._initial_card_message_ref = message
             self._last_flush = now
-            if rendered_json is not None:
-                self._observe_initial_progress(message, rendered_json, operation="send")
             if self._on_first_post is not None:
                 # Persist the returned message ID before the turn proceeds. If
                 # this fails, retain the prepared intent and stop the caller.
@@ -962,11 +955,10 @@ class DiscordTurnLifecycle(OutputGate):
             self._on_first_post = None
         elif now - self._last_flush >= _DEBOUNCE_S:
             embeds = self._build_embeds(now)
-            rendered_json = self._initial_render_json(embeds) if initial else None
             # Keep every on-wire edit alive when the render loop is cancelled.
             # Its completion reconciles the card if terminal delivery overtook it.
             task = asyncio.create_task(
-                self._edit_progress(self._message_ref, embeds, rendered_json=rendered_json),
+                self._edit_progress(self._message_ref, embeds),
                 name="discord.progress_edit",
             )
             self._progress_edits.add(task)
@@ -996,19 +988,12 @@ class DiscordTurnLifecycle(OutputGate):
         self,
         message: discord.Message,
         embeds: list[discord.Embed],
-        *,
-        rendered_json: str | None = None,
     ) -> None:
         try:
             if not self._terminal and not self._thread_stopped():
-                landed = await self._edit_message(
+                await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
-                if landed and rendered_json is not None:
-                    assert self._message_ref is not None
-                    self._observe_initial_progress(
-                        self._message_ref, rendered_json, operation="edit"
-                    )
         except Exception:
             log.warning("turn.progress_edit_failed", exc_info=True)
             raise
@@ -1032,36 +1017,6 @@ class DiscordTurnLifecycle(OutputGate):
                     await self._progress_settled.wait()
             except TimeoutError:
                 pass
-
-    def _initial_render_json(self, embeds: list[discord.Embed]) -> str | None:
-        if self._on_initial_progress is None:
-            return None
-        # Freeze before awaiting send: an early Cancel click may mutate the view.
-        return json.dumps(
-            {
-                "embeds": [embed.to_dict() for embed in embeds],
-                "components": self._cancel_view.to_components() if self._cancel_view else [],
-            }
-        )
-
-    def _observe_initial_progress(
-        self,
-        message: discord.Message,
-        rendered_json: str,
-        *,
-        operation: Literal["send", "edit"],
-    ) -> None:
-        if self._on_initial_progress is None:
-            return
-        self._on_initial_progress(
-            InitialProgressReceipt(
-                operation=operation,
-                destination_id=str(message.channel.id),
-                message_id=str(message.id),
-                rendered_json=rendered_json,
-                observed_s=self._clock(),
-            )
-        )
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price the turn's accumulated token totals onto the embed state before a
