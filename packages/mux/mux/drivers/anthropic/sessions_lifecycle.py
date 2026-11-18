@@ -186,6 +186,7 @@ class SessionArchive(Protocol):
 
 class SessionWalk(Protocol):
     def walk(self, scope: Scope) -> AsyncIterator[Session]: ...
+    def live_vault_ids(self, scope: Scope) -> AsyncIterator[str]: ...
 
 
 SESSION_READS_NAMESPACE = "anthropic.session_reads"
@@ -444,6 +445,22 @@ class AnthropicSessions:
                 self._authorization, scope, "session", item.id
             ):
                 yield self._session(scope, item)
+
+    async def live_vault_ids(self, scope: Scope) -> AsyncIterator[str]:
+        """Vault ids mounted by unarchived sessions, without converting each session.
+
+        A large fleet made the per-session record conversion hold the event loop.
+        """
+        authorize(self._authorization, scope, "session")
+        pages = self._client.beta.sessions.list(include_archived=False, limit=100)
+        async for item in provider_iter(pages):
+            if (
+                item.archived_at is None
+                and visible(scope, item.metadata)
+                and visible_grant(self._authorization, scope, "session", item.id)
+            ):
+                for vault_id in item.vault_ids or ():
+                    yield vault_id
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         self._check(scope, ref, "session")
