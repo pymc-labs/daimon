@@ -41,6 +41,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.drivers.openai import deployment
 from mux.errors import ScopeViolation
+from mux.profiles import PERSISTENT_WORKSPACE
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from openai import AsyncOpenAI
@@ -576,7 +577,7 @@ async def test_copy_skills_when_one_archive_is_bad_then_copies_the_rest_and_name
         cast(Any, Skills()),
         scope=SCOPE,
         tenant_id=TENANT,
-        provider="openai",
+        profile=PERSISTENT_WORKSPACE,
         account_scope_id="project",
         pins=(SkillRef(id="skill_bad", version="7"), SkillRef(id="skill_team", version="7")),
     )
@@ -631,7 +632,7 @@ async def test_copy_skills_when_an_openai_copy_predates_plain_frontmatter_then_u
         cast(Any, Skills()),
         scope=SCOPE,
         tenant_id=TENANT,
-        provider="openai",
+        profile=PERSISTENT_WORKSPACE,
         account_scope_id="project",
         pins=(SkillRef(id="skill_team", version="7"),),
     )
@@ -675,7 +676,7 @@ async def test_copy_skills_when_an_upload_fails_then_only_a_permanent_error_is_a
         cast(Any, Skills()),
         scope=SCOPE,
         tenant_id=TENANT,
-        provider="openai",
+        profile=PERSISTENT_WORKSPACE,
         account_scope_id="project",
         pins=(SkillRef(id="skill_team", version="7"),),
     )

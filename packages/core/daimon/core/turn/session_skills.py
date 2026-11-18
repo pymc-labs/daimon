@@ -63,9 +63,6 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 _DROP_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _MANIFEST_BYTES = 1024 * 1024
-#: A provider's copy format, kept beside the source version: OpenAI uploads plain
-#: SKILL.md frontmatter (mux `plain_manifest`), so its older copies are never reused.
-_COPY_FORMATS = {"openai": "plain-frontmatter"}
 
 
 def read_blip(error: BaseException) -> TurnError | None:
@@ -431,7 +428,7 @@ async def copy_skills(
     *,
     scope: Scope,
     tenant_id: uuid.UUID,
-    provider: str,
+    profile: Profile,
     account_scope_id: str,
     pins: tuple[SkillRef, ...],
     record: Agent | None = None,
@@ -449,12 +446,12 @@ async def copy_skills(
         if pin.version in (None, "latest"):
             raise ValueError("a carried skill needs a concrete version")
         assert pin.version is not None
-        version = "+".join(filter(None, (pin.version, _COPY_FORMATS.get(provider))))
+        version = "+".join(filter(None, (pin.version, profile.skill_copy_format)))
         async with sessionmaker() as db:
             row = await get_skill_copy(
                 db,
                 tenant_id=tenant_id,
-                provider=provider,
+                provider=profile.provider,
                 account_scope_id=account_scope_id,
                 skill_id=pin.id,
                 version=version,
@@ -487,7 +484,7 @@ async def copy_skills(
                     db,
                     SkillCopyRow(
                         tenant_id=tenant_id,
-                        provider=provider,
+                        provider=profile.provider,
                         account_scope_id=account_scope_id,
                         skill_id=pin.id,
                         version=version,
@@ -497,24 +494,33 @@ async def copy_skills(
                 )
         return SkillRef(id=row.copy_id, version=row.copy_version)
 
+    # A native upload waits until it reads back (~4s), so up to 4 run at once. An
+    # emulated catalogue's records share one host transaction (a single writer).
+    gate = asyncio.Semaphore(4 if profile.support_for("skills_bundle") == "native" else 1)
+
+    async def attempt(pin: SkillRef) -> SkillRef | Exception:
+        async with gate:
+            try:
+                return await copy(pin)
+            except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+                return error
+
+    outcomes = await asyncio.gather(*(attempt(pin) for pin in pins))
+    # A transient failure retries with the reply; only a permanent one is a loss,
+    # because the session is created once with whatever copied.
+    for outcome in outcomes:
+        if isinstance(outcome, ProviderError) and outcome.retryable:
+            raise outcome
     copies: list[SkillRef] = []
     losses: list[str] = []
-    # One at a time: a provider's local record store may take a single writer.
-    for pin in pins:
-        try:
-            copies.append(made := await copy(pin))
-        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-            # A transient failure retries with the reply; only a permanent one is a loss,
-            # because the session is created once with whatever copied.
-            if isinstance(error, ProviderError) and error.retryable:
-                raise
+    for pin, made in zip(pins, outcomes, strict=True):
+        if isinstance(made, Exception):
             log.warning(
-                "session_skills.copy_failed",
-                skill_id=pin.id,
-                causes=backend_refusal_causes(error),
+                "session_skills.copy_failed", skill_id=pin.id, causes=backend_refusal_causes(made)
             )
             losses.append(f"skill:{pin.id}")
             continue
+        copies.append(made)
         if sources is not None:
             sources[(made.id, str(made.version))] = pin
     return tuple(copies), tuple(losses)
@@ -733,7 +739,7 @@ async def turn_session_skills(
             skills(),
             scope=scope,
             tenant_id=request.tenant_id,
-            provider=profile.provider,
+            profile=profile,
             account_scope_id=account_scope_id,
             pins=pins,
             record=record,

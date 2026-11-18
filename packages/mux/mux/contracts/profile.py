@@ -162,6 +162,9 @@ class Profile(Contract):
     skill_upload_limits: SkillLimits | None = Field(default=None, exclude=True)
     """A larger tier for a skill past `skill_limits`: its files are uploaded and only
     its SKILL.md spends the inline budget. None: no such tier."""
+    skill_copy_format: str | None = Field(default=None, exclude=True)
+    """Kept beside a copied skill's source version when the driver uploads other bytes
+    than the source's; changing it uploads every copy anew. Excluded: digests hold."""
     carries_caller_resources: bool = Field(default=False, exclude=True)
     """The host carries the caller's seals, Slack turn context and private DM on its
     per-turn credential, not as a native resource. Excluded from dumps: digests hold."""
