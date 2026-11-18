@@ -25,6 +25,7 @@ from mux.contracts.ids import Revision, Scope
 from mux.contracts.ports import SessionResources
 from mux.contracts.resources import ResourceBinding, Session, SessionSpec
 from mux.drivers.anthropic import NativeSessionResources, SessionWalk
+from mux.profiles.anthropic import SESSION_WALK_NAMESPACE
 from pydantic import JsonValue
 
 
@@ -268,5 +269,5 @@ async def add_session_file_record(
 async def mounted_live_vault_ids(client: AsyncAnthropic, *, scope: Scope) -> frozenset[str]:
     """Provider live sessions include unmapped hub/agent-chat sessions, not just DB rows."""
     backend = managed_agents(client, scope=scope)
-    walk = backend.extension(SessionWalk, namespace="anthropic.session_walk", version=1)
+    walk = backend.extension(SessionWalk, namespace=SESSION_WALK_NAMESPACE, version=1)
     return frozenset([vault_id async for vault_id in legacy_iter(walk.live_vault_ids(scope))])
