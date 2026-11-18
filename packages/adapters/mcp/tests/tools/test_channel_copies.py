@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from unittest.mock import MagicMock
 
 import anthropic
@@ -13,6 +13,7 @@ import httpx
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
 from daimon.adapters.mcp.tools.channel_copies import (
     _archive_channel_copy_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -41,6 +42,14 @@ ROOM = "111111111111111111"
 OTHER = "222222222222222222"
 COPY = "channel-111111"
 OWN = ChannelRule(readers="own", writers="own")
+
+
+@pytest.fixture(autouse=True)
+def _inside_the_channels() -> Iterator[None]:
+    """These calls come from inside the channels they change (a private channel is inside-only)."""
+    token = CALL_ORIGIN.set(frozenset({ROOM, OTHER}))
+    yield
+    CALL_ORIGIN.reset(token)
 
 
 class _World:
@@ -149,7 +158,7 @@ async def test_a_channel_retires_only_its_own_copy(
     actor = ChannelActor(
         tenant_id=world.tenant_id,
         account_id=world.account_id,
-        subject=Subject(is_admin=True, platform_user_id="444444444444444444"),
+        subject=Subject(is_admin=True, platform_user_id="444444444444444444", operator=True),
         surface="web",
     )
 

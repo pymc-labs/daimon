@@ -41,6 +41,7 @@ from daimon.adapters.discord.checks import is_guild_admin
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
@@ -558,7 +559,11 @@ class DetailsView(PanelViewBase):
     ) -> tuple[channel_backend.AgentBackendService, AgentEditDeps, AgentActor, bool]:
         """What a model write needs, as the clicking person: admin or owner decided now."""
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)  # pyright: ignore[reportArgumentType]
-        subject = build_subject(is_admin=admin, platform_user_id=str(interaction.user.id))
+        subject = build_subject(
+            is_admin=admin,
+            platform_user_id=str(interaction.user.id),
+            origin_channel_ids=interaction_origin(interaction),
+        )
         capture = backend_capture.for_agent(
             self.runtime.turn_deps, account_id=self.state.account_id, subject=subject
         )

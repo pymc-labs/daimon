@@ -12,6 +12,7 @@ agent with a rule needs an admin; a member inside its channels uses request tool
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -28,8 +29,9 @@ from daimon.core.authz import (
     Surface,
     authorize,
     build_agent_ref,
+    origin_ids,
 )
-from daimon.core.permissions import any_agent_rules
+from daimon.core.permissions import SEALED_REFUSAL, any_agent_rules, any_own_readers
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -59,20 +61,25 @@ async def require_pin_write_access(
 
     A trusted admin credential may write from anywhere; agent keys never are trusted.
     """
-    trusted = _trusted_credential(auth)
-    if trusted and auth.admin_for(action):
-        return
+    admin = _trusted_credential(auth) and auth.admin_for(action)
     async with runtime.session_factory() as session:
         try:
             policy = await load_access_policy(session, tenant_id=auth.tenant_id)
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc
-    if not any_agent_rules(policy):
+    # A trusted admin may write from anywhere, except to a private channel's own agent.
+    if admin and not any_own_readers(policy):
+        return
+    if not admin and not any_agent_rules(policy):
         return
     if callable(ma_agent):
         ma_agent = await ma_agent()
-    subject = mcp_subject(auth)
-    if not authorize(
+    subject = mcp_subject(auth, is_admin=admin)
+    if origin is not None and not auth.is_external_agent:
+        subject = replace(
+            subject, origin_channel_ids=origin_ids(origin.parent_channel_id, origin.thread_id)
+        )
+    decision = authorize(
         policy,
         subject=subject,
         action=Action.CONFIGURE,
@@ -85,7 +92,12 @@ async def require_pin_write_access(
             if origin is not None
             else Place()
         ),
-    ):
+    )
+    if not decision:
+        if decision.reason == "sealed_channel":
+            raise ToolError(
+                f"'{ma_agent.name}': {SEALED_REFUSAL} Nothing was changed. Do not retry."
+            )
         raise ToolError(
             f"'{ma_agent.name}': {PIN_WRITE_REFUSAL} No card was posted. Tell the caller to "
             "ask in one of that agent's channels, or ask an admin. Do not retry."

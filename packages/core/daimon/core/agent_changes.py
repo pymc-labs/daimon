@@ -62,7 +62,7 @@ from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, strip_tenant_prefix
 from daimon.core.model_presets import ModelConfig
 from daimon.core.models_catalog import is_priced_claude_model, list_model_choices
-from daimon.core.permissions import WEB_PLACE_ID
+from daimon.core.permissions import SEALED_REFUSAL, WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_helpers, agent_tool_rules
 from daimon.core.stores.agent_tool_rules import Rule
@@ -593,6 +593,7 @@ _PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
     "feature_disabled": ("Choosing a model provider is turned off here.", "forbidden"),
     "owner_or_admin_required": ("Only the agent's owner or an admin can do that.", "forbidden"),
     "admin_required": ("Only an admin can do that.", "forbidden"),
+    "sealed_channel": (SEALED_REFUSAL, "forbidden"),
     "model_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "profile_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "effort_not_offered": ("That model has no effort setting.", "invalid"),

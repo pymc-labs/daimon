@@ -32,7 +32,7 @@ from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, owns_agent, record_agent_creator
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_configured
-from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize
+from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
@@ -66,7 +66,12 @@ from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.mux_compat import update_agent as ma_update_agent
-from daimon.core.permissions import WEB_PLACE_ID, agent_permissions, with_agent_rule
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    WEB_PLACE_ID,
+    agent_permissions,
+    with_agent_rule,
+)
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec, merge_default_agent_toolset
@@ -682,11 +687,14 @@ async def check_may_edit(
         owned = await owns_agent(
             session, tenant_id=actor.tenant_id, ma_agent_id=agent.id, account_id=actor.account_id
         )
+    async with deps.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     decision = authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=actor.subject,
         action=Action.CHANGE_SHARED_AGENT,
         surface=actor.surface,
+        agent=build_agent_ref(agent.name, agent.metadata),
         operation_family="spec",
         reach=AgentReach(managed=rejection is not None, owned=owned),
     )
@@ -694,6 +702,8 @@ async def check_may_edit(
         message = (
             rejection
             if rejection is not None
+            else SEALED_REFUSAL
+            if decision.reason == "sealed_channel"
             else f"Changing '{agent.name}' needs its owner or an admin."
         )
         raise AgentEditError(message, kind="forbidden")

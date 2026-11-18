@@ -477,6 +477,36 @@ def held_to(agent: AgentPermissions, origin: ChannelPermissions | None = None) -
     return origin.home if origin is not None else None
 
 
+SEALED_REFUSAL: Final[str] = "This channel is private. Change its settings from inside the channel."
+"""What a person is told when a change to a private channel, or to its own agent, comes
+from outside it (`sealed_outside`)."""
+
+
+def sealed_outside(
+    policy: TenantAccessPolicy,
+    inside: Collection[str],
+    *,
+    channel_ids: Iterable[str | None] = (),
+    agent_names: Iterable[str | None] = (),
+    operator: bool = False,
+) -> str | None:
+    """The private channel a settings change reaches from outside it, or None.
+
+    A settings change reaches a channel with limited readers (inside or own),
+    and a channel's own agent (`AgentPermissions.home`). It stays inside only
+    when the request's verified origin (`inside`: its channel and thread) is
+    that channel, for admins too. No origin (the web app, the hub, a DM, an agent
+    key) is outside. The operator's CLI is the recovery path and is never held.
+    """
+    if operator:
+        return None
+    sealed = [c for c in channel_ids if c is not None and channel_rule(policy, c).readers != "any"]
+    home = agent_permissions(policy, agent_names).home
+    if home is not None:
+        sealed.append(home)
+    return next((c for c in sealed if c not in inside), None)
+
+
 def crosses_home(
     agent: AgentPermissions,
     here: ChannelPermissions,

@@ -456,7 +456,10 @@ async def test_a_pin_chosen_mid_sync_waits_for_it_and_then_holds(
 
     async def target(*_a: object, **_k: object) -> Any:
         return SimpleNamespace(
-            agent=SimpleNamespace(id="follows", name="follows"), managed=False, sees_setup=True
+            agent=SimpleNamespace(id="follows", name="follows"),
+            managed=False,
+            sees_setup=True,
+            sealed=False,
         )
 
     monkeypatch.setattr(follows_module, "load_target", target)

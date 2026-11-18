@@ -29,6 +29,7 @@ from daimon.core.agent_editing import (
     load_tenant_agent,
 )
 from daimon.core.agent_ownership import owns_agent
+from daimon.core.agent_target import agent_names_loader
 from daimon.core.channel_changes import Expected
 from daimon.core.channel_directory import WEB_ROW_ID
 from daimon.core.features.registry import DEFAULT, Tier
@@ -267,6 +268,8 @@ def features_router(runtime: WebRuntime) -> APIRouter:
             owns_agent=owns,
             write_builtin=write_tool,
             read_builtins=read_tools,
+            # The web app proves no origin: a private channel and its own agent are read only here.
+            agent_names=agent_names_loader(change_deps(runtime).edit, agent_actor_of(caller)),
         )
         with channel_refusals():
             result = await change_feature(

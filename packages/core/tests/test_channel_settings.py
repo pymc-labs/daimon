@@ -44,7 +44,7 @@ async def _actor(db: AsyncSession, *, admin: bool = True) -> ChannelActor:
     return ChannelActor(
         tenant_id=tenant.id,
         account_id=account.id,
-        subject=Subject(is_admin=admin),
+        subject=Subject(is_admin=admin, operator=admin),
         surface="web",
     )
 

@@ -444,7 +444,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             tenant_id=uuid.UUID(case.scope.tenant_id),
             platform="discord",
             channel_id="123",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default=DeploymentDefault(agent_name="source"),
             readers="own",
             writers="own",
@@ -460,7 +460,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             tenant_id=uuid.UUID(case.scope.tenant_id),
             platform="discord",
             channel_id="123",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default=DeploymentDefault(agent_name="source"),
             readers="own",
             writers="own",
@@ -587,7 +587,7 @@ async def test_source_owned_unversioned_pin_needs_native_default_resolution_befo
                 case.sessions,
                 source_name="source",
                 new_name="copy",
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default_agent_name=None,
             )
     case.trace.assert_consumed()
@@ -637,7 +637,7 @@ async def test_injected_real_driver_pin_resolver_copies_native_default_not_newes
             case.sessions,
             source_name="source",
             new_name="copy",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default_agent_name=None,
         )
     case.trace.assert_consumed()
@@ -668,7 +668,7 @@ async def test_failed_owned_skill_copy_is_reported_and_shared_pin_survives(setup
             case.sessions,
             source_name="source",
             new_name="copy",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default_agent_name=None,
         )
     case.trace.assert_consumed()
@@ -982,7 +982,7 @@ async def test_channel_rule_refuses_mismatched_resource_scope_before_lookup(
                 ),
                 platform="discord",
                 channel_id="123",
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default=DeploymentDefault(agent_name="source"),
                 readers="own",
                 resource_host=case.host(sdk),

@@ -194,7 +194,10 @@ async def budget_set(
 def _operator(tenant_id: uuid.UUID) -> ChannelActor:
     """The host operator: trusted as an admin, with no account behind it."""
     return ChannelActor(
-        tenant_id=tenant_id, account_id=None, subject=Subject(is_admin=True), surface="cli"
+        tenant_id=tenant_id,
+        account_id=None,
+        subject=Subject(is_admin=True, operator=True),
+        surface="cli",
     )
 
 
@@ -829,7 +832,7 @@ async def channels_rule_set(
     kind = "category" if category else "thread" if thread else "channel"
     where = f"{platform}:{workspace_id} {kind}"
     # The CLI is the deployment operator.
-    subject = Subject(is_admin=True)
+    subject = Subject(is_admin=True, operator=True)
     if category:
         try:
             changed = await set_category_rule(
@@ -976,7 +979,7 @@ async def agents_rule_set(
             agent_name=agent_name.strip(),
             runs_in=channels,
             # The CLI is the deployment operator.
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             surface="cli",
             default=rt.deployment_default,
         )
@@ -1043,6 +1046,6 @@ async def agents_rule_invoker_roles(
         platform=platform,
         agent_name=agent_name.strip(),
         role_ids=cleaned,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     console.print(f"{platform}:{workspace_id} {escape(agent_name)} invoker roles updated.")

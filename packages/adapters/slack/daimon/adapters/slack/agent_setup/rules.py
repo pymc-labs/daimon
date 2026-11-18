@@ -14,7 +14,7 @@ from typing import Any, cast
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
-from daimon.core.authz import build_subject
+from daimon.core.authz import build_subject, origin_ids
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.channel_rules import ChannelRuleRefused, set_channel_rule
 from daimon.core.errors import DaimonError
@@ -79,7 +79,11 @@ async def change_rule(
             readers=readers,
             writers=writers,
             # Only a workspace admin reaches the permissions controls.
-            subject=build_subject(is_admin=True, platform_user_id=user_id),
+            subject=build_subject(
+                is_admin=True,
+                platform_user_id=user_id,
+                origin_channel_ids=origin_ids(channel),
+            ),
             surface="panel",
             default=runtime.deployment_default,
             actor_account_id=actor.account_id,

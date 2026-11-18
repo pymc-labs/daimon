@@ -26,6 +26,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import archive_agent
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_backends, agent_helpers, web_people
 from mux.contracts.config import DEFAULT_BACKEND
@@ -50,7 +51,10 @@ async def load_admin_target(
 ) -> AgentTarget:
     """The agent, for an admin only."""
     require_admin(actor, what)
-    return await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    if target.sealed:
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
+    return target
 
 
 async def set_owners(

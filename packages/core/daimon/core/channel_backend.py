@@ -44,6 +44,7 @@ from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.permissions import sealed_outside
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -923,6 +924,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
     safe_reasons = {
         "actor_not_found",
         "admin_required",
+        "sealed_channel",
         "agent_identity_required",
         "agent_not_found",
         "backend_not_allowed",
@@ -1362,6 +1364,14 @@ class AgentBackendService:
         if not await agent_backends.actor_exists(session, agent.tenant_id, actor.account_id):
             raise AgentBackendRefused("actor_not_found")
         policy = await policy_store.load_access_policy(session, tenant_id=agent.tenant_id)
+        # A private channel's own agent changes only from inside the channel, owner or admin.
+        if sealed_outside(
+            policy,
+            actor.subject.inside,
+            agent_names=(agent.name,),
+            operator=actor.subject.operator,
+        ):
+            raise AgentBackendRefused("sealed_channel")
         if authorize(policy, subject=actor.subject, action=Action.SET_AGENT_RULE):
             return True
         if not await may_edit_as_owner(session, agent.tenant_id, agent.agent_id, actor):

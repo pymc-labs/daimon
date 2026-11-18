@@ -91,7 +91,7 @@ async def operator(db_preflight, db_nullpool_engine, db_clean, request):
             ),
         )
         service = make_backend_service(sessions, settings.turn, capture_source=NO_CAPTURE)
-        actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True))
+        actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True, operator=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
             tenant.id, ("anthropic", "openai", "gemini"), policy.revision, actor
@@ -617,7 +617,7 @@ async def capture(operator, **changes):
     )
     args = dict(
         context=ScopeContext(tenant_id=tenant.id, account_id=principal.account_id, platform="cli"),
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         place=Place(),
         is_dm=False,
         slack_turn_context_id=None,
