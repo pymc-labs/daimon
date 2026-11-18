@@ -168,9 +168,16 @@ class _SlackCredentialPort:
     async def resume(self, row: CredentialRequestRow) -> None:
         await _dispatch_pending(self.dispatch_continuations, kind=row.kind)
 
-    def write_failed(self, kind: str, err: Exception) -> None:
+    def write_failed(
+        self, kind: str, err: Exception, *, key: str | None = None, key_count: int | None = None
+    ) -> None:
         # Type only: the message of an error at a credential boundary can quote values.
-        log.error(f"credential_request.{kind}_write_failed", error_type=type(err).__name__)
+        fields: dict[str, object] = {"key_present": True} if key is not None else {}
+        if key_count is not None:
+            fields["key_count"] = key_count
+        log.error(
+            f"credential_request.{kind}_write_failed", error_type=type(err).__name__, **fields
+        )
         capture_exception_with_scope(err)
 
 

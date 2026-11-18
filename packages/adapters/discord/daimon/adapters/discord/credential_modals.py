@@ -162,6 +162,7 @@ from daimon.core.mcp_token_connect import (
 )
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
+from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
@@ -401,8 +402,16 @@ class _DiscordCredentialPort:
     async def resume(self, row: CredentialRequestRow) -> None:
         await _dispatch_origin_thread(self.interaction, row)
 
-    def write_failed(self, kind: str, err: Exception) -> None:
-        _log.error(f"credential_modal.{kind}_write_failed", err_type=type(err).__name__)
+    def write_failed(
+        self, kind: str, err: Exception, *, key: str | None = None, key_count: int | None = None
+    ) -> None:
+        fields = {"key": key, "key_count": key_count}
+        _log.exception(
+            f"credential_modal.{kind}_write_failed",
+            err_type=type(err).__name__,
+            **{name: value for name, value in fields.items() if value is not None},
+        )
+        capture_exception_with_scope(err)
 
 
 class EnvCredentialModal(discord.ui.Modal):

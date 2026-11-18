@@ -75,7 +75,7 @@ class _Port:
     async def resume(self, row: CredentialRequestRow) -> None:
         self.resumed += 1
 
-    def write_failed(self, kind: str, err: Exception) -> None:
+    def write_failed(self, kind: str, err: Exception, **_: object) -> None:
         self.failed.append(kind)
 
 

@@ -101,7 +101,9 @@ class CredentialPort(Protocol):
         """Start the continuation the save queued in the request's origin thread."""
         ...
 
-    def write_failed(self, kind: str, err: Exception) -> None:
+    def write_failed(
+        self, kind: str, err: Exception, *, key: str | None = None, key_count: int | None = None
+    ) -> None:
         """Record a failed write. The error may quote the value: never log its text."""
         ...
 
@@ -148,7 +150,7 @@ async def submit_env(
         log.error(f"{port.log_prefix}.env_write_refused_no_crypto_keys")
         return await port.reply(str(err))
     except Exception as err:  # the submit's boundary: the person gets a reply
-        port.write_failed("env", err)
+        port.write_failed("env", err, key=row.target)
         return await port.reply(WRITE_FAILED_MESSAGE)
     consumed, state = result.consumed, result.state
     if consumed is None:
@@ -200,7 +202,7 @@ async def submit_env_file(
         log.error(f"{port.log_prefix}.env_file_refused_no_crypto_keys")
         return await port.reply(str(err))
     except Exception as err:  # the submit's boundary: the person gets a reply
-        port.write_failed("env_file", err)
+        port.write_failed("env_file", err, key_count=len(entries))
         return await port.reply(WRITE_FAILED_MESSAGE)
     if consumed is None:
         return await port.reply(NO_LONGER_VALID_MESSAGE)
