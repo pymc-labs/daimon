@@ -32,7 +32,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import change_note, listed, view_json
+from daimon.core.features.surface import agent_listed, change_note, view_json
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -110,7 +110,7 @@ async def _get_settings_impl(
     place = await _place(runtime, auth, origin_context_id, change=False)
     views = await read_features(runtime.session_factory, runtime.settings, place)
     return SettingsResult(
-        [view_json(view, place.platform) for view in listed(views, runtime.settings, place)]
+        [view_json(view, place.platform) for view in agent_listed(views, runtime.settings, place)]
     )
 
 
@@ -171,7 +171,7 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         you are, what is in effect, which level decided it (``source``: ``default``,
         ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
         and whether it is locked. Anyone may read them; read each ``summary`` back. People
-        change them with ``/settings``, the web app's Settings section or ``change_setting``.
+        change them with ``/settings`` or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 

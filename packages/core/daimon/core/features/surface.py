@@ -67,6 +67,19 @@ def listed(
     )
 
 
+def agent_listed(
+    views: Iterable[FeatureView], settings: Settings | None, place: FeaturePlace
+) -> tuple[FeatureView, ...]:
+    """`listed` for an agent: with `web_awareness` Off here it also leaves out that row and the
+    web app's own (`web.*`), so the agent is not told the web app exists. `change_setting`
+    still takes their keys."""
+    views = tuple(views)
+    web = next((view for view in views if view.spec.key == "web_awareness"), None)
+    if web is not None and not web.resolved.on:
+        views = tuple(v for v in views if v is not web and not v.spec.key.startswith("web."))
+    return listed(views, settings, place)
+
+
 def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
     text = spec.label(value)
     return f"{text}, locked" if locked and value != DEFAULT else text

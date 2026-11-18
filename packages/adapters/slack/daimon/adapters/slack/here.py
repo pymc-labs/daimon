@@ -233,6 +233,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 else None,
                 is_admin=is_admin,
                 web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+                settings=runtime.settings,
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id

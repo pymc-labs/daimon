@@ -411,7 +411,7 @@ def register_agent_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         *,
         origin_context_id: str,
     ) -> AgentOwnersSet:
-        """Set an agent's owner and co-owners to exactly these web person or account ids."""
+        """Set an agent's owner and co-owners to exactly these person or account ids."""
         return await _owners_impl(
             runtime, await _auth(ctx), agent_id, owner, co_owners or [], origin_context_id
         )

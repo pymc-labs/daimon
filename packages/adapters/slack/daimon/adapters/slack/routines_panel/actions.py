@@ -38,6 +38,7 @@ from daimon.adapters.slack.routines_panel.views import (
     build_loading_view,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import web_links_at
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -48,7 +49,6 @@ from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import can_manage_routine, can_read_routine_output, routine_label
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
-from daimon.core.web_links import panel_links
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -98,7 +98,7 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
             rows=entries,
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
-            links=panel_links(runtime.settings.web, tenant_id, admin=False),
+            links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
         )
         # No hash — single updater, Pitfall 3.
         await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -235,7 +235,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
-                links=panel_links(runtime.settings.web, tenant_id, admin=False),
+                links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -346,7 +346,7 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
-                links=panel_links(runtime.settings.web, tenant_id, admin=False),
+                links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,

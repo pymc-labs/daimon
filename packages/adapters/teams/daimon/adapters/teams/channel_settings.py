@@ -231,11 +231,12 @@ class ChannelSettingsDialog:
                 max_value_length=_MAX_OPTION_VALUE,
             )
         name = (await self._listed(tenant_id)).get(channel_id)
-        web = web_links(
+        web = await web_links(
             self._runtime,
             tenant_id,
             admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
             foreign=actor.foreign,
+            channel_id=channel_id,
         )
         settings = cards.ChannelSettings(
             channel_id=channel_id,

@@ -137,7 +137,7 @@ async def handle_billing_command(
                 now=now,
                 since=since,
                 channel_id=channel_id,
-                web_url=spend_url(runtime.settings.web, tenant_id),
+                web_url=await spend_url(runtime, tenant_id, channel_id),
             ),
         )
 
@@ -376,7 +376,7 @@ async def handle_panel_action(runtime: SlackRuntime, payload: dict[str, Any]) ->
             since=since,
             channel_id=channel_id,
             lookup=Lookup(user_id=picked, name=name, line=lookup_line(spend, turns)),
-            web_url=spend_url(runtime.settings.web, tenant_id),
+            web_url=await spend_url(runtime, tenant_id, channel_id),
         )
         # The hash makes a slower, earlier lookup lose to a newer one instead of
         # overwriting it.

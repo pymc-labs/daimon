@@ -583,11 +583,14 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
-                web=web_links(
+                web=await web_links(
                     self._runtime,
                     actor.tenant_id,
                     admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                     foreign=actor.foreign,
+                    channel_id=actor.channel_thread[0],
+                    thread_id=actor.channel_thread[1],
+                    agent_id=match.ma_agent_id,
                 ),
                 records=self._runtime.sessionmaker,
             )

@@ -15,6 +15,7 @@ settings, so that catalogue, stay fixed while it runs.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from typing import Final
 
@@ -22,6 +23,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.tool_gate import (
@@ -30,9 +32,14 @@ from daimon.core.features.tool_gate import (
     hides_tools,
     server_gate_key,
 )
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
+from daimon.core.mux_backend import resource_scope
+from daimon.core.rule_views import routine_feature_place
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.stores.tenants import get_tenant
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -80,7 +87,7 @@ async def caller_places(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: object
 ) -> list[FeaturePlace]:
     """Where the call may run, from verified facts only: its turn origin, its routine, an
-    agent key's channel, or else the workspace.
+    agent key's agent and channel, or else the workspace.
 
     Several running turns of one session, when none is named, cannot be told apart. Turns
     in one channel and thread are one place; otherwise each place is returned and a gate
@@ -96,10 +103,43 @@ async def caller_places(
     if auth.routine_id is not None:
         async with runtime.session_factory() as session:
             routine = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-        if routine is not None:
-            # As the scheduler reads it (`scheduler.py`).
-            return [FeaturePlace(auth.tenant_id, "", routine.channel_id, agent_id=routine.agent_id)]
-    return [FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth))]
+            tenant = await get_tenant(session, auth.tenant_id)
+        if routine is not None and tenant is not None:
+            # As its session's toolset reads it (`headless_runner.py`).
+            return [routine_feature_place(routine, platform=tenant.platform)]
+    agent_id = None if auth.agent_id is None else await _key_agent_id(runtime, auth, auth.agent_id)
+    return [
+        FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth), agent_id=agent_id)
+    ]
+
+
+async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:
+    """An agent key's own agent id, so its agent-tier values apply rather than the channel's.
+    Cached; a failed lookup is logged and leaves the agent tier out, never refusing."""
+    key = (auth.tenant_id, derived)
+    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
+        return cached
+    try:
+        if auth.anthropic_disabled or anthropic_disabled():
+            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+                resource_scope(tenant_id=str(auth.tenant_id)), derived
+            )
+            found = None if record is None else record.ref.id
+        else:
+            agent = await find_agent_by_derived_uuid_cached(
+                runtime.client,
+                runtime.resolver_cache,
+                tenant_id=auth.tenant_id,
+                agent_id=derived,
+                records=runtime.session_factory,
+            )
+            found = None if agent is None else agent.id
+    except Exception:  # named boundary: the agent tier is extra; its lookup never refuses
+        log.warning("capability_gate.key_agent_lookup_failed", exc_info=True)
+        return None
+    if found is not None:
+        runtime.resolver_cache.derived_agent_ids[key] = found
+    return found
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:

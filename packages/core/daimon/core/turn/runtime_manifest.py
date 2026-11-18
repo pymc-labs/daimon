@@ -746,6 +746,9 @@ async def _capture_source_capabilities(
 
             settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), RETIRED_GATES
+            # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
+            # its tools out of the allowlist, as a Claude session's toolset does.
+            hidden = request.admission.toolset.hidden_daimon_tools
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
@@ -754,7 +757,9 @@ async def _capture_source_capabilities(
                 # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
                 name: (
-                    "auto"
+                    "disabled"
+                    if name in hidden
+                    else "auto"
                     if name in carded and permission != "disabled"
                     else "ask"
                     if name in gated

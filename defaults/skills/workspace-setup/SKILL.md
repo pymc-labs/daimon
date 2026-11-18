@@ -320,8 +320,7 @@ it, and off again when they ask you to stop.
 Use the Settings group: `change_setting(key="participation", tier=..., value=...)`
 changes it at the `thread`, `channel` or `workspace` level of this conversation, and
 `get_settings()` reads every level and which one decided. Only this conversation's place
-can be changed; a person changes another channel with `/settings` there or in the
-web app. The person presses Approve before a change is saved.
+can be changed; a person changes another channel with `/settings` there. The person presses Approve before a change is saved.
 
 Values are `on`, `off` and `default` (drop this level's own setting). An admin's
 `locked=true` (not at the thread level) makes the value final for every narrower level.

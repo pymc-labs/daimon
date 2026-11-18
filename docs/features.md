@@ -13,6 +13,10 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
+A chat conversation picks up a change to a feature that hides tools at its next message.
+A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
+with; Daimon refuses a tool turned Off since then.
+
 ## All features
 
 Where each feature can be set, and its default.
@@ -29,7 +33,7 @@ Where each feature can be set, and its default.
 | Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -302,9 +306,9 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Web app links
+## Web app
 
-Each message tells the agent the web app's address and the pages it may link to.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
 
 | | |
 | --- | --- |
