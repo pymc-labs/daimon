@@ -3,6 +3,7 @@
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -13,6 +14,10 @@ from daimon.adapters.discord.budget_notice import send_member_notice, send_watch
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.stores.watches import REFUSED, UNCLEAR, NoticeAttempt, SentNotice
+
+_send_watch_notice = partial(
+    send_watch_notice, bot_user_id=7, workspace_id="100", recipient_id="123", text="Watch expired."
+)
 
 
 @pytest.mark.parametrize("closed,allowed", [(False, True), (True, True), (False, False)])
@@ -69,15 +74,11 @@ async def test_watch_notice_sends_with_a_stable_nonce_and_reports_the_message() 
     sent = SimpleNamespace(id=901, channel=SimpleNamespace(id=900))
     send = AsyncMock(return_value=sent)
     dm = SimpleNamespace(send=send, history=_history())
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),
         lambda: False,
-        bot_user_id=7,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(),
     )
     assert result == SentNotice("900", "901")
@@ -100,15 +101,11 @@ async def test_resumed_watch_notice_reuses_the_bot_message_it_finds(
     new = SimpleNamespace(id=901, channel=SimpleNamespace(id=900))
     send = AsyncMock(return_value=new)
     dm = SimpleNamespace(send=send, history=_history(earlier))
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),
         lambda: False,
-        bot_user_id=7,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(datetime.now(UTC)),
     )
     assert result is not None
@@ -125,15 +122,12 @@ async def test_resumed_watch_notice_sends_nothing_when_it_cannot_check(
     failure = discord.HTTPException(response, "x") if error else None
     send = AsyncMock()
     dm = SimpleNamespace(send=send, history=_history(error=failure))
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),
         lambda: False,
         bot_user_id=bot_user_id,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(datetime.now(UTC)),
     )
     assert result is None
@@ -151,15 +145,11 @@ async def test_watch_notice_send_that_may_have_landed_is_unclear(
     response: Any = SimpleNamespace(status=status, reason="x")
     failure: Exception = TimeoutError() if error else discord.HTTPException(response, "x")
     dm = SimpleNamespace(send=AsyncMock(side_effect=failure), history=_history())
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),
         lambda: False,
-        bot_user_id=7,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(),
     )
     assert result == expected
@@ -184,15 +174,11 @@ async def test_watch_notice_to_an_owner_discord_cannot_reach_is_refused(
     open_error: Exception, expected: object
 ) -> None:
     tenant_id = uuid.uuid4()
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(side_effect=open_error),
         lambda: False,
-        bot_user_id=7,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(),
     )
     assert result == expected
@@ -205,15 +191,11 @@ async def test_watch_notice_to_an_owner_with_closed_dms_is_refused(
     tenant_id = uuid.uuid4()
     send = AsyncMock(side_effect=_discord_error(discord.Forbidden, 403, code))
     dm = SimpleNamespace(send=send, history=_history())
-    result = await send_watch_notice(
+    result = await _send_watch_notice(
         _runtime(tenant_id),
         AsyncMock(return_value=dm),
         lambda: False,
-        bot_user_id=7,
         tenant_id=tenant_id,
-        workspace_id="100",
-        recipient_id="123",
-        text="Watch expired.",
         attempt=_attempt(),
     )
     assert result == expected

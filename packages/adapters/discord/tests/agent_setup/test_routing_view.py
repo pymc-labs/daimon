@@ -33,6 +33,7 @@ from daimon.core.roster import RosterAgent, paginate
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
+from daimon.testing.shared_helpers import walk as _walk
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,16 +118,6 @@ def _interaction(user_id: int = 42) -> MagicMock:
     interaction.followup.send = AsyncMock()
     interaction.edit_original_response = AsyncMock()
     return interaction
-
-
-def _walk(item: Any) -> list[Any]:
-    found = [item]
-    for child in getattr(item, "children", []) or []:
-        found.extend(_walk(child))
-    accessory = getattr(item, "accessory", None)
-    if accessory is not None:
-        found.extend(_walk(accessory))
-    return found
 
 
 def _text(item: Any) -> str:

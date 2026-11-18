@@ -9,6 +9,7 @@ import dataclasses
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -151,18 +152,14 @@ NOW = datetime(2026, 5, 14, 12, 0, tzinfo=UTC)
 
 _TEST_ACCOUNT_ID = uuid.UUID("00000000-0000-0000-0000-000000000042")
 
+_billing_panel_view = partial(
+    BillingPanelView, allowed_user_id=42, account_id=_TEST_ACCOUNT_ID, now=NOW, since=SINCE
+)
+
 
 def test_member_view_has_refresh_and_done_buttons_only() -> None:
     """Member (non-admin) view must have Refresh + Done buttons and no UserSelect."""
-    view = BillingPanelView(
-        _make_state(is_admin=False),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=False), runtime=_make_runtime(), is_admin=False)
     labels = [c.label for c in view.walk_children() if isinstance(c, discord.ui.Button)]
     assert labels == ["Refresh", "Done"], f"no timed credit, no admin actions: {labels}"
 
@@ -172,15 +169,7 @@ def test_member_view_has_refresh_and_done_buttons_only() -> None:
 
 def test_admin_view_has_topup_select_with_4_options() -> None:
     """Admin view must have a string Select with exactly 4 options [$10/$25/$50/$100]."""
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=_make_runtime(), is_admin=True)
     # Find the string Select (not UserSelect)
     topup_select: discord.ui.Select[Any] | None = None
     for item in view.walk_children():
@@ -215,15 +204,7 @@ def _button_rows(view: discord.ui.LayoutView) -> list[list[str | None]]:
 
 def _panel(**overrides: Any) -> BillingPanelView:
     state = _make_state(**overrides)
-    return BillingPanelView(
-        state,
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=state.is_admin,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    return _billing_panel_view(state, runtime=_make_runtime(), is_admin=state.is_admin)
 
 
 def test_buttons_follow_the_viewer_and_the_credit() -> None:
@@ -267,15 +248,7 @@ async def test_expiry_dates_replies_privately_with_each_credit_soonest_first() -
 
 @pytest.mark.asyncio
 async def test_interaction_check_rejects_non_invoker() -> None:
-    view = BillingPanelView(
-        _make_state(),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(), runtime=_make_runtime(), is_admin=False)
     interaction = MagicMock()
     interaction.user.id = 999  # different from allowed_user_id=42
     interaction.response.send_message = AsyncMock()
@@ -288,15 +261,7 @@ async def test_interaction_check_rejects_non_invoker() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_check_accepts_invoker() -> None:
-    view = BillingPanelView(
-        _make_state(),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=False,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(), runtime=_make_runtime(), is_admin=False)
     interaction = MagicMock()
     interaction.user.id = 42
     ok = await view.interaction_check(interaction)
@@ -353,15 +318,7 @@ async def test_topup_select_callback_posts_to_mcp_checkout_and_sends_ephemeral_u
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
 
     topup_select: _TopUpSelect | None = None
     for item in view.walk_children():
@@ -444,15 +401,7 @@ async def test_topup_checkout_token_carries_no_admin_or_internal_claim(
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -513,15 +462,7 @@ async def test_topup_select_renders_an_error_when_the_checkout_call_returns_a_no
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -560,15 +501,7 @@ async def test_topup_select_refuses_a_demoted_admin_without_creating_a_checkout(
 
     monkeypatch.setattr(panel_module, "_create_checkout", _explode)
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=_make_runtime(),
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=_make_runtime(), is_admin=True)
     topup_select = next(item for item in view.walk_children() if isinstance(item, _TopUpSelect))
     interaction = _non_admin_interaction(guild_id=888000000000000001)
     topup_select._values = ["10"]  # pyright: ignore[reportAttributeAccessIssue]
@@ -610,15 +543,7 @@ async def test_member_lookup_select_refuses_a_demoted_admin_without_reading_usag
         side_effect=AssertionError("a refused lookup must not open a session")
     )
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     lookup_select = next(
         item for item in view.walk_children() if isinstance(item, _MemberLookupSelect)
     )
@@ -656,15 +581,7 @@ async def test_member_lookup_select_still_renders_spend_for_a_live_admin(
     await make_account(db_session, id=_TEST_ACCOUNT_ID)
     await db_session.commit()
 
-    view = BillingPanelView(
-        _make_state(is_admin=True),
-        runtime=runtime,
-        allowed_user_id=42,
-        is_admin=True,
-        account_id=_TEST_ACCOUNT_ID,
-        now=NOW,
-        since=SINCE,
-    )
+    view = _billing_panel_view(_make_state(is_admin=True), runtime=runtime, is_admin=True)
     lookup_select = next(
         item for item in view.walk_children() if isinstance(item, _MemberLookupSelect)
     )
@@ -835,15 +752,8 @@ def test_open_in_web_link_button_follows_the_web_url() -> None:
     """A web link adds one link button; with none the panel is as before."""
 
     def buttons(web_url: str | None) -> list[discord.ui.Button[Any]]:
-        view = BillingPanelView(
-            _make_state(is_admin=False),
-            runtime=_make_runtime(),
-            allowed_user_id=42,
-            is_admin=False,
-            account_id=_TEST_ACCOUNT_ID,
-            now=NOW,
-            since=SINCE,
-            web_url=web_url,
+        view = _billing_panel_view(
+            _make_state(is_admin=False), runtime=_make_runtime(), is_admin=False, web_url=web_url
         )
         return [c for c in view.walk_children() if isinstance(c, discord.ui.Button)]
 

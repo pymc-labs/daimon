@@ -32,6 +32,7 @@ from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.errors import AdmissionDenialReason, SessionAgentMismatch, SessionBusyError
 from daimon.core.turn.notices import admission_refusal_text
 from daimon.core.turn.slots import release_turn_slot
+from daimon.testing.builders import provision_workspace
 from daimon.testing.factories import make_account
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -319,9 +320,7 @@ async def test_the_poller_opens_a_due_timer_and_runs_it_once(
         requester_account_id=account_id,
     )
     assert await teams._open_wake_thread(gone) is False, "a missing tenant is pushed back"
-    other = await provision_tenant(
-        db_session_factory, platform="teams", workspace_id=str(uuid.uuid4())
-    )
+    other = await provision_workspace(db_session_factory, str(uuid.uuid4()), platform="teams")
     foreign = gone.model_copy(update={"tenant_id": other.tenant_id})
     assert await teams._open_wake_thread(foreign) is False, "another organisation's rows wait"
 

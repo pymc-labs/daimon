@@ -14,6 +14,7 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
 )
 from daimon.core.turn.bookkeeping import orphan_scope, recover_orphan_marker
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -26,10 +27,9 @@ async def test_orphan_interrupt_controls_session_reuse(
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="orphan-recovery",
         account_id=account.id,
         ma_session_id="sess_busy",
@@ -68,10 +68,9 @@ async def test_moved_orphan_marker_leaves_new_owner_alone(
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="moved-orphan",
         account_id=account.id,
         ma_session_id="sess_live",
@@ -104,10 +103,9 @@ async def test_failed_detach_rolls_back_marker_clear(
 ) -> None:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    row = await create_thread_session(
+    row = await new_thread_session(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="rollback-orphan",
         account_id=account.id,
         ma_session_id="sess_busy",

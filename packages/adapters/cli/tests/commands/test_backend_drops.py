@@ -23,7 +23,7 @@ from daimon.core.config import Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.identity import get_or_create_cli_principal
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
@@ -841,7 +841,6 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores import access_policy
     from daimon.core.stores.domain import Role
-    from daimon.core.turn.admission import admit
     from daimon.core.turn.deps import build_turn_deps
     from daimon.core.turn.errors import AdmissionDenied
 
@@ -862,12 +861,9 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
     decisions = []
     operator[-1].clear()
     with pytest.raises(AdmissionDenied):
-        await admit(
+        await admit_chat(
             deps,
-            origin="chat",
-            tenant_id=tenant.id,
-            requester_org=RequesterOrg.HOST,
-            platform="discord",
+            tenant,
             external_user_id="denied-human",
             channel_id="900",
             now=datetime.now(UTC),

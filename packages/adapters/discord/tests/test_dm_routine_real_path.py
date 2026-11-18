@@ -56,12 +56,13 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn import unattended
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import new_routine
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -743,14 +744,12 @@ async def test_a_paused_public_send_is_decided_unattended(
 
 async def _routine_row(harness: Harness, *, owner: str = OWNER_A) -> RoutineRow:
     async with harness.factory.begin() as session:
-        return await create_routine(
+        return await new_routine(
             session,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=owner,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="what is on my plate?",
             destination_kind="dm",
             channel_id=BUDGET,
@@ -1445,14 +1444,12 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
 
 async def test_channel_routine_stays_headless_without_personal_memory(harness: Harness):
     async with harness.factory.begin() as db:
-        row = await create_routine(
+        row = await new_routine(
             db,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=OWNER_A,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="channel work",
             destination_kind="channel",
             destination_id=BUDGET,
@@ -1709,14 +1706,12 @@ async def test_destination_free_fire_reads_owner_memory_read_only_and_drops_recl
 
     sentinel = "OWNER_PERSONAL_MEMORY_SENTINEL"
     async with harness.factory.begin() as db:
-        row = await create_routine(
+        row = await new_routine(
             db,
-            tenant_id=harness.tenant.id,
+            harness.tenant.id,
             created_by_user_id=OWNER_A,
             agent_id="ag_daimon",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="private work",
             destination_kind="dm",
             channel_id=None,
@@ -1748,14 +1743,12 @@ async def test_destination_free_fire_reads_owner_memory_read_only_and_drops_recl
             assert row is not None and row.last_result_tail is None
         else:
             await routines.delete_routine(db, row.id, tenant_id=row.tenant_id)
-            row = await create_routine(
+            row = await new_routine(
                 db,
-                tenant_id=harness.tenant.id,
+                harness.tenant.id,
                 created_by_user_id=OWNER_A,
                 agent_id="ag_daimon",
-                agent_name="daimon",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="legacy work",
                 source_provenance_known=True,
                 next_fire_at=datetime.now(UTC) - timedelta(seconds=1),

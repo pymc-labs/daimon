@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import AsyncMock
@@ -20,18 +21,15 @@ import pytest
 import sentry_sdk
 from daimon.adapters.discord import bot as bot_module
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    Settings,
     ThreadNamingSettings,
     TurnSettings,
 )
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import scoped_config_write, tenant_ledger
 from daimon.core.stores.access_policy import (
@@ -44,6 +42,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.membership import FixtureMembershipResolver
@@ -53,7 +52,6 @@ from mux.contracts.ids import Provider, Scope
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr, ValidationError
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -72,24 +70,16 @@ from packages.adapters.discord.tests.forbidden_hook import (
     evaluate_new14,
 )
 
+from .shared_fakes import InitOnlySettings
+
+_scope = partial(Scope, principal_id="qa-admin:100", authorization_id="qa-offline:100")
+
+
 if TYPE_CHECKING:
     from discord.types.channel import TextChannel as TextChannelPayload
     from discord.types.guild import Guild as GuildPayload
     from discord.types.message import Message as MessagePayload
     from discord.types.user import User as UserPayload
-
-
-class InitOnlySettings(Settings):
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
 
 
 @dataclasses.dataclass
@@ -195,12 +185,10 @@ async def ingress(
     )
 
     deps = dataclasses.replace(deps, turn_runtime_factory=None, turn_runtimes={})
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=client,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=deps,
@@ -371,12 +359,7 @@ async def configured_hook(
 ) -> tuple[DiscordForbiddenHook, OverwriteReceipt]:
     hook = await ready_hook(ingress, backend)
     overwrite = await hook.discord_overwrite_edge(
-        scope=Scope(
-            tenant_id=str(ingress.tenant_id),
-            account_id=str(ingress.account_id),
-            principal_id="qa-admin:100",
-            authorization_id="qa-offline:100",
-        ),
+        scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
         owned_workspace_id="100",
         owned_channel_id="101",
         source={
@@ -448,11 +431,9 @@ async def test_unbound_native_trace_is_refused(ingress: OwnedIngress) -> None:
 @pytest.mark.parametrize("bad_binding", ["account", "tenant", "workspace", "channel", "platform"])
 async def test_foreign_overwrite_is_refused(ingress: OwnedIngress, bad_binding: str) -> None:
     hook = DiscordForbiddenHook(bot=ingress.bot, gateway=ingress.gateway, native=ingress.native)
-    scope = Scope(
+    scope = _scope(
         tenant_id=str(uuid.uuid4()) if bad_binding == "tenant" else str(ingress.tenant_id),
         account_id=str(uuid.uuid4()) if bad_binding == "account" else str(ingress.account_id),
-        principal_id="qa-admin:100",
-        authorization_id="qa-offline:100",
     )
     if bad_binding == "platform":
         scope = Scope.platform(reason="mutation control")
@@ -487,12 +468,7 @@ async def test_non_original_admin_operation_is_refused(
     hook = DiscordForbiddenHook(bot=ingress.bot, gateway=ingress.gateway, native=ingress.native)
     with pytest.raises(ValidationError):
         await hook.discord_overwrite_edge(
-            scope=Scope(
-                tenant_id=str(ingress.tenant_id),
-                account_id=str(ingress.account_id),
-                principal_id="qa-admin:100",
-                authorization_id="qa-offline:100",
-            ),
+            scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
             owned_workspace_id="100",
             owned_channel_id="101",
             source={"do": "admin", "tool": "discord_overwrite", "args": bad_args},
@@ -506,12 +482,7 @@ async def test_concurrent_overwrites_and_reuse_are_refused(ingress: OwnedIngress
 
     async def bind_again() -> OverwriteReceipt:
         return await hook.discord_overwrite_edge(
-            scope=Scope(
-                tenant_id=str(ingress.tenant_id),
-                account_id=str(ingress.account_id),
-                principal_id="qa-admin:100",
-                authorization_id="qa-offline:100",
-            ),
+            scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
             owned_workspace_id="100",
             owned_channel_id="101",
             source={
@@ -690,11 +661,8 @@ async def test_every_reachable_runtime_dependency_refused_before_observation(
             ingress.bot.runtime = bad
             with pytest.raises(ValueError):
                 await hook.discord_overwrite_edge(
-                    scope=Scope(
-                        tenant_id=str(ingress.tenant_id),
-                        account_id=str(ingress.account_id),
-                        principal_id="qa-admin:100",
-                        authorization_id="qa-offline:100",
+                    scope=_scope(
+                        tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)
                     ),
                     owned_workspace_id="100",
                     owned_channel_id="101",
@@ -776,11 +744,8 @@ async def test_replaced_runtime_after_await_is_refused_before_receipt(
             monkeypatch.setattr(hook_module, "current_backend", replace_after_read)
             with pytest.raises(ValueError, match="absent injected"):
                 await hook.discord_overwrite_edge(
-                    scope=Scope(
-                        tenant_id=str(ingress.tenant_id),
-                        account_id=str(ingress.account_id),
-                        principal_id="qa-admin:100",
-                        authorization_id="qa-offline:100",
+                    scope=_scope(
+                        tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)
                     ),
                     owned_workspace_id="100",
                     owned_channel_id="101",

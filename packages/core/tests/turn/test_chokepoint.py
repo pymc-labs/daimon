@@ -9,7 +9,6 @@ must never import `daimon.adapters.*`.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -22,22 +21,17 @@ import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core.config import McpSettings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import FundingMode
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import Admission, admit
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
-from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat, plain_turn_deps
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import run_prepared
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
@@ -128,30 +122,9 @@ def _deps(
     defaults_root: Path,
     router: MARouter,
 ) -> TurnDeps:
-    return TurnDeps(
-        anthropic=build_fake_anthropic(router.dispatch),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=defaults_root,
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
+    return plain_turn_deps(
+        build_fake_anthropic(router.dispatch), sessionmaker, defaults_root=defaults_root
     )
-
-
-async def _reseed() -> str:
-    return "full history reseed"
-
-
-def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
-    return RecordingLifecycle()
 
 
 @pytest.mark.parametrize("funding_mode", ["prepaid", "operator_funded"])
@@ -181,16 +154,7 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
 
     # --- Stage one: admit() ---
-    admission = await admit(
-        deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform=platform,
-        external_user_id="user-1",
-        channel_id="chan-1",
-        now=_NOW,
-    )
+    admission = await admit_chat(deps, tenant, platform=platform, now=_NOW)
     assert isinstance(admission, Admission), "admit() must return a real Admission"
 
     # --- (simulated platform step): resolve the caller's session_account_id ---
@@ -210,19 +174,8 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     assert isinstance(prepared, PreparedTurn), "bind_session() must return a real PreparedTurn"
 
     # --- Stage three: run_prepared_turn() ---
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform=platform,
-        thread_id="thread-e2e",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
+    outcome = await run_prepared(
+        deps, prepared, tenant_id=tenant.id, platform=platform, thread_id="thread-e2e"
     )
 
     assert (outcome.state.error is not None) == failure

@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 from daimon.core.stores import web_logins as logins_store
@@ -24,6 +25,9 @@ from daimon.testing.factories import make_tenant, make_web_person
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2030, 1, 1, 12, tzinfo=UTC)
+
+_disconnect_account = partial(disconnect_account, provider="slack", now=NOW)
+
 TOKEN = b"t" * 32
 Factory = async_sessionmaker[AsyncSession]
 
@@ -259,13 +263,8 @@ async def test_disconnect_removes_the_account_and_its_workspaces(
 ) -> None:
     web_session, people, g1, _ = await _connected(db_session_factory, db_session)
 
-    await disconnect_account(
-        db_session_factory,
-        web_session=web_session,
-        person=people[0],
-        provider="slack",
-        subject="T1:U1",
-        now=NOW,
+    await _disconnect_account(
+        db_session_factory, web_session=web_session, person=people[0], subject="T1:U1"
     )
 
     assert await _tenants(db_session_factory, web_session.id) == {g1}, "the Slack workspace left"
@@ -284,13 +283,8 @@ async def test_disconnect_moves_off_the_workspace_it_removes(
     async with db_session_factory() as db:
         (current,) = await people_store.get_people(db, person_ids=[switched.current_person_id])
 
-    await disconnect_account(
-        db_session_factory,
-        web_session=web_session,
-        person=current,
-        provider="slack",
-        subject="T1:U1",
-        now=NOW,
+    await _disconnect_account(
+        db_session_factory, web_session=web_session, person=current, subject="T1:U1"
     )
 
     async with db_session_factory() as db:
@@ -304,22 +298,16 @@ async def test_the_account_a_session_signed_in_with_cannot_be_disconnected(
     web_session, people, _, _ = await _connected(db_session_factory, db_session)
 
     with pytest.raises(WebSignInRefused):
-        await disconnect_account(
+        await _disconnect_account(
             db_session_factory,
             web_session=web_session,
             person=people[0],
             provider="discord",
             subject="d1",
-            now=NOW,
         )
     with pytest.raises(ConnectedAccountNotFound):
-        await disconnect_account(
-            db_session_factory,
-            web_session=web_session,
-            person=people[0],
-            provider="slack",
-            subject="T1:unknown",
-            now=NOW,
+        await _disconnect_account(
+            db_session_factory, web_session=web_session, person=people[0], subject="T1:unknown"
         )
 
 
@@ -330,13 +318,8 @@ async def test_disconnect_takes_the_account_out_of_the_logins_other_sessions(
     elsewhere, _ = await _sign_in(db_session_factory, _discord(("g1", "Acme")), now=NOW)
     assert len(await _tenants(db_session_factory, elsewhere.id)) == 2, "the other device has both"
 
-    await disconnect_account(
-        db_session_factory,
-        web_session=web_session,
-        person=people[0],
-        provider="slack",
-        subject="T1:U1",
-        now=NOW,
+    await _disconnect_account(
+        db_session_factory, web_session=web_session, person=people[0], subject="T1:U1"
     )
 
     assert await _tenants(db_session_factory, elsewhere.id) == {g1}, (
@@ -353,13 +336,8 @@ async def test_disconnect_ends_sessions_signed_in_with_the_account(
     )
     assert via_slack.login_id == web_session.login_id, "signing in with Slack joined the login"
 
-    await disconnect_account(
-        db_session_factory,
-        web_session=web_session,
-        person=people[0],
-        provider="slack",
-        subject="T1:U1",
-        now=NOW,
+    await _disconnect_account(
+        db_session_factory, web_session=web_session, person=people[0], subject="T1:U1"
     )
 
     async with db_session_factory() as db:
@@ -492,13 +470,8 @@ async def test_connect_and_disconnect_are_refused_once_the_sessions_own_account_
             now=NOW,
         )
     with pytest.raises(WebSignInRefused, match="Sign in again"):
-        await disconnect_account(
-            db_session_factory,
-            web_session=web_session,
-            person=people[0],
-            provider="slack",
-            subject="T1:U1",
-            now=NOW,
+        await _disconnect_account(
+            db_session_factory, web_session=web_session, person=people[0], subject="T1:U1"
         )
 
 

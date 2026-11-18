@@ -16,7 +16,6 @@ from typing import Any
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import (
     DeliverableFile,
     NoticedFiles,
@@ -28,6 +27,7 @@ from daimon.core.output_delivery import (
     sweep_outputs,
 )
 from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
@@ -63,14 +63,8 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
             return list_response([])
         return list_response(
             [
-                FileMetadata(
-                    id="file_late",
-                    created_at=NOW,
-                    filename="report.csv",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_late", created_at=NOW, filename="report.csv", size_bytes=4
                 ).model_dump(mode="json")
             ]
         )
@@ -121,15 +115,9 @@ async def test_quiet_time_counts_toward_the_settle_floor(
     async def sleep(delay: float) -> None:
         delays.append(delay)
 
-    row = FileMetadata(
-        id="file_a",
-        created_at=NOW,
-        filename="a.txt",
-        mime_type="text/plain",
-        size_bytes=1,
-        type="file",
-        downloadable=True,
-    ).model_dump(mode="json")
+    row = file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=1).model_dump(
+        mode="json"
+    )
     router = MARouter()
     router.add("GET", r"/v1/files", lambda request, match: list_response([row] * files))
     router.add("GET", r"/v1/files/([^/]+)/content", lambda r, m: httpx.Response(200, content=b"a"))
@@ -162,26 +150,14 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
         nonlocal polls
         polls += 1
         rows = [
-            FileMetadata(
-                id="file_a",
-                created_at=NOW,
-                filename="early.txt",
-                mime_type="text/plain",
-                size_bytes=5,
-                type="file",
-                downloadable=True,
-            ).model_dump(mode="json")
+            file_meta(id="file_a", created_at=NOW, filename="early.txt", size_bytes=5).model_dump(
+                mode="json"
+            )
         ]
         if polls >= 3:
             rows.append(
-                FileMetadata(
-                    id="file_b",
-                    created_at=NOW,
-                    filename="late.txt",
-                    mime_type="text/plain",
-                    size_bytes=5,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_b", created_at=NOW, filename="late.txt", size_bytes=5
                 ).model_dump(mode="json")
             )
         return list_response(rows)
@@ -248,23 +224,19 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_env",
                     created_at=NOW,
                     filename=".env",
-                    mime_type="text/plain",
                     size_bytes=128,
-                    type="file",
                     downloadable=False,
                 ).model_dump(mode="json"),
-                FileMetadata(
+                file_meta(
                     id="file_chart",
                     created_at=NOW,
                     filename="chart.png",
                     mime_type="image/png",
                     size_bytes=64,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
             ]
         )
@@ -311,24 +283,8 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
-                id="file_a",
-                created_at=NOW,
-                filename="a.txt",
-                mime_type="text/plain",
-                size_bytes=3,
-                type="file",
-                downloadable=True,
-            ),
-            FileMetadata(
-                id="file_b",
-                created_at=NOW,
-                filename="b.txt",
-                mime_type="text/plain",
-                size_bytes=3,
-                type="file",
-                downloadable=True,
-            ),
+            file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=3),
+            file_meta(id="file_b", created_at=NOW, filename="b.txt", size_bytes=3),
         ]
         return list_response([row.model_dump(mode="json") for row in rows if row.id not in deleted])
 
@@ -374,24 +330,12 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_a",
-                    created_at=NOW,
-                    filename="a.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_b",
-                    created_at=NOW,
-                    filename="b.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_a", created_at=NOW, filename="a.txt", size_bytes=3).model_dump(
+                    mode="json"
+                ),
+                file_meta(id="file_b", created_at=NOW, filename="b.txt", size_bytes=3).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -438,14 +382,12 @@ async def test_sweep_skips_oversize_file_with_notice_and_keeps_entry() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.parquet",
                     mime_type="application/octet-stream",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         )
@@ -491,24 +433,16 @@ def _oversize_then_normal_client(
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="render.mp4",
                     mime_type="video/mp4",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_ok",
-                    created_at=NOW,
-                    filename="ok.txt",
-                    mime_type="text/plain",
-                    size_bytes=2,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_ok", created_at=NOW, filename="ok.txt", size_bytes=2).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -765,24 +699,16 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="huge.bin",
                     mime_type="application/octet-stream",
                     size_bytes=11,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_ok",
-                    created_at=NOW,
-                    filename="ok.txt",
-                    mime_type="text/plain",
-                    size_bytes=2,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json"),
+                file_meta(id="file_ok", created_at=NOW, filename="ok.txt", size_bytes=2).model_dump(
+                    mode="json"
+                ),
             ]
         )
 
@@ -831,14 +757,8 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_empty",
-                    created_at=NOW,
-                    filename="empty.txt",
-                    mime_type="text/plain",
-                    size_bytes=0,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_empty", created_at=NOW, filename="empty.txt", size_bytes=0
                 ).model_dump(mode="json")
             ]
         )
@@ -885,23 +805,11 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_bad",
-                    created_at=NOW,
-                    filename="bad.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_bad", created_at=NOW, filename="bad.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_good",
-                    created_at=NOW,
-                    filename="good.txt",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_good", created_at=NOW, filename="good.txt", size_bytes=4
                 ).model_dump(mode="json"),
             ]
         )
@@ -944,23 +852,11 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_offered",
-                    created_at=NOW,
-                    filename="offered.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_offered", created_at=NOW, filename="offered.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_posted",
-                    created_at=NOW,
-                    filename="posted.txt",
-                    mime_type="text/plain",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_posted", created_at=NOW, filename="posted.txt", size_bytes=4
                 ).model_dump(mode="json"),
             ]
         )
@@ -1043,23 +939,11 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         return list_response(
             [
-                FileMetadata(
-                    id="file_first",
-                    created_at=NOW,
-                    filename="first.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_first", created_at=NOW, filename="first.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_second",
-                    created_at=NOW,
-                    filename="second.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_second", created_at=NOW, filename="second.txt", size_bytes=3
                 ).model_dump(mode="json"),
             ]
         )
@@ -1102,23 +986,19 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         rows = [
-            FileMetadata(
+            file_meta(
                 id="file_bundle",
                 created_at=NOW,
                 filename="daimon-handoff-0f9d1c4e.tar.gz",
                 mime_type="application/gzip",
                 size_bytes=2048,
-                type="file",
-                downloadable=True,
             ),
-            FileMetadata(
+            file_meta(
                 id="file_report",
                 created_at=NOW,
                 filename="report.csv",
                 mime_type="text/csv",
                 size_bytes=3,
-                type="file",
-                downloadable=True,
             ),
         ]
         return list_response([row.model_dump(mode="json") for row in rows if row.id not in deleted])
@@ -1167,14 +1047,12 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     deleted: set[str] = set()
 
     def on_list(request: httpx.Request, match: re.Match[str]) -> httpx.Response:
-        row = FileMetadata(
+        row = file_meta(
             id="file_bundle",
             created_at=NOW,
             filename="daimon-handoff-0f9d1c4e.tar.gz",
             mime_type="application/gzip",
             size_bytes=4,
-            type="file",
-            downloadable=True,
         )
         return list_response([] if row.id in deleted else [row.model_dump(mode="json")])
 
@@ -1218,14 +1096,12 @@ async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
 
     names = ["first.pdf", "second.png"]
     listing = [
-        FileMetadata(
+        file_meta(
             id=f"file_{index}",
             created_at=NOW,
             filename=name,
             mime_type="application/octet-stream",
             size_bytes=3,
-            type="file",
-            downloadable=True,
         ).model_dump(mode="json")
         for index, name in enumerate(names)
     ]

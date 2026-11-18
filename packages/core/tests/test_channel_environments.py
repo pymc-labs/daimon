@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 
 import httpx
 import pytest
@@ -51,6 +52,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+_save_scope_environment = partial(save_scope_environment, platform="discord", surface="panel")
+
 
 async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
     db_session: AsyncSession,
@@ -59,23 +62,19 @@ async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
     actor = await make_account(db_session, tenant=tenant)
     scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="c1")
 
-    first = await save_scope_environment(
+    first = await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id="c1",
         environment_name="science",
         actor_account_id=actor.id,
-        platform="discord",
-        surface="panel",
     )
-    second = await save_scope_environment(
+    second = await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id="c1",
         environment_name="gpu",
         actor_account_id=actor.id,
-        platform="discord",
-        surface="panel",
     )
     resolved = await resolve(
         db_session,
@@ -90,14 +89,12 @@ async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
     )
     assert resolved.agent_name == "daimon", "an environment-only row leaves the agent alone"
 
-    cleared = await save_scope_environment(
+    cleared = await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id="c1",
         environment_name=None,
         actor_account_id=actor.id,
-        platform="discord",
-        surface="panel",
     )
     assert cleared == "gpu", "clearing reports what it removed"
     assert await get_scope(db_session, scope=scope) is None, (
@@ -118,14 +115,12 @@ async def test_clearing_a_channel_environment_keeps_its_agent(db_session: AsyncS
         db_session, scope=scope, tenant_id=tenant.id, agent_name="alpha", environment_name="gpu"
     )
 
-    await save_scope_environment(
+    await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id="c1",
         environment_name=None,
         actor_account_id=None,
-        platform="discord",
-        surface="panel",
     )
     row = await get_scope(db_session, scope=scope)
 
@@ -138,23 +133,19 @@ async def test_save_scope_environment_without_a_channel_writes_the_tenant_defaul
 ) -> None:
     tenant = await make_tenant(db_session)
 
-    previous = await save_scope_environment(
+    previous = await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id=None,
         environment_name="shared",
         actor_account_id=None,
-        platform="discord",
-        surface="panel",
     )
-    noop = await save_scope_environment(
+    noop = await _save_scope_environment(
         db_session,
         tenant_id=tenant.id,
         channel_id="c9",
         environment_name=None,
         actor_account_id=None,
-        platform="discord",
-        surface="panel",
     )
     row = await get_scope(db_session, scope=TenantScopeRef(tenant_id=tenant.id))
 

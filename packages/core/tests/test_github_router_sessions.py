@@ -50,7 +50,7 @@ from daimon.core.purge import purge_account
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores import github_app_installations, github_issued_tokens
 from daimon.core.stores import github_router_sessions as router_sessions
-from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import SecretStr
 from sqlalchemy import select, update
@@ -201,13 +201,8 @@ async def test_chat_session_is_live_while_its_thread_session_is_live(
     record, _ = await _record(db_session, tenant_id)
     # Managed Agents connects while it creates the session, before the row exists.
     assert await router_sessions.is_session_live(db_session, record)
-    await create_thread_session(
-        db_session,
-        tenant_id=tenant_id,
-        platform="discord",
-        thread_id="thread-1",
-        account_id=uuid.uuid4(),
-        ma_session_id=SESSION_ID,
+    await new_thread_session(
+        db_session, tenant_id=tenant_id, thread_id="thread-1", ma_session_id=SESSION_ID
     )
     assert await router_sessions.is_session_live(db_session, record)
     await db_session.execute(
@@ -259,13 +254,8 @@ async def test_live_session_of_another_tenant_does_not_count(db_session: AsyncSe
     other_tenant = await _tenant(db_session)
     record, _ = await _record(db_session, tenant_id)
     for tenant, thread in ((tenant_id, "thread-own"), (other_tenant, "thread-other")):
-        await create_thread_session(
-            db_session,
-            tenant_id=tenant,
-            platform="discord",
-            thread_id=thread,
-            account_id=uuid.uuid4(),
-            ma_session_id=SESSION_ID,
+        await new_thread_session(
+            db_session, tenant_id=tenant, thread_id=thread, ma_session_id=SESSION_ID
         )
     await db_session.execute(
         update(ThreadSession)
@@ -571,12 +561,10 @@ async def _routed_session(
             session_id=SESSION_ID,
         )
     async with factory.begin() as session:
-        await create_thread_session(
+        await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="two-installations",
-            account_id=uuid.uuid4(),
             ma_session_id=SESSION_ID,
             effective_config=SessionSnapshot.model_validate(
                 {

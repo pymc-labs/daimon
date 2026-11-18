@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,6 +32,14 @@ from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
 from daimon.testing.slack_notices import shown_text
 from slack_sdk.web.async_client import AsyncWebClient
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
+)
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -152,14 +161,7 @@ async def test_always_click_checks_admin_then_claims_and_saves(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="C1",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="C1"),
         }
     )
     subject = AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2"))
@@ -195,14 +197,7 @@ async def test_always_click_refuses_nonadmins_without_settling(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="C1",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="C1"),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -242,13 +237,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     posted = confirmation_module._PostedCard(
@@ -288,13 +277,7 @@ async def test_always_role_check_loses_to_deny_and_saves_nothing(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     started = asyncio.Event()
@@ -337,13 +320,7 @@ async def test_stale_always_click_approves_once_and_notifies_clicker(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -807,13 +784,7 @@ async def test_blocked_always_save_does_not_block_retirement(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards = SlackConfirmationCards()
@@ -854,13 +825,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards = SlackConfirmationCards()

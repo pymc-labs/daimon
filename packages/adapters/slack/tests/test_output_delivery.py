@@ -20,7 +20,6 @@ import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
 from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.output_delivery import (
     SLACK_MAX_BYTES_PER_FILE,
@@ -29,6 +28,7 @@ from daimon.adapters.slack.output_delivery import (
 )
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from slack_sdk.web.async_client import AsyncWebClient
@@ -93,14 +93,8 @@ async def test_delivery_uploads_via_three_request_flow_without_content_type(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
-                    id="file_report",
-                    created_at=NOW,
-                    filename="report",
-                    mime_type="text/plain",
-                    size_bytes=11,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_report", created_at=NOW, filename="report", size_bytes=11
                 ).model_dump(mode="json")
             ]
         ),
@@ -170,14 +164,12 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_one",
                     created_at=NOW,
                     filename="chart.png",
                     mime_type="image/png",
                     size_bytes=9,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -236,14 +228,12 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_one",
                     created_at=NOW,
                     filename="report.csv",
                     mime_type="text/csv",
                     size_bytes=9,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -302,14 +292,12 @@ async def test_delivery_posts_abort_notice_once_per_thread_and_logs_once_per_wor
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_one",
                     created_at=NOW,
                     filename="chart.png",
                     mime_type="image/png",
                     size_bytes=9,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -386,23 +374,11 @@ async def test_delivery_continues_after_bytes_post_failure_on_one_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
-                    id="file_first",
-                    created_at=NOW,
-                    filename="a.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_first", created_at=NOW, filename="a.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_second",
-                    created_at=NOW,
-                    filename="b.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_second", created_at=NOW, filename="b.txt", size_bytes=3
                 ).model_dump(mode="json"),
             ]
         ),
@@ -465,23 +441,11 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
-                    id="file_first",
-                    created_at=NOW,
-                    filename="a.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_first", created_at=NOW, filename="a.txt", size_bytes=3
                 ).model_dump(mode="json"),
-                FileMetadata(
-                    id="file_second",
-                    created_at=NOW,
-                    filename="b.txt",
-                    mime_type="text/plain",
-                    size_bytes=3,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id="file_second", created_at=NOW, filename="b.txt", size_bytes=3
                 ).model_dump(mode="json"),
             ]
         ),
@@ -535,14 +499,12 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="big data.bin",
                     mime_type="application/octet-stream",
                     size_bytes=SLACK_MAX_BYTES_PER_FILE + 1,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -650,14 +612,12 @@ async def test_a_file_at_the_slack_cap_is_downloaded_and_uploaded(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_big",
                     created_at=NOW,
                     filename="big",
                     mime_type="application/octet-stream",
                     size_bytes=SLACK_MAX_BYTES_PER_FILE,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -716,14 +676,12 @@ def _abort_delivery_client(fake_slack_web_client: Any) -> Any:
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_one",
                     created_at=NOW,
                     filename="chart.png",
                     mime_type="image/png",
                     size_bytes=9,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -866,14 +824,12 @@ def _per_session_files(files: dict[str, list[tuple[str, int]]]) -> Any:
         session_id = request.url.params["scope_id"]
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=f"file_{session_id}_{index}",
                     created_at=NOW,
                     filename=filename,
                     mime_type="text/csv",
                     size_bytes=size,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
                 for index, (filename, size) in enumerate(files[session_id])
                 if f"file_{session_id}_{index}" not in deleted

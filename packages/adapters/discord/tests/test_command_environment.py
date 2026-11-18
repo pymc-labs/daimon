@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -16,9 +15,7 @@ from daimon.core.config import (
     EnvironmentSettings,
     Settings,
 )
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
-from daimon.core.scope import DeploymentDefault
+from daimon.testing.discord_builders import discord_runtime
 from discord import app_commands
 from discord.ext import commands
 from pydantic import PostgresDsn, SecretStr
@@ -36,15 +33,8 @@ async def _ready_bot(
         environment=EnvironmentSettings(name=name),
         discord=DiscordSettings(bot_token=SecretStr("test"), command_guild_ids=guild_ids),
     )
-    runtime = DiscordRuntime(
-        settings=settings,
-        anthropic=AsyncMock(),
-        sessionmaker=MagicMock(),
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        turn_deps=MagicMock(),
+    runtime = discord_runtime(
+        settings=settings, anthropic=AsyncMock(), sessionmaker=MagicMock(), turn_deps=MagicMock()
     )
     bot = make_bot(runtime)
     bot._connection.application_id = 99  # pyright: ignore[reportPrivateUsage]

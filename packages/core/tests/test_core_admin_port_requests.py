@@ -4,7 +4,7 @@ import contextlib
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal, Self, cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -24,6 +24,8 @@ from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .shared_fakes import SessionFactory
 
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
@@ -321,14 +323,6 @@ async def test_account_purge_refuses_platform_and_legacy_scope_before_io(scope: 
         with pytest.raises(ScopeViolation, match="tenant scope"):
             await port.delete_session(scope, resource_ref(backend, "session", "sess", scope=scope))
     assert not transport.requests
-
-
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
 
 
 @pytest.mark.parametrize(

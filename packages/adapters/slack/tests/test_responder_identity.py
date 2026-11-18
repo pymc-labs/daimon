@@ -23,10 +23,10 @@ import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack import app as slack_app
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.testing.builders import provision_workspace
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -151,8 +151,8 @@ async def test_fresh_reseed_and_queued_messages_name_the_mentioned_account_as_th
     excluded: bool,
 ) -> None:
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=_TEAM_ID)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=_TEAM_ID, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, _TEAM_ID, platform="slack", signup_credit=Decimal("10")
     )
     app, _ = make_orchestrate_app(
         db_session_factory,

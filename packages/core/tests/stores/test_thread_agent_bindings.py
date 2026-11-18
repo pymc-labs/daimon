@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 from daimon.core._models import ThreadAgentBinding
@@ -25,6 +26,9 @@ from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_binding = partial(create_binding, platform="discord", parent_channel_id="channel")
+
+
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
 
@@ -33,11 +37,9 @@ async def test_thread_wins_without_changing_environment_or_reachability(
 ) -> None:
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
-    binding = await create_binding(
+    binding = await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="setup",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
@@ -85,11 +87,10 @@ async def test_lifecycle_retains_identity_and_omits_closed_conversations(
 ) -> None:
     tenant = await make_tenant(db_session)
     for index in range(12):
-        await create_binding(
+        await _binding(
             db_session,
             tenant_id=tenant.id,
             platform="slack",
-            parent_channel_id="channel",
             thread_id=str(index),
             responder_ma_agent_id="agent_daimon",
             responder_name="daimon",
@@ -163,22 +164,18 @@ async def test_binding_location_is_unique_and_tenant_scoped(db_session: AsyncSes
     first = await make_tenant(db_session)
     second = await make_tenant(db_session)
     for tenant in (first, second):
-        await create_binding(
+        await _binding(
             db_session,
             tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel",
             thread_id="setup",
             responder_ma_agent_id="agent_daimon",
             responder_name="daimon",
         )
     with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
-            await create_binding(
+            await _binding(
                 db_session,
                 tenant_id=first.id,
-                platform="discord",
-                parent_channel_id="channel",
                 thread_id="setup",
                 responder_ma_agent_id="agent_other",
                 responder_name="other",
@@ -190,11 +187,9 @@ async def test_a_handoff_binding_is_accepted_alongside_setup_bindings(
 ) -> None:
     tenant = await make_tenant(db_session)
 
-    binding = await create_binding(
+    binding = await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="ordinary-thread",
         responder_ma_agent_id="agent_stats",
         responder_name="stats-bot",
@@ -241,20 +236,16 @@ async def test_listing_setups_never_surfaces_a_handoff_binding(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="setup-thread",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
     )
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="handoff-thread",
         responder_ma_agent_id="agent_stats",
         responder_name="stats-bot",
@@ -299,11 +290,9 @@ async def test_upsert_responder_binding_moves_a_task_on_and_clears_the_stale_tar
 ) -> None:
     """A task may be handed on again; the row follows it rather than stacking."""
     tenant = await make_tenant(db_session)
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="ordinary-thread",
         responder_ma_agent_id="agent_stats",
         responder_name="stats-bot",
@@ -344,11 +333,9 @@ async def test_upsert_responder_binding_refuses_over_a_setup_conversation(
     """Setup conversations answer as Daimon; overwriting the responder would break
     the admission path that asserts exactly that."""
     tenant = await make_tenant(db_session)
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="setup-thread",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
@@ -384,11 +371,9 @@ async def test_upsert_responder_binding_is_scoped_to_one_tenant_and_location(
 ) -> None:
     first = await make_tenant(db_session)
     second = await make_tenant(db_session)
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=second.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="ordinary-thread",
         responder_ma_agent_id="agent_other",
         responder_name="other-bot",
@@ -432,10 +417,9 @@ async def test_tenant_wide_listing_omits_handoffs_and_closed_conversations(
         ("locked", "setup"),
         ("deleted", "setup"),
     ):
-        await create_binding(
+        await _binding(
             db_session,
             tenant_id=tenant.id,
-            platform="discord",
             parent_channel_id=f"channel-{thread_id}",
             thread_id=thread_id,
             responder_ma_agent_id="agent_daimon",
@@ -472,11 +456,9 @@ async def test_tenant_wide_listing_reports_truncation_past_the_limit(
     """The caller learns more conversations exist without a second query."""
     tenant = await make_tenant(db_session)
     for index in range(4):
-        await create_binding(
+        await _binding(
             db_session,
             tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel",
             thread_id=f"setup-{index}",
             responder_ma_agent_id="agent_daimon",
             responder_name="daimon",
@@ -503,29 +485,24 @@ async def test_tenant_wide_listing_isolates_one_tenant_and_one_platform(
     """A tenant-wide read still stops at the install boundary."""
     tenant = await make_tenant(db_session, workspace_id="guild-1")
     other = await make_tenant(db_session, workspace_id="guild-2")
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="ours",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
     )
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=tenant.id,
         platform="slack",
-        parent_channel_id="channel",
         thread_id="other-platform",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
     )
-    await create_binding(
+    await _binding(
         db_session,
         tenant_id=other.id,
-        platform="discord",
-        parent_channel_id="channel",
         thread_id="other-tenant",
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
@@ -16,6 +17,8 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
+
+_load_roster = partial(load_roster, platform="discord", thread_id=None)
 
 
 def _entry(name: str, *, ma_agent_id: str = "ag_1", tier: ConfigTier | None = None) -> RosterAgent:
@@ -142,13 +145,11 @@ async def test_load_roster_marks_the_channel_default_as_answering_here(
         agent_name="zulu",
     )
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
-        platform="discord",
         channel_id="chan-1",
-        thread_id=None,
         default=DeploymentDefault(),
     )
 
@@ -199,13 +200,11 @@ async def test_load_roster_shows_a_member_only_their_side_of_an_isolated_channel
     default = DeploymentDefault()
     anthropic = build_fake_anthropic(router.dispatch)
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         anthropic,
         tenant_id=tenant.id,
-        platform="discord",
         channel_id=channel_id,
-        thread_id=None,
         default=default,
         viewer=await load_rule_viewer(
             db_session, anthropic, tenant_id=tenant.id, channel_id=channel_id, is_admin=is_admin
@@ -228,13 +227,11 @@ async def test_load_roster_reports_no_answering_agent_when_the_channel_is_unknow
         agent_name="alpha",
     )
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
-        platform="discord",
         channel_id=None,
-        thread_id=None,
         default=DeploymentDefault(agent_name="alpha"),
     )
 
@@ -271,11 +268,10 @@ async def test_load_roster_reports_the_thread_responder_when_the_thread_is_bound
         responder_name="daimon",
     )
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
-        platform="discord",
         channel_id="chan-1",
         thread_id="thread-1",
         default=DeploymentDefault(),
@@ -317,13 +313,11 @@ async def test_load_roster_reads_built_in_and_creator_stamps_from_agent_metadata
         ),
     )
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
-        platform="discord",
         channel_id=None,
-        thread_id=None,
         default=DeploymentDefault(),
     )
 
@@ -345,13 +339,11 @@ async def test_load_roster_returns_an_empty_roster_when_the_tenant_has_no_agents
     router = MARouter()
     router.add_agent_list()
 
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
-        platform="discord",
         channel_id="chan-1",
-        thread_id=None,
         default=DeploymentDefault(),
     )
 
@@ -393,13 +385,12 @@ async def test_member_roster_hides_agents_that_cannot_answer_at_its_location(
         platform=platform,
         default=DeploymentDefault(agent_name="shared"),
     )
-    roster = await load_roster(
+    roster = await _load_roster(
         db_session,
         client,
         tenant_id=tenant.id,
         platform=platform,
         channel_id=channel_id,
-        thread_id=None,
         default=DeploymentDefault(agent_name="shared"),
         viewer=viewer,
     )

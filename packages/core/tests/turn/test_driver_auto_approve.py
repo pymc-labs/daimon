@@ -63,17 +63,7 @@ async def test_auto_approve_confirms_blocked_ids_and_continues_on_same_stream() 
     ]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert final.error is None
     assert final.stop_reason is not None
@@ -113,17 +103,7 @@ async def test_auto_approve_dedups_overlapping_ids_across_consecutive_idles() ->
         ]
     ]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert final.error is None
     assert fa.beta.sessions.events.sent_events == [
@@ -167,17 +147,7 @@ async def test_auto_approve_ends_turn_when_all_requested_ids_already_confirmed()
         ]
     ]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert final.error is not None
     assert final.error.kind == "requires_action"
@@ -212,17 +182,7 @@ async def test_auto_approve_dedups_across_a_reconnect() -> None:
     fa.beta.sessions.retrieve_statuses = ["running"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.stream_calls == 2
     # One entry for the initial user.message, one for the first (only)
@@ -281,17 +241,7 @@ async def test_explicit_require_approval_behaves_identically_to_default() -> Non
         ]
     ]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=RequireApproval(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=RequireApproval())
 
     assert final.error is not None
     assert final.error.kind == "requires_action"
@@ -321,17 +271,7 @@ async def test_auto_approve_confirms_a_requires_action_discovered_via_a_clean_cl
     fa.beta.sessions.retrieve_statuses = ["idle"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.sent_events == [
         ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
@@ -362,17 +302,7 @@ async def test_auto_approve_confirms_a_requires_action_discovered_via_a_read_tim
     fa.beta.sessions.retrieve_statuses = ["idle"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.sent_events == [
         ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
@@ -402,15 +332,7 @@ async def test_auto_approve_reconnects_when_queued_confirmation_is_taken_later()
     lifecycle = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lifecycle,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
+        fa, lifecycle=lifecycle, now=_now, tool_confirmation=AutoApprove()
     )
 
     assert final.error is None
@@ -437,17 +359,7 @@ async def test_auto_approve_does_not_re_confirm_on_the_idle_branch_ids_already_c
     fa.beta.sessions.events.replay_events = [ra_idle]
     fa.beta.sessions.retrieve_statuses = ["idle", "idle", "idle"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.stream_calls == 3
     assert fa.beta.sessions.retrieve_calls == ["sess_1"] * 3
@@ -473,17 +385,7 @@ async def test_auto_approve_replay_echo_after_stale_pause_is_not_a_reask() -> No
     fa.beta.sessions.events.replay_events = [pause, echo]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert final.error is None
     assert fa.beta.sessions.events.stream_calls == 2
@@ -505,17 +407,7 @@ async def test_auto_approve_replay_echo_followed_by_reask_stops() -> None:
     fa.beta.sessions.events.replay_events = [pause, echo, acted, reask]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.stream_calls == 1
     assert len(fa.beta.sessions.events.sent_events) == 2
@@ -539,17 +431,7 @@ async def test_auto_approve_never_sends_confirmations_into_a_terminated_session(
     fa.beta.sessions.events.replay_events = [pre, ra_idle]
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.stream_calls == 1
     assert fa.beta.sessions.events.sent_events == [
@@ -579,17 +461,7 @@ async def test_require_approval_still_finalizes_a_requires_action_found_on_the_i
     fa.beta.sessions.events.replay_events = [pre, ra_idle]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=RequireApproval(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=RequireApproval())
 
     assert fa.beta.sessions.events.stream_calls == 1
     assert fa.beta.sessions.events.sent_events == [
@@ -625,17 +497,7 @@ async def test_auto_approve_eventless_reconnect_keeps_pre_approval_content_when_
     fa.beta.sessions.retrieve_statuses = ["idle"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert fa.beta.sessions.events.sent_events == [
         ("sess_1", [{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}]),
@@ -676,17 +538,7 @@ async def test_auto_approve_mid_turn_reconnect_keeps_pre_approval_content_across
     fa.beta.sessions.events.replay_events = [pre, ra_idle, post]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now, tool_confirmation=AutoApprove())
 
     assert lc.reconnects == ["connection_dropped"], "the drop must take the is_retry re-fold path"
     assert final.error is None
@@ -719,17 +571,7 @@ async def test_auto_approve_reconnect_still_drops_a_prior_turns_content_at_its_e
     fa.beta.sessions.events.replay_events = [prior, prior_done, pre, ra_idle, post]
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
-    )
+    final = await run_turn_on_leg(fa, now=_now, tool_confirmation=AutoApprove())
 
     assert final.error is None
     assert final.content == [TextBlock(kind="text", text="pre-approval text post-approval text")], (
@@ -763,14 +605,11 @@ async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_b
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
+        fa,
         session_id="sess_reused",
         user_message="second question",
         lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
         now=_now,
-        billing=_EXEMPT,
         tool_confirmation=RequireApproval(),
     )
 
@@ -805,14 +644,11 @@ async def test_require_approval_treats_a_prior_turns_requires_action_idle_as_a_b
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
+        fa,
         session_id="sess_reused",
         user_message="second question",
         lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
         now=_now,
-        billing=_EXEMPT,
         tool_confirmation=RequireApproval(),
     )
 
@@ -865,15 +701,7 @@ async def test_queued_confirmations_in_a_replay_are_not_taken_until_ma_acts() ->
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="publish",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=AutoApprove(),
+        fa, user_message="publish", now=_now, tool_confirmation=AutoApprove()
     )
 
     assert final.error is None, final.error

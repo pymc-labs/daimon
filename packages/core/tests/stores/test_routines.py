@@ -18,7 +18,6 @@ from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
     count_routines_for_principal,
-    create_routine,
     delete_for_principal,
     delete_routine,
     get_first_routine_for_principal,
@@ -29,6 +28,7 @@ from daimon.core.stores.routines import (
     resume_routine,
     update_routine,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,15 +45,12 @@ async def test_create_routine_persists_tenant_id(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     result = await provision_tenant(db_session_factory, platform="discord", workspace_id="g1")
-    row = await create_routine(
+    row = await new_routine(
         db_session,
+        result.tenant_id,
         created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="hi",
-        tenant_id=result.tenant_id,
     )
     assert row.tenant_id == result.tenant_id, "create_routine must persist the supplied tenant_id"
 
@@ -63,14 +60,11 @@ async def test_create_routine_persists_tenant_id(
 
 
 async def test_create_round_trip(db_session: AsyncSession, tenant_id: uuid.UUID) -> None:
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="hi",
     )
     assert row.cron_expr == "*/5 * * * *", "cron_expr must be persisted"
@@ -84,30 +78,12 @@ async def test_create_round_trip(db_session: AsyncSession, tenant_id: uuid.UUID)
 async def test_archived_tenant_routine_is_not_claimed(db_session: AsyncSession) -> None:
     now = datetime(2026, 10, 9, 12, tzinfo=UTC)
     tenant = await make_tenant(db_session)
-    archived = await create_routine(
-        db_session,
-        tenant_id=tenant.id,
-        created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="run",
-        next_fire_at=now - timedelta(minutes=1),
+    archived = await new_routine(
+        db_session, tenant, created_by_user_id="u1", next_fire_at=now - timedelta(minutes=1)
     )
     await db_session.execute(update(Tenant).where(Tenant.id == tenant.id).values(archived_at=now))
     live_tenant = await make_tenant(db_session, workspace_id="live-routine-claim")
-    live = await create_routine(
-        db_session,
-        tenant_id=live_tenant.id,
-        created_by_user_id="u2",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="run",
-        next_fire_at=now,
-    )
+    live = await new_routine(db_session, live_tenant, created_by_user_id="u2", next_fire_at=now)
     claimed = await claim_due_fireable(db_session, now=now, limit=1)
     assert [row.id for row in claimed] == [live.id], (
         "archived rows must not consume the claim limit"
@@ -120,26 +96,8 @@ async def test_archived_tenant_routine_is_not_claimed(db_session: AsyncSession) 
 async def test_list_for_tenant_filters(db_session: AsyncSession) -> None:
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
-    await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m1",
-    )
-    await create_routine(
-        db_session,
-        tenant_id=tenant_b.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m2",
-    )
+    await new_routine(db_session, tenant_a, trigger_message="m1")
+    await new_routine(db_session, tenant_b, trigger_message="m2")
 
     tenant_a_rows = await list_routines_for_tenant(db_session, tenant_id=tenant_a.id)
     assert len(tenant_a_rows) == 1, "list must return only tenant_a's routines"
@@ -147,16 +105,7 @@ async def test_list_for_tenant_filters(db_session: AsyncSession) -> None:
 
 
 async def test_update_modifies_fields(db_session: AsyncSession, tenant_id: uuid.UUID) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="orig",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="orig")
     updated = await update_routine(
         db_session,
         row.id,
@@ -177,16 +126,7 @@ async def test_update_modifies_fields(db_session: AsyncSession, tenant_id: uuid.
 async def test_update_agent_id_and_next_fire_at(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="orig",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="orig")
     new_fire_at = datetime(2026, 6, 1, 0, 0, tzinfo=UTC)
     updated = await update_routine(
         db_session,
@@ -208,16 +148,7 @@ async def test_update_agent_id_and_next_fire_at(
 async def test_update_with_no_kwargs_returns_unchanged_row(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="orig",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="orig")
     returned = await update_routine(
         db_session, row.id, edited_by=row.created_by_user_id, tenant_id=tenant_id
     )
@@ -228,16 +159,7 @@ async def test_update_with_no_kwargs_returns_unchanged_row(
 
 
 async def test_delete_removes_row(db_session: AsyncSession, tenant_id: uuid.UUID) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="m")
     deleted = await delete_routine(db_session, row.id, tenant_id=tenant_id)
     assert deleted is True, "delete returns True when a row was removed"
 
@@ -251,16 +173,7 @@ async def test_delete_removes_row(db_session: AsyncSession, tenant_id: uuid.UUID
 async def test_record_result_clears_last_error_on_success(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="m")
     # First, set an error.
     await record_result(db_session, row.id, tail=None, error="boom")
     err_row = await get_routine(db_session, row.id, tenant_id=tenant_id)
@@ -285,16 +198,7 @@ async def test_routine_persists_across_session_reopen(
     fresh AsyncSession bound to the same connection. Proves persistence past
     session lifecycle.
     """
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="durable",
-    )
+    row = await new_routine(db_session, tenant_id, trigger_message="durable")
     await db_session.commit()
     bind = db_session.bind
     await db_session.close()
@@ -312,16 +216,8 @@ async def test_claim_due_fireable_picks_routine_in_window(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-        next_fire_at=now - timedelta(minutes=1),
+    row = await new_routine(
+        db_session, tenant_id, trigger_message="m", next_fire_at=now - timedelta(minutes=1)
     )
     claimed = await claim_due_fireable(db_session, now=now, max_age=timedelta(minutes=15), limit=20)
     assert len(claimed) == 1, "routine due within window must be claimed"
@@ -341,27 +237,11 @@ async def test_claim_excludes_too_old_or_future(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="too-old",
-        next_fire_at=now - timedelta(minutes=30),
+    await new_routine(
+        db_session, tenant_id, trigger_message="too-old", next_fire_at=now - timedelta(minutes=30)
     )
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="future",
-        next_fire_at=now + timedelta(minutes=30),
+    await new_routine(
+        db_session, tenant_id, trigger_message="future", next_fire_at=now + timedelta(minutes=30)
     )
     claimed = await claim_due_fireable(db_session, now=now, max_age=timedelta(minutes=15), limit=20)
     assert claimed == [], "claim window [now-15m, now] must exclude older and future rows"
@@ -371,17 +251,7 @@ async def test_advance_stale_recovers_orphans(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     now = datetime(2026, 5, 8, 12, 0, 0, tzinfo=UTC)
-    orphan = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="orphan",
-        next_fire_at=None,
-    )
+    orphan = await new_routine(db_session, tenant_id, trigger_message="orphan", next_fire_at=None)
     touched = await advance_stale(db_session, now=now, max_age=timedelta(minutes=15), limit=200)
     assert touched == 1, "advance_stale must touch the one orphan"
 
@@ -401,37 +271,10 @@ async def test_delete_for_principal_removes_routines_matching_tenant_id_and_exte
     tenant_id: uuid.UUID,
 ) -> None:
     # principal A: two routines in the tenant
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_a",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="A1",
-    )
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_a",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="A2",
-    )
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_a", trigger_message="A1")
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_a", trigger_message="A2")
     # principal B: one routine in same tenant — must survive
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_b",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="B1",
-    )
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_b", trigger_message="B1")
 
     rowcount = await delete_for_principal(db_session, tenant_id=tenant_id, external_id="ext_a")
     assert rowcount == 2, "must delete only A's two routines"
@@ -454,15 +297,8 @@ async def test_delete_for_principal_does_not_match_when_tenant_id_differs(
     tenant_id: uuid.UUID,
 ) -> None:
     other_tenant = await make_tenant(db_session)
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_a",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="tenant-only",
+    await new_routine(
+        db_session, tenant_id, created_by_user_id="ext_a", trigger_message="tenant-only"
     )
     rowcount = await delete_for_principal(
         db_session, tenant_id=other_tenant.id, external_id="ext_a"
@@ -492,26 +328,8 @@ async def test_count_routines_for_principal_counts_rows_when_present(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_c",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="c1",
-    )
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_c",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="c2",
-    )
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_c", trigger_message="c1")
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_c", trigger_message="c2")
     count = await count_routines_for_principal(db_session, tenant_id=tenant_id, external_id="ext_c")
     assert count == 2, "both seeded routines for ext_c must be counted"
 
@@ -530,16 +348,7 @@ async def test_get_first_routine_for_principal_returns_row_when_present(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="ext_d",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="first",
-    )
+    await new_routine(db_session, tenant_id, created_by_user_id="ext_d", trigger_message="first")
     row = await get_first_routine_for_principal(
         db_session, tenant_id=tenant_id, external_id="ext_d"
     )
@@ -556,16 +365,8 @@ async def test_pause_routine_clears_next_fire_at(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     future = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="*/5 * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-        next_fire_at=future,
+    row = await new_routine(
+        db_session, tenant_id, cron_expr="*/5 * * * *", trigger_message="m", next_fire_at=future
     )
     paused = await pause_routine(db_session, row.id, tenant_id=tenant_id)
     assert paused is not None, "pause_routine must return the updated row"
@@ -588,14 +389,10 @@ async def test_pause_routine_unknown_id_returns_none(
 async def test_pause_routine_idempotent_on_already_paused(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
+        tenant_id,
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="m",
         enabled=False,
         next_fire_at=None,
@@ -609,14 +406,10 @@ async def test_pause_routine_idempotent_on_already_paused(
 async def test_resume_routine_recomputes_next_fire_at(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
+        tenant_id,
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="m",
         enabled=False,
         next_fire_at=None,
@@ -641,16 +434,8 @@ async def test_resume_routine_unknown_id_returns_none(
 
 async def test_paused_routine_not_claimed(db_session: AsyncSession, tenant_id: uuid.UUID) -> None:
     now = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="claim-me",
-        next_fire_at=now - timedelta(minutes=1),
+    row = await new_routine(
+        db_session, tenant_id, trigger_message="claim-me", next_fire_at=now - timedelta(minutes=1)
     )
     claimed_before = await claim_due_fireable(
         db_session, now=now, max_age=timedelta(minutes=15), limit=20
@@ -689,15 +474,8 @@ async def test_routines_tenant_isolation(db_session: AsyncSession) -> None:
     tenant_b = await make_tenant(db_session)
 
     # Write under tenant_a
-    await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id="u1",
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="*/5 * * * *",
-        timezone_="UTC",
-        trigger_message="hi",
+    await new_routine(
+        db_session, tenant_a, created_by_user_id="u1", cron_expr="*/5 * * * *", trigger_message="hi"
     )
 
     # Read under tenant_a — sees own row
@@ -709,14 +487,12 @@ async def test_routines_tenant_isolation(db_session: AsyncSession) -> None:
     assert len(rows_b) == 0, "tenant_b read must not return tenant_a's routine"
 
     # Write under tenant_b, re-read tenant_a — still sees only its own
-    await create_routine(
+    await new_routine(
         db_session,
-        tenant_id=tenant_b.id,
+        tenant_b,
         created_by_user_id="u2",
         agent_id="agent_b",
-        agent_name="daimon",
         cron_expr="*/5 * * * *",
-        timezone_="UTC",
         trigger_message="hi",
     )
     rows_a_after = await list_routines_for_tenant(db_session, tenant_id=tenant_a.id)
@@ -731,16 +507,7 @@ async def test_routines_tenant_isolation(db_session: AsyncSession) -> None:
 async def test_get_routine_cross_tenant_returns_none(db_session: AsyncSession) -> None:
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_a, trigger_message="m")
 
     wrong_tenant = await get_routine(db_session, row.id, tenant_id=tenant_b.id)
     assert wrong_tenant is None, "get_routine with the wrong tenant_id must return None"
@@ -755,16 +522,7 @@ async def test_update_routine_cross_tenant_returns_none_and_leaves_row_unchanged
 ) -> None:
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_a, trigger_message="m")
 
     result = await update_routine(
         db_session, row.id, edited_by=row.created_by_user_id, tenant_id=tenant_b.id, enabled=False
@@ -787,16 +545,7 @@ async def test_delete_routine_cross_tenant_returns_false_and_row_survives(
 ) -> None:
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_a, trigger_message="m")
 
     deleted = await delete_routine(db_session, row.id, tenant_id=tenant_b.id)
     assert deleted is False, "delete_routine with the wrong tenant_id must return False"
@@ -810,16 +559,7 @@ async def test_pause_and_resume_routine_cross_tenant_return_none(
 ) -> None:
     tenant_a = await make_tenant(db_session)
     tenant_b = await make_tenant(db_session)
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_a.id,
-        created_by_user_id=None,
-        agent_id="agent_a",
-        agent_name="daimon",
-        cron_expr="*/5 * * * *",
-        timezone_="UTC",
-        trigger_message="m",
-    )
+    row = await new_routine(db_session, tenant_a, cron_expr="*/5 * * * *", trigger_message="m")
 
     paused_wrong = await pause_routine(db_session, row.id, tenant_id=tenant_b.id)
     assert paused_wrong is None, "pause_routine with the wrong tenant_id must return None"

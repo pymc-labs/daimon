@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from unittest.mock import MagicMock
 
 import anthropic
@@ -34,7 +35,6 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     claim_routine_deliveries,
-    create_routine,
     get_routine,
     record_result,
     settle_routine_delivery,
@@ -42,10 +42,15 @@ from daimon.core.stores.routines import (
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.web_links import WebLinks
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+
+_claim_routine_deliveries = partial(
+    claim_routine_deliveries, platform="discord", now=_NOW, lease=timedelta(minutes=2)
+)
 
 
 def _row(**overrides: object) -> RoutineRow:
@@ -456,14 +461,11 @@ async def _routine(
     session: AsyncSession, *, platform: str = "discord", destination: bool = True
 ) -> RoutineRow:
     tenant = await make_tenant(session, platform=platform)  # type: ignore[arg-type]
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="U1",
         agent_id="ag",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
         trigger_message="go",
         destination_kind="channel" if destination else None,
         destination_id="123" if destination else None,
@@ -485,12 +487,8 @@ async def test_a_pending_post_is_claimed_once_and_settled_by_its_owner(
     row = await _routine(db_session)
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
 
-    first = await claim_routine_deliveries(
-        db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-    )
-    second = await claim_routine_deliveries(
-        db_session, platform="discord", owner="b", now=_NOW, lease=timedelta(minutes=2)
-    )
+    first = await _claim_routine_deliveries(db_session, owner="a")
+    second = await _claim_routine_deliveries(db_session, owner="b")
     assert [r.id for r in first] == [row.id]
     assert second == [], "a claimed post is not handed out twice"
     assert not await settle_routine_delivery(
@@ -507,14 +505,10 @@ async def test_a_pending_post_is_claimed_once_and_settled_by_its_owner(
 async def test_an_expired_claim_is_never_reposted(db_session: AsyncSession) -> None:
     row = await _routine(db_session)
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    await claim_routine_deliveries(
-        db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-    )
+    await _claim_routine_deliveries(db_session, owner="a")
 
     later = _NOW + timedelta(minutes=5)
-    again = await claim_routine_deliveries(
-        db_session, platform="discord", owner="b", now=later, lease=timedelta(minutes=2)
-    )
+    again = await _claim_routine_deliveries(db_session, owner="b", now=later)
 
     assert again == []
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
@@ -525,12 +519,7 @@ async def test_an_expired_claim_is_never_reposted(db_session: AsyncSession) -> N
 async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
     row = await _routine(db_session, platform="slack")
     await record_result(db_session, row.id, tail="t", error=None, delivery="pending")
-    assert (
-        await claim_routine_deliveries(
-            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-        )
-        == []
-    )
+    assert await _claim_routine_deliveries(db_session, owner="a") == []
 
 
 @pytest.mark.parametrize("claimed", [False, True])
@@ -560,9 +549,7 @@ async def test_clearing_the_destination_drops_a_pending_post(
         delivery_payload=payload,
     )
     if claimed:
-        claims = await claim_routine_deliveries(
-            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
-        )
+        claims = await _claim_routine_deliveries(db_session, owner="a")
         assert len(claims) == 1 and claims[0].delivery_status == "claimed"
     await update_routine(
         db_session,

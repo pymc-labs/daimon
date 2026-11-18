@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -10,21 +9,14 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
-from daimon.core.config import McpSettings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import admit
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import bind_session
-from daimon.core.turn.run import run_prepared_turn
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat, plain_turn_deps
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import run_prepared
 from daimon.testing.turn_router import build_turn_router
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.state.lease import Slot
@@ -41,14 +33,6 @@ from daimon.testing.factories import (  # isort: skip
     make_tenant,
     make_tenant_config,
 )
-
-
-async def _reseed() -> str:
-    return "full history reseed"
-
-
-def _recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
-    return RecordingLifecycle()
 
 
 async def test_private_anthropic_session_survives_mux_legacy_mux(
@@ -97,23 +81,13 @@ async def test_private_anthropic_session_survives_mux_legacy_mux(
         return other_requests(request)
 
     client = build_fake_anthropic(transport)
-    deps = TurnDeps(
-        anthropic=client,
-        sessionmaker=db_session_factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
+    deps = plain_turn_deps(
+        client,
+        db_session_factory,
         defaults_root=tmp_path,
-        mcp=McpSettings(),
-        billing_config=None,
         markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
         turn_path="mux",
         channel_backends=True,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
     slot: Slot | None = None
     first_mapping_id: uuid.UUID | None = None
@@ -122,11 +96,9 @@ async def test_private_anthropic_session_survives_mux_legacy_mux(
     try:
         for index, path in enumerate(("mux", "legacy", "mux")):
             path_deps = replace(deps, turn_path=path)
-            admission = await admit(
+            admission = await admit_chat(
                 path_deps,
-                origin="chat",
-                tenant_id=tenant.id,
-                requester_org=RequesterOrg.HOST,
+                tenant,
                 platform="slack",
                 external_user_id="writer",
                 channel_id="channel",
@@ -168,7 +140,7 @@ async def test_private_anthropic_session_survives_mux_legacy_mux(
                 assert prepared.mapping_id == first_mapping_id, (
                     "a path change must reuse the same thread-session row"
                 )
-            outcome = await run_prepared_turn(
+            outcome = await run_prepared(
                 path_deps,
                 prepared,
                 tenant_id=tenant.id,
@@ -176,11 +148,6 @@ async def test_private_anthropic_session_survives_mux_legacy_mux(
                 thread_id="thread",
                 external_user_id="writer",
                 user_message=f"question {index}",
-                lifecycle=RecordingLifecycle(),
-                cancel=asyncio.Event(),
-                reseed_user_message=_reseed,
-                recovery_lifecycle=_recovery_lifecycle,
-                render_interval_s=0.001,
             )
             assert outcome.state.error is None, f"{path} turn should finish: {outcome.state.error}"
             assert outcome.ma_session_id == first_session_id, "driver must use the mapped session"

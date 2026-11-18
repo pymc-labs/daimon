@@ -75,6 +75,19 @@ def _restore_structlog_config() -> Iterator[None]:  # pyright: ignore[reportUnus
         yield
 
 
+@pytest.fixture(autouse=True)
+def _cancel_background_work() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Card edits and agent face renders finish in the background; one test's stalled
+    edit or render must not hold the next test's card, database or back-off state."""
+    yield
+    faces = sys.modules.get("daimon.core.agent_identity")
+    if faces is not None:
+        faces.cancel_pending_agent_faces()
+    cards = sys.modules.get("daimon.core.posted_controls.lifecycle")
+    if cards is not None:
+        cards.cancel_pending_card_edits()
+
+
 @pytest.fixture
 def instant_routine_file_settle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run a routine fire's generated-file settle polls without waiting them out.

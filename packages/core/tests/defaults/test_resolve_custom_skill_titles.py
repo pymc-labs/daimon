@@ -5,22 +5,14 @@ from __future__ import annotations
 import uuid
 
 import httpx
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.skills import resolve_custom_skill_titles
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 
 def _skill(*, id: str, display_title: str) -> dict[str, object]:
-    return SkillListResponse(
-        id=id,
-        display_title=display_title,
-        source="custom",
-        type="custom",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        latest_version="1",
-    ).model_dump(mode="json")
+    return skill_listed(id=id, display_title=display_title).model_dump(mode="json")
 
 
 async def test_resolve_custom_skill_titles_strips_the_tenant_prefix_from_own_skills() -> None:

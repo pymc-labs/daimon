@@ -19,18 +19,15 @@ from daimon.core.channel_backend import (
     current_backend,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings, TurnSettings, load_turn_settings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault
+from daimon.core.config import TurnSettings, load_turn_settings
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import TenantRow
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.admission import Admission, admit
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.termination import TerminationReason, termination_reason
-from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import admit_chat, plain_turn_deps
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -217,36 +214,16 @@ def _deps(
         calls.append(request)
         return router.dispatch(request)
 
-    return TurnDeps(
-        anthropic=build_fake_anthropic(dispatch),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
+    return plain_turn_deps(
+        build_fake_anthropic(dispatch),
+        sessionmaker,
         defaults_root=defaults_root,
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
         channel_backends=channel_backends,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
 async def _admit(deps: TurnDeps, tenant: TenantRow, channel_id: str = "chan-1") -> Admission:
-    return await admit(
-        deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
-        external_user_id="user-1",
-        channel_id=channel_id,
-        now=_NOW,
-    )
+    return await admit_chat(deps, tenant, channel_id=channel_id, now=_NOW)
 
 
 _UNRUNNABLE = BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-5")

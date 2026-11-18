@@ -9,28 +9,17 @@ import pytest
 from daimon.core import settings_panel as panel
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import FeatureActor, read_features
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import choice, listed
 from daimon.testing.factories import make_tenant
-from pydantic import PostgresDsn, SecretStr
+from daimon.testing.shared_helpers import settings as _settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
 AGENTS = [panel.AgentChoice("a1", "Alpha"), panel.AgentChoice("a2", "Beta")]
-
-
-def _settings() -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-        }
-    )
 
 
 def _place(actor: FeatureActor, thread: str | None = None) -> FeaturePlace:

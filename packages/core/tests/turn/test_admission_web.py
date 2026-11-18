@@ -11,8 +11,9 @@ from daimon.core.errors import UserFacingError
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.turn.admission import Admission, AdmissionDenied, admit
+from daimon.core.turn.admission import Admission, AdmissionDenied
 from daimon.core.turn_hold import RequesterOrg, TurnHold
+from daimon.testing.builders import admit_chat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import _NOW, _admittable_router, _deps, _seed_admittable_tenant
@@ -31,9 +32,9 @@ async def _admit(
     home_id: str | None = None,
     role: Role = Role.USER,
 ) -> Admission:
-    return await admit(
+    return await admit_chat(
         _deps(sessionmaker=factory, defaults_root=tmp_path, router=_admittable_router(tenant)),
-        tenant_id=tenant.id,
+        tenant,
         platform="web",
         external_user_id=user,
         channel_id="web",
@@ -44,7 +45,6 @@ async def _admit(
         requester_home_id=home_id,
         surface=Surface.WEB,
         principal_platform=principal_platform,
-        origin="chat",
     )
 
 

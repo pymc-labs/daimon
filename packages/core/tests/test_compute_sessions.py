@@ -9,43 +9,22 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from daimon.core._models import TaskContinuation
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_models import ComputeResource
 from daimon.core.compute_provider import ComputeProviderError, app_name
 from daimon.core.compute_sessions import ComputeCaller, ComputeSessions
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import Role, TaskContinuationRow
+from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin, get_active_origin
 from daimon.testing.compute import FakeComputeProvider
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import SecretStr
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .shared_fakes import pending_wakes
+
 NOW = datetime(2026, 10, 28, tzinfo=UTC)
-
-
-async def pending_wakes(db, *, tenant_id, platform, thread_id):
-    """Pending wakes for one thread, including any due after the database clock.
-
-    These tests run a fake clock ahead of the database, so a wake written at
-    that clock is not yet due for `list_pending_continuations`.
-    """
-    rows = (
-        await db.execute(
-            select(TaskContinuation)
-            .where(
-                TaskContinuation.tenant_id == tenant_id,
-                TaskContinuation.platform == platform,
-                TaskContinuation.thread_id == thread_id,
-                TaskContinuation.status == "pending",
-            )
-            .order_by(TaskContinuation.created_at, TaskContinuation.id)
-        )
-    ).scalars()
-    return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
 def settings(**kwargs):

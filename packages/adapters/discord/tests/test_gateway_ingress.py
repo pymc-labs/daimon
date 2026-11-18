@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, Never
 from unittest.mock import AsyncMock
@@ -26,12 +27,10 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    Settings,
     ThreadNamingSettings,
     TurnSettings,
 )
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import scoped_config_write, tenant_ledger
 from daimon.core.stores.access_policy import (
@@ -44,6 +43,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.discord_ingress import ConcurrentCheckpoint, DiscordIngress, IngressHTTP
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -52,22 +52,12 @@ from mux.contracts.ids import Provider, Scope
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from .shared_fakes import InitOnlySettings
 
-class InitOnlySettings(Settings):
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
+_scope = partial(Scope, principal_id="qa-operator:100", authorization_id="qa-offline:100")
 
 
 @dataclasses.dataclass
@@ -170,12 +160,10 @@ async def owned(
     )
 
     deps = dataclasses.replace(deps, turn_runtime_factory=None, turn_runtimes={})
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=client,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=deps,
@@ -265,12 +253,7 @@ async def start(
         )
     harness = DiscordIngress(
         runtime=owned.runtime,
-        scope=Scope(
-            tenant_id=str(owned.tenant_id),
-            account_id=str(owned.account_id),
-            principal_id="qa-operator:100",
-            authorization_id="qa-offline:100",
-        ),
+        scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
         http=IngressHTTP(evidence_id="c7-owned", parent_channel_id=101, hold_first_post=True),
         native=owned.native,
         utc_clock=utc_clock,
@@ -590,12 +573,7 @@ async def test_all_database_binds_are_checked_before_gateway_allocation(
         with pytest.raises(ValueError, match="owned"):
             DiscordIngress(
                 runtime=dataclasses.replace(owned.runtime, sessionmaker=factory),
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="bad-bind", parent_channel_id=101),
                 native=owned.native,
             )
@@ -612,11 +590,9 @@ async def test_foreign_owned_fixture_binding_is_refused(owned: OwnedIngress, for
     await first.close()
     harness = DiscordIngress(
         runtime=owned.runtime,
-        scope=Scope(
+        scope=_scope(
             tenant_id=str(uuid.uuid4()) if foreign == "tenant" else str(owned.tenant_id),
             account_id=str(uuid.uuid4()) if foreign == "account" else str(owned.account_id),
-            principal_id="qa-operator:100",
-            authorization_id="qa-offline:100",
         ),
         http=IngressHTTP(evidence_id="bad-scope", parent_channel_id=101),
         native=owned.native,
@@ -665,24 +641,14 @@ async def test_reachable_nested_dependencies_refuse_before_admission(
             with pytest.raises(ValueError):
                 DiscordIngress(
                     runtime=bad,
-                    scope=Scope(
-                        tenant_id=str(owned.tenant_id),
-                        account_id=str(owned.account_id),
-                        principal_id="qa-operator:100",
-                        authorization_id="qa-offline:100",
-                    ),
+                    scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                     http=IngressHTTP(evidence_id="nested", parent_channel_id=101),
                     native=owned.native,
                 )
         elif boundary == "open":
             harness = DiscordIngress(
                 runtime=owned.runtime,
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="nested", parent_channel_id=101),
                 native=owned.native,
             )
@@ -744,12 +710,7 @@ async def test_nested_routed_bind_refused_before_bot_allocation(
                     owned.runtime,
                     turn_deps=dataclasses.replace(owned.runtime.turn_deps, sessionmaker=nested),
                 ),
-                scope=Scope(
-                    tenant_id=str(owned.tenant_id),
-                    account_id=str(owned.account_id),
-                    principal_id="qa-operator:100",
-                    authorization_id="qa-offline:100",
-                ),
+                scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                 http=IngressHTTP(evidence_id="nested-routed", parent_channel_id=101),
                 native=owned.native,
             )
@@ -824,11 +785,8 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
                 with pytest.raises(ValueError, match="absent injected"):
                     DiscordIngress(
                         runtime=bad,
-                        scope=Scope(
-                            tenant_id=str(owned.tenant_id),
-                            account_id=str(owned.account_id),
-                            principal_id="qa-operator:100",
-                            authorization_id="qa-offline:100",
+                        scope=_scope(
+                            tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)
                         ),
                         # Unheld is deliberate: pause configuration cannot authorize a runtime.
                         http=IngressHTTP(evidence_id="opaque", parent_channel_id=101),
@@ -837,12 +795,7 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
             else:
                 harness = DiscordIngress(
                     runtime=owned.runtime,
-                    scope=Scope(
-                        tenant_id=str(owned.tenant_id),
-                        account_id=str(owned.account_id),
-                        principal_id="qa-operator:100",
-                        authorization_id="qa-offline:100",
-                    ),
+                    scope=_scope(tenant_id=str(owned.tenant_id), account_id=str(owned.account_id)),
                     http=IngressHTTP(evidence_id="opaque", parent_channel_id=101),
                     native=owned.native,
                 )

@@ -12,9 +12,9 @@ from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
 from daimon.core.session_snapshot import fingerprint_identity, snapshot_from_retrieved_session
-from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_outcomes import list_for_tenant
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import select
@@ -63,12 +63,11 @@ async def test_key_is_written_to_the_session_row_and_the_turn_outcome(
     body = EvalKey.of(None, _features(), "slack").to_json()
     async with sessions() as session, session.begin():
         tenant = await make_tenant(session)
-        row = await create_thread_session(
+        row = await new_thread_session(
             session,
             tenant_id=tenant.id,
             platform="slack",
             thread_id="t",
-            account_id=uuid.uuid4(),
             ma_session_id="sess_a",
             eval_key=body,
         )

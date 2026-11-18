@@ -25,6 +25,7 @@ from daimon.core.mcp_vault import (
     ensure_agent_mcp_vault,
 )
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.shared_helpers import vault_obj as _vault_obj
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -57,17 +58,6 @@ def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
         api_key="sk-test",
         http_client=httpx.AsyncClient(transport=handler),
     )
-
-
-def _vault_obj(vault_id: str, display_name: str, created_at: str) -> dict[str, Any]:
-    return {
-        "id": vault_id,
-        "type": "vault",
-        "display_name": display_name,
-        "metadata": None,
-        "archived_at": None,
-        "created_at": created_at,
-    }
 
 
 @pytest.mark.parametrize("legacy", [False, True])

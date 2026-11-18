@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Literal, cast
 
 import httpx
@@ -44,6 +45,16 @@ from .conformance_support import TENANT as TENANT
 from .conformance_support import admission as admission
 from .conformance_support import patch_hosted
 from .conformance_support import record_usage as record_usage
+
+_bind_session_impl = partial(
+    bind_session_impl,
+    tenant_id=TENANT,
+    platform="slack",
+    external_user_id="user",
+    thread_id="thread",
+    session_account_id=ACCOUNT,
+)
+
 
 SCOPE = Scope(
     tenant_id=str(TENANT),
@@ -224,16 +235,7 @@ async def test_preparation_dispatches_before_any_anthropic_binding(
     patch_hosted(monkeypatch, prepare=hook)
     async with transport.client() as client:
         deps = deps_for_pinned_mux(client, db_session_factory)
-        result = await bind_session_impl(
-            deps,
-            admission(),
-            tenant_id=TENANT,
-            platform="slack",
-            external_user_id="user",
-            thread_id="thread",
-            session_account_id=ACCOUNT,
-            reuse_existing=True,
-        )
+        result = await _bind_session_impl(deps, admission(), reuse_existing=True)
         assert result.session_ref == SESSION and result.ma_session_id == SESSION.id
         assert len(calls) == 1 and calls[0].scope == SCOPE
         assert calls[0].admission.backend_revision == REVISION
@@ -264,16 +266,7 @@ async def test_missing_preparation_fails_before_native_binding(
             turn_path=cast(Literal["legacy", "mux"], path),
         )
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-            await bind_session_impl(
-                deps,
-                admission(),
-                tenant_id=TENANT,
-                platform="slack",
-                external_user_id="user",
-                thread_id="thread",
-                session_account_id=ACCOUNT,
-                reuse_existing=False,
-            )
+            await _bind_session_impl(deps, admission(), reuse_existing=False)
     assert not transport.requests
 
 
@@ -318,15 +311,8 @@ async def test_foreign_provider_preparation_is_refused(
     transport = ScriptedTransport()
     async with transport.client() as client:
         with pytest.raises(ScopeViolation):
-            await bind_session_impl(
-                deps_for_pinned_mux(client, db_session_factory),
-                admission(),
-                tenant_id=TENANT,
-                platform="slack",
-                external_user_id="user",
-                thread_id="thread",
-                session_account_id=ACCOUNT,
-                reuse_existing=False,
+            await _bind_session_impl(
+                deps_for_pinned_mux(client, db_session_factory), admission(), reuse_existing=False
             )
     assert not transport.requests
 
@@ -403,15 +389,8 @@ async def test_preparation_ceiling_keeps_the_host_failure_contract(
     transport = ScriptedTransport()
     async with transport.client() as client:
         with pytest.raises(TurnError) as error:
-            await bind_session_impl(
-                deps_for_pinned_mux(client, db_session_factory),
-                admission(),
-                tenant_id=TENANT,
-                platform="slack",
-                external_user_id="user",
-                thread_id="thread",
-                session_account_id=ACCOUNT,
-                reuse_existing=False,
+            await _bind_session_impl(
+                deps_for_pinned_mux(client, db_session_factory), admission(), reuse_existing=False
             )
         assert error.value.kind == "ceiling"
     assert not transport.requests
@@ -538,16 +517,7 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
         assert not requests and not deps.turn_runtimes
         if injected:
             deps = replace(deps, turn_runtimes={PROFILE: runtime})
-        result = await bind_session_impl(
-            deps,
-            admission(),
-            tenant_id=TENANT,
-            platform="slack",
-            external_user_id="user",
-            thread_id="thread",
-            session_account_id=ACCOUNT,
-            reuse_existing=True,
-        )
+        result = await _bind_session_impl(deps, admission(), reuse_existing=True)
         assert len(requests) == int(lookup and not injected)
         assert result.runtime is (runtime if lookup or injected else None)
         assert dict(deps.turn_runtimes) == ({PROFILE: runtime} if injected else {})
@@ -581,16 +551,7 @@ async def test_missing_runtime_constructor_refuses_without_provider_or_key_acces
             turn_runtime_factory=runtime_module.build_channel_runtime,
         )
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-            await bind_session_impl(
-                deps,
-                admission(),
-                tenant_id=TENANT,
-                platform="slack",
-                external_user_id="user",
-                thread_id="thread",
-                session_account_id=ACCOUNT,
-                reuse_existing=True,
-            )
+            await _bind_session_impl(deps, admission(), reuse_existing=True)
     assert not transport.requests
 
 

@@ -21,11 +21,13 @@ from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobPolicy
 from daimon.core.long_jobs import LongJobExecutor, WorkerVanished, require_admission
 from daimon.core.long_jobs_ma import worker_prompt
 from daimon.core.stores import long_jobs as store
-from daimon.core.stores.domain import FeatureTarget, TaskContinuationRow
+from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from .shared_fakes import pending_wakes
 
 NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
 LIMITS = LongJobsSettings()
@@ -35,27 +37,6 @@ async def choose(db, tenant_id, target, key, value):
     await set_feature_value(
         db, tenant_id=tenant_id, target=target, key=key, value=value, set_by=None, surface="chat"
     )
-
-
-async def pending_wakes(db, *, tenant_id, platform, thread_id):
-    """Pending wakes for one thread, including any due after the database clock.
-
-    These tests run a fake clock ahead of the database, so a wake written at
-    that clock is not yet due for `list_pending_continuations`.
-    """
-    rows = (
-        await db.execute(
-            select(TaskContinuation)
-            .where(
-                TaskContinuation.tenant_id == tenant_id,
-                TaskContinuation.platform == platform,
-                TaskContinuation.thread_id == thread_id,
-                TaskContinuation.status == "pending",
-            )
-            .order_by(TaskContinuation.created_at, TaskContinuation.id)
-        )
-    ).scalars()
-    return [TaskContinuationRow.model_validate(row) for row in rows]
 
 
 async def seed(sm, *, policy=True):

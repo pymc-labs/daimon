@@ -8,7 +8,8 @@ import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core._models import Routine
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import Connection, text, update
 from sqlalchemy.exc import IntegrityError
@@ -64,14 +65,11 @@ async def test_exact_tag_backfill_and_tenant_unique_identity(db_session):
         ("internal-routine-import-v1:not-a-uuid", None),
     ]
     rows = [
-        await create_routine(
+        await new_routine(
             db_session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
+            tenant,
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message=prompt,
             enabled=False,
         )
@@ -89,28 +87,22 @@ async def test_exact_tag_backfill_and_tenant_unique_identity(db_session):
         await get_routine(db_session, rows[0].id, tenant_id=tenant.id)
     ).source_routine_id == first
     other_tenant = await make_tenant(db_session)
-    await create_routine(
+    await new_routine(
         db_session,
-        tenant_id=other_tenant.id,
+        other_tenant,
         source_routine_id=first,
-        created_by_user_id=None,
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="new",
     )
     with pytest.raises(IntegrityError):
         async with db_session.begin_nested():
-            await create_routine(
+            await new_routine(
                 db_session,
-                tenant_id=tenant.id,
+                tenant,
                 source_routine_id=first,
-                created_by_user_id=None,
                 agent_id="ag",
-                agent_name="daimon",
                 cron_expr="0 * * * *",
-                timezone_="UTC",
                 trigger_message="duplicate",
             )
 
@@ -120,14 +112,11 @@ async def test_duplicate_legacy_tags_refuse_migration(db_session):
     tenant = await make_tenant(db_session)
     source_id = uuid.uuid4()
     for _ in range(2):
-        await create_routine(
+        await new_routine(
             db_session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
+            tenant,
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message=f"internal-routine-import-v1:{source_id}",
         )
     with pytest.raises(IntegrityError, match="uq_routines_tenant_internal_id"):

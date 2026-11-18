@@ -38,6 +38,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.testing.builders import provision_workspace
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import (
@@ -196,11 +197,8 @@ async def test_handler_persona_matrix(
     persona: Persona,
 ) -> None:
     """Mocked permission tests observe the command reply or invoke refusal."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     graph = OwnerGraphFake()
     fake = PersonaTeamsApiFake(active=persona)
@@ -250,11 +248,8 @@ async def test_message_persona_matrix(
     persona: Persona,
 ) -> None:
     """Mocked permission tests observe a real turn or a sender refusal."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
     session_id = "sesn_persona_matrix"
@@ -342,11 +337,8 @@ async def test_tool_confirmation_only_requester_can_answer(
     "no operation ... :actions:...").
     """
     db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
     session_id = "sesn_persona_approval"

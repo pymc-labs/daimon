@@ -33,10 +33,10 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_sessions import (
-    create_thread_session,
     list_orphaned_turns,
     mark_turn_active,
 )
+from daimon.testing.builders import new_thread_session
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -76,12 +76,11 @@ async def _seed_orphan(
             )
             await s.commit()
     async with db_factory() as s:
-        row = await create_thread_session(
+        row = await new_thread_session(
             s,
             tenant_id=tenant_id,
             platform="slack",
             thread_id=thread_id,
-            account_id=uuid.uuid4(),
             ma_session_id=ma_session_id,
         )
         if mark_active:

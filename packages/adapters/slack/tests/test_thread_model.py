@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 from dataclasses import MISSING, fields, replace
@@ -14,6 +13,7 @@ from daimon.adapters.slack import thread_model as module
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.thread_model_flow import ThreadOption
+from daimon.testing.shared_helpers import drain as _drain
 from daimon.testing.turn_fakes import deps_for
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
@@ -234,12 +234,6 @@ def _app() -> SlackApp:
     settings = MagicMock()
     settings.slack.max_concurrent_turns_per_tenant = 3
     return SlackApp(runtime=replace(_runtime(), settings=settings, turn_deps=deps_for()))
-
-
-async def _drain(app: SlackApp) -> None:
-    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.mark.parametrize(

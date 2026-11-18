@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 from daimon.core.defaults import apply_defaults
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -186,7 +187,6 @@ async def test_apply_prunes_seeded_rows_for_skills_no_longer_in_the_tree(
 
     Rows for skills still in the tree survive, and a dry run prunes nothing.
     """
-    from anthropic.types.beta import SkillListResponse
     from daimon.core.ma_identity import derive_tenant_uuid
     from daimon.core.stores.seeded_skills import list_seeded_skill_names, record_seeded_skill
 
@@ -213,15 +213,7 @@ async def test_apply_prunes_seeded_rows_for_skills_no_longer_in_the_tree(
         r"/v1/skills",
         lambda req, _m: httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_eda",
-                type="custom",
-                display_title="eda",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_eda", display_title="eda").model_dump(mode="json"),
         ),
     )
     client = build_fake_anthropic_http(router.dispatch)

@@ -19,8 +19,9 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import list_posts_in
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import create_routine, record_result
+from daimon.core.stores.routines import record_result
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -74,14 +75,12 @@ async def _routine(
     from daimon.core.stores.direct_messages import set_dm_enabled
 
     await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="1",
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 9 * * 1",
-        timezone_="UTC",
         trigger_message="go",
         destination_kind=destination_kind,
         destination_id=destination_id,

@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anthropic as _anthropic
 import discord
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -27,8 +26,6 @@ from daimon.core import allowance_limits
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import ResolverCache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -45,9 +42,10 @@ from daimon.core.stores.turn_card_intents import (
     TurnCardIntentRow,
     list_recoverable_turn_card_intents,
 )
-from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
+from daimon.testing.builders import new_thread_session
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_channel_budget
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import mock_settings
@@ -57,6 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
 from .harness import make_bot
+from .shared_fakes import make_channel_message as _make_channel_message
+from .shared_fakes import make_turn_deps as _make_turn_deps
 
 
 def _snapshot_of(session: BetaManagedAgentsSession) -> SessionSnapshot:
@@ -117,12 +117,10 @@ def _make_runtime(
 
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=_make_turn_deps(
@@ -132,29 +130,6 @@ def _make_runtime(
             resolver_cache=resolver_cache,
             deployment_default=deployment_default,
         ),
-    )
-
-
-def _make_turn_deps(
-    settings: MagicMock,
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    resolver_cache: ResolverCache,
-    deployment_default: DeploymentDefault,
-) -> TurnDeps:
-    """Build the TurnDeps a DiscordRuntime carries via the production
-    `build_turn_deps` helper, so tests see the same derivation build_runtime
-    does. `settings.crypto.keys` on an unconfigured MagicMock iterates empty
-    (MagicMock auto-specs `__iter__`), so fernet is None here as in the
-    pre-cutover tests."""
-    return build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
     )
 
 
@@ -182,54 +157,6 @@ class _EmptyEventList:
             return _EmptyEventPage()
 
         return _first().__await__()
-
-
-class _AsyncIter:
-    """Async iterator adapter for mocked channel/thread history."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
-
-
-def _make_channel_message(
-    *,
-    content: str = "<@999> hello",
-    guild_id: int = 123456,
-    channel_id: int = 789,
-    author_id: int = 111,
-) -> discord.Message:
-    """Mock a message in a regular text channel (not a thread)."""
-    message = MagicMock(spec=discord.Message)
-    message.content = content
-    message.author = MagicMock()
-    message.author.bot = False
-    message.author.id = author_id
-    message.guild = MagicMock(spec=discord.Guild)
-    message.guild.id = guild_id
-    # Channel is a regular text channel (not a Thread)
-    message.channel = MagicMock()
-    # Make isinstance(message.channel, discord.Thread) return False
-    # and isinstance(message.channel, discord.TextChannel) return True
-    message.channel.__class__ = discord.TextChannel
-    message.channel.id = channel_id
-    message.channel.send = AsyncMock()
-    # Stub channel.history so build_channel_context_xml can be called; empty list
-    # produces a valid <channel_context count="0"> envelope.
-    message.channel.history = MagicMock(return_value=_AsyncIter([]))
-    message.create_thread = AsyncMock()
-    message.add_reaction = AsyncMock()
-    message.attachments = []
-    message.mentions = [types.SimpleNamespace(id=999)]
-    return message
 
 
 def _make_thread_message(
@@ -2655,12 +2582,10 @@ class TestResolverSelfHeal:
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
+        runtime = discord_runtime(
             settings=settings,
             anthropic=anthropic,
             sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             turn_deps=_make_turn_deps(
@@ -2784,12 +2709,10 @@ class TestResolverSelfHeal:
         settings.thread_naming = ThreadNamingSettings(enabled=False)
         resolver_cache = new_resolver_cache()
         deployment_default = DeploymentDefault()
-        runtime = DiscordRuntime(
+        runtime = discord_runtime(
             settings=settings,
             anthropic=anthropic,
             sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
             deployment_default=deployment_default,
             resolver_cache=resolver_cache,
             turn_deps=_make_turn_deps(
@@ -2974,7 +2897,6 @@ class TestSessionReuse:
     ) -> None:
         """The drain's content override must reach a reused thread session."""
         from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -2984,11 +2906,10 @@ class TestSessionReuse:
         await db_session.commit()
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id="sesn_queued_existing"))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5555",
                 account_id=principal.account_id,
                 ma_session_id="sesn_queued_existing",
@@ -3211,7 +3132,6 @@ class TestSessionReuse:
         from daimon.core.errors import TurnError
         from daimon.core.stores.identity import get_or_create_platform_principal
         from daimon.core.stores.thread_sessions import (
-            create_thread_session,
             get_live_thread_session,
         )
         from daimon.core.turn.state import TurnState
@@ -3231,11 +3151,10 @@ class TestSessionReuse:
         old_session_id = "sesn_old_dead_001"
         async with db_session_factory() as seed_session:
             snapshot = _snapshot_of(ma_session(id=old_session_id))
-            await create_thread_session(
+            await new_thread_session(
                 seed_session,
                 ma_agent_id="ag_test",
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="5557",
                 account_id=principal.account_id,
                 ma_session_id=old_session_id,
@@ -3912,7 +3831,6 @@ class TestOwnCardIsNotContext:
         seeded_watermark: str | None,
     ) -> None:
         from daimon.core.stores.identity import get_or_create_platform_principal
-        from daimon.core.stores.thread_sessions import create_thread_session
 
         tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
         await _setup_workspace_and_config(db_session, tenant.id)
@@ -3923,11 +3841,10 @@ class TestOwnCardIsNotContext:
         if seeded_watermark is not None:
             async with db_session_factory() as seed_session:
                 snapshot = _snapshot_of(ma_session(id="sesn_card_existing"))
-                await create_thread_session(
+                await new_thread_session(
                     seed_session,
                     ma_agent_id="ag_test",
                     tenant_id=tenant.id,
-                    platform="discord",
                     thread_id="5557",
                     account_id=principal.account_id,
                     ma_session_id="sesn_card_existing",

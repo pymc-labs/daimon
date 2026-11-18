@@ -8,6 +8,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from unittest.mock import MagicMock
 
 import httpx
@@ -59,6 +60,9 @@ _CALLER_ID = "U_CALLER"
 _OTHER_ID = "U_OTHER"
 _SINCE = datetime(2025, 1, 1, tzinfo=UTC)
 _NOW = datetime(2025, 1, 15, tzinfo=UTC)
+
+_load_billing_snapshot = partial(load_billing_snapshot, since=_SINCE, now=_NOW)
+
 _CHECKOUT_URL = "https://checkout.example/abc"
 
 
@@ -299,13 +303,8 @@ async def test_load_billing_snapshot_member_reads_only_caller_data(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=False
     )
 
     assert state.is_admin is False, "a member gets the member snapshot"
@@ -320,13 +319,8 @@ async def test_load_billing_snapshot_admin_sorts_members_by_spend(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
     )
 
     assert state.is_admin is True, "an admin gets the admin snapshot"
@@ -361,13 +355,11 @@ async def test_load_billing_snapshot_names_rows_from_the_stored_names(
         names={_CALLER_ID: KnownName(display_name="Wrong platform")},
     )
 
-    state = await load_billing_snapshot(
+    state = await _load_billing_snapshot(
         db_session,
         tenant_id=tenant_id,
         platform_user_id=_CALLER_ID,
         is_admin=True,
-        since=_SINCE,
-        now=_NOW,
         platform="slack",
     )
 
@@ -390,13 +382,8 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncS
         )
     await db_session.commit()
 
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="U_MANY_000",
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id="U_MANY_000", is_admin=True
     )
 
     assert len(state.member_rows) == 25, "member rows are capped at 25"
@@ -406,13 +393,8 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncS
 async def test_load_billing_snapshot_empty_period_is_well_formed(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BILLING_EMPTY")
     await db_session.commit()
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="U_EMPTY",
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id="U_EMPTY", is_admin=False
     )
 
     assert (state.caller_spend, state.caller_turns, state.member_rows) == (0.0, 0, ()), (
@@ -534,13 +516,8 @@ async def test_load_billing_snapshot_flags_the_codes_each_viewer_may_redeem(
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PROMO")
 
     async def snapshot(is_admin: bool) -> bool:
-        state = await load_billing_snapshot(
-            db_session,
-            tenant_id=tenant.id,
-            platform_user_id=_CALLER_ID,
-            is_admin=is_admin,
-            since=_SINCE,
-            now=_NOW,
+        state = await _load_billing_snapshot(
+            db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
         )
         return state.has_redeemable_promo_code
 
@@ -568,13 +545,8 @@ async def test_load_billing_snapshot_hides_redemption_when_the_lookup_fails(
     monkeypatch.setattr("daimon.core.billing_panel.has_redeemable_promo_code", failing_lookup)
     tenant_id = await _tenant_with_usage(db_session)
 
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
     )
 
     assert state.is_admin and not state.has_redeemable_promo_code, (
@@ -604,13 +576,11 @@ async def test_load_billing_snapshot_lists_channel_budgets_for_admins_only(
     await db_session.commit()
 
     async def snapshot(is_admin: bool) -> BillingPanelState:
-        return await load_billing_snapshot(
+        return await _load_billing_snapshot(
             db_session,
             tenant_id=tenant_id,
             platform_user_id=_CALLER_ID,
             is_admin=is_admin,
-            since=_SINCE,
-            now=_NOW,
             platform="slack",
         )
 

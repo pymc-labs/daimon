@@ -12,6 +12,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 import pytest_asyncio
@@ -49,6 +50,11 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
+
+from .shared_fakes import until_lock_wait as _until_lock_wait
+
+_thread_session = partial(make_thread_session, platform="slack", thread_id="T1", channel_id="C1")
+
 
 _NOW = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 _DEFAULT = DeploymentDefault(agent_name="daimon")
@@ -172,22 +178,6 @@ async def race_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIterator[A
 
 async def _pid(session: AsyncSession) -> int:
     return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
-
-
-async def _until_lock_wait(engine: AsyncEngine, pid: int) -> None:
-    async with engine.connect() as probe:
-        for _ in range(200):
-            waiting = (
-                await probe.execute(
-                    text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
-                    {"pid": pid},
-                )
-            ).scalar_one_or_none()
-            if waiting == "Lock":
-                return
-            await probe.rollback()
-            await asyncio.sleep(0.025)
-    raise AssertionError(f"backend {pid} never waited on a lock")
 
 
 _PIN_ELSEWHERE = TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)})
@@ -793,9 +783,7 @@ async def test_an_owner_binding_is_marked_and_answers_only_its_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
@@ -833,9 +821,7 @@ async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     if spoke == "recent_turn":
         # Their turn has no session of its own yet (it is still starting).
         await create_origin(
@@ -856,14 +842,7 @@ async def test_a_thread_other_people_are_in_never_moves_to_a_private_copy(
             shared_channel=False,
         )
     else:
-        theirs = await make_thread_session(
-            db_session,
-            tenant=tenant,
-            account=other,
-            platform="slack",
-            thread_id="T1",
-            channel_id="C1",
-        )
+        theirs = await _thread_session(db_session, tenant=tenant, account=other)
         if spoke == "closed_session":
             await thread_sessions.mark_dead(db_session, id=theirs.id)
     await db_session.commit()
@@ -888,9 +867,7 @@ async def test_a_turn_long_past_with_no_session_never_blocks_the_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await create_origin(
         db_session,
         tenant_id=tenant.id,
@@ -927,13 +904,9 @@ async def test_the_owners_own_sessions_and_turns_never_count_as_someone_else(
     await _owned_copy(db_session, tenant, member.id)
     # Only the owner has ever been here: an earlier session of theirs (closed), the
     # live one, and their own turn now.
-    closed = await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    closed = await _thread_session(db_session, tenant=tenant, account=member)
     await thread_sessions.mark_dead(db_session, id=closed.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await create_origin(
         db_session,
         tenant_id=tenant.id,
@@ -970,12 +943,8 @@ async def test_a_session_with_no_account_counts_as_someone_else(
     tenant = await _seed(db_session)
     member = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
-    legacy = await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
+    legacy = await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.execute(
         update(ThreadSession).where(ThreadSession.id == legacy.id).values(account_id=None)
     )
@@ -1029,9 +998,7 @@ async def test_an_owner_thread_stops_routing_when_its_copy_changes_owner(
     member = await make_account(db_session, tenant=tenant)
     other = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)
@@ -1063,9 +1030,7 @@ async def test_an_owner_thread_never_routes_a_caller_with_no_account(
     tenant = await _seed(db_session)
     member = await make_account(db_session, tenant=tenant)
     await _owned_copy(db_session, tenant, member.id)
-    await make_thread_session(
-        db_session, tenant=tenant, account=member, platform="slack", thread_id="T1", channel_id="C1"
-    )
+    await _thread_session(db_session, tenant=tenant, account=member)
     await db_session.commit()
     async with db_session_factory.begin() as session:
         await _switch(session, tenant.id, caller=_owner_caller(member.id), destination=_COPY)

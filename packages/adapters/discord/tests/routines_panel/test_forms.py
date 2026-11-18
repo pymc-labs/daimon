@@ -22,11 +22,11 @@ from daimon.core.channel_budget import is_over_channel_budget
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_budgets import set_channel_budget
 from daimon.core.stores.routines import (
-    create_routine,
     delete_routine,
     get_routine,
     list_routines_for_tenant,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 
 
@@ -174,14 +174,11 @@ async def test_agent_validation_and_save_policy(setup_panel, db_session_factory,
 
 async def seed_selected(view, tenant, factory, *, creator="42"):
     async with factory.begin() as session:
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id=creator,
-            agent_id="agent_a",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="summary",
         )
     glyph, color = derive_state(row)

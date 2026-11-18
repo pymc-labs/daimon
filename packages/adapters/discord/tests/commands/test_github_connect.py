@@ -3,24 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.discord.commands import github as github_command
+from daimon.testing.shared_helpers import Sessions as _Sessions
 from pydantic import SecretStr
-
-
-class _Sessions:
-    @asynccontextmanager
-    async def begin(self):  # type: ignore[no-untyped-def]
-        yield object()
-
-    @asynccontextmanager
-    async def __call__(self):  # type: ignore[no-untyped-def]
-        yield object()
 
 
 @pytest.mark.asyncio

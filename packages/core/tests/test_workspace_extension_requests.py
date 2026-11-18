@@ -1,7 +1,7 @@
 """The native export/restore bridge preserves each host fallback and first-send input."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -17,14 +17,13 @@ from daimon.core.workspace_transfer import (
     WorkspaceTransferRunner,
     as_prepared_replacement,
 )
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ResourceBinding, SessionExport
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicWorkspaceTransfer
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
-
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
