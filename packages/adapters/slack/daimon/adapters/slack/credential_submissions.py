@@ -23,7 +23,7 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, Unpack
 
 import anthropic
 import httpx
@@ -42,7 +42,6 @@ from daimon.adapters.slack.agent_setup.write import (
     store_inline_pat,
 )
 from daimon.adapters.slack.blockkit import notice_fields
-from daimon.adapters.slack.credential_forms import refusal_text
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.posted_controls import edit_posted_card
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -53,21 +52,23 @@ from daimon.core.agent_pins import (
 )
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
+from daimon.core.credential_flow import (
+    CardEdit,
+    McpConnectConfig,
+    submit_env,
+    submit_env_file,
+    submit_mcp,
+)
 from daimon.core.credential_requests import (
     CredentialRequestKind,
-    availability_for_request,
-    mcp_permission_message,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
-    apply_env_file_submit,
-    apply_env_submit,
     consume_credential_submit,
     guard_credential_save,
     prepare_env_submit,
     prepare_mcp_submit,
     settle_credential_submit,
-    write_mcp_submit,
     write_repo_submit,
     write_skill_repo_submit,
 )
@@ -77,10 +78,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
-    EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_collision_line,
     env_name_problem,
     parse_env_file,
 )
@@ -91,14 +90,9 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.mcp_attach import (
     McpConnectDecision,
-    McpServerReplaceRefusedError,
     decide_mcp_connect,
 )
-from daimon.core.mcp_token_check import check_token, rejected_token_message
 from daimon.core.mcp_token_connect import (
-    McpAgentGoneError,
-    McpAttachFailedError,
-    McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
 from daimon.core.mux_backend import resource_scope
@@ -107,18 +101,17 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
+    CardState,
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.slack_files import fetch_slack_file
 from daimon.core.stores import credential_requests as credential_requests_store
-from daimon.core.stores.agent_files import (
-    AgentEnvEncryptionRequiredError,
-)
-from daimon.core.stores.domain import CredentialRequestRow, RepoAccessProof
+from daimon.core.stores.domain import ChatPlatform, CredentialRequestRow, RepoAccessProof
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "ContinuationTrigger",
@@ -139,9 +132,65 @@ log = structlog.get_logger()
 #: in the bot process, and this module must not reach back into it.
 ContinuationTrigger = Callable[[], Awaitable[None]]
 
-# How many colliding key names a refusal names before it summarises the rest,
-# matching `render_env_import_rejected`'s own line budget.
-_COLLISION_LINES_SHOWN: Final[int] = 3
+
+@dataclasses.dataclass(frozen=True)
+class _SlackCredentialPort:
+    """A submission's ephemeral replies, card edits and continuation trigger."""
+
+    runtime: SlackRuntime
+    client: AsyncWebClient
+    channel_id: str
+    thread_ts: str | None
+    user_id: str
+    dispatch_continuations: ContinuationTrigger
+    platform: ChatPlatform = "slack"
+    log_prefix: str = "credential_request"
+
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        return self.runtime.sessionmaker
+
+    async def reply(self, text: str) -> None:
+        await post_ephemeral(
+            self.client,
+            thread_ts=self.thread_ts,
+            channel_id=self.channel_id,
+            user_id=self.user_id,
+            text=text,
+            error=True,
+        )
+
+    async def edit_card(
+        self, row: CredentialRequestRow, state: CardState, **card: Unpack[CardEdit]
+    ) -> None:
+        await edit_posted_card(self.client, row=row, state=state, **card)
+
+    async def resume(self, row: CredentialRequestRow) -> None:
+        await _dispatch_pending(self.dispatch_continuations, kind=row.kind)
+
+    def write_failed(self, kind: str, err: Exception) -> None:
+        # Type only: the message of an error at a credential boundary can quote values.
+        log.error(f"credential_request.{kind}_write_failed", error_type=type(err).__name__)
+        capture_exception_with_scope(err)
+
+
+def _port(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    request: CredentialRequestRow,
+    *,
+    channel_id: str,
+    user_id: str,
+    dispatch_continuations: ContinuationTrigger,
+) -> _SlackCredentialPort:
+    return _SlackCredentialPort(
+        runtime,
+        client,
+        channel_id=request.parent_channel_id or channel_id,
+        thread_ts=request.origin_thread_id,
+        user_id=user_id,
+        dispatch_continuations=dispatch_continuations,
+    )
 
 
 async def post_ephemeral(
@@ -442,9 +491,14 @@ async def run_env_credential_submission(
     if validated is None:
         return
     request, agent = validated
-    channel_id = request.parent_channel_id or channel_id
-    message_ts = request.posted_message_id or message_ts
-    thread_ts = request.origin_thread_id
+    port = _port(
+        runtime,
+        client,
+        request,
+        channel_id=channel_id,
+        user_id=user_id,
+        dispatch_continuations=dispatch_continuations,
+    )
 
     async def replacement_refused() -> bool:
         return await _replacement_refused_at_submit(
@@ -454,7 +508,6 @@ async def run_env_credential_submission(
     plan = await prepare_env_submit(
         runtime.sessionmaker, row=request, replacement_refused=replacement_refused
     )
-    shadowed = plan.shadowed
 
     # The name a member may store is re-checked against the submitter's live
     # role. `key_add` needs no gate, but the NAME does: a tool-control or
@@ -462,127 +515,15 @@ async def run_env_credential_submission(
     is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=None)
     name_problem = env_name_problem(request.target, is_admin=is_admin)
     if name_problem is not None:
-        await post_ephemeral(
-            client,
-            thread_ts=request.origin_thread_id,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=_env_name_refusal(request.target, name_problem),
-            error=True,
-        )
-        return
+        return await port.reply(_env_name_refusal(request.target, name_problem))
 
-    try:
-        result = await apply_env_submit(
-            runtime.sessionmaker,
-            row=request,
-            agent=agent,
-            platform="slack",
-            value=value,
-            plan=plan,
-            now=datetime.now(UTC),
-        )
-        consumed, state, queued = result.consumed, result.state, result.queued
-    except FormPinRefused as refused:
-        # Decided with the consume: rolled back, nothing stored.
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=refused.refusal,
-            error=True,
-        )
-        return
-    except AgentEnvEncryptionRequiredError as err:
-        # Rolled back with the consume: nothing stored, the request stays live.
-        log.error("credential_request.env_write_refused_no_crypto_keys")
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=str(err),
-            error=True,
-        )
-        return
-    except Exception as exc:
-        # Type only: the message of an error at a credential boundary can quote values.
-        log.error(
-            "credential_request.env_write_failed", key_present=True, error_type=type(exc).__name__
-        )
-        capture_exception_with_scope(exc)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text="Something went wrong — please try again.",
-            error=True,
-        )
-        return
-
-    if consumed is None:
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=NO_LONGER_VALID_MESSAGE,
-            error=True,
-        )
-        return
-
-    # Log the key NAME only — never the value.
-    log.info("credential_request.env.submit", key=consumed.target, state=state)
-    await _mark_button_consumed(client, row=consumed)
-
-    if state == "refused":
-        await edit_posted_card(
-            client,
-            row=consumed,
-            state="refused",
-            refusal="replacement_admin_required",
-            replaces=shadowed,
-        )
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=refusal_text(
-                consumed, state="refused", refusal="replacement_admin_required", replaces=shadowed
-            ),
-            error=True,
-        )
-        return
-    if state == "superseded":
-        await edit_posted_card(client, row=consumed, state="superseded")
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=refusal_text(consumed, state="superseded"),
-            error=True,
-        )
-        return
-
-    # The card is the receipt; no ephemeral beside it, or the same save would
-    # be announced twice in the same conversation.
-    await edit_posted_card(
-        client,
-        row=consumed,
-        state="applied",
-        outcome=ConfigurationChange(
-            target_name=consumed.target_name or "this agent",
-            kind="key",
-            detail=consumed.target,
-            availability=availability_for_request(consumed),
-        ),
+    await submit_env(
+        port,
+        row=request,
+        agent=agent,
+        value=value,
+        plan=plan,
     )
-    if queued:
-        await _dispatch_pending(dispatch_continuations, kind="env")
 
 
 #: Uploaded files get their own client rather than the runtime's shared one:
@@ -594,44 +535,6 @@ _FILE_DOWNLOAD_TIMEOUT_SECONDS: Final[float] = 30.0
 def _download_client() -> httpx.AsyncClient:
     """The HTTP client used to pull one uploaded file from Slack."""
     return httpx.AsyncClient(timeout=_FILE_DOWNLOAD_TIMEOUT_SECONDS)
-
-
-def _collision_lines(collisions: tuple[EnvEntry, ...], held: frozenset[str]) -> tuple[str, ...]:
-    """Name the keys that already exist: names and line numbers, no values.
-
-    Shaped like `render_env_import_rejected`'s line list, and capped the same
-    way — a 200-key file that collides everywhere must not render 200 lines.
-    """
-    lines = [env_collision_line(entry, held) for entry in collisions[:_COLLISION_LINES_SHOWN]]
-    remaining = len(collisions) - _COLLISION_LINES_SHOWN
-    if remaining > 0:
-        lines.append(f"…and {remaining} more.")
-    return tuple(lines)
-
-
-async def _apply_env_file_entries(
-    runtime: SlackRuntime,
-    *,
-    request: CredentialRequestRow,
-    agent: BetaManagedAgentsAgent,
-    entries: tuple[EnvEntry, ...],
-    now: datetime,
-) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
-    """Consume the request and write every entry, in one transaction.
-
-    Returns `(consumed row, colliding entries, continuation queued, held key
-    names)`; the held names let the refusal say which stored key an alias
-    would have replaced. A `None`
-    row means the request was already spent and nothing was written. A
-    non-empty collision tuple means the request is now spent and recorded as
-    `stale_replacement` and STILL nothing was written: the card promised these
-    keys were new, so a whole-file import must not quietly replace a key
-    someone is using. The continuation the request owes is queued in the same
-    transaction as the keys, and only on the path that actually wrote them.
-    """
-    return await apply_env_file_submit(
-        runtime.sessionmaker, row=request, agent=agent, platform="slack", entries=entries, now=now
-    )
 
 
 async def run_env_file_credential_submission(
@@ -677,11 +580,15 @@ async def run_env_file_credential_submission(
     if validated is None:
         return
     request, agent = validated
-    channel_id = request.parent_channel_id or channel_id
-    message_ts = request.posted_message_id or message_ts
-    thread_ts = request.origin_thread_id
+    port = _port(
+        runtime,
+        client,
+        request,
+        channel_id=channel_id,
+        user_id=user_id,
+        dispatch_continuations=dispatch_continuations,
+    )
     agent_name = request.target_name or "the agent"
-    responder_name = request.responder_name or "Daimon"
 
     try:
         async with _download_client() as http_client:
@@ -692,18 +599,10 @@ async def run_env_file_credential_submission(
         # Exception class only: an upstream error string can carry the signed
         # download URL, which is a bearer credential for that file.
         log.warning("credential_request.env_file_download_failed", err_type=type(err).__name__)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                f"I could not read that upload, so nothing was saved for {agent_name}. "
-                "Attach the file again."
-            ),
-            error=True,
+        return await port.reply(
+            f"I could not read that upload, so nothing was saved for {agent_name}. "
+            "Attach the file again."
         )
-        return
 
     try:
         # `decode_env_bytes` re-measures the real bytes against the same cap
@@ -718,191 +617,15 @@ async def run_env_file_credential_submission(
             rejection=err.rejection,
             lines=[problem.line for problem in err.problems],
         )
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=render_env_import_rejected(err.rejection, err.problems, target_name=agent_name),
-            error=True,
+        return await port.reply(
+            render_env_import_rejected(err.rejection, err.problems, target_name=agent_name)
         )
-        return
 
-    try:
-        consumed, collisions, queued, held = await _apply_env_file_entries(
-            runtime, request=request, agent=agent, entries=entries, now=datetime.now(UTC)
-        )
-    except FormPinRefused as refused:
-        # Decided with the consume: rolled back, nothing stored.
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=refused.refusal,
-            error=True,
-        )
-        return
-    except AgentEnvEncryptionRequiredError as err:
-        # Rolled back with the consume: nothing stored, the request stays live.
-        log.error("credential_request.env_file_refused_no_crypto_keys")
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=str(err),
-            error=True,
-        )
-        return
-    except Exception as exc:
-        # Handled here, not in the spawned task, so the person gets a reply.
-        # Rolled back with the consume, so the request stays live. The Sentry
-        # capture carries id tags only; frame locals are never sent.
-        # Type only: the message of an error at a credential boundary can quote values.
-        log.error(
-            "credential_request.env_file_write_failed",
-            key_count=len(entries),
-            error_type=type(exc).__name__,
-        )
-        capture_exception_with_scope(exc)
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text="Something went wrong — please try again.",
-            error=True,
-        )
-        return
-    if consumed is None:
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=NO_LONGER_VALID_MESSAGE,
-            error=True,
-        )
-        return
-
-    if collisions:
-        lines = (
-            *_collision_lines(collisions, held),
-            f"Nothing was changed. Ask {responder_name} to replace a key you already have.",
-        )
-        log.info(
-            "credential_request.env_file_collision",
-            key_count=len(entries),
-            collision_count=len(collisions),
-        )
-        await edit_posted_card(
-            client,
-            row=consumed,
-            state="refused",
-            refusal="env_file_invalid",
-            refusal_lines=lines,
-        )
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text="\n".join((f"No keys were saved for {agent_name}.", *lines)),
-            error=True,
-        )
-        return
-
-    # Key NAMES only — never a value, as the single-key env submission does.
-    log.info(
-        "credential_request.env_file.submit",
-        key_count=len(entries),
-        keys=[entry.name for entry in entries],
-    )
-    # The card is the receipt; there is no ephemeral beside it, because the
-    # two would say the same thing twice in the same conversation.
-    await edit_posted_card(
-        client,
-        row=consumed,
-        state="applied",
-        outcome=ConfigurationChange(
-            target_name=consumed.target_name or agent_name,
-            kind="keys_bulk",
-            availability=availability_for_request(consumed),
-            count=len(entries),
-        ),
-    )
-    if queued:
-        await _dispatch_pending(dispatch_continuations, kind="env_file")
-
-
-async def _refuse_for_unavailable_target(
-    runtime: SlackRuntime, client: AsyncWebClient, *, row: CredentialRequestRow, token: str
-) -> None:
-    """Close a spent request whose target turned out to be unusable.
-
-    The consume has already happened by the time any of these branches run, so
-    leaving the card on `received` would have it say "Saving…" about a save
-    that stopped. Nothing reached a store on this path, so the terminal state
-    is `refused` rather than `partial`, and no continuation is queued: work
-    waiting on this value must not resume on a value that never landed.
-    """
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="write_failed"
-        )
-    await edit_posted_card(client, row=row, state="refused", refusal="target_unavailable")
-
-
-async def _refuse_for_rejected_token(
-    runtime: SlackRuntime, client: AsyncWebClient, *, row: CredentialRequestRow, token: str
-) -> None:
-    """Close a spent request whose token the server refused before any write."""
-    async with runtime.sessionmaker() as session, session.begin():
-        await credential_requests_store.set_credential_request_outcome(
-            session, token=token, outcome="token_rejected"
-        )
-    await edit_posted_card(client, row=row, state="refused", refusal="token_rejected")
-
-
-async def _refuse_mcp_replacement(
-    runtime: SlackRuntime,
-    client: AsyncWebClient,
-    *,
-    row: CredentialRequestRow,
-    token: str,
-    thread_ts: str | None,
-    channel_id: str,
-    user_id: str,
-    policy_refused: bool = False,
-) -> None:
-    """Spend the request and write nothing: no vault token, no published token."""
-    await settle_credential_submit(
-        runtime.sessionmaker,
-        row=row,
-        platform="slack",
-        outcome="policy_refused" if policy_refused else "write_failed",
-        carries_work=False,
-        record=record_input_continuation,
-    )
-    await edit_posted_card(
-        client,
-        row=row,
-        state="refused",
-        refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
-    )
-    await post_ephemeral(
-        client,
-        thread_ts=thread_ts,
-        channel_id=channel_id,
-        user_id=user_id,
-        text=(mcp_permission_message(row.target_name or "The agent") + " Nothing was saved.")
-        if policy_refused
-        else (
-            f"{row.target_name or 'The agent'} already has this connection. Nothing was saved."
-            "\n\nOnly a workspace admin can replace it."
-        ),
-        error=True,
+    await submit_env_file(
+        port,
+        row=request,
+        agent=agent,
+        entries=entries,
     )
 
 
@@ -941,221 +664,42 @@ async def run_mcp_credential_submission(
     if validated is None:
         return
     request, agent = validated
-    channel_id = request.parent_channel_id or channel_id
-    message_ts = request.posted_message_id or message_ts
-    thread_ts = request.origin_thread_id
+    port = _port(
+        runtime,
+        client,
+        request,
+        channel_id=channel_id,
+        user_id=user_id,
+        dispatch_continuations=dispatch_continuations,
+    )
 
     mcp = runtime.settings.mcp
     if mcp.public_url is None or mcp.jwt_secret is None:
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=(
-                "Daimon isn't fully set up yet. Ask the operator to finish "
-                "setup, then try again. Nothing was saved."
-            ),
-            error=True,
+        return await port.reply(
+            "Daimon isn't fully set up yet. Ask the operator to finish "
+            "setup, then try again. Nothing was saved."
         )
-        return
 
     connect, now = await prepare_mcp_submit(
         decide=lambda: _decide_mcp_connect_at_submit(runtime, client, row=request, user_id=user_id),
         clock=lambda: datetime.now(UTC),
     )
-    try:
-        consumed = await _consume(runtime, request=request, agent=agent, now=now)
-    except FormPinRefused as refused:
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=refused.refusal,
-            error=True,
-        )
-        return
-    if consumed is None:
-        await post_ephemeral(
-            client,
-            thread_ts=thread_ts,
-            channel_id=channel_id,
-            user_id=user_id,
-            text=NO_LONGER_VALID_MESSAGE,
-            error=True,
-        )
-        return
-
-    async with guard_credential_save(
-        runtime.sessionmaker,
-        row=consumed,
-        edit_retry=lambda retry, reason: edit_posted_card(
-            client, row=retry, state="requested", retry_reason=reason
+    await submit_mcp(
+        port,
+        row=request,
+        agent=agent,
+        value=value,
+        connect=connect,
+        config=McpConnectConfig(
+            anthropic=runtime.anthropic,
+            fernet=runtime.turn_deps.fernet,
+            probe=runtime.mcp_token_probe,
+            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+            public_url=str(mcp.public_url),
+            connect=connect_mcp_server_with_token,
         ),
-        edit_pending=lambda pending, notice: edit_posted_card(
-            client, row=pending, state="received", saving_notice=notice
-        ),
-    ) as attempt:
-        await _mark_button_consumed(client, row=consumed)
-
-        if connect.refused:
-            attempt.retry_allowed = False
-            await _refuse_mcp_replacement(
-                runtime,
-                client,
-                row=consumed,
-                token=token,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-                policy_refused=not connect.replaces,
-            )
-            return
-
-        mcp_server_url = consumed.mcp_server_url
-        if mcp_server_url is None:
-            attempt.retry_allowed = False
-            log.error("credential_request.mcp_missing_server_url", agent_id=str(consumed.agent_id))
-            await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
-            await post_ephemeral(
-                client,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-                text="This request is missing its server URL — please ask again.",
-                error=True,
-            )
-            return
-
-        log.info(
-            "credential_request.mcp.submit",
-            mcp_server_url=mcp_server_url,
-            token_present=bool(value),
-        )
-        # Ask the server first, as on Discord: a rejected token must not be
-        # stored, mirrored and attached only to fail every later turn.
-        rejection = await check_token(
-            runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=value
-        )
-        if rejection is not None:
-            await _refuse_for_rejected_token(runtime, client, row=consumed, token=token)
-            await post_ephemeral(
-                client,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-                text=rejected_token_message(rejection),
-                error=True,
-            )
-            return
-        try:
-            await write_mcp_submit(
-                runtime.anthropic,
-                session_factory=runtime.sessionmaker,
-                row=consumed,
-                fernet=runtime.turn_deps.fernet,
-                value=value,
-                replace_allowed=connect.replace_allowed,
-                jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
-                public_url=str(mcp.public_url),
-                now=now,
-                connect=connect_mcp_server_with_token,
-            )
-        except McpServerReplaceRefusedError:
-            attempt.retry_allowed = False
-            # A server or token for this URL appeared after the pre-consume check.
-            await _refuse_mcp_replacement(
-                runtime,
-                client,
-                row=consumed,
-                token=token,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-            )
-            return
-        except (McpAgentGoneError, McpAttachFailedError) as err:
-            attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
-            # Exception class name only: a stringified SDK error can carry the
-            # request envelope. Nothing was stored.
-            log.warning(
-                "credential_request.mcp_attach_failed",
-                mcp_server_url=mcp_server_url,
-                err_type=type(err.__cause__ or err).__name__,
-            )
-            await _refuse_for_unavailable_target(runtime, client, row=consumed, token=token)
-            await post_ephemeral(
-                client,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-                text=(
-                    f"`{mcp_server_url}` could not be attached to "
-                    "the agent. Nothing was saved. Try again using the same form."
-                ),
-                error=True,
-            )
-            return
-        except McpTokenWriteFailedError as err:
-            log.warning(
-                "credential_request.mcp_write_failed",
-                mcp_server_url=mcp_server_url,
-                err_type=type(err.__cause__ or err).__name__,
-            )
-            await settle_credential_submit(
-                runtime.sessionmaker,
-                row=consumed,
-                platform="slack",
-                outcome="write_failed",
-                carries_work=False,
-                record=record_input_continuation,
-            )
-            await edit_posted_card(
-                client,
-                row=consumed,
-                state="partial",
-                outcome=ConfigurationChange(
-                    target_name=consumed.target_name or "the agent",
-                    kind="mcp",
-                    detail=consumed.target,
-                    availability="preparation_failed",
-                ),
-            )
-            await post_ephemeral(
-                client,
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                user_id=user_id,
-                text=(
-                    f"`{mcp_server_url}` is attached, but storing its token did not finish. "
-                    "Try again using the same form."
-                ),
-                error=True,
-            )
-            return
-
-        queued = await settle_credential_submit(
-            runtime.sessionmaker,
-            row=consumed,
-            platform="slack",
-            outcome="applied",
-            record=record_input_continuation,
-        )
-        # The card is the receipt — no ephemeral beside it.
-        await edit_posted_card(
-            client,
-            row=consumed,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=consumed.target_name or "the agent",
-                kind="mcp",
-                detail=consumed.target,
-                availability="next_message",
-            ),
-        )
-        if queued:
-            await _dispatch_pending(dispatch_continuations, kind="mcp")
+        now=now,
+    )
 
 
 async def _resolve_repo_binding_credential(
