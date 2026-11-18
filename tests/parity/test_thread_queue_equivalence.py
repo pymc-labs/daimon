@@ -1,4 +1,4 @@
-"""Replay interleavings through real frozen base methods and the current adapters."""
+"""Pin admission order, responses, resumes and queue ownership across scheduled interleavings."""
 
 from __future__ import annotations
 
@@ -20,29 +20,22 @@ from daimon.adapters.teams.reactions import TeamsReactions
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import HeldThreads, ThreadQueue
 from daimon.core.turn_queue import TurnQueue
+from daimon.testing.recorded_effects import Recording
 
 TENANT = UUID(int=1)
 MODULES = {"discord": discord, "slack": slack, "teams": teams}
 CLASSES = {"discord": discord.DaimonBot, "slack": slack.SlackApp, "teams": teams.TeamsApp}
 
 
-def base(platform):
-    namespace = dict(vars(MODULES[platform]))
-    # The frozen base predates the turn queue and calls the old pure gate.
-    namespace["should_admit_turn"] = lambda *, current_in_flight, cap: current_in_flight < cap
-    path = Path(__file__).with_name("thread_queue_base") / f"{platform}.txt"
-    exec(compile(path.read_text(), str(path), "exec"), namespace)
-    return namespace["Base"], namespace
+_RECORDING = Recording(Path(__file__).with_name("thread_queue_effects.json"))
 
 
 class Replay:
-    def __init__(self, platform, old, fault="ok", cap=3, draining=False):
+    def __init__(self, platform, fault="ok", cap=3, draining=False):
         self.platform, self.fault, self.cap = platform, fault, cap
-        self.old = old
         self.effects, self.resumes, self.cleared = [], [], []
         self.rows = ["handoff"]
-        cls, namespace = base(platform) if old else (CLASSES[platform], vars(MODULES[platform]))
-        self.namespace = namespace
+        cls = CLASSES[platform]
         self.obj = SimpleNamespace(
             _processing=HeldThreads(),
             _pending={},
@@ -91,7 +84,7 @@ class Replay:
             ],
             "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"],
         }[platform]
-        if platform == "discord" and not old:
+        if platform == "discord":
             names += [
                 "_remove_mention_reaction",
                 "_clear_queued_reactions",
@@ -129,14 +122,14 @@ class Replay:
 
     @property
     def state_key(self):
-        # The frozen Slack base owns a bare timestamp; the current adapter
-        # scopes ownership to its workspace conversation.
-        if self.platform == "slack" and not self.old:
+        # Slack scopes ownership to its workspace conversation.
+        if self.platform == "slack":
             return ("team", "channel", self.key)
         return self.key
 
     def base_key(self, key):
-        if self.platform == "slack" and not self.old:
+        # Recorded by bare conversation key on every platform.
+        if self.platform == "slack":
             return key[2]
         return key
 
@@ -296,21 +289,16 @@ class Replay:
         return item
 
     def hold_slot(self):
-        """Another turn holds one of TENANT's slots: the base's counter, the queue's ticket."""
-        if self.old:
-            self.obj._inflight[TENANT] = 1
-        else:
-            self.obj.turn_queue.claim(TENANT)
+        """Another turn holds one of TENANT's slots."""
+        self.obj.turn_queue.claim(TENANT)
 
     def in_flight(self):
-        """Slots held per tenant, in the base's dict shape for either version."""
-        if self.old:
-            return self.obj._inflight
+        """Slots held per tenant."""
         queue = self.obj.turn_queue
         return {TENANT: queue.in_flight(TENANT)} if queue.in_flight(TENANT) else {}
 
     def result(self, error=None):
-        # Client identity differs across the two executions; retain all other resume facts.
+        # The client object is opaque; retain all other resume facts.
         resumes = [
             {
                 k: ("client" if k == "web_client" else v.id if k == "thread" else v)
@@ -341,8 +329,8 @@ def route_without_io(monkeypatch):
     monkeypatch.setattr(teams, "route_to_setup", route)
 
 
-async def replay(platform, old, authors, pause_at, fault, cancel, draining):
-    run = Replay(platform, old, fault=fault, draining=draining)
+async def replay(platform, authors, pause_at, fault, cancel, draining):
+    run = Replay(platform, fault=fault, draining=draining)
     if platform == "teams" and draining:
         await run.external()
         return run.result()
@@ -383,104 +371,88 @@ async def replay(platform, old, authors, pause_at, fault, cancel, draining):
     ],
 )
 @pytest.mark.parametrize("draining", [False, True])
-async def test_scheduled_arrivals_errors_and_cancels_match_base(
+async def test_scheduled_arrivals_errors_and_cancels_match_recording(
     platform, authors, pause_at, fault, cancel, draining
 ):
-    before = await replay(platform, True, authors, pause_at, fault, cancel, draining)
-    after = await replay(platform, False, authors, pause_at, fault, cancel, draining)
-    assert after == before
+    result = await replay(platform, authors, pause_at, fault, cancel, draining)
+    key = f"{platform}-{''.join(map(str, authors))}-{pause_at}-{fault}-{cancel}-{draining}"
+    _RECORDING.check(key, result)
 
 
 @pytest.mark.parametrize("platform", MODULES)
 @pytest.mark.parametrize("capped,cap", [(False, 0), (True, 0), (True, 1)])
-async def test_wake_caps_and_busy_before_cap_match_base(platform, capped, cap):
-    results = []
-    for old in (True, False):
-        run = Replay(platform, old, cap=cap)
-        run.hold_slot()
-        await run.external(capped=capped)
-        run.obj._processing.add(run.state_key)
-        await run.external(url="saved region", capped=False)
-        await run.external(url=None, capped=True)
-        if platform == "teams":
-            run.obj._release(run.key)
-        else:
-            run.obj._release_thread(run.state_key)
-        results.append(run.result())
-    assert results[0] == results[1]
+async def test_wake_caps_and_busy_before_cap_match_recording(platform, capped, cap):
+    run = Replay(platform, cap=cap)
+    run.hold_slot()
+    await run.external(capped=capped)
+    run.obj._processing.add(run.state_key)
+    await run.external(url="saved region", capped=False)
+    await run.external(url=None, capped=True)
+    if platform == "teams":
+        run.obj._release(run.key)
+    else:
+        run.obj._release_thread(run.state_key)
+    _RECORDING.check(f"caps-{platform}-{capped}-{cap}", run.result())
 
 
 async def test_discord_enqueue_precedes_suspended_wait_response():
-    results = []
-    for old in (True, False):
-        run = Replay("discord", old)
-        run.obj._processing.add(run.key)
-        run.pause_at = "reaction"
-        arrived = asyncio.create_task(run.arrive(1, 1))
-        await asyncio.wait_for(run.paused.wait(), 3)
-        await run.obj._drain_pending_mentions(run.key, "guild", TENANT)
-        run.obj._release_thread(run.key)
-        run.proceed.set()
-        await arrived
-        results.append(run.result())
-    assert results[0] == results[1]
-    assert any(effect[0] == "admit" for effect in results[0][0])
+    run = Replay("discord")
+    run.obj._processing.add(run.key)
+    run.pause_at = "reaction"
+    arrived = asyncio.create_task(run.arrive(1, 1))
+    await asyncio.wait_for(run.paused.wait(), 3)
+    await run.obj._drain_pending_mentions(run.key, "guild", TENANT)
+    run.obj._release_thread(run.key)
+    run.proceed.set()
+    await arrived
+    result = run.result()
+    assert any(effect[0] == "admit" for effect in result[0]), "the queued mention never ran"
+    _RECORDING.check("discord-enqueue-before-wait", result)
 
 
-async def test_slack_authorless_events_and_per_author_errors_match_base():
-    results = []
-    for old in (True, False):
-        run = Replay("slack", old, fault="expected")
-        run.obj._pending[run.state_key] = [
-            run.message(a, n) for n, a in enumerate((None, 1, 2, 1), 1)
-        ]
-        await run.external()
-        results.append(run.result())
-    assert results[0] == results[1]
-    assert [effect[1] for effect in results[0][0] if effect[0] == "admit"] == ["1", "2"]
+async def test_slack_authorless_events_and_per_author_errors_match_recording():
+    run = Replay("slack", fault="expected")
+    run.obj._pending[run.state_key] = [run.message(a, n) for n, a in enumerate((None, 1, 2, 1), 1)]
+    await run.external()
+    result = run.result()
+    assert [effect[1] for effect in result[0] if effect[0] == "admit"] == ["1", "2"]
     assert sorted(run.cleared) == ["1", "2", "3", "4"]
+    _RECORDING.check("slack-authorless", result)
 
 
 async def test_teams_setup_threads_resume_in_order_with_merged_url_and_cap():
-    results = []
-    for old in (True, False):
-        run = Replay("teams", old)
-        run.obj._processing.add(run.key)
-        # Multiple setup threads share a conversation guard and each retains its resume.
-        for thread in ("chat;setup=one", "chat;setup=two"):
-            await run.external(url="region", capped=False, thread=thread)
-            await run.external(url=None, capped=True, thread=thread)
-        run.obj._release(run.key)
-        results.append(run.result())
-    assert results[0] == results[1]
+    run = Replay("teams")
+    run.obj._processing.add(run.key)
+    # Multiple setup threads share a conversation guard and each retains its resume.
+    for thread in ("chat;setup=one", "chat;setup=two"):
+        await run.external(url="region", capped=False, thread=thread)
+        await run.external(url=None, capped=True, thread=thread)
+    run.obj._release(run.key)
+    _RECORDING.check("teams-setup-threads", run.result())
 
 
 @pytest.mark.parametrize("authors", sorted(set(itertools.permutations((1, 1, 2)))))
-def test_teams_last_carrier_content_files_and_message_ids_match_base(authors):
-    run = Replay("teams", True)
+def test_teams_last_carrier_content_files_and_message_ids_match_recording(authors):
+    run = Replay("teams")
     queued = [run.message(a, n) for n, a in enumerate(authors, 1)]
-    before = run.namespace["_compose_queued"](queued)
-    after = [teams._compose(items) for items in teams._by_author(queued)]
-    assert [dataclasses.asdict(i) for i in after] == [dataclasses.asdict(i) for i in before]
+    composed = [teams._compose(items) for items in teams._by_author(queued)]
+    _RECORDING.check(f"teams-compose-{''.join(map(str, authors))}", composed)
 
 
 @pytest.mark.parametrize("platform", MODULES)
 async def test_another_thread_runs_while_the_first_dispatch_waits(platform):
-    results = []
-    for old in (True, False):
-        run = Replay(platform, old)
-        run.pause_at = "dispatch"
-        first = asyncio.create_task(run.external())
-        await asyncio.wait_for(run.paused.wait(), 3)
-        run.key = 12 if platform == "discord" else "other chat"
-        run.thread = SimpleNamespace(id=run.key)
-        item = run.message(2, 5)
-        if platform == "teams":
-            item = dataclasses.replace(item, conversation_id=run.key)
-        run.obj._pending[run.state_key] = [item]
-        await run.external()
-        assert any(effect[0] == "admit" for effect in run.effects)
-        run.proceed.set()
-        await first
-        results.append(run.result())
-    assert results[0] == results[1]
+    run = Replay(platform)
+    run.pause_at = "dispatch"
+    first = asyncio.create_task(run.external())
+    await asyncio.wait_for(run.paused.wait(), 3)
+    run.key = 12 if platform == "discord" else "other chat"
+    run.thread = SimpleNamespace(id=run.key)
+    item = run.message(2, 5)
+    if platform == "teams":
+        item = dataclasses.replace(item, conversation_id=run.key)
+    run.obj._pending[run.state_key] = [item]
+    await run.external()
+    assert any(effect[0] == "admit" for effect in run.effects), "the other thread never ran"
+    run.proceed.set()
+    await first
+    _RECORDING.check(f"other-thread-{platform}", run.result())
