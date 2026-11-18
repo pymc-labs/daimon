@@ -441,18 +441,17 @@ class AgentSettings:
 
 def claude_effort(agent: BackendAgent) -> Effort | None:
     """The effort a Claude agent states in its model setting; None when it states none."""
-    from mux.drivers.anthropic import AgentModelConfig
     from mux.profiles.anthropic import MODEL_CONFIG_NAMESPACE
 
     spec = agent.effective_spec or (agent.source.spec if agent.source is not None else None)
     if spec is None or spec.model.provider != DEFAULT_BACKEND:
         return None
     for extension in spec.extensions or ():
-        if extension.namespace == MODEL_CONFIG_NAMESPACE:
-            model = AgentModelConfig.model_validate(dict(extension.value)).model
-            effort = None if isinstance(model, str) else model.effort
-            effort = effort if effort is None or isinstance(effort, str) else effort.type
-            return cast("Effort | None", effort)
+        model = extension.value.get("model")
+        if extension.namespace == MODEL_CONFIG_NAMESPACE and isinstance(model, dict):
+            # Read raw: the preview refuses an invalid one; a caller keeps only offered ones.
+            effort = model.get("effort")
+            return cast("Effort | None", effort.get("type") if isinstance(effort, dict) else effort)
     return None
 
 
