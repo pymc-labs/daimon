@@ -110,6 +110,7 @@ async def apply_env_submit(
     value: str,
     plan: EnvSubmitPlan,
     now: datetime,
+    location_verified: bool = False,
 ) -> EnvSubmitResult:
     """Consume, lock, recheck, conditionally write, settle and queue atomically.
 
@@ -119,7 +120,9 @@ async def apply_env_submit(
     outcome: CredentialRequestOutcome = "applied"
     queued = False
     async with session_factory() as session, session.begin():
-        consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        consumed = await consume_form_unless_pinned(
+            session, row=row, agent=agent, now=now, location_verified=location_verified
+        )
         if consumed is None:
             return EnvSubmitResult(None)
         await lock_agent_keys(session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id)
@@ -189,6 +192,7 @@ async def apply_env_file_submit(
     platform: ChatPlatform,
     entries: Sequence[EnvEntry],
     now: datetime,
+    location_verified: bool = False,
 ) -> tuple[CredentialRequestRow | None, tuple[EnvEntry, ...], bool, frozenset[str]]:
     """Whole-file import; collisions spend the request and store no entries.
 
@@ -197,7 +201,9 @@ async def apply_env_file_submit(
     """
     try:
         async with session_factory() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+            consumed = await consume_form_unless_pinned(
+                session, row=row, agent=agent, now=now, location_verified=location_verified
+            )
             if consumed is None:
                 return None, (), False, frozenset()
             await lock_agent_keys(session, tenant_id=consumed.tenant_id, agent_id=consumed.agent_id)
@@ -232,7 +238,9 @@ async def apply_env_file_submit(
     except _KeyAppearedMidWrite as err:
         # Slack/Teams rolled back the first consume along with the file writes.
         async with session_factory() as session, session.begin():
-            consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+            consumed = await consume_form_unless_pinned(
+                session, row=row, agent=agent, now=now, location_verified=location_verified
+            )
             if consumed is None:
                 return None, (), False, frozenset()
             await credential_requests.set_credential_request_outcome(
@@ -247,10 +255,13 @@ async def consume_credential_submit(
     row: CredentialRequestRow,
     agent: BetaManagedAgentsAgent | None,
     now: datetime,
+    location_verified: bool = False,
 ) -> CredentialRequestRow | None:
     """Spend an external-write form, holding the policy lock through commit."""
     async with session_factory() as session, session.begin():
-        return await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        return await consume_form_unless_pinned(
+            session, row=row, agent=agent, now=now, location_verified=location_verified
+        )
 
 
 async def settle_credential_submit(
@@ -324,10 +335,13 @@ async def begin_oauth_submit(
     agent: BetaManagedAgentsAgent | None,
     app_root_url: str,
     now: datetime,
+    location_verified: bool = False,
 ) -> tuple[CredentialRequestRow | None, McpOAuthFlowRow | None]:
     """Consume and mint atomically; completion's vault/MCP pin checks stay there."""
     async with session_factory() as session, session.begin():
-        consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+        consumed = await consume_form_unless_pinned(
+            session, row=row, agent=agent, now=now, location_verified=location_verified
+        )
         flow = (
             await begin_mcp_oauth_flow(
                 session, request=consumed, app_root_url=app_root_url, now=now

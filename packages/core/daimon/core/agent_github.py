@@ -34,6 +34,7 @@ from daimon.core.github_credentials import encrypt_token
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.mux_compat import list_skill_versions
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.skill_library import SyncedSkill, github_url_of
 from daimon.core.skill_sync.orchestrator import SyncReport, sync_agent_skills
 from daimon.core.skill_sync.resync_lock import hold_resync_locks
@@ -484,7 +485,8 @@ async def _target(deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str) -> A
     except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
         raise AgentEditError("Agents are unavailable right now.", kind="unavailable") from exc
     if not target.sees_setup:
-        raise AgentEditError(ASK_WHO, kind="forbidden")
+        # A private channel's own agent is hidden from outside its channel (`sealed_outside`).
+        raise AgentEditError(SEALED_REFUSAL if target.sealed else ASK_WHO, kind="forbidden")
     return target
 
 

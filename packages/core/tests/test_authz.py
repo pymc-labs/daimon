@@ -33,6 +33,9 @@ OPEN = TenantAccessPolicy()
 
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
+ADMIN_INSIDE = Subject(
+    is_admin=True, platform_user_id="U_ADM", origin_channel_ids=frozenset({"C_ACME"})
+)
 BEARER = Subject(is_admin=True, platform_user_id=None)
 TWO_CHANNELS = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME", "C_OPS")})
 AGENT_KEY_ADMIN = Subject(is_admin=True, platform_user_id="U_ADM", via_agent_key=True)
@@ -270,10 +273,21 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin mints bound anywhere, as before",
+        "server admin mints bound from inside the channel",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel mints nothing for its agent",
         ACME_SEALED,
         {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME, "place": INSIDE},
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel default: nobody binds a pinned agent outside its pin ---
     (
@@ -1121,7 +1135,18 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin opens the network of a sealed channel",
+        "server admin opens the network of a sealed channel from inside it",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel cannot open its network",
         ACME_SEALED,
         {
             "subject": ADMIN,
@@ -1129,7 +1154,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
             "open_network": True,
         },
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel protection and seals: server admins only ---
     (

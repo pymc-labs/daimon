@@ -20,10 +20,13 @@ from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction, admin_for_action
+from daimon.core.authz import origin_ids
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.errors import DaimonError
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
+from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.web_links import OPEN_IN_WEB, Assignment, TenantLinks, links_at, panel_links
 from microsoft_teams.api import (
@@ -62,6 +65,17 @@ SENDING_PANEL_ERRORS = (*PANEL_ERRORS, *TEAMS_SEND_ERRORS)
 _EDIT_TIMEOUT_S = 5.0
 
 
+def conversation_origin(conversation_id: str) -> frozenset[str]:
+    """The channel a Teams conversation is; empty in a 1:1 chat or when it is not a channel."""
+    channel = teams_channel_of(conversation_id.strip())
+    if channel is None:
+        return frozenset()
+    try:
+        return origin_ids(normalize_channel_id("teams", channel))
+    except InvalidChannelId:
+        return frozenset()
+
+
 @dataclass(frozen=True)
 class Actor:
     """A verified clicker in a live tenant."""
@@ -78,6 +92,14 @@ class Actor:
         """The channel and post pressed in; Teams names a post ``<channel>;messageid=<id>``."""
         channel = self.conversation_id.split(";", 1)[0]
         return channel, None if channel == self.conversation_id else self.conversation_id
+
+    @property
+    def origin(self) -> frozenset[str]:
+        """The channel this click came from, as Teams delivered it; empty in a 1:1 chat.
+
+        Never a channel the clicker typed or picked: that is the target, not the origin.
+        """
+        return conversation_origin(self.conversation_id)
 
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return admin_for_action(

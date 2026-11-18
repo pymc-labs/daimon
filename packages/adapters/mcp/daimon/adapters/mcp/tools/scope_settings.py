@@ -13,10 +13,14 @@ from typing import Any, Final, Literal
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._card import NEEDS_CARD, require_card
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_editing import AgentActor, AgentEditDeps
+from daimon.core.agent_target import agent_names_loader
+from daimon.core.authz import Surface
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.registry import Tier
@@ -49,12 +53,13 @@ class SettingChanged:
     note: str
 
 
-def settings_actor(auth: AuthIdentity) -> FeatureActor:
+def settings_actor(auth: AuthIdentity, runtime: McpRuntime) -> FeatureActor:
     """The token's own person, never an argument."""
 
     async def admin_for(action: DelegatedAction | None) -> bool:
         return auth.admin_for(action)
 
+    subject = mcp_subject(auth)
     return FeatureActor(
         auth.tenant_id,
         auth.account_id,
@@ -62,6 +67,12 @@ def settings_actor(auth: AuthIdentity) -> FeatureActor:
         auth.platform_user_id,
         admin_for,
         via_agent_key=auth.is_external_agent,
+        inside=subject.origin_channel_ids,
+        operator=subject.operator,
+        agent_names=agent_names_loader(
+            AgentEditDeps(runtime.client, runtime.session_factory, None),
+            AgentActor(auth.tenant_id, auth.account_id, subject, Surface.AGENT_CHAT),
+        ),
     )
 
 
@@ -115,7 +126,7 @@ async def _change_setting_impl(
 ) -> SettingChanged:
     """Every check before the card, in order; the writer re-checks the key's rule after it."""
     place = await _place(runtime, auth, origin_context_id, change=True)
-    actor = settings_actor(auth)
+    actor = settings_actor(auth, runtime)
     refusal = feature_refusal(
         key, tier, value, locked=locked, place=place, settings=runtime.settings
     ) or await change_refusal(

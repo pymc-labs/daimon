@@ -81,6 +81,8 @@ def _interaction(*, admin: bool = True) -> MagicMock:
     interaction.user.guild_permissions.administrator = admin
     interaction.user.guild_permissions.manage_guild = False
     interaction.guild.owner_id = 999
+    interaction.channel_id = CHANNEL_ID  # the press comes from inside the channel
+    interaction.channel = MagicMock(spec=discord.TextChannel)
     interaction.response.is_done = MagicMock(return_value=False)
     interaction.response.send_message = AsyncMock()
     interaction.response.defer = AsyncMock()

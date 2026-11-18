@@ -11,8 +11,8 @@ drops the resolver's cache. Approvals are written to the access policy
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 from daimon.core.access_policy import Approvals, TenantAccessPolicy
@@ -55,6 +55,7 @@ from daimon.core.features.snapshot import (
     tier_values,
     unavailable_reason,
 )
+from daimon.core.permissions import SEALED_REFUSAL, any_own_readers, sealed_outside
 from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
@@ -98,6 +99,15 @@ class FeatureActor:
     owns_agent: Callable[[str], Awaitable[bool]] | None = None
     write_builtin: Callable[[str, bool | None], Awaitable[bool | None]] | None = None
     read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
+    inside: frozenset[str] = frozenset()
+    """Where the request verifiably started (`Subject.origin_channel_ids`); none from the
+    web app, the hub or a DM."""
+    operator: bool = False
+    """The deployment operator's CLI, which is never held to a channel."""
+    agent_names: Callable[[str], Awaitable[Sequence[str | None]]] | None = None
+    """The names an agent answers to, from its id: how a change at the agent tier finds out
+    whether it is a private channel's own agent. Without it, such a change is refused while
+    any channel is kept to its own agents."""
 
 
 @dataclass(frozen=True)
@@ -484,7 +494,11 @@ async def _change_approvals(
     place: FeaturePlace,
     expected: Expected[str] | None,
 ) -> TierSetting:
-    subject = await _native_admin(sessions, settings, actor, place.platform)
+    subject = replace(
+        await _native_admin(sessions, settings, actor, place.platform),
+        origin_channel_ids=actor.inside,
+        operator=actor.operator,
+    )
 
     def raw(text: str) -> Approvals:
         return cast(Approvals, "inherit" if text == DEFAULT else text)
@@ -603,6 +617,7 @@ async def change_feature(
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
+    await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
     if spec.authority.native:
         before = await _change_approvals(sessions, settings, actor, tier, value, place, expected)
@@ -621,6 +636,31 @@ async def change_feature(
     )
     (view,) = await read_features(sessions, settings, place, keys=(key,), agent_builtins=builtins)
     return FeatureChange(key, tier, before, after, view)
+
+
+async def _require_inside(
+    sessions: Sessions, actor: FeatureActor, spec: FeatureSpec, tier: Tier, place: FeaturePlace
+) -> None:
+    """A private channel's switches, and its own agent's, change only from inside the channel
+    (`sealed_outside`), for admins too. Whoever is not an admin here is held as before."""
+    if actor.operator or tier in ("deployment", "workspace"):
+        return
+    if actor.via_agent_key or not await actor.admin_for(spec.authority.action):
+        return
+    async with sessions() as session:
+        policy = await load_access_policy(session, tenant_id=place.tenant_id)
+    names: Sequence[str | None] = ()
+    if tier == "agent" and place.agent_id is not None and any_own_readers(policy):
+        if actor.agent_names is None:
+            raise _sealed_refused()
+        names = await actor.agent_names(place.agent_id)
+    channels = (place.channel_id,) if tier in ("channel", "thread") else ()
+    if sealed_outside(policy, actor.inside, channel_ids=channels, agent_names=names):
+        raise _sealed_refused()
+
+
+def _sealed_refused() -> ChannelChangeRefused:
+    return _refused(SEALED_REFUSAL, "sealed_channel", "forbidden")
 
 
 async def _write(

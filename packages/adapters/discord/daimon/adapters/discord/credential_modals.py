@@ -533,6 +533,7 @@ class EnvCredentialModal(discord.ui.Modal):
                 value=raw_value,
                 plan=plan,
                 now=datetime.now(UTC),
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
             consumed_row = result.consumed
             if consumed_row is None:
@@ -727,6 +728,7 @@ class EnvFileModal(discord.ui.Modal):
                 platform="discord",
                 entries=entries,
                 now=datetime.now(UTC),
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
             if consumed_row is None:
                 await interaction.followup.send(
@@ -887,7 +889,11 @@ class McpCredentialModal(discord.ui.Modal):
         )
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(
@@ -1202,7 +1208,11 @@ class SkillRepoModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(
@@ -1588,7 +1598,11 @@ class RepoBindModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(

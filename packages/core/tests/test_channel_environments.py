@@ -7,13 +7,15 @@ import uuid
 import httpx
 import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
+from daimon.core.authz import Subject
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     LIMITED_NETWORK_UNCHECKED_WARNING,
     LIMITED_OPEN_NETWORK_WARNING,
+    archive_sealed_refusal,
     build_archive_environment_note,
     build_clear_environment_note,
     build_environment_resolution_note,
@@ -31,6 +33,8 @@ from daimon.core.channel_environments import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_owned_environment
+from daimon.core.permissions import SEALED_REFUSAL
+from daimon.core.platform_names import ChannelSighting
 from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -40,7 +44,9 @@ from daimon.core.scope import (
     TenantConfigRow,
     TenantScopeRef,
 )
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_changes import list_changes
+from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_account, make_tenant
@@ -440,3 +446,69 @@ async def test_daimon_owned_environments_are_listed_and_pickable_without_anthrop
     assert names == ["Science"], "a keyless install still lists its own environments"
     other = await list_environment_names(None, tenant_id=uuid.uuid4(), records=db_session_factory)
     assert other == [], "another tenant sees none of them"
+
+
+async def _archive_world(session: AsyncSession, *, picked_by: tuple[str, ...]) -> uuid.UUID:
+    """Environment "e" picked by `picked_by`; "c_seal" is a private channel named "vault"."""
+    tenant = await make_tenant(session, platform="discord")
+    for channel_id in picked_by:
+        await set_fields(
+            session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel_id),
+            tenant_id=tenant.id,
+            environment_name="e",
+        )
+    await set_access_policy(
+        session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={"c_seal": ChannelRule(readers="own", writers="own")}
+        ),
+    )
+    await upsert_channel_names(
+        session, tenant_id=tenant.id, platform="discord", names={"c_seal": ChannelSighting("vault")}
+    )
+    return tenant.id
+
+
+async def test_archiving_an_environment_a_private_channel_picks_is_refused_outside_it(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _archive_world(db_session, picked_by=("c_seal", "c_open"))
+    for subject in (
+        Subject(is_admin=True),
+        Subject(is_admin=True, origin_channel_ids=frozenset({"c_open"})),
+    ):
+        refusal = await archive_sealed_refusal(
+            db_session, tenant_id=tenant_id, environment_name="e", subject=subject
+        )
+        assert refusal is not None and refusal.startswith(SEALED_REFUSAL)
+        assert "#vault" in refusal, "it names the channel to change first"
+
+
+async def test_archiving_an_environment_a_private_channel_picks_is_allowed_inside_it(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _archive_world(db_session, picked_by=("c_seal", "c_open"))
+    for subject in (
+        Subject(is_admin=True, origin_channel_ids=frozenset({"c_seal"})),
+        Subject(is_admin=True, operator=True),
+    ):
+        assert (
+            await archive_sealed_refusal(
+                db_session, tenant_id=tenant_id, environment_name="e", subject=subject
+            )
+            is None
+        )
+
+
+async def test_archiving_an_environment_only_open_channels_pick_is_allowed_from_anywhere(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _archive_world(db_session, picked_by=("c_open",))
+    assert (
+        await archive_sealed_refusal(
+            db_session, tenant_id=tenant_id, environment_name="e", subject=Subject(is_admin=True)
+        )
+        is None
+    )

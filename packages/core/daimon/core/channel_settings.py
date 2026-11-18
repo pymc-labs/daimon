@@ -18,7 +18,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_RULE, TenantAccessPolicy
 from daimon.core.agent_model_names import AmbiguousModel
-from daimon.core.authz import Action, Place, authorize
+from daimon.core.authz import Action, Place, authorize, build_agent_ref
 from daimon.core.backend_refusals import refusal_card
 from daimon.core.channel_backend import (
     AgentBackendRefused,
@@ -35,6 +35,7 @@ from daimon.core.channel_changes import (
     ChannelChangeRefused,
     Expected,
     after_write,
+    refusal_for,
     refused_binding,
     require_channel_admin,
 )
@@ -124,7 +125,7 @@ async def set_environment(
             records=sessionmaker,
         )
     if not pick.decision and pick.decision.reason != "not_a_reader":
-        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+        raise refusal_for(pick.decision)
     if environment_name in hidden or pick.missing:
         raise ChannelChangeRefused(_MISSING_ENVIRONMENT, kind="not_found")
     if not pick.decision:
@@ -179,7 +180,7 @@ async def add_skill(
     expected: Expected[Sequence[str]] | None = None,
 ) -> ChannelSkillRow:
     """Add `skill` for the agent answering here. Raises SkillsListTruncatedError when unread."""
-    _require_skill_admin(actor, channel_id)
+    await _require_skill_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         await _compare_skills(session, actor, platform, channel_id, expected)
         added = await add_skill_to_channel(
@@ -210,7 +211,7 @@ async def remove_skill(
     skill_id: str,
     expected: Expected[Sequence[str]] | None = None,
 ) -> None:
-    _require_skill_admin(actor, channel_id)
+    await _require_skill_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         await _compare_skills(session, actor, platform, channel_id, expected)
         removed = await remove_channel_skill(
@@ -227,9 +228,16 @@ async def remove_skill(
         await after_write(session, actor, True)
 
 
-def _require_skill_admin(actor: ChannelActor, channel_id: str) -> None:
-    if actor.subject.via_agent_key or not may_set_channel_skills(actor.subject, channel_id):
+async def _require_skill_admin(
+    sessionmaker: async_sessionmaker[AsyncSession], actor: ChannelActor, channel_id: str
+) -> None:
+    if actor.subject.via_agent_key:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    decision = may_set_channel_skills(policy, actor.subject, channel_id)
+    if not decision:
+        raise refusal_for(decision)
 
 
 async def _compare_skills(
@@ -281,13 +289,17 @@ async def set_tool_rule(
     """
     if not tool_safety:
         raise ChannelChangeRefused(_TOOL_SAFETY_OFF, kind="invalid", reason="tool_safety_off")
-    if actor.subject.via_agent_key or not authorize(
-        _OPEN_POLICY,
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    decision = authorize(
+        policy,
         subject=actor.subject,
         action=Action.SET_CHANNEL_AGENT_TOOL_RULE,
+        agent=build_agent_ref(agent.name, agent.metadata),
         place=Place(channel_id=channel_id),
-    ):
-        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    )
+    if actor.subject.via_agent_key or not decision:
+        raise refusal_for(decision)
     async with sessionmaker.begin() as session:
         existing = await tool_rules.get_rule(
             session,
@@ -413,7 +425,7 @@ async def clear_provider_pin(
     expected_local: int,
 ) -> None:
     """Clear the channel's provider pin; `expected_local` is the pin the actor read."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     if actor.account_id is None:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
     ref = ChannelRef(tenant_id=str(actor.tenant_id), platform=platform, channel_id=channel_id)
@@ -446,7 +458,7 @@ async def set_provider_pin(
     """Pin the channel to the catalog model `value` (`provider:id`); `expected_local` is the
     pin the actor read, None for none. Every agent answers here on it until it is cleared.
     """
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     if actor.account_id is None:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
     model = pin_target(value, policy)
@@ -501,7 +513,7 @@ async def retire_channel_copy(
 
     The copy must have been made for `channel_id`; another channel's copy is refused.
     """
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     archived = await archive_channel_copy(
         client,
         sessionmaker,
@@ -531,7 +543,7 @@ async def set_workspace_default_agent(
     expected: Expected[str | None] | None = None,
 ) -> ValueChange[str | None]:
     """Set (None: clear) the agent every channel without its own default uses."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, None)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
@@ -627,7 +639,7 @@ async def clear_thread_override(
     kind: ThreadOverrideKind,
 ) -> None:
     """Drop one thread's own setting so it follows its channel again. Admins only."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         listed = await list_thread_overrides(
             session, tenant_id=actor.tenant_id, platform=platform, channel_id=channel_id
@@ -700,8 +712,6 @@ async def _record(
         surface=actor.surface,
     )
 
-
-_OPEN_POLICY = TenantAccessPolicy()
 
 __all__ = [
     "ConfirmNeeded",
