@@ -51,10 +51,14 @@ async def tenant_links(runtime: McpRuntime, auth: AuthIdentity) -> TenantLinks |
     their chat admin standing."""
     if runtime.settings.web is None:
         return None
-    async with runtime.session_factory() as db:
-        role = await role_of_account(
-            db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
-        )
+    try:
+        async with runtime.session_factory() as db:
+            role = await role_of_account(
+                db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
+            )
+    except Exception:  # named boundary: as in `web_aware`, a failed read leaves the link out
+        log.warning("web_url.role_read_failed", exc_info=True)
+        return None
     if role is None:
         return None
     links = panel_links(runtime.settings.web, auth.tenant_id, admin=is_admin(role))
