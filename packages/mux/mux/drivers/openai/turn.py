@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Protocol
@@ -55,9 +55,22 @@ async def close(source: AsyncIterator[Object]) -> None:
         await method()
 
 
+#: Receives a root terminal event's own `usage`, which the turn resource can lack.
+type TerminalUsage = Callable[[ResourceRef, str, Object], None]
+
+
 class _NormalizedStream(AsyncIterator[Event]):
-    def __init__(self, source: AsyncIterator[Object], session: ResourceRef, previews: bool) -> None:
+    def __init__(
+        self,
+        source: AsyncIterator[Object],
+        session: ResourceRef,
+        previews: bool,
+        terminal_usage: TerminalUsage | None = None,
+    ) -> None:
         self._source, self._previews = source, previews
+        self._session, self._terminal_usage = session, terminal_usage
+        #: A root turn's last non-null `turn.usage`, until its terminal event.
+        self._root_usage: dict[str, Object] = {}
         self._iterator = source.__aiter__()
         self._normalizer = EventNormalizer(session.id)
         self._pending: deque[Event] = deque()
@@ -74,10 +87,10 @@ class _NormalizedStream(AsyncIterator[Event]):
                 if self._pending:
                     return self._pending.popleft()
                 raw = await self._iterator.__anext__()
+                events = self._normalizer.normalize_batch(raw)
+                self._note_usage(raw, events)
                 self._pending.extend(
-                    event
-                    for event in self._normalizer.normalize_batch(raw)
-                    if self._previews or event.authority != "preview"
+                    event for event in events if self._previews or event.authority != "preview"
                 )
         except (ValueError, KeyError, TypeError):
             await self.aclose()
@@ -87,6 +100,27 @@ class _NormalizedStream(AsyncIterator[Event]):
         except BaseException:
             await self.aclose()
             raise
+
+    def _note_usage(self, raw: Object, events: Sequence[Event]) -> None:
+        """At a root terminal: its top-level usage, else its turn's, else the last root one."""
+        if self._terminal_usage is None:
+            return
+        turn = raw.get("turn")
+        if (
+            isinstance(turn, dict)
+            and "subagent_id" in turn
+            and turn["subagent_id"] is None
+            and isinstance(turn.get("id"), str)
+            and isinstance(turn.get("usage"), dict)
+        ):
+            self._root_usage[text(turn["id"])] = object_json(turn["usage"])
+        for event in events:
+            if event.type != "session.turn_ended" or event.turn_id is None:
+                continue
+            top, seen = raw.get("usage"), self._root_usage.pop(event.turn_id, None)
+            usage = object_json(top) if isinstance(top, dict) else seen
+            if usage is not None:
+                self._terminal_usage(self._session, event.turn_id, usage)
 
     @owned
     async def aclose(self) -> None:
@@ -153,9 +187,14 @@ class OpenAIEvents:
     """
 
     def __init__(
-        self, context: Context, sessions: OpenAISessions, journal: RecoveryJournal
+        self,
+        context: Context,
+        sessions: OpenAISessions,
+        journal: RecoveryJournal,
+        terminal_usage: TerminalUsage | None = None,
     ) -> None:
         self._c, self._sessions, self._journal = context, sessions, journal
+        self._terminal_usage = terminal_usage
 
     @owned
     async def send(
@@ -212,7 +251,7 @@ class OpenAIEvents:
         source = await self._c.transport.open_stream(
             f"/agents/sessions/{segment(session.id)}/events"
         )
-        return _NormalizedStream(source, session, previews)
+        return _NormalizedStream(source, session, previews, self._terminal_usage)
 
     async def stream(
         self,
