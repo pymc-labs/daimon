@@ -555,7 +555,7 @@ def _decide_shared_agent_change(req: Request) -> Decision:
 
 def _channel_bound(agent: AgentRef) -> bool:
     """An agent ruled to channels without the web chat. Naming the web chat in every
-    rule lets it answer there, even as a channel's own agent."""
+    rule lets it answer there, unless it is a channel's own agent (`_decide`)."""
     return agent.permissions.keeps_off_web
 
 
@@ -612,7 +612,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # A web chat is in no channel, so an agent kept to channels never answers there,
         # whoever asks, unless every rule on it names the web chat.
         if req.surface is Surface.WEB and agent.resolved:
-            if _channel_bound(agent):
+            # A channel's own agent answers only in its home, even with "web" in its rule.
+            if _channel_bound(agent) or agent.permissions.home is not None:
                 return _deny("runs_elsewhere")
             if agent.permissions.runs_in:
                 return ALLOW
@@ -621,6 +622,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             and admin_only_surface
             and subject.platform_user_id is not None
             and not subject.via_agent_key
+            # a channel's own agent answers only in its home, admins included.
+            and not (agent.present and agent.permissions.home is not None)
         ):
             return ALLOW
         if not agent.present:
@@ -807,10 +810,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
-    # Admins are trusted to READ any channel conversation of the agent from
-    # their own hub session, limited or not, anyone's -- never another
-    # person's private DM, and never to continue it (a follow-up would join
-    # the channel's session). Their own sessions, DMs included, are read
+    # Admins are trusted to READ another person's open channel conversation of
+    # the agent from their own hub session -- never one from a sealed or limited
+    # channel, never another person's private DM, and never to continue it (a
+    # follow-up would join the channel's session). Their own sessions, DMs included, are read
     # without the readers filter: ownership was already proven by the caller.
     hub_read = req.action is Action.READ_SESSION and req.surface is Surface.HUB
     admin_hub_read = (
@@ -822,6 +825,16 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             or (
                 not facts.private
                 and (facts.channel is not None or facts.legacy_thread_id is not None)
+                # never another person's conversation from a channel read only
+                # from inside -- sealed when it ran (seals only grow) or limited now.
+                and session_readable_from(
+                    policy,
+                    (),
+                    channel=facts.channel,
+                    thread=facts.thread,
+                    seal_ids=facts.seal_ids,
+                    legacy_thread_id=facts.legacy_thread_id,
+                )
             )
         )
     )

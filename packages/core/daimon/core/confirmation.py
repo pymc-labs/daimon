@@ -38,6 +38,7 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.features.registry import DEFAULT, FEATURES
+from daimon.core.finer_drops import MODEL_SETTING_DROPS
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_title
 from daimon.core.server_skills.gate import may_run
@@ -773,15 +774,18 @@ def prompt_for_tool_call(
     )
 
 
+def reach_title(data: Mapping[str, object]) -> str:
+    """An approve_reach card's question; raises on a plan approve_reach would refuse."""
+    # The same validation approve_reach stores, so the card never understates it.
+    plan = ReachPlan.from_args(data)
+    return _one_line(card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200)
+
+
 def _reach_prompt(
     data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
 ) -> ConfirmationPrompt:
-    # The same validation approve_reach stores, so the card never understates it.
-    plan = ReachPlan.from_args(data)
     return ConfirmationPrompt(
-        title=_one_line(
-            card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200
-        ),
+        title=reach_title(data),
         denied_action="Nothing posted",
         requester_platform_user_id=requester_platform_user_id,
         expires_at=expires_at,
@@ -839,7 +843,9 @@ _DROP_WORDS: Mapping[str, str] = {
     "tools": "its tools",
     "files": "its files",
     "repository": "its repository",
-    "model_controls": "its model settings",
+    "model_controls": "its fast mode and inference region",
+    "fast_mode": "its fast mode",
+    "inference_region": "its inference region",
     "effort_setting": "its effort setting",
     "installed_packages": "its installed packages",
     "network_rules": "its network rules",
@@ -868,6 +874,11 @@ def drop_word(drop: str, names: Mapping[str, str] | None = None) -> str:
 def loss_word(drop: str, names: Mapping[str, str] | None = None) -> str:
     """A declared loss in a list of what stops working: 'memory', 'pricing skill'."""
     return drop_word(drop, names).removeprefix("its ")
+
+
+def agent_loss_word(drop: str) -> str:
+    """A loss as the agent reads it: a model setting in plain words, anything else by its id."""
+    return loss_word(drop) if drop in MODEL_SETTING_DROPS else drop
 
 
 def drop_words(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:

@@ -2196,12 +2196,12 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     assert admission.private_dm_id == "dm-scope"
 
 
-async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budget(
+async def test_an_admins_dm_never_runs_an_isolated_channels_own_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """An admin may DM chan-1's own agent; the turn counts toward chan-1 and stops at its budget."""
+    """chan-1's own agent answers only in chan-1: an admin's DM is refused before any charge."""
     policy = _ISOLATED.model_copy(
         update={"agent_rules": {"daimon": AgentRule(runs_in=("chan-1",))}}
     )
@@ -2212,25 +2212,20 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
         defaults_root=tmp_path,
         router=_admittable_router(tenant),
     )
-    args = {
-        "tenant_id": tenant.id,
-        "platform": "discord",
-        "external_user_id": "boss",
-        "channel_id": "dm-1",
-        "is_dm": True,
-        "verified_membership": True,
-        "role": Role.ADMIN,
-        "requester_org": RequesterOrg.HOST,
-    }
-
-    admission = await admit(deps, origin="chat", **args, now=_NOW)
-    assert admission.budget_channel_id == "chan-1", "charged to the agent's channel"
-
-    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
-    await db_session.commit()
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await admit(deps, origin="chat", **args, now=_NOW)
-    assert exc_info.value.reason == "channel_budget_exceeded", "a $0 channel budget stops it"
+    with pytest.raises(AdmissionDenied):
+        await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="boss",
+            channel_id="dm-1",
+            is_dm=True,
+            verified_membership=True,
+            role=Role.ADMIN,
+            requester_org=RequesterOrg.HOST,
+            now=_NOW,
+        )
 
 
 async def _admit_as(
