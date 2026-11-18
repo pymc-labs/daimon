@@ -74,8 +74,8 @@ function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenCha
   const apply = useApply(agent.id)
   const pick = usePendingPreview(agent, draft.config.model)
   const preview = pick.data
-  // A refused pick cannot be applied.
-  const blocked = !!preview?.refusal
+  // A pick that is refused, still loading or failed to load cannot be applied.
+  const blocked = !!preview?.refusal || pick.isFetching || pick.isError
   const groups = ORDER.map((e) => ({ e, items: draft.changes.filter((c) => c.effect === e) })).filter((g) => g.items.length)
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
