@@ -884,7 +884,10 @@ def decide_tool_call(
     )
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
-    if call.permission == "ask" and verdict.outcome == "allow":
+    inner = unwrap_daimon_call(call, trusted_servers)
+    retired = inner.server_name in trusted_servers and inner.tool_name in RETIRED_GATES
+    if call.permission == "ask" and verdict.outcome == "allow" and not retired:
+        # A retired gate's ask, stored on a session started before it was lifted, runs.
         return ToolVerdict(
             outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
         )
