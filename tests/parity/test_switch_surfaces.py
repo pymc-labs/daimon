@@ -1,7 +1,8 @@
-"""Every model-switch surface asks through one rule, `needs_switch_card`.
+"""Every model-switch surface applies a pick at once, through one shared write.
 
-Surfaces are found from the code (the AST): any module that previews a switch is listed
-with the gated helper it goes through, or allowed with its reason.
+Surfaces are found from the code (the AST): any module that previews or picks a switch
+is listed with the helper it applies through, or allowed with its reason. Each helper
+writes in the same call; none asks first.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from typing import Final
 REPO: Final = Path(__file__).resolve().parents[2]
 ROOTS: Final = (REPO / "packages/core/daimon", *sorted(REPO.glob("packages/adapters/*/daimon")))
 
-#: Calls that preview a switch or show its card.
+#: Calls that preview, pick or write a switch.
 ENTRY_POINTS: Final = frozenset(
     {
         "preview_or_refusal",
@@ -22,70 +23,48 @@ ENTRY_POINTS: Final = frozenset(
         "preview_thread_model",
         "preview_model_switch",
         "pick_or_refusal",
-        "pick_thread_or_card",
-        "backend_switch_callbacks",
+        "pick_thread",
+        "change_model",
+        "switch_provider",
+        "set_backend",
         "preview",
     }
 )
 
-#: Each switch surface and the gated helper it must call.
+#: Each switch surface and the shared helper it applies a pick through.
 SURFACES: Final = {
-    "adapters/discord/daimon/adapters/discord/commands/model.py": "pick_thread_or_card",
+    "adapters/discord/daimon/adapters/discord/commands/model.py": "pick_thread",
     "adapters/discord/daimon/adapters/discord/agent_setup/details_view.py": "pick_or_refusal",
     "adapters/slack/daimon/adapters/slack/agent_setup/actions.py": "pick_or_refusal",
     "adapters/teams/daimon/adapters/teams/setup_panel.py": "pick_or_refusal",
-    "adapters/web/daimon/adapters/web/agents.py": "preview_doc",
-    "adapters/web/daimon/adapters/web/chat_thread_model.py": "thread_asks_first",
-    "adapters/mcp/daimon/adapters/mcp/tools/agents.py": "needs_switch_card",
-    "adapters/mcp/daimon/adapters/mcp/tools/thread_model.py": "pick_thread_or_card",
-    "core/daimon/core/thread_model_flow.py": "pick_thread_or_card",
-    "core/daimon/core/thread_model_reask.py": "pick_thread_or_card",
+    "adapters/web/daimon/adapters/web/agents.py": "switch_provider",
+    "adapters/web/daimon/adapters/web/chat_thread_model.py": "pick_thread",
+    "adapters/mcp/daimon/adapters/mcp/tools/agents.py": "change_model",
+    "adapters/mcp/daimon/adapters/mcp/tools/thread_model.py": "pick_thread",
+    "core/daimon/core/thread_model_flow.py": "pick_thread",
 }
 
-#: Modules that preview a switch but are not a surface that decides on the card.
+#: Modules that preview or write a switch but are not a surface a person picks on.
 ALLOWED: Final = {
     "adapters/cli/daimon/adapters/cli/commands/agents.py": (
-        "Operator CLI: prints the whole preview, confirms every change like its other"
-        " commands, and takes losses only through --accept-drops"
+        "Operator CLI: prints the preview and confirms every change like its other commands"
     ),
-    "adapters/discord/daimon/adapters/discord/tool_confirmation.py": (
-        "Shows the hook card only when request_agent_backend_switch asks first"
-    ),
-    "adapters/slack/daimon/adapters/slack/tool_confirmation.py": (
-        "Shows the hook card only when request_agent_backend_switch asks first"
-    ),
-    "adapters/teams/daimon/adapters/teams/tool_confirmation.py": (
-        "Shows the hook card only when request_agent_backend_switch asks first"
-    ),
-    "core/daimon/core/agent_changes.py": (
-        "Write path: checks consent a surface gathered; creating an agent takes its losses"
-    ),
-    "core/daimon/core/channel_backend.py": "The consent store: previews and checks digests",
-    "core/daimon/core/confirmation.py": "Hook card text, from switch_card_lines",
+    "core/daimon/core/agent_changes.py": "Home of change_model and switch_provider",
+    "core/daimon/core/backend_refusals.py": "The refusal card's Switch back to Claude button",
+    "core/daimon/core/channel_backend.py": "The provider store: previews and writes",
     "core/daimon/core/model_switch.py": "Home of pick_or_refusal",
-    "core/daimon/core/thread_model_switch.py": "Home of pick_thread_or_card",
-    "core/daimon/core/switch_cards.py": "Posts a card a surface already chose to show",
+    "core/daimon/core/thread_model_switch.py": "Home of pick_thread",
+    "core/daimon/core/switch_cards.py": "Applies an older card's press like a pick",
 }
 
-#: Each gated helper and the module it lives in; each reaches `needs_switch_card`.
-GATES: Final = {
-    "asks_first": ("core/daimon/core/model_switch.py", "needs_switch_card"),
-    "pick_or_refusal": ("core/daimon/core/model_switch.py", "asks_first"),
-    "thread_asks_first": ("core/daimon/core/thread_model_switch.py", "asks_first"),
-    "pick_thread_or_card": ("core/daimon/core/thread_model_switch.py", "thread_asks_first"),
-    "preview_doc": ("adapters/web/daimon/adapters/web/model_preview.py", "asks_first"),
+#: Each shared helper, its module, and the write it makes in the same call.
+WRITES: Final = {
+    "pick_or_refusal": ("core/daimon/core/model_switch.py", "change_model"),
+    "change_model": ("core/daimon/core/agent_changes.py", "set_backend"),
+    "switch_provider": ("core/daimon/core/agent_changes.py", "write_provider_switch"),
+    "pick_thread": ("core/daimon/core/thread_model_switch.py", "_keep"),
+    "_keep": ("core/daimon/core/thread_model_switch.py", "set_thread_model"),
 }
-
-#: Modules that draw the card's two buttons; they take the shared labels.
-BUTTONS: Final = (
-    "core/daimon/core/switch_cards.py",
-    "adapters/discord/daimon/adapters/discord/commands/model.py",
-    "adapters/discord/daimon/adapters/discord/agent_setup/details_view.py",
-    "adapters/slack/daimon/adapters/slack/agent_setup/panel_views.py",
-    "adapters/slack/daimon/adapters/slack/thread_model.py",
-    "adapters/teams/daimon/adapters/teams/setup_card.py",
-    "adapters/teams/daimon/adapters/teams/thread_model.py",
-)
 
 
 @cache
@@ -127,36 +106,26 @@ def _discovered() -> set[str]:
 
 
 def test_every_module_that_previews_a_switch_is_listed() -> None:
-    """A new caller of a switch preview must say how it decides on the card."""
+    """A new caller of a switch preview or write must say how it applies the pick."""
     found = _discovered()
     listed = SURFACES.keys() | ALLOWED.keys()
-    assert not found - listed, f"unlisted switch previews: {sorted(found - listed)}"
-    assert not listed - found, f"listed but no longer previewing: {sorted(listed - found)}"
+    assert not found - listed, f"unlisted switch callers: {sorted(found - listed)}"
+    assert not listed - found, f"listed but no longer switching: {sorted(listed - found)}"
 
 
-def test_every_surface_goes_through_its_gate() -> None:
-    """Each surface calls the helper that applies needs_switch_card."""
-    missing = {rel: gate for rel, gate in SURFACES.items() if gate not in _names(_tree(rel))}
-    assert not missing, f"surfaces skipping their gate: {missing}"
+def test_every_surface_applies_through_its_shared_helper() -> None:
+    """Each surface calls the shared helper, never a copy of its rule."""
+    missing = {rel: via for rel, via in SURFACES.items() if via not in _names(_tree(rel))}
+    assert not missing, f"surfaces skipping their helper: {missing}"
 
 
-def test_every_gate_reaches_the_one_rule() -> None:
-    """Each gated helper calls the rule, directly or through another gate."""
-    for gate, (rel, via) in GATES.items():
+def test_every_helper_writes_in_the_same_call() -> None:
+    """A pick is written by the call that makes it: no helper stops to ask first."""
+    for helper, (rel, write) in WRITES.items():
         defs = [
             node
             for node in ast.walk(_tree(rel))
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == gate
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == helper
         ]
-        assert defs, f"{gate} not defined in {rel}"
-        assert via in _names(defs[0]), f"{gate} no longer goes through {via}"
-        assert via == "needs_switch_card" or via in GATES, f"{via} is not a gate"
-
-
-def test_every_card_takes_the_shared_button_labels() -> None:
-    """Cancel and Switch read the same on every platform."""
-    for rel in BUTTONS:
-        names = _names(_tree(rel))
-        assert {"CANCEL_LABEL", "SWITCH_LABEL"} <= names, f"{rel} words its own buttons"
-    web = (REPO / "web/src/modules/chat/ThreadModel.tsx").read_text()
-    assert web.index(">Cancel</Button>") < web.index(">Switch</Button>"), "web card buttons"
+        assert defs, f"{helper} not defined in {rel}"
+        assert write in _names(defs[0]), f"{helper} no longer writes through {write}"

@@ -23,6 +23,7 @@ from daimon.core import allowance_limits
 from daimon.core._models import (
     Account,
     AgentMemoryStore,
+    AgentSkillFollow,
     CliPrincipal,
     GitHubAppInstallation,
     GitHubRemovalNotice,
@@ -174,6 +175,24 @@ async def make_account(
     session.add(orm)
     await session.flush()
     return AccountRow.model_validate(orm)
+
+
+async def make_held_update(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str, skill_id: str, digest: str
+) -> None:
+    """An update an earlier release held back for the agent's owner, as old rows store it."""
+    session.add(
+        AgentSkillFollow(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+            follow=True,
+            held_digest=digest,
+            held_reason="drops differ",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    await session.flush()
 
 
 async def make_cli_principal(
