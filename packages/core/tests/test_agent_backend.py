@@ -8,6 +8,7 @@ import json
 import sys
 import uuid
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -164,9 +165,12 @@ async def test_set_clear_revert_and_independent_audit_readback(owned) -> None:
     with pytest.raises(AgentBackendRefused, match="backend not allowed"):
         await service.set_backend(agent, "openai", 0, actor)
     await enable(service, agent, actor)
-    preview = await service.preview(agent, "openai")
+    await service.preview(agent, "openai")
     first = await service.set_backend(
-        agent, "openai", 0, actor, expected_preview_digest=preview.digest
+        agent,
+        "openai",
+        0,
+        actor,
     )
     second = await service.clear_backend(agent, 1, actor)
     third = await service.revert(agent, actor, expected_revision=2)
@@ -180,31 +184,19 @@ async def test_set_clear_revert_and_independent_audit_readback(owned) -> None:
     assert all(r.account_id == actor.account_id for r in rows)
 
 
-async def test_stale_preview_rejects_policy_agent_and_price_replacements(owned) -> None:
+async def test_a_switch_holds_no_preview_and_checks_the_allowlist_when_saved(owned) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
-    preview = await service.preview(agent, "openai")
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await service.set_backend(
-            agent.model_copy(update={"configuration_digest": "changed"}),
-            "openai",
-            0,
-            actor,
-            expected_preview_digest=preview.digest,
-        )
+    await service.preview(agent, "openai")
+    changed = agent.model_copy(update={"configuration_digest": "changed"})
     policy = await service.tenant_policy(agent.tenant_id)
     await service.set_tenant_allowlist(
-        agent.tenant_id, ("anthropic", "openai"), policy.revision, actor
+        agent.tenant_id, ("anthropic", "gemini"), policy.revision, actor
     )
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await service.set_backend(agent, "openai", 0, actor, expected_preview_digest=preview.digest)
-    assert await service.current(agent) is None
-    line = {"value": "existing rate snapshot"}
-    priced = AgentBackendService(sessions, enabled=True, cost_line=lambda a, b: line["value"])
-    quote = await priced.preview(agent, "openai")
-    line["value"] = "changed rate snapshot"
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await priced.set_backend(agent, "openai", 0, actor, expected_preview_digest=quote.digest)
+    with pytest.raises(AgentBackendRefused, match="backend not allowed"):
+        await service.set_backend(changed, "openai", 0, actor)
+    priced = AgentBackendService(sessions, enabled=True, cost_line=lambda a, b: "changed rate")
+    assert (await priced.set_backend(changed, "gemini", 0, actor)).backend == "gemini"
 
 
 async def test_foreign_tenant_and_account_refused(owned) -> None:
@@ -250,7 +242,7 @@ async def test_audit_failure_rolls_back_setting(owned, monkeypatch) -> None:
 async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
-    await service.set_backend(agent, "openai", 0, actor)
+    held = await service.set_backend(agent, "openai", 0, actor)
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="chan")
     async with sessions.begin() as session:
         first, shared, source = await resolve_turn_backend(session, channel, agent, enabled=True)
@@ -259,7 +251,8 @@ async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) 
         assert await current_backend(session, channel) is None
         repeated, _, _ = await resolve_turn_backend(session, channel, agent, enabled=True)
         assert repeated == first
-        assert await mux_state.put_config_revision(session, first) == first
+        put = partial(mux_state.put_config_revision, session, first, origin="agent")
+        assert await put(agent_revision=held) == first
         assert await current_backend(session, channel) is None
     await service.set_backend(agent, "gemini", 1, actor)
     async with sessions.begin() as session:
@@ -715,8 +708,8 @@ async def test_concurrent_materialization_settles_actual_postgres_conflict(
     assert candidates == [1, 1]
     assert [result[2] for result in results] == ["agent", "agent"]
     assert [result[0].backend for result in results] == ["openai", replacement_backend]
-    expected = {1} if replacement_backend == "openai" else {1, 2}
-    assert {result[0].local for result in results} == expected
+    # Each agent's switch keeps its own row, even when both picked the same.
+    assert {result[0].local for result in results} == {1, 2}
     async with sessions() as session:
         for result in results:
             assert (
@@ -972,7 +965,10 @@ async def test_selfhosted_agent_selection_needs_the_operators_agent_grant(
         preview.declared_drops == compatibility_preview(agent, "selfhosted", policy).declared_drops
     )
     saved = await service.set_backend(
-        agent, "selfhosted", 0, actor, expected_preview_digest=preview.digest
+        agent,
+        "selfhosted",
+        0,
+        actor,
     )
     assert (saved.backend, saved.environment) == ("selfhosted", "sh_env_granted")
 
@@ -1064,7 +1060,6 @@ async def test_a_picked_model_is_stored_previewed_reverted_and_resolved(owned) -
         "gemini",
         0,
         actor,
-        expected_preview_digest=argon.digest,
         model="gemini-4-argon",
     )
     assert (first.backend, first.model) == ("gemini", "gemini-4-argon")

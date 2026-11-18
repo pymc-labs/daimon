@@ -14,7 +14,6 @@ from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.channel_backend import (
     REFUSAL_DETAILS,
-    RETRY_DETAILS,
     AgentBackendRefused,
     BackendActor,
     BackendUnsupported,
@@ -41,17 +40,10 @@ RefusalAction = Literal[
     "switch_back_to_claude",
     "pick_another_model",
     "fresh_preview",
-    "confirm_again",
 ]
-
-CONFIRM_AGAIN_LINE: Final = "Confirm this switch again."
 
 #: Lines for refusals that need no provider name, with their action.
 _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
-    "re_confirm": (CONFIRM_AGAIN_LINE, "confirm_again"),
-    "drops_required": ("Review what changes first.", "fresh_preview"),
-    "drops_mismatch": ("Review what changes first.", "fresh_preview"),
-    "stale_preview": ("Review what changes first.", "fresh_preview"),
     "stale_revision": ("This changed since you looked. Review it again.", "fresh_preview"),
     "admin_required_for_shared_threads": ("A shared thread needs an admin to switch.", None),
     "admin_required": ("Only an admin can do that.", None),
@@ -69,7 +61,7 @@ _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
     ),
     "source_unsupported": ("That provider can't carry everything this agent uses.", None),
     "source_context_unavailable": (
-        "A switch can't be confirmed from here. Ask in a server channel or thread.",
+        "That can't be changed from here. Ask in a server channel or thread.",
         None,
     ),
     "tenant_mismatch": ("That agent belongs to another organisation.", None),
@@ -97,22 +89,7 @@ _SOURCE_DETAILS: Final = {
 }
 
 #: What each closed `detail` of a refusal says. Every one of `REFUSAL_DETAILS` has a line.
-DETAIL_LINES: Final = {
-    **_SOURCE_DETAILS,
-    **dict.fromkeys(
-        (
-            "backend_mismatch",
-            "losses_differ",
-            "model_unpinned",
-            "no_consent",
-            "revert_differs",
-            "source_identity",
-            "source_pin",
-        ),
-        CONFIRM_AGAIN_LINE,
-    ),
-    **dict.fromkeys(RETRY_DETAILS, "Daimon couldn't finish setting up the agent. Try again."),
-}
+DETAIL_LINES: Final = dict(_SOURCE_DETAILS)
 
 assert set(DETAIL_LINES) == REFUSAL_DETAILS, "every refusal detail needs a line"
 

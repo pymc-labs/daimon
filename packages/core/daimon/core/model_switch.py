@@ -1,9 +1,8 @@
-"""The setup panels' one model switch: pick a model; it applies, or asks once first.
+"""The setup panels' one model switch: pick a model and it applies.
 
 Discord, Slack and Teams show the same select (`read_picker`) and the same pick
-(`pick_or_refusal`): a pick that loses nothing applies at once, one that does shows the
-short card (`switch_card_text`) and writes on Switch (`confirm_model_switch`). Both writes
-accept the declared losses through `change_model`, guarded by the preview's digest.
+(`pick_or_refusal`), which writes through `change_model` like any model change. What the
+new provider can't carry is off there and said once as information (`ModelChanged.lines`).
 """
 
 from __future__ import annotations
@@ -29,8 +28,7 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.models_catalog import ModelChoice, catalog_model, list_model_choices
-from daimon.core.switch_card import needs_switch_card, switch_card_lines, switch_title
-from daimon.core.turn.notices import provider_name
+from daimon.core.switch_card import switch_lines
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import Effort
@@ -46,7 +44,10 @@ if TYPE_CHECKING:
 
 #: Discord's select holds 25 options; every panel keeps the current model in them.
 SELECT_LIMIT: Final = 25
-#: The refusal card's two buttons, worded the same on every panel.
+#: The refusal card's buttons, worded the same on every panel.
+CANCEL_LABEL: Final = "Cancel"
+#: The button under what a pick turned off: back to the agent.
+BACK_LABEL: Final = "Back"
 SWITCH_BACK_LABEL: Final = "Switch back to Claude"
 REVIEW_AGAIN_LABEL: Final = "Review again"
 
@@ -75,7 +76,7 @@ class ModelPicker:
 
 @dataclass(frozen=True)
 class ModelSwitchPreview:
-    """One pick, previewed: what the person confirms."""
+    """One pick, previewed: what would be off on the new provider."""
 
     model: ModelRef
     label: str
@@ -85,21 +86,12 @@ class ModelSwitchPreview:
     preview: CompatibilityPreview | None
 
     @property
-    def digest(self) -> str:
-        return self.preview.digest if self.preview is not None else ""
-
-    @property
-    def revision(self) -> int:
-        return self.preview.setting_revision if self.preview is not None else 0
-
-    @property
     def allowed(self) -> bool:
         return self.preview is None or self.preview.allowed
 
-    @property
-    def asks_first(self) -> bool:
-        """Whether the pick shows the card rather than applying at once."""
-        return not self.allowed or needs_switch_card(self.preview)
+    def lines(self, *, escape: Callable[[str], str] = str) -> tuple[str, ...]:
+        """What is off on the new provider; `escape` makes names safe for a surface's markup."""
+        return switch_lines(self.preview, escape=escape) if self.preview is not None else ()
 
 
 def panel_edit_deps(
@@ -192,48 +184,6 @@ async def _preview(
     return ModelSwitchPreview(model=model, label=model_name(model), before=before, preview=preview)
 
 
-async def confirm_model_switch(
-    service: AgentBackendService,
-    edit: AgentEditDeps,
-    *,
-    actor: AgentActor,
-    agent_name: str,
-    value: str,
-    digest: str,
-    revision: int,
-) -> ModelChanged:
-    """Write the pick the person confirmed, with the losses they were shown accepted.
-
-    The preview is read again; if it no longer matches the shown digest or revision the
-    write is refused as `stale_preview` and nothing changes.
-    """
-    agent, backend = await _load(service, edit, actor, agent_name)
-    shown = await _preview(service, agent, backend, await _resolve(service, agent, value))
-    if shown.digest != digest or shown.revision != revision:
-        raise AgentBackendRefused("stale_preview", provider=shown.model.provider)
-    return await _apply(service, edit, actor, agent, shown)
-
-
-async def _apply(
-    service: AgentBackendService,
-    edit: AgentEditDeps,
-    actor: AgentActor,
-    agent: BackendAgent,
-    shown: ModelSwitchPreview,
-) -> ModelChanged:
-    """Write `shown`, accepting the losses it declares, guarded by its digest and revision."""
-    return await change_model(
-        agent,
-        shown.model,
-        actor=actor,
-        edit=edit,
-        backends=service,
-        accepted_drops=shown.preview.declared_drops if shown.preview is not None else None,
-        expected_digest=shown.digest or None,
-        expected_revision=shown.revision if shown.preview is not None else None,
-    )
-
-
 @dataclass(frozen=True)
 class SwitchRefusal:
     """A pick that wasn't applied: the line to show and the one action to offer."""
@@ -253,32 +203,6 @@ def refusal_of(
     return SwitchRefusal(
         line, action, error.reason if isinstance(error, AgentBackendRefused) else "unsupported"
     )
-
-
-async def confirm_or_refusal(
-    service: AgentBackendService,
-    edit: AgentEditDeps,
-    *,
-    actor: AgentActor,
-    agent_name: str,
-    value: str,
-    digest: str,
-    revision: int,
-    admin: bool,
-) -> ModelChanged | SwitchRefusal:
-    """`confirm_model_switch`, with a refusal returned as the words a panel shows."""
-    try:
-        return await confirm_model_switch(
-            service,
-            edit,
-            actor=actor,
-            agent_name=agent_name,
-            value=value,
-            digest=digest,
-            revision=revision,
-        )
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
 
 
 async def preview_or_refusal(
@@ -307,16 +231,18 @@ async def pick_or_refusal(
     agent_name: str,
     value: str,
     admin: bool,
-) -> ModelChanged | ModelSwitchPreview | SwitchRefusal:
-    """A panel's pick: applied at once when nothing stops working, else the card to show.
+    escape: Callable[[str], str] = str,
+) -> ModelChanged | SwitchRefusal:
+    """A panel's pick: applied at once, like any model change, or refused with why.
 
-    Every panel calls this, so the rule (`needs_switch_card`) is the same everywhere; a
-    pick the person may not make is refused before either.
+    Every panel calls this. The result's `lines` say what is off on the new provider;
+    `escape` makes names in them safe for the panel's markup.
     """
     try:
         agent, backend = await _load(service, edit, actor, agent_name)
         shown = await _preview(service, agent, backend, await _resolve(service, agent, value))
-        return shown if shown.asks_first else await _apply(service, edit, actor, agent, shown)
+        changed = await change_model(agent, shown.model, actor=actor, edit=edit, backends=service)
+        return replace(changed, lines=shown.lines(escape=escape))
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
 
@@ -332,9 +258,7 @@ async def set_effort(
 ) -> Effort | SwitchRefusal:
     """The effort select's one write: state `effort` on the agent's provider, or say why not.
 
-    The provider and model stay, so nothing new is lost; the losses the agent already
-    accepted are accepted again from the fresh preview, whose digest and revision guard
-    the write.
+    The provider and model stay; the fresh preview's revision guards the write.
     """
     try:
         agent, backend = await _load(service, edit, actor, agent_name)
@@ -350,14 +274,7 @@ async def set_effort(
         preview = await service.preview_settings(agent, settings)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed", provider=provider)
-        await service.set_settings(
-            agent,
-            settings,
-            preview.setting_revision,
-            backend,
-            expected_preview_digest=preview.digest,
-            accepted_drops=preview.declared_drops,
-        )
+        await service.set_settings(agent, settings, preview.setting_revision, backend)
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
     return level
@@ -405,19 +322,3 @@ async def _load(
 async def _resolve(service: AgentBackendService, agent: BackendAgent, value: str) -> ModelRef:
     policy = await service.tenant_policy(agent.tenant_id) if service.enabled else None
     return catalog_model(value, tenant=policy, agent_id=agent.agent_id)
-
-
-def switch_card_text(
-    switch: ModelSwitchPreview, *, agent_name: str | None, escape: Callable[[str], str] = str
-) -> tuple[str, ...]:
-    """The short card every panel shows; `escape` makes names safe for its markup.
-
-    Its title, what stops working and any shared-thread limit; the price stays on the
-    model select, as for any model.
-    """
-    lines = [escape(switch_title(agent_name, switch.label))]
-    if switch.preview is not None:
-        lines.extend(switch_card_lines(switch.preview, escape=escape))
-        if not switch.preview.allowed:
-            lines.append(f"{provider_name(switch.model.provider)} is off here. Pick another.")
-    return tuple(lines)

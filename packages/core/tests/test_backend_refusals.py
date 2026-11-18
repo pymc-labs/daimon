@@ -75,8 +75,6 @@ def test_every_refusal_detail_has_a_line() -> None:
     assert set(DETAIL_LINES) == REFUSAL_DETAILS
     for detail in sorted(REFUSAL_DETAILS):
         assert DETAIL_LINES[detail].endswith("."), detail
-        line, action = refusal_card(AgentBackendRefused("re_confirm", detail=detail))
-        assert line == "Confirm this switch again." and action == "confirm_again", detail
         said, _ = refusal_card(AgentBackendRefused("source_unavailable", detail=detail))
         assert "_" not in said and said != FALLBACK, detail
 
@@ -105,9 +103,9 @@ def test_every_refusal_detail_has_a_line() -> None:
             ("A shared thread needs an admin to switch.", None),
         ),
         (
-            AgentBackendRefused("drops_mismatch"),
+            AgentBackendRefused("stale_revision"),
             {},
-            ("Review what changes first.", "fresh_preview"),
+            ("This changed since you looked. Review it again.", "fresh_preview"),
         ),
         (
             BackendUnsupported("profile_not_runnable"),

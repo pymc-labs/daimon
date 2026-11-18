@@ -20,7 +20,6 @@ from daimon.core.server_skills import follows as follows_module
 from daimon.core.server_skills.follows import set_agent_follow
 from daimon.core.server_skills.gate import AttachedAgent, manifest_digest, manifest_of
 from daimon.core.server_skills.sync import (
-    NeedsReconfirm,
     SyncDeps,
     TargetError,
     UpstreamGone,
@@ -32,7 +31,7 @@ from daimon.core.skill_library_files import skill_lock
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_held_update, make_tenant
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -76,8 +75,6 @@ class FakeTarget:
     agents: dict[str, str | None]
     failing: bool = False
     refuses: set[str] = field(default_factory=set[str])
-    held: set[str] = field(default_factory=set[str])
-    """Agents whose backend consent would not survive the update."""
     published: list[str] = field(default_factory=list[str])
 
     async def publish(self, mirror: ServerSkillRow, bundle: SkillBundle) -> str:
@@ -92,8 +89,6 @@ class FakeTarget:
     async def repin(self, mirror: ServerSkillRow, agent_id: str, version: str) -> None:
         if self.failing or agent_id in self.refuses:
             raise TargetError("down")
-        if agent_id in self.held:
-            raise NeedsReconfirm("drops differ")
         self.agents[agent_id] = version
 
 
@@ -281,23 +276,28 @@ async def _held(world: World, agent_id: str) -> dict[str, str]:
         )
 
 
-async def test_an_agent_whose_consent_would_change_is_held_not_moved(
+async def _hold(world: World, agent_id: str) -> None:
+    async with world.deps.sessionmaker.begin() as session:
+        await make_held_update(
+            session,
+            tenant_id=world.mirror.tenant_id,
+            agent_id=agent_id,
+            skill_id="skill_1",
+            digest=world.mirror.digest,
+        )
+
+
+async def test_an_old_hold_moves_with_the_next_update(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """A held agent keeps its version and shows the update; the others move on."""
+    """An agent an earlier release held back moves like any other, and its hold goes."""
     world = await _world(db_session, db_session_factory)
-    world.first.held = {"follows"}
+    await _hold(world, "follows")
     world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
 
-    assert await check_mirror(world.deps, world.mirror.id) == "updated", "a hold is no failure"
-    assert world.first.agents["follows"] == "1", "a held agent is never moved"
+    assert await check_mirror(world.deps, world.mirror.id) == "updated"
+    assert world.first.agents["follows"] == "2", "a held agent moves on the next update"
     assert world.second.agents == {"other": "2"}
-    digest = (await _row(world)).digest
-    assert await _held(world, "follows") == {"skill_1": digest}
-
-    world.first.held = set()
-    assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
-    assert world.first.agents["follows"] == "2", "the hold is retried each run"
     assert await _held(world, "follows") == {}, "a moved agent's hold is released"
 
 
@@ -306,10 +306,14 @@ async def test_a_hold_is_released_once_the_agent_is_current(
 ) -> None:
     """An owner who moved the agent by hand clears the stale hold on the next run."""
     world = await _world(db_session, db_session_factory)
-    world.first.held = {"follows"}
+    await _hold(world, "follows")
+    world.first.agents["follows"] = "1"
     world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
-    assert await check_mirror(world.deps, world.mirror.id) == "updated"
+    world.first.refuses = {"follows"}
+    assert await check_mirror(world.deps, world.mirror.id) == "failed", "retried next run"
+    assert await _held(world, "follows") != {}, "a refused repin keeps the old hold"
 
+    world.first.refuses = set()
     world.first.agents["follows"] = "2"
     assert await check_mirror(world.deps, world.mirror.id) == "unchanged"
     assert await _held(world, "follows") == {}, "an agent already current holds nothing"
@@ -338,15 +342,8 @@ async def test_an_agent_that_resumes_following_moves_at_once(
         await store.set_follow(
             session, tenant_id=tenant, agent_id="pins", skill_id="skill_1", follow=True, now=NOW
         )
-    world.first.held = {"follows"}
     await follow_now(world.deps, tenant_id=tenant, skill_id="skill_1", agent_id="pins")
     assert world.first.agents == {"follows": "1", "pins": "5"}, "only that agent moves"
-
-    world.first.held = {"pins"}
-    world.first.agents["pins"] = "1"
-    await follow_now(world.deps, tenant_id=tenant, skill_id="skill_1", agent_id="pins")
-    assert world.first.agents["pins"] == "1", "the consent rules still apply"
-    assert await _held(world, "pins") == {"skill_1": world.mirror.digest}
 
 
 async def test_following_again_survives_a_failing_provider(

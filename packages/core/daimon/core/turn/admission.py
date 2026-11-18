@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -115,7 +115,7 @@ from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Platform, Role
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import (
     find_platform_principal,
     get_or_create_platform_principal,
@@ -454,9 +454,6 @@ class Admission:
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
-    # The agent's switch to this provider needs confirming again, so this turn runs
-    # on its source (Anthropic) and the agent is told (`agent_notices`).
-    backend_switch_stale: Provider | None = None
     # What `admit` was called with; a helper's turn is admitted on the same.
     request: AdmitRequest | None = field(default=None, compare=False, repr=False)
     # This workspace's links into the web app for the admitted role; None with no web app.
@@ -1489,61 +1486,16 @@ async def _admit_gates(
     backend_counterpart: AgentRevision | None = None
     backend_agent_revision: AgentBackendRevision | None = None
     source_agent: BackendAgent | None = None
-    # Set when the agent's own switch refused re_confirm; a channel pin never sets it.
-    stale_switch: Provider | None = None
-    backend_switch_stale: Provider | None = None
 
     # This conversation's own model choice, as the thread tier (`resolve_preference`).
     thread_choice: channel_backend.ThreadBackend | None = None
 
     def _thread_of(agent_revision: AgentBackendRevision | None) -> str | None:
-        """The conversation whose consent `agent_revision` is, if the thread tier's."""
+        """The conversation whose revision `agent_revision` is, if the thread tier's."""
         chosen = thread_choice
         if chosen is None or chosen.consent is None or agent_revision is not chosen.consent:
             return None
         return chosen.thread_id
-
-    def _ask_thread_again() -> bool:
-        """Post the conversation's model card again when its own consent went stale."""
-        chosen = thread_choice
-        notifier = deps.thread_reask_notifier
-        conversation = conversation_key(channel_id=channel_id, thread_id=thread_id, is_dm=is_dm)
-        if (
-            notifier is None
-            or chosen is None
-            or chosen.consent is None
-            or source_agent is None
-            or conversation is None
-        ):
-            return False
-        # Deferred: the model switch modules it imports reach `channel_rules`, whose
-        # import chain comes back through this package.
-        from daimon.core import thread_model_reask
-        from daimon.core.turn.invocation import human_invocation
-
-        thread_model_reask.spawn_thread_reask(
-            sessionmaker=deps.sessionmaker,
-            notifier=notifier,
-            stale=thread_model_reask.StaleThread(
-                deps=deps,
-                settings=deps.settings,
-                tenant_id=tenant_id,
-                platform=cast(Platform, platform),
-                channel_id=channel_id,
-                thread_id=thread_id,
-                conversation_id=conversation,
-                user_id=external_user_id,
-                admin=effective_admin,
-                source=source_agent,
-                ma_agent_id=agent.id,
-                agent_version=agent.version,
-                consent=chosen.consent,
-                attended=human_invocation(origin, attended),
-                category_id=category_id,
-                category_unresolved=category_unresolved,
-            ),
-        )
-        return True
 
     async def verify_origin(
         selection: ResolvedBackend,
@@ -1552,7 +1504,7 @@ async def _admit_gates(
         *,
         agent_revision: AgentBackendRevision | None = None,
     ) -> None:
-        nonlocal backend_counterpart, backend_agent_revision, stale_switch
+        nonlocal backend_counterpart, backend_agent_revision
         _require_backend_origin(selection, origin, agent_backends=deps.agent_backends)
         if revision is None or selection.profile == MANAGED_AGENTS.profile_id:
             return
@@ -1618,13 +1570,11 @@ async def _admit_gates(
                 if error.cause == "channel_row_missing":
                     raise error
                 if (
-                    error.cause in ("re_confirm", "preparation_busy", "preparation_failed")
+                    error.cause in ("preparation_busy", "preparation_failed")
                     and error.provider is None
                 ):
                     # The copy names the provider the switch went to (J6g); a busy
                     # or failed preparation is never "not set up".
-                    if error.cause == "re_confirm" and origin == "agent":
-                        stale_switch = revision.backend
                     raise AdmissionDenied(
                         reason="backend_unsupported",
                         cause=error.cause,
@@ -1636,11 +1586,10 @@ async def _admit_gates(
 
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
-        nonlocal backend_footer_profile, source_agent, backend_switch_stale
+        nonlocal backend_footer_profile, source_agent
         nonlocal retained_revision, backend_follow, follow_generation, thread_choice
         if selfhosted:
             return
-        bound_before = retained_revision if backend_revision is None else None
         if selection_enabled and channel is not None and not configured_channel:
             async with deps.sessionmaker() as thread_session:
                 thread_choice = await thread_backend(
@@ -1653,6 +1602,25 @@ async def _admit_gates(
                     agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
                     daimon_record=daimon_record,
                 )
+        if (
+            selection_enabled
+            and channel is not None
+            and retained_revision
+            and not retained_shared
+            and not configured_channel
+        ):
+            # A held revision runs only for the agent it was made for: after the
+            # thread's responder changed, this slot selects afresh for the new one.
+            async with deps.sessionmaker() as owner_session:
+                owner = await mux_state.config_agent_id(owner_session, channel, retained_revision)
+            if owner is not None and owner != derive_agent_uuid(
+                tenant_id=tenant_id, ma_agent_id=agent.id
+            ):
+                follow_generation = retained_binding.generation if retained_binding else 0
+                retained_revision = None
+                backend_revision = None
+                backend_revision_origin = None
+                backend_footer_profile = None
         if follow_eligible and channel is not None and retained_revision is not None:
             # M03: the conversation follows its (Anthropic source) agent's switch.
             async with deps.sessionmaker() as follow_session:
@@ -1725,7 +1693,6 @@ async def _admit_gates(
                         return selected
 
                 source: Literal["channel", "agent", "default"] = "agent"
-                stale: Provider | None = None
                 try:
                     # The shared policy fence is a try-lock: a turn admitted while an
                     # admin's policy write holds it waits (bounded) instead of failing
@@ -1743,33 +1710,6 @@ async def _admit_gates(
                     raise _backend_refusal(
                         backend_revision, source, policy.enabled_backends, error
                     ) from error
-                except AdmissionDenied:
-                    stale, follow_kept = stale_switch, follow_generation is None
-                    # A stale switch runs on the agent's source instead of locking
-                    # it out, where a later message still re-checks the switch: only
-                    # a person's chat turn (the agent can offer a new card there), not
-                    # a setup thread, and not a move away from another provider.
-                    if (
-                        stale is None
-                        or origin not in ("chat", "handoff")
-                        or attended is False
-                        or not follow_switch
-                        or config.thread_binding_kind == "setup"
-                        or not (follow_kept or bound_before == 0)
-                    ):
-                        raise
-                if stale is not None:
-                    _log.info("turn.stale_switch_fallback", provider=stale)
-                    backend_revision, backend, source = None, None, "default"
-                    # The conversation's own pick posts its card again; the agent
-                    # offers no switch for it.
-                    backend_switch_stale = None if _ask_thread_again() else stale
-                    if follow_generation is not None:
-                        # Already on Anthropic: stay in that session, move nothing.
-                        retained_revision, follow_generation, backend_follow = 0, None, None
-                        if followed is not None and own_slot in followed:
-                            followed.remove(own_slot)
-                    backend_footer_profile = resolve_default(BackendConfig()).profile
                 backend_revision_origin = source if source != "default" else None
                 if backend_revision is not None:
                     backend_footer_profile = backend_revision.profile
@@ -1961,7 +1901,6 @@ async def _admit_gates(
         grant=grant,
         model_override=thread_model.model_override,
         model_fell_back=thread_model.fell_back,
-        backend_switch_stale=backend_switch_stale,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     result = replace(
@@ -2763,72 +2702,6 @@ async def capture_agent_source(
         private_dm_id=None,
         external_user_id=external_user_id,
         explicit_target_name=source.name,
-    )
-
-
-async def capture_admitted_backend_source(
-    deps: TurnDeps,
-    source: BackendAgent,
-    *,
-    admission: Admission | None,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    platform: str,
-    opened_thread_id: str | None = None,
-    opened_thread_parent_id: str | None = None,
-) -> BackendAgent:
-    """A chat confirmation card's source capture: only its own turn's public admission.
-
-    `opened_thread_id` is the thread the turn opened for its reply after admission (a
-    Discord mention in a channel). The turn's origin, and so the switch tool's capture
-    and a copy's `forked_in` stamp, name that thread: the card must read the same place,
-    or a copy made in this turn reads as a bare agent and its card's digest never matches.
-    The thread counts only as a child of the channel the turn was admitted in
-    (`opened_thread_parent_id`); any other thread is not this turn's reply thread, so
-    the capture is refused and the card fails safe.
-    """
-    from daimon.core.session_seal import is_private_conversation
-
-    if admission is None or admission.grant is None or admission.account_id != account_id:
-        raise channel_backend.AgentBackendRefused("source_unavailable")
-    if (
-        opened_thread_id is not None
-        and admission.origin_thread_id is None
-        and opened_thread_parent_id != admission.origin_channel_id
-    ):
-        raise channel_backend.AgentBackendRefused("source_context_unavailable")
-    thread_id = admission.origin_thread_id or opened_thread_id
-    place = admission.grant.run_place
-    if admission.origin_thread_id is None and opened_thread_id is not None:
-        place = replace(
-            place, channel_id=opened_thread_id, parent_channel_id=admission.origin_channel_id
-        )
-    # Like the MCP caller's public-context gate: never a DM or private conversation.
-    if (
-        admission.grant.is_dm
-        or admission.private_dm_id is not None
-        or admission.slack_turn_context_id is not None
-        or admission.origin_channel_id is None
-        or is_private_conversation(admission.origin_channel_id)
-        or is_private_conversation(thread_id or "")
-    ):
-        raise channel_backend.AgentBackendRefused("source_context_unavailable")
-    return await capture_backend_source(
-        deps,
-        source,
-        context=ScopeContext(
-            tenant_id=tenant_id,
-            account_id=account_id,
-            platform=platform,
-            channel_id=admission.origin_channel_id,
-            thread_id=thread_id,
-        ),
-        subject=admission.grant.subject,
-        place=place,
-        is_dm=False,
-        slack_turn_context_id=None,
-        private_dm_id=None,
-        responder_ma_agent_id=admission.agent.id,
     )
 
 

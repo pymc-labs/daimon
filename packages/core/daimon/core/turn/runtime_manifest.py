@@ -18,6 +18,7 @@ import structlog
 from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFIX
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
+from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
 from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
@@ -25,7 +26,6 @@ from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translat
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
-from daimon.core.turn.consent_upgrade import covers
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
@@ -736,26 +736,23 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
-            # No OpenAI/Gemini turn has a confirmation card of its own. Daimon
-            # posts one for a self-carded tool and, with the host call gate on
-            # for this platform, for each gated call; any other gated tool stays
-            # unavailable (and the server refuses it for provider-turn credentials).
+            # No OpenAI/Gemini turn has a confirmation card of its own. With the
+            # host call gate on for this platform, Daimon posts one for each gated
+            # call; otherwise a gated tool stays unavailable (and the server
+            # refuses it for provider-turn credentials). A retired gate's stored ask runs.
             from daimon.core.features.snapshot import deployment_on_everywhere
             from daimon.core.tool_safety import (
-                GATE_OFF_TOOLS,
+                RETIRED_GATES,
                 confirmation_gated_tools,
                 host_call_carded_tools,
-                self_carded_tools,
             )
 
             settings = request.deps.settings
-            gated, carded = confirmation_gated_tools(), self_carded_tools()
+            gated, carded = confirmation_gated_tools(), RETIRED_GATES
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
                 carded |= host_call_carded_tools()
-            else:
-                carded |= GATE_OFF_TOOLS
             permissions = {
                 # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
@@ -771,7 +768,7 @@ async def _capture_source_capabilities(
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
             # URL fetching has no native hosted-Agents tool. Keep the exact
-            # source capability visible as a consented loss instead of silently
+            # source capability visible as a declared loss instead of silently
             # treating shell HTTP execution as the provider's fetch tool.
             # Daimon's own `web_fetch` (`daimon.core.host_web_fetch`) carries it when listed.
             host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
@@ -880,8 +877,8 @@ async def _capture_source_capabilities(
                 raise ValueError("MCP representation expands the source allowlist")
             # Hosted Agents MCP currently has no approval request/response
             # protocol (unlike Responses). Keep confirmation-gated tools out
-            # of its executable allowlist and require explicit per-tool loss
-            # consent. Never convert `ask` into `auto` or drop sibling tools.
+            # of its executable allowlist and declare each as a per-tool loss.
+            # Never convert `ask` into `auto` or drop sibling tools.
             unavailable_mcp_tools = tuple(
                 f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
                 for name, permission in sorted(permissions.items())
@@ -1663,7 +1660,7 @@ def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, 
     captured = source.model_copy(update=updates)
     # Direct facts include the intentionally non-serialized resource projection.
     facts = dict(captured)
-    # Derived representation evidence must not change old consent pins, nor
+    # Derived representation evidence must not change old source pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
     facts.pop("owner_spec", None)
@@ -1730,7 +1727,7 @@ def _gated_pin(source: BackendAgent, *, readdress: bool) -> str:
 def source_pin_matches(source: BackendAgent, pin: str) -> bool:
     """Whether `pin` pins this source, by the current formula or one before it.
 
-    Consents and operator rows stored before places, Daimon's gating or the
+    Operator rows stored before places, Daimon's gating or the
     caller's re-addressed credential left the pin still hold: each older pin
     also covers those facts, so it is stricter and safe to accept.
     """
@@ -1835,9 +1832,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                             )
                         )
                     if setting != provisional:
-                        raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
-                    if setting is None or setting.drop_consent is None:
-                        raise AgentBackendRefused("re_confirm", detail="no_consent")
+                        # Changed since admission read it; the next message runs the new one.
+                        raise AgentBackendRefused("revision_busy")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     owned = request.admission.agent.id.startswith("dm_agent_")
     source = await asyncio.wait_for(
@@ -1858,19 +1854,17 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or source.source.revision.local != request.admission.agent.version
     ):
         if setting is not None:
-            raise AgentBackendRefused("re_confirm", detail="source_identity")
+            # An edit landed between admission and this capture.
+            raise AgentBackendRefused("revision_busy")
         raise UnsupportedCapability(("source_context",), revision.profile)
     # Capture is evidence of source intent, not evidence that a target preserved it.
     spec = source.effective_spec
     if spec is None:
         raise UnsupportedCapability(("source_definition",), revision.profile)
     target = None
-    # A Daimon record born on this profile runs natively: no switch, no consent.
-    born_native = (
-        setting is None
-        and owned
-        and revision.profile == backend_selection(spec.model.provider).profile
-    )
+    native = revision.profile == backend_selection(spec.model.provider).profile
+    # A Daimon record born on this profile runs natively: no switch.
+    born_native = setting is None and owned and native
     if born_native:
         target = preview_source_drops(
             source,
@@ -1878,37 +1872,21 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             effort=revision.effort,
         )
     if setting is not None:
-        consent = setting.drop_consent
-        if consent is None:
-            raise AgentBackendRefused("re_confirm", detail="no_consent")
         if setting.backend != revision.backend:
-            raise AgentBackendRefused("re_confirm", detail="backend_mismatch")
-        if revision.model is None and revision.backend != spec.model.provider:
-            raise AgentBackendRefused("re_confirm", detail="model_unpinned")
-        from daimon.core.channel_backend import loss_names
-
+            raise AgentBackendRefused("revision_busy")
+        model = revision.model
+        if model is None and revision.backend != spec.model.provider:
+            # Only Claude names no model: a source born elsewhere runs Claude's default.
+            model = DEFAULT_AGENT_MODEL
+        # Built from the source as it is now: an edit applies on the next turn, and
+        # what the provider can't carry is off until a switch back.
         target = preview_source_drops(
             source,
-            ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
+            ModelRef(provider=revision.backend, id=model or spec.model.id),
             effort=revision.effort,
         )
-        # An edit since the confirmation (instructions, a key, Daimon's own prompt
-        # update) asks again only when it changes the model or what the agent loses:
-        # the owner or an admin who may edit it may confirm the same card anyway.
-        if not covers(
-            consent,
-            target,
-            source_system=spec.system,
-            names=loss_names(source),
-            backend=revision.backend,
-            model=revision.model,
-            picked=setting.model,
-        ):
-            raise AgentBackendRefused("re_confirm", detail="losses_differ")
     retain_native = born_native or (
-        (setting is not None)
-        and not setting.declared_drops
-        and revision.profile == backend_selection(spec.model.provider).profile
+        setting is not None and target is not None and not target.declared_drops and native
     )
     missing = classify_source_obligations(
         source,
@@ -1972,7 +1950,8 @@ async def read_preparation_counterpart(
         )
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         if (target is not None) and current_source != source:
-            raise AgentBackendRefused("re_confirm", detail="source_drift")
+            # Edited mid-preparation: the next message builds from the edit.
+            raise AgentBackendRefused("revision_busy")
         if target is None or counterpart.agent.spec != target or current_source != source:
             raise UnsupportedCapability(("source_drift",), revision.profile)
         return replace(selected, counterpart=counterpart, verified_counterpart=counterpart)
@@ -1985,14 +1964,10 @@ async def read_preparation_counterpart(
             raise
         raise AdmissionDenied(reason="backend_unsupported") from error
     except AgentBackendRefused as error:
-        # A stale consent is not missing provider setup: name the fresh preview
-        # the person needs. Any other backend refusal stays unsupported (J6g).
-        if error.reason == "re_confirm":
-            from daimon.core.channel_backend import RETRY_DETAILS
-
-            # A race is not a stale consent: the same message works once it settles.
-            cause = "preparation_busy" if error.detail in RETRY_DETAILS else "re_confirm"
-            raise AdmissionDenied(reason="backend_unsupported", cause=cause) from error
+        # A race with an edit is not missing provider setup: the same message works
+        # once it settles. Any other backend refusal stays unsupported (J6g).
+        if error.reason == "revision_busy":
+            raise AdmissionDenied(reason="backend_unsupported", cause="preparation_busy") from error
         raise AdmissionDenied(reason="backend_unsupported") from error
     except UnsupportedCapability as error:
         # The provider is set up; this agent can't be built there (the log names why).
@@ -2318,7 +2293,7 @@ def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     """The one catalog entry a template row's counterpart lives at for this agent version.
 
     Keyed by the admitted agent's scoped identity, its MA version, the admitted
-    profile and model and the consented target spec, so an agent edit, a model
+    profile and model and the derived target spec, so an agent edit, a model
     change or a different derivation gets a new entry, and an entry can never
     serve another agent, version, model or spec.
     """
@@ -2330,7 +2305,7 @@ def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     agent_id = derive_agent_uuid(
         tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
     )
-    # The consented target's digest: a different derived target never reuses an entry.
+    # The derived target's digest: a different target never reuses an entry.
     spec = request_digest(target.model_dump(mode="json"))[:16]
     return (
         f"root:{agent_id}:{request.admission.agent.version}:{revision.profile}"
@@ -2409,10 +2384,10 @@ async def materialize_root_counterpart(
     *,
     resources: NeutralResourceHost,
 ) -> AgentRevision:
-    """Publish this agent version's counterpart from its consented target, once.
+    """Publish this agent version's counterpart from its derived target, once.
 
-    Runs after source preparation proved the drop consent, so the target is the
-    exact spec the admin confirmed. A concurrent first turn loses the catalog
+    Runs after source preparation built the target from the current source and
+    the agent's revision. A concurrent first turn loses the catalog
     compare-and-set and reads the winner's entry; the native key is the catalog
     id, so native creation is idempotent too. `read_counterpart` then verifies
     the entry like any operator-installed counterpart.

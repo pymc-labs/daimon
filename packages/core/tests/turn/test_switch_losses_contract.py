@@ -12,7 +12,7 @@ import pytest
 from daimon.core.host_web_fetch import PINNED_HOST_TOOLS
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_template_mcp import CONNECTOR_PARAMS as GEMINI_CONNECTOR
 from .test_gemini_template_mcp import template as gemini_template  # noqa: F401
 from .test_openai_template_mcp import CONNECTOR_PARAMS as OPENAI_CONNECTOR
@@ -86,12 +86,12 @@ ENVIRONMENTS = {
 
 
 @pytest.fixture
-async def source_mcp(consent_request):
-    async with handoff_mcp(consent_request[0], PINNED_HOST_TOOLS) as app:
+async def source_mcp(switched_request):
+    async with handoff_mcp(switched_request[0], PINNED_HOST_TOOLS) as app:
         yield app
 
 
-async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()):
+async def _one_reading(request, quote, switched_request, *, relay: bool, finer=()):
     from daimon.core.channel_backend import switch_losses
     from daimon.core.confirmation import drop_words
     from daimon.core.stores.accounts import set_role
@@ -105,7 +105,7 @@ async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()
     assert {d for d in drops if d in _FINER} == set(finer), (drops, finer)
     for name in finer:
         assert _FINER[name] in drop_words(drops), f"the card names {_FINER[name]}"
-        assert _FINER[name].removeprefix("its ") in switch_losses(drops, consent_request[2])[2], (
+        assert _FINER[name].removeprefix("its ") in switch_losses(drops, switched_request[2])[2], (
             "the tool's text names it too"
         )
     assert ("mcp_server:linear" in drops) is not relay
@@ -117,15 +117,14 @@ async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()
     assert set(ids) <= set(quote.skill_names), f"each lost skill has its name: {ids}"
     assert quote.unsupported_skills == tuple(sorted(quote.skill_names[i] for i in ids))
     assert (quote.unsupported_skills, quote.unsupported_mcps, quote.unsupported_capabilities) == (
-        switch_losses(drops, consent_request[2], quote.skill_names)
+        switch_losses(drops, switched_request[2], quote.skill_names)
     )
     if drops:
         assert "connected tools" not in drop_words(drops)
-    assert quote.drop_consent is not None and quote.drop_consent.declared_drops == drops
     prepared = await prepare_source(request)
     assert prepared.target_spec is not None and prepared.target_spec.declared_drops == drops
     # A copy is read as its own agent, with no channel: the same losses, admin or not.
-    _, _, source, actor, *_ = consent_request
+    _, _, source, actor, *_ = switched_request
     model = prepared.target_spec.model
     for role in (Role.USER, Role.ADMIN):
         async with request.deps.sessionmaker.begin() as db:
@@ -140,12 +139,12 @@ async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()
         assert preview_source_drops(captured, model).declared_drops == drops, role
 
 
-@pytest.mark.parametrize("consent_request", [GEMINI_CONNECTOR], indirect=True)
+@pytest.mark.parametrize("switched_request", [GEMINI_CONNECTOR], indirect=True)
 @pytest.mark.parametrize("gemini_template", [None, "relay"], indirect=True)
-async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_request):  # noqa: F811
+async def test_gemini_names_only_what_its_turn_loses(gemini_template, switched_request):  # noqa: F811
     request, quote, *_ = gemini_template
     relay = "mcp_server:linear" not in quote.declared_drops
-    await _one_reading(request, quote, consent_request, relay=relay)
+    await _one_reading(request, quote, switched_request, relay=relay)
     # Its large default skill (fonts, images) uploads, so no skill is a loss.
     assert not [d for d in quote.declared_drops if d.startswith("skill:")], quote.declared_drops
     # Web search maps to Google Search; Daimon's own web_fetch carries fetch.
@@ -153,15 +152,15 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_re
     assert "builtin_tool:web_fetch" not in quote.declared_drops
 
 
-@pytest.mark.parametrize("consent_request", [OPENAI_AGENT], indirect=True)
+@pytest.mark.parametrize("switched_request", [OPENAI_AGENT], indirect=True)
 @pytest.mark.parametrize("openai_template", [{}, {"relay": True}], indirect=True)
-async def test_openai_names_only_what_its_turn_loses(openai_template, consent_request):  # noqa: F811
+async def test_openai_names_only_what_its_turn_loses(openai_template, switched_request):  # noqa: F811
     request, quote, *_ = openai_template
     relay = "mcp_server:linear" not in quote.declared_drops
     # Deliberate: an operator's own OpenAI environment (`environment_id`) is served as
     # it is, so the recorded source's packages are a loss there. A tenant's own default
     # environment carries them (`test_template_environment`).
-    await _one_reading(request, quote, consent_request, relay=relay, finer=("installed_packages",))
+    await _one_reading(request, quote, switched_request, relay=relay, finer=("installed_packages",))
 
 
 def _cases(base, provider: int):
@@ -169,24 +168,24 @@ def _cases(base, provider: int):
 
 
 @pytest.mark.parametrize(
-    "consent_request,finer",
+    "switched_request,finer",
     _cases(GEMINI_CONNECTOR, 0),
     ids=list(ENVIRONMENTS),
-    indirect=["consent_request"],
+    indirect=["switched_request"],
 )
-async def test_gemini_environment_losses(gemini_template, consent_request, finer):  # noqa: F811
+async def test_gemini_environment_losses(gemini_template, switched_request, finer):  # noqa: F811
     """Preview, card, consent and preparation name the same environment losses on Gemini."""
     request, quote, *_ = gemini_template
-    await _one_reading(request, quote, consent_request, relay=False, finer=finer)
+    await _one_reading(request, quote, switched_request, relay=False, finer=finer)
 
 
 @pytest.mark.parametrize(
-    "consent_request,finer",
+    "switched_request,finer",
     _cases(OPENAI_AGENT, 1),
     ids=list(ENVIRONMENTS),
-    indirect=["consent_request"],
+    indirect=["switched_request"],
 )
-async def test_openai_environment_losses(openai_template, consent_request, finer):  # noqa: F811
+async def test_openai_environment_losses(openai_template, switched_request, finer):  # noqa: F811
     """Preview, card, consent and preparation name the same environment losses on OpenAI."""
     request, quote, *_ = openai_template
-    await _one_reading(request, quote, consent_request, relay=False, finer=finer)
+    await _one_reading(request, quote, switched_request, relay=False, finer=finer)

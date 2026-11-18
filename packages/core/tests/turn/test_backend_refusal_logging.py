@@ -98,14 +98,14 @@ def test_nested_private_errors_log_only_closed_reason_and_capability_labels():
 
 
 def test_a_refusal_detail_is_logged_only_from_the_closed_set():
-    stale = AgentBackendRefused("re_confirm", detail="source_pin")
-    stale.__cause__ = AgentBackendRefused("re_confirm", detail="private-PRIVATE")
+    gap = AgentBackendRefused("source_unavailable", detail="source")
+    gap.__cause__ = AgentBackendRefused("source_unavailable", detail="private-PRIVATE")
     with capture_logs() as logs:
-        _log_backend_unsupported("preparation_counterpart", stale)
+        _log_backend_unsupported("preparation_counterpart", gap)
     assert logs[0]["causes"] == [
-        {"type": "AgentBackendRefused", "reason": "re_confirm", "detail": "source_pin"},
-        {"type": "AgentBackendRefused", "reason": "re_confirm"},
-    ]
+        {"type": "AgentBackendRefused", "reason": "source_unavailable", "detail": "source"},
+        {"type": "AgentBackendRefused", "reason": "source_unavailable"},
+    ], "only a detail from the closed set is logged"
 
 
 def test_capture_sentences_include_its_nested_helpers():

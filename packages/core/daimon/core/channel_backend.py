@@ -92,7 +92,6 @@ from mux.profiles import (
 )
 from mux.profiles.anthropic import MULTIAGENT_NAMESPACE
 from mux.state.lease import Slot
-from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
 from pydantic import JsonValue
 from sqlalchemy.exc import IntegrityError
@@ -340,8 +339,8 @@ def check_backend(
 class ThreadBackend:
     """A conversation's own model choice, between a channel pin and its agent.
 
-    `consent` is the agent's consent to run this conversation on another
-    provider (`thread_model_consents`); None runs it on Claude, the agent's source.
+    `consent` is this conversation's run of the agent on another provider
+    (stored in `thread_model_consents`); None runs it on Claude, the agent's source.
     """
 
     thread_id: str
@@ -509,34 +508,14 @@ class AgentBackendRefused(DaimonError):
         self.provider = provider
         # `source_unsupported`: what the target can't carry (closed obligation labels).
         self.missing = missing
-        # `source_unavailable`: which permanent cause, if not a transient read failure;
-        # `re_confirm`: which check refused the consent. Logged only from REFUSAL_DETAILS.
+        # `source_unavailable`: which permanent cause, if not a transient read failure.
+        # Logged only from REFUSAL_DETAILS.
         self.detail = detail
         super().__init__(reason.replace("_", " "))
 
 
 #: Closed `AgentBackendRefused.detail` labels a refusal log may carry.
-REFUSAL_DETAILS: Final = frozenset(
-    {
-        "environment",
-        "identity",
-        "place",
-        "source",
-        "backend_mismatch",
-        "losses_differ",
-        "model_unpinned",
-        "no_consent",
-        "provisional_mismatch",
-        "revert_differs",
-        "source_drift",
-        "source_identity",
-        "source_pin",
-    }
-)
-
-#: `re_confirm` details a retry can clear: the setup or the switch changed while a
-#: turn was being readied, and a fresh admission reads the new one.
-RETRY_DETAILS: Final = frozenset({"provisional_mismatch", "source_drift"})
+REFUSAL_DETAILS: Final = frozenset({"environment", "identity", "place", "source"})
 
 
 type BackendRefusalStage = Literal[
@@ -947,8 +926,6 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "agent_identity_required",
         "agent_not_found",
         "backend_not_allowed",
-        "drops_mismatch",
-        "drops_required",
         "feature_disabled",
         "no_previous_revision",
         "owner_or_admin_required",
@@ -956,12 +933,10 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "profile_not_selectable",
         "effort_not_offered",
         "channel_pin_lacks_capability",
-        "re_confirm",
         "revision_busy",
         "source_context_unavailable",
         "source_unavailable",
         "source_unsupported",
-        "stale_preview",
         "stale_revision",
         "tenant_mismatch",
         "backend_unsupported",
@@ -1065,7 +1040,6 @@ def _digest(facts: object) -> str:
 def _revision_digest(
     agent: BackendAgent,
     backend: Provider | None,
-    drop_consent: JsonValue | None = None,
     model: str | None = None,
     settings: AgentSettings | None = None,
 ) -> str:
@@ -1079,8 +1053,6 @@ def _revision_digest(
     if settings is not None:
         # Only set fields are hashed, so a revision without them keeps its digest.
         facts.update(settings.facts())
-    if drop_consent is not None:
-        facts["drop_consent"] = drop_consent
     return _digest(facts)
 
 
@@ -1284,6 +1256,7 @@ def compatibility_preview(
         skill_names={
             k: v for k, v in loss_names(agent).items() if f"skill:{k}" in (declared_drops or ())
         },
+        declared_drops=tuple(declared_drops or ()),
         target_model=model if model != backend_selection(target_backend).model else None,
         target_settings=cast(dict[str, JsonValue], settings.facts())
         if settings is not None and not settings.is_default()
@@ -1472,7 +1445,7 @@ class AgentBackendService:
                 raise AgentBackendRefused(
                     "source_unsupported", provider=target, missing=tuple(error.missing)
                 ) from error
-        preview = compatibility_preview(
+        return compatibility_preview(
             agent,
             target,
             await self._policy(session, agent.tenant_id),
@@ -1483,29 +1456,6 @@ class AgentBackendService:
             model=model,
             settings=settings,
             declared_drops=None if proposed is None else proposed.declared_drops,
-        )
-
-        if proposed is None:
-            return preview
-        from daimon.core.turn.runtime_manifest import source_preservation_pin
-
-        consent = {
-            "declared_drops": proposed.declared_drops,
-            "source_pin": source_preservation_pin(agent),
-            "target_digest": request_digest(proposed.model_dump(mode="json")),
-        }
-        preview = CompatibilityPreview.model_validate(
-            {**preview.model_dump(), "drop_consent": consent}
-        )
-        return preview.model_copy(
-            update={
-                "digest": _digest(
-                    {
-                        "preview": preview.model_dump(mode="json"),
-                        "configuration_digest": agent.configuration_digest,
-                    }
-                )
-            }
         )
 
     async def preview(
@@ -1536,19 +1486,13 @@ class AgentBackendService:
                 settings,
             )
 
-    async def thread_consent(
-        self,
-        agent: BackendAgent,
-        target_backend: Provider | None,
-        model: str | None,
-        *,
-        expected_preview_digest: str,
-        accepted_drops: tuple[str, ...],
-    ) -> AgentBackendRevision:
-        """One conversation's consent to run this agent on `target_backend`; not stored here.
+    async def thread_revision(
+        self, agent: BackendAgent, target_backend: Provider | None, model: str | None
+    ) -> tuple[AgentBackendRevision, CompatibilityPreview]:
+        """One conversation's run of this agent on `target_backend`, and what it turns off.
 
-        Checked as an agent change is, against the preview the person was shown. The
-        caller decides who may pick and stores the result with the conversation.
+        Not stored here: the caller decides who may pick and stores it with the
+        conversation. Checked as an agent change is: the provider must be enabled.
         """
         self._require_enabled()
         if self._read_only:
@@ -1562,16 +1506,7 @@ class AgentBackendService:
             preview = await self._preview(session, agent, target, picked, settings)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed", provider=target_backend)
-        consent = preview.drop_consent
-        if consent is None and target is not None:
-            # Claude runs the agent's own source; another provider needs its losses accepted.
-            raise AgentBackendRefused("source_unavailable", provider=target_backend)
-        if preview.digest != expected_preview_digest:
-            raise AgentBackendRefused("stale_preview", provider=target_backend)
-        if tuple(accepted_drops) != (consent.declared_drops if consent else ()):
-            raise AgentBackendRefused("drops_mismatch", provider=target_backend)
-        consent_json = consent.model_dump(mode="json") if consent is not None else None
-        return AgentBackendRevision.model_validate(
+        revision = AgentBackendRevision.model_validate(
             {
                 "tenant_id": agent.tenant_id,
                 "agent_id": agent.agent_id,
@@ -1585,12 +1520,12 @@ class AgentBackendService:
                 "environment": settings.environment,
                 "agent_name": agent.name,
                 "preview_digest": preview.digest,
-                "digest": _revision_digest(agent, target, consent_json, picked, settings),
+                "digest": _revision_digest(agent, target, picked, settings),
                 "previous_local": None,
                 "created_at": datetime.now(UTC),
-                **({"drop_consent": consent_json} if consent_json is not None else {}),
             }
         )
+        return revision, preview
 
     async def read_selection(
         self,
@@ -1633,16 +1568,13 @@ class AgentBackendService:
             "revert",
             "settings",
         ],
-        expected_preview_digest: str | None,
         *,
-        accepted_drops: tuple[str, ...] | None = None,
-        now: datetime | None = None,
         model: str | None = None,
         settings: AgentSettings | None = None,
     ) -> AgentBackendRevision:
         self._check_editor(agent.tenant_id, actor)
         if self._read_only:
-            # A service built without a source capture would store no loss consent.
+            # A service built without a source capture can't tell what a change turns off.
             raise AgentBackendRefused("source_unavailable")
         # Capture (slow: it may read every skill) before the lock; the lock only compares.
         # Refuse a disallowed actor first, so only an allowed edit pays for a capture.
@@ -1664,7 +1596,7 @@ class AgentBackendService:
             plan = await _plan_change(
                 session, agent, operation, backend, model, settings, expected_revision
             )
-            current, previous, kept, backend, model, settings = plan
+            current, _, kept, backend, model, settings = plan
             local = current.local if current else 0
             if settings.thread_mode == "shared" and kept.thread_mode != "shared" and not admin:
                 # Sharing applies in every channel the agent answers in unpinned, so
@@ -1678,36 +1610,6 @@ class AgentBackendService:
             if not preview.allowed:
                 raise AgentBackendRefused("backend_not_allowed")
             previous_local = local or None
-            consent = preview.drop_consent
-            if (
-                operation == "revert"
-                and (previous.drop_consent if previous is not None else None) != consent
-            ):
-                raise AgentBackendRefused("re_confirm", detail="revert_differs")
-            if consent is not None:
-                if operation != "revert":
-                    if accepted_drops is None and consent.declared_drops:
-                        raise AgentBackendRefused("drops_required")
-                    try:
-                        accepted = type(consent).model_validate(
-                            {
-                                **consent.model_dump(),
-                                "declared_drops": accepted_drops
-                                if accepted_drops is not None
-                                else (),
-                            }
-                        )
-                    except ValueError:
-                        raise AgentBackendRefused("drops_mismatch") from None
-                    if accepted != consent:
-                        raise AgentBackendRefused("drops_mismatch")
-                if expected_preview_digest is None:
-                    raise AgentBackendRefused("stale_preview")
-            elif accepted_drops not in (None, ()):
-                raise AgentBackendRefused("source_unavailable")
-            consent_json = consent.model_dump(mode="json") if consent is not None else None
-            if expected_preview_digest is not None and (preview.digest != expected_preview_digest):
-                raise AgentBackendRefused("stale_preview")
             # Validation is the same owner used for explicit channel selections.
             check_backend(
                 ConfigRevision.create(
@@ -1727,9 +1629,8 @@ class AgentBackendService:
                     local=local + 1,
                     backend=backend,
                     previous_local=previous_local,
-                    digest=_revision_digest(agent, backend, consent_json, model, settings),
+                    digest=_revision_digest(agent, backend, model, settings),
                     preview_digest=preview.digest,
-                    drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
                     requires=cast(JsonValue, settings.facts().get("requires")),
@@ -1751,8 +1652,8 @@ class AgentBackendService:
                 outcome="allowed",
                 reason="completed"
                 + (
-                    "; declared_drops=" + ",".join(revision.declared_drops)
-                    if revision.declared_drops
+                    "; declared_drops=" + ",".join(preview.declared_drops)
+                    if preview.declared_drops
                     else ""
                 ),
                 scope=f"agent_backend:{agent.agent_id}:{revision.local}",
@@ -1766,36 +1667,19 @@ class AgentBackendService:
         expected_revision: int,
         actor: BackendActor,
         *,
-        expected_preview_digest: str | None = None,
-        accepted_drops: tuple[str, ...] | None = None,
         model: str | None = None,
         settings: AgentSettings | None = None,
     ) -> AgentBackendRevision:
         """Switch the provider. `settings` None keeps the agent's settings that still apply."""
         model = picked_model(target_backend, model)
         return await self._change(
-            agent,
-            target_backend,
-            expected_revision,
-            actor,
-            "set",
-            expected_preview_digest,
-            accepted_drops=accepted_drops,
-            model=model,
-            settings=settings,
+            agent, target_backend, expected_revision, actor, "set", model=model, settings=settings
         )
 
     async def clear_backend(
-        self,
-        agent: BackendAgent,
-        expected_revision: int,
-        actor: BackendActor,
-        *,
-        expected_preview_digest: str | None = None,
+        self, agent: BackendAgent, expected_revision: int, actor: BackendActor
     ) -> AgentBackendRevision:
-        return await self._change(
-            agent, None, expected_revision, actor, "clear", expected_preview_digest
-        )
+        return await self._change(agent, None, expected_revision, actor, "clear")
 
     async def set_settings(
         self,
@@ -1803,169 +1687,19 @@ class AgentBackendService:
         settings: AgentSettings,
         expected_revision: int,
         actor: BackendActor,
-        *,
-        expected_preview_digest: str | None = None,
-        accepted_drops: tuple[str, ...] | None = None,
     ) -> AgentBackendRevision:
-        """State the agent's profile, requirements, thread mode and effort; provider and model stay.
+        """State the agent's profile, requirements, thread mode and effort.
 
-        On a provider that drops source features, `accepted_drops` must name them
-        again, as for a provider switch.
+        Provider and model stay.
         """
         return await self._change(
-            agent,
-            None,
-            expected_revision,
-            actor,
-            "settings",
-            expected_preview_digest,
-            settings=settings,
-            accepted_drops=accepted_drops,
+            agent, None, expected_revision, actor, "settings", settings=settings
         )
 
     async def revert(
-        self,
-        agent: BackendAgent,
-        actor: BackendActor,
-        *,
-        expected_revision: int,
-        expected_preview_digest: str | None = None,
+        self, agent: BackendAgent, actor: BackendActor, *, expected_revision: int
     ) -> AgentBackendRevision:
-        return await self._change(
-            agent, None, expected_revision, actor, "revert", expected_preview_digest
-        )
-
-    async def source_keeping_drops(
-        self,
-        agent: BackendAgent,
-        revision: AgentBackendRevision,
-        change: Callable[[BackendAgent], BackendAgent],
-    ) -> BackendAgent | None:
-        """The captured source when `revision`'s consent holds for it and would after `change`.
-
-        The changed source must declare exactly the drops the owner accepted. A
-        consent that no longer matches the source is never vouched for here.
-        """
-        from daimon.core.turn.runtime_manifest import preview_source_drops, source_pin_matches
-
-        consent = revision.drop_consent
-        if consent is None or self._capture_source is None:
-            return None
-        captured = await self._capture_source(agent)
-        if (captured.tenant_id, captured.agent_id) != (agent.tenant_id, agent.agent_id) or (
-            not source_pin_matches(captured, consent.source_pin)
-        ):
-            return None
-        changed = change(captured)
-        selection = agent_selection(
-            revision.backend or DEFAULT_BACKEND, revision.model, AgentSettings.of(revision)
-        )
-        try:
-            proposed = preview_source_drops(
-                changed,
-                ModelRef(provider=selection.backend, id=selection.model or changed.model or ""),
-                effort=selection.effort,
-            )
-        except UnsupportedCapability:
-            return None
-        return captured if proposed.declared_drops == consent.declared_drops else None
-
-    async def renew_consent(
-        self,
-        agent: BackendAgent,
-        *,
-        expected: AgentBackendRevision,
-        account_id: uuid.UUID | None,
-        reason: str,
-        vouch: Callable[[BackendAgent], bool],
-    ) -> AgentBackendRevision | None:
-        """Renew `expected`'s drop consent for the agent's changed source, as a new revision.
-
-        Only while the revision is still current, `vouch` accepts the captured source
-        as the consented one plus the expected change, and it declares exactly the
-        drops the owner accepted; otherwise None, and the owner re-confirms. Revert
-        skips the renewal: it returns to what the owner chose before.
-        """
-        consent = expected.drop_consent
-        if not self.enabled or consent is None or self._capture_source is None:
-            return None
-        # Capture before the lock; inside it only the revision and the drops are compared.
-        captured = await self._capture_source(agent)
-        if not vouch(captured):
-            return None
-        async with policy_store.policy_write_transaction(
-            self._sessions, tenant_id=agent.tenant_id
-        ) as session:
-            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            if (
-                current is None
-                or current.local != expected.local
-                or current.drop_consent != consent
-            ):
-                return None
-            settings = AgentSettings.of(current)
-            try:
-                preview = await self._preview(
-                    session,
-                    agent,
-                    current.backend,
-                    current.model,
-                    settings,
-                    captured,
-                    may_capture=False,
-                )
-            except AgentBackendRefused:
-                return None
-            renewed = preview.drop_consent
-            if (
-                not preview.allowed
-                or renewed is None
-                or renewed.declared_drops != consent.declared_drops
-            ):
-                return None
-            consent_json = renewed.model_dump(mode="json")
-            try:
-                revision = await agent_backends.put_revision(
-                    session,
-                    tenant_id=agent.tenant_id,
-                    agent_id=agent.agent_id,
-                    agent_name=agent.name,
-                    local=current.local + 1,
-                    backend=current.backend,
-                    previous_local=current.previous_local,
-                    digest=_revision_digest(
-                        agent, current.backend, consent_json, current.model, settings
-                    ),
-                    preview_digest=preview.digest,
-                    drop_consent=consent_json,
-                    model=current.model,
-                    profile=settings.profile,
-                    requires=cast(JsonValue, settings.facts().get("requires")),
-                    thread_mode=settings.thread_mode,
-                    effort=settings.effort,
-                    environment=settings.environment,
-                )
-            except IntegrityError:
-                return None
-            await security_audit.append_event(
-                session,
-                tenant_id=agent.tenant_id,
-                account_id=account_id,
-                agent_id=agent.agent_id,
-                platform=None,
-                platform_user_id=None,
-                tool_name="agent_backend",
-                operation="renew",
-                outcome="allowed",
-                reason=f"{reason}; source_pin={consent.source_pin}->{renewed.source_pin}"
-                + (
-                    "; declared_drops=" + ",".join(revision.declared_drops)
-                    if revision.declared_drops
-                    else ""
-                ),
-                scope=f"agent_backend:{agent.agent_id}:{revision.local}",
-            )
-            return revision
+        return await self._change(agent, None, expected_revision, actor, "revert")
 
     async def audit(
         self,
@@ -2068,7 +1802,8 @@ def make_backend_service(
     prices: Mapping[str, ProviderPrice] | None = None,
 ) -> AgentBackendService:
     """A backend service. `capture_source` is required: every surface that can switch an
-    agent reads its source to record the loss consent; `NO_CAPTURE` marks a read-only one."""
+    agent reads its source to preview what a switch turns off; `NO_CAPTURE` marks a
+    read-only one."""
 
     def configured_cost(agent: BackendAgent, target: Provider) -> str:
         return _default_cost(agent, target, prices=prices)
@@ -2082,7 +1817,7 @@ def make_backend_service(
     )
 
 
-class _ConsentOriginValidator(Protocol):
+class _RevisionOriginValidator(Protocol):
     def __call__(
         self,
         selection: ResolvedBackend,
@@ -2151,14 +1886,16 @@ async def resolve_turn_backend(
         return None, ever_shared, "default"
     selection = agent_choice
     require_agent_grant(tenant_id, agent.agent_id, selection, setting)
-    consent_revision = setting if setting is not None and setting.drop_consent is not None else None
-    if thread is not None and consent_revision is None:
-        raise AgentBackendRefused("re_confirm", detail="no_consent")
-    if consent_revision is not None:
-        if validate_origin is None:
-            raise AgentBackendRefused("source_unavailable")
+    # A switch runs a target built from the agent's source each turn, so the turn's
+    # check needs the revision; settings on Claude and a record born on its provider don't.
+    linked = (
+        setting
+        if setting is not None and setting.backend is not None and not setting.born
+        else None
+    )
+    if linked is not None and validate_origin is not None:
         validate_origin = partial(
-            cast(_ConsentOriginValidator, validate_origin), agent_revision=consent_revision
+            cast(_RevisionOriginValidator, validate_origin), agent_revision=linked
         )
     policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
     if not backend_is_enabled(selection.backend, policy.enabled_backends):
@@ -2189,7 +1926,7 @@ async def resolve_turn_backend(
             channel,
             selection.content_digest(),
             stored_origin,
-            agent_revision=consent_revision,
+            agent_revision=linked,
             thread_id=thread_id,
         )
         if effective is not None:
@@ -2210,7 +1947,7 @@ async def resolve_turn_backend(
                 session,
                 effective,
                 origin=stored_origin,
-                agent_revision=consent_revision,
+                agent_revision=linked,
                 thread_id=thread_id,
             )
         except ConfigRevisionConflict:
@@ -2460,8 +2197,8 @@ async def record_born_backend(
 ) -> AgentBackendRevision:
     """Give a Daimon record created on `provider` its first backend revision.
 
-    It has no Claude source to switch from, so there is no preview and no drop
-    consent; the revision only states where it runs. Idempotent per record.
+    It has no Claude source to switch from, so there is no preview; the revision
+    only states where it runs. Idempotent per record.
     """
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=record_id)
     existing = await agent_backends.current(session, tenant_id, agent_id)

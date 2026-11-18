@@ -481,7 +481,6 @@ source_modules = [
     "daimon.core.output_runtime",
     "daimon.core.self_helpers",
     "daimon.core.thread_model_flow",
-    "daimon.core.thread_model_reask",
     "daimon.core.thread_model_switch",
 ]
 forbidden_modules = ["daimon.core._models"]

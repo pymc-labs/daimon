@@ -22,7 +22,6 @@ from mux.contracts.resources import (
     WorkspaceSource,
 )
 from mux.errors import UnsupportedCapability
-from pydantic import ValidationError
 
 from .source_projection_support import captured_source
 
@@ -378,58 +377,6 @@ def test_pin_normalizes_caller_address_but_preserves_source_ownership(captured):
         }
     )
     assert source_preservation_pin(foreign) != source_preservation_pin(captured)
-
-
-@pytest.fixture
-def preview(captured):
-    from daimon.core.channel_backend import compatibility_preview
-    from daimon.core.stores.domain import TenantBackendPolicy
-
-    return compatibility_preview(
-        captured, "openai", TenantBackendPolicy(tenant_id=captured.tenant_id, revision="policy")
-    )
-
-
-def test_public_preview_consent_uses_the_existing_canonical_drop_domain(preview):
-    original = preview.model_dump(mode="json")
-    assert "drop_consent" not in original
-    parsed = type(preview).model_validate(
-        {
-            **original,
-            "drop_consent": {
-                "declared_drops": ["sandbox", "memory"],
-                "source_pin": "a" * 64,
-                "target_digest": "b" * 64,
-            },
-        }
-    )
-    assert parsed.declared_drops == ("memory", "sandbox")
-    assert parsed.model_dump(mode="json")["drop_consent"] == {
-        "declared_drops": ["memory", "sandbox"],
-        "source_pin": "a" * 64,
-        "target_digest": "b" * 64,
-    }
-    assert preview.declared_drops == () and preview.model_dump(mode="json") == original
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"declared_drops": ["instructions"]},
-        {"declared_drops": ["source_definition"]},
-        {"declared_drops": ["memory", "memory"]},
-        {"declared_drops": "memory"},
-        {"source_pin": "caller supplied"},
-        {"target_digest": None},
-        {"unknown": True},
-    ],
-)
-def test_public_preview_refuses_unclosed_or_nondroppable_consent(preview, change):
-    consent = {"declared_drops": ["memory"], "source_pin": "a" * 64, "target_digest": "b" * 64}
-    with pytest.raises(ValidationError):
-        type(preview).model_validate(
-            {**preview.model_dump(), "drop_consent": {**consent, **change}}
-        )
 
 
 def test_source_provider_identity_retains_its_full_existing_spec(captured):

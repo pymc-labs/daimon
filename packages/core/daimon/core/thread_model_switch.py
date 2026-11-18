@@ -1,10 +1,10 @@
-"""Pick one conversation's model on any provider; it applies, or asks once first.
+"""Pick one conversation's model on any provider; it applies at once.
 
-Every chat's thread pick and the MCP `set_thread_model` tool share these. Any pick is
-previewed like an agent switch (`pick_thread_or_card`): one that loses nothing is kept at
-once, one that does shows the short card. Keeping it stores this agent's consent with the
-conversation, which `thread_backend` reads on the next turn. A pick off the agent's
-provider also needs the agent's `thread_providers` feature on, or its owner or an admin.
+Every chat's thread pick and the MCP `set_thread_model` tool share `pick_thread`. Keeping
+a pick stores this agent's run on that provider with the conversation, which
+`thread_backend` reads on the next turn; what the provider can't carry is off there and
+named in the note. A pick off the agent's provider also needs the agent's
+`thread_providers` feature on, or its owner or an admin.
 """
 
 from __future__ import annotations
@@ -136,39 +136,16 @@ def _ambiguous(value: str) -> SwitchRefusal:
     )
 
 
-async def pick_thread_or_card(
+async def pick_thread(
     pick: ThreadPick, value: str, *, thread_id: str, admin: bool
-) -> ThreadModelChange | ModelSwitchPreview | SwitchRefusal:
-    """A conversation's pick: kept at once when nothing stops working, else the card to show."""
+) -> ThreadModelChange | SwitchRefusal:
+    """A conversation's pick, kept at once like any model change, or refused with why."""
     try:
-        shown = await preview_thread_model(pick, value)
-        return (
-            shown if await thread_asks_first(pick, shown) else await _keep(pick, shown, thread_id)
-        )
+        return await _keep(pick, await preview_thread_model(pick, value), thread_id)
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
     except AmbiguousModel:
         return _ambiguous(value)
-
-
-async def thread_asks_first(pick: ThreadPick, shown: ModelSwitchPreview) -> bool:
-    """Whether a conversation's pick shows the card: something stops working, or it leaves
-    the agent's provider for someone who may not edit the agent."""
-    return shown.asks_first or not (
-        shown.model.provider == shown.before or await pick.service.may_edit(pick.agent, pick.actor)
-    )
-
-
-async def confirm_thread_or_refusal(
-    pick: ThreadPick, value: str, *, thread_id: str, digest: str, revision: int, admin: bool
-) -> ThreadModelChange | SwitchRefusal:
-    """`confirm_thread_model`, with a refusal returned as the words a chat shows."""
-    try:
-        return await confirm_thread_model(
-            pick, value, thread_id=thread_id, digest=digest, revision=revision
-        )
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
 
 
 async def thread_model_picker(pick: ThreadPick) -> ModelPicker:
@@ -197,7 +174,7 @@ async def may_pick_provider(pick: ThreadPick) -> bool:
 async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPreview:
     """What picking `value` (`provider:id`) for one conversation would change.
 
-    No preview (None) for a Claude pick on a Claude agent, which needs no consent.
+    No preview (None) for a Claude pick on a Claude agent, which keeps the agent's run.
     """
     service = pick.service
     policy = await service.tenant_policy(pick.agent.tenant_id) if service.enabled else None
@@ -218,32 +195,15 @@ async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPrevi
     return ModelSwitchPreview(model=model, label=label, before=before, preview=preview)
 
 
-async def confirm_thread_model(
-    pick: ThreadPick, value: str, *, thread_id: str, digest: str, revision: int
-) -> ThreadModelChange:
-    """Keep the pick the person confirmed for this conversation, with its losses accepted.
-
-    The preview is read again; if it no longer matches what was shown nothing changes.
-    """
-    shown = await preview_thread_model(pick, value)
-    if shown.digest != digest or shown.revision != revision:
-        raise AgentBackendRefused("stale_preview", provider=shown.model.provider)
-    return await _keep(pick, shown, thread_id)
-
-
 async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> ThreadModelChange:
-    """Store `shown` for the conversation, its declared losses accepted."""
-    consent = None
+    """Store `shown` for the conversation; what its provider can't carry is off there."""
+    run = None
     if shown.preview is not None:
-        if not shown.allowed:
-            raise AgentBackendRefused("backend_not_allowed", provider=shown.model.provider)
         claude = shown.model.provider == DEFAULT_BACKEND
-        consent = await pick.service.thread_consent(
+        run, _ = await pick.service.thread_revision(
             pick.agent,
             None if claude else shown.model.provider,
             None if claude else shown.model.id,
-            expected_preview_digest=shown.digest,
-            accepted_drops=shown.preview.declared_drops,
         )
     tenant_id = pick.agent.tenant_id
     async with pick.sessionmaker.begin() as session:
@@ -255,9 +215,9 @@ async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> 
             model=shown.model.id,
             provider=shown.model.provider,
         )
-        if consent is not None:
+        if run is not None:
             await put_thread_consent(
-                session, platform=pick.platform, thread_id=thread_id, revision=consent
+                session, platform=pick.platform, thread_id=thread_id, revision=run
             )
         await security_audit.append_event(
             session,
@@ -275,6 +235,7 @@ async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> 
     note = f"This conversation runs on {shown.label} from the next reply."
     if shown.model.provider != shown.before:
         note += " Earlier messages carry over."
+    note = " ".join((note, *shown.lines()))
     return ThreadModelChange(model_id=shown.model.id, note=note)
 
 

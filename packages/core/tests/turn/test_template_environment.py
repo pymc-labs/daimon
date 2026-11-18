@@ -26,7 +26,7 @@ from mux.profiles import PROFILES
 from mux.state.memory import MemoryStateStore
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_full_source import PARAMS as GEMINI_PARAMS
 from .test_gemini_full_source import ROOT
 from .test_gemini_template_mcp import template as gemini_template  # noqa: F401
@@ -70,8 +70,8 @@ LIMITED_ENVIRONMENT = {
 
 
 @pytest.fixture
-async def source_mcp(consent_request):
-    async with handoff_mcp(consent_request[0], PINNED_HOST_TOOLS) as app:
+async def source_mcp(switched_request):
+    async with handoff_mcp(switched_request[0], PINNED_HOST_TOOLS) as app:
         yield app
 
 
@@ -205,7 +205,7 @@ async def _deployment(*_args: object) -> str:
 
 
 @pytest.mark.parametrize(
-    "consent_request", [dict(OPENAI_PARAMS, environment=default_environment())], indirect=True
+    "switched_request", [dict(OPENAI_PARAMS, environment=default_environment())], indirect=True
 )
 @pytest.mark.parametrize("openai_template", [{"code_default": True}], indirect=True)
 async def test_default_environment_when_switched_to_openai_then_its_turn_installs_it(
@@ -232,7 +232,7 @@ async def test_default_environment_when_switched_to_openai_then_its_turn_install
 
 
 @pytest.mark.parametrize(
-    "consent_request", [dict(OPENAI_PARAMS, environment=default_environment())], indirect=True
+    "switched_request", [dict(OPENAI_PARAMS, environment=default_environment())], indirect=True
 )
 @pytest.mark.parametrize("openai_template", [{"code_default": True}], indirect=True)
 async def test_openai_thread_when_made_on_the_bare_environment_then_it_moves_once(
@@ -309,13 +309,13 @@ async def _run(request, prepared) -> None:
 
 
 @pytest.mark.parametrize(
-    "consent_request,setup",
+    "switched_request,setup",
     [
         (dict(GEMINI_PARAMS, environment=default_environment()), "packages"),
         (dict(GEMINI_PARAMS, environment=LIMITED_ENVIRONMENT), "network"),
     ],
     ids=["packages", "network"],
-    indirect=["consent_request"],
+    indirect=["switched_request"],
 )
 async def test_source_environment_when_switched_to_gemini_then_its_turn_sets_it_up(
     gemini_template,  # noqa: F811
@@ -347,7 +347,7 @@ async def test_source_environment_when_switched_to_gemini_then_its_turn_sets_it_
 
 
 @pytest.mark.parametrize(
-    "consent_request", [dict(GEMINI_PARAMS, environment=default_environment())], indirect=True
+    "switched_request", [dict(GEMINI_PARAMS, environment=default_environment())], indirect=True
 )
 async def test_gemini_session_when_made_before_setups_carried_then_it_is_replaced_once(
     gemini_template,  # noqa: F811
