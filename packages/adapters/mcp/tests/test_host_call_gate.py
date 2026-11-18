@@ -364,11 +364,9 @@ async def test_dispatch_runs_an_ungated_tool_through_the_proxy(rig: Rig) -> None
     assert await _cards(rig) == [], "a read records no card"
 
 
-@pytest.mark.parametrize("digest", [None, "d1"], ids=["preview", "confirm"])
-async def test_a_thread_model_pick_cards_only_its_cross_provider_confirm(
-    rig: Rig, digest: str | None
-) -> None:
-    """The model's own preview runs; its confirm waits for the person's press (A-M1)."""
+@pytest.mark.parametrize("digest", [None, "d1"], ids=["plain", "old-confirm"])
+async def test_a_thread_model_pick_runs_without_a_card(rig: Rig, digest: str | None) -> None:
+    """A pick applies at once; an older caller's digest is ignored and never cards."""
     _attach(rig)
     args: dict[str, Any] = {"model": "openai:gpt-5"}
     if digest is not None:
@@ -376,13 +374,8 @@ async def test_a_thread_model_pick_cards_only_its_cross_provider_confirm(
 
     await _call(rig, rig.identity(), "set_thread_model", args)
 
-    cards = await _cards(rig)
-    if digest is None:
-        assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the preview ran"
-        assert cards == [], "a preview records no card"
-    else:
-        assert rig.ran == [], "the confirm does not run before the press"
-        assert [card.tool_name for card in cards] == ["set_thread_model"], "the confirm cards"
+    assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the pick ran"
+    assert await _cards(rig) == [], "a pick records no card"
 
 
 @pytest.mark.parametrize("digest", [None, "d1"], ids=["preview", "confirm"])

@@ -196,7 +196,7 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         keeps its model. Other conversations are unaffected.
 
         A pick applies at once. What the new provider can't carry is off
-        there until a switch back; the note says what.
+        there; the note says what.
 
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
