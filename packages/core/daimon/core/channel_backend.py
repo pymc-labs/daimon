@@ -934,8 +934,40 @@ def transient_failure(error: BaseException | None) -> bool:
     return False
 
 
+_PROVIDER_LABEL = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _provider_facts(error: BaseException) -> dict[str, object]:
+    """Why a provider call failed: the fields mux already redacts, or an SDK status
+    error's status, type and request id. Never a raw body, URL or request text."""
+    from mux.errors import ProviderError
+
+    if isinstance(error, ProviderError):
+        facts: dict[str, object] = {
+            "category": error.category,
+            "native_code": error.native_code,
+            "native_error_code": error.native_error_code,
+            "native_param": error.native_param,
+            "native_message": error.native_message,
+        }
+        return {key: value for key, value in facts.items() if value is not None}
+    if type(error).__module__.partition(".")[0] not in ("anthropic", "openai"):
+        return {}
+    facts = {
+        "status": getattr(error, "status_code", None),
+        "error_type": getattr(error, "type", None),
+        "request_id": getattr(error, "request_id", None),
+    }
+    return {
+        key: value
+        for key, value in facts.items()
+        if isinstance(value, int) or (isinstance(value, str) and _PROVIDER_LABEL.match(value))
+    }
+
+
 def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object]]:
-    """One closed-label sanitizer for turn and background refusals."""
+    """One closed-label sanitizer for turn, provider and background failures: every
+    failure point logs its cause chain through it (a `TurnError` via its `cause`)."""
     from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 
     safe_types: dict[type[BaseException], str] = {
@@ -1013,8 +1045,12 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
                     for item in error.missing
                 }
             )
+        cause.update(_provider_facts(error))
         causes.append(cause)
-        error = error.__cause__ or error.__context__
+        carried: object = getattr(error, "cause", None)
+        error = (
+            carried if isinstance(carried, BaseException) else error.__cause__ or error.__context__
+        )
     return causes
 
 

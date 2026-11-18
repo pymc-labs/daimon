@@ -38,7 +38,7 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
-from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.channel_backend import BackendUnsupported, backend_refusal_causes
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
@@ -1074,7 +1074,11 @@ async def stamp_session_seal(
         # other refusal fails the turn rather than running it unstamped.
         if error.status_code != 409 and "while session is running" not in str(error):
             raise
-        log.info("turn.seal_stamp_busy", ma_session_id=ma_session_id)
+        log.info(
+            "turn.seal_stamp_busy",
+            ma_session_id=ma_session_id,
+            causes=backend_refusal_causes(error),
+        )
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
         ) from error

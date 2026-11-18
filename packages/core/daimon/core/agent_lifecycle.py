@@ -23,6 +23,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.anthropic_guard import AnthropicDisabled
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import sealed_pick_refusal
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -226,13 +227,17 @@ async def archive_memory_store_best_effort(
             tenant_id=tenant_id,
             agent_id=agent_id,
         )
-    except (anthropic_errors.APIError, AnthropicDisabled):
+    except (anthropic_errors.APIError, AnthropicDisabled) as error:
         # Best-effort degrade: the caller's own delete flow has already
         # committed (e.g. the MA agent is archived and the retry path is
         # dead), so a transient memory-store archive failure must not
         # strand it in a failed state — mirrors the mount-side policy in
         # memory_resource.py.
-        _log.warning("agent_lifecycle.memory_store_archive_failed", **log_context)
+        _log.warning(
+            "agent_lifecycle.memory_store_archive_failed",
+            **log_context,
+            causes=backend_refusal_causes(error),
+        )
 
 
 def _own_names(name: str, agent: BetaManagedAgentsAgent) -> tuple[str, ...]:

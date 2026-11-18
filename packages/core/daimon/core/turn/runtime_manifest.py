@@ -1072,7 +1072,11 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences and code labels are logged, never a provider's or a validator's text.
-        from daimon.core.channel_backend import exception_labels, transient_failure
+        from daimon.core.channel_backend import (
+            backend_refusal_causes,
+            exception_labels,
+            transient_failure,
+        )
         from daimon.core.errors import TurnError
 
         # A blip (a timeout, a lost connection, a 5xx or 429) proves no loss: the
@@ -1091,6 +1095,7 @@ async def _capture_source_capabilities(
             profile=revision.profile if revision is not None else None,
             model=revision.model if revision is not None else None,
             capability_preview=capability_preview,
+            causes=backend_refusal_causes(error),
         )
         return source
 

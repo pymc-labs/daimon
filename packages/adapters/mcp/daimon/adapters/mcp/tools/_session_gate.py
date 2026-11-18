@@ -19,7 +19,7 @@ from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.channel_backend import backend_refusal_causes, backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import backend_switch_tools
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
@@ -161,6 +161,7 @@ async def session_card_gap(
             tool=tool_name,
             ma_session_id=live.ma_session_id,
             error=str(exc),
+            causes=backend_refusal_causes(exc),
         )
         return "session_unreadable"
 

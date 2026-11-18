@@ -309,3 +309,31 @@ def test_every_name_our_code_raises_is_logged_by_name():
     names = _raised_names()
     assert len(names) > 100  # the scan finds the drivers' names
     assert sorted(n for n in names if not _raised_capability(n)) == []
+
+
+def test_every_logged_provider_failure_handler_logs_its_causes() -> None:
+    """A provider error handler that logs must log why: `backend_refusal_causes`
+    carries the redacted native code, param and message (incident: a skill
+    archive mismatch logged only as `invalid_request (400)`)."""
+    import ast
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4] / "packages"
+    provider = {"ProviderError", "MuxError", "APIStatusError", "APIError", "AnthropicError"}
+    # Wired when the in-flight session_skills.py change merges.
+    pending = {"session_skills.py"}
+    missing: list[str] = []
+    for path in [*root.glob("core/daimon/**/*.py"), *root.glob("adapters/*/daimon/**/*.py")]:
+        if path.name in pending:
+            continue
+        for handler in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                continue
+            if not provider & set(re.findall(r"\w+", ast.unparse(handler.type))):
+                continue
+            body = "\n".join(ast.unparse(statement) for statement in handler.body)
+            logs = re.search(r"log\w*(\(\))?\.(debug|info|warning|error|exception)\(", body)
+            if logs and "backend_refusal_causes(" not in body:
+                missing.append(f"{path.relative_to(root)}:{handler.lineno}")
+    assert not missing, f"provider failure logs without causes: {missing}"

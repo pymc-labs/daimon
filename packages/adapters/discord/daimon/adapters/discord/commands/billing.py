@@ -19,6 +19,7 @@ from daimon.adapters.discord.checks import require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_words import DESCRIPTIONS
@@ -107,7 +108,12 @@ class BillingCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            log.warning("billing.handler.failed", rid=rid, error=str(exc))
+            log.warning(
+                "billing.handler.failed",
+                rid=rid,
+                error=str(exc),
+                causes=backend_refusal_causes(exc),
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,

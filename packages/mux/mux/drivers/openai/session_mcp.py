@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import JsonValue
 
@@ -25,6 +25,8 @@ class SessionMCPVault:
     vault: ResourceRef
     name: str
     credential_id: str | None = None
+    # This request's bearers, so its provider errors can be masked; never persisted.
+    secrets: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def refs(self) -> dict[str, str]:
         return {
@@ -35,7 +37,7 @@ class SessionMCPVault:
 
     async def delete(self, context: Context, scope: Scope, *, key: str) -> None:
         port = _port(context, scope, {self.vault.id})
-        with suppress_mcp_error_details():
+        with suppress_mcp_error_details(self.secrets or None):
             actual = await port.retrieve(scope, self.vault)
             if actual.name != self.name:
                 raise ScopeViolation(self.vault.id, "session MCP vault identity changed")
@@ -129,7 +131,7 @@ async def prepare(
     owned: set[str] = set()
     digest = hashlib.sha256(f"{scope.tenant_id}\0{scope.account_id}\0{key}".encode()).hexdigest()
     name = "mux-session-mcp-" + digest
-    with suppress_mcp_error_details():
+    with suppress_mcp_error_details(secrets):
         try:
             vault = await _port(context, scope, owned).create(scope, name, key=key + ":mcp-vault")
         except BaseException as error:
@@ -139,7 +141,7 @@ async def prepare(
             )
             raise
         owned.add(vault.ref.id)
-        managed = SessionMCPVault(vault.ref, name)
+        managed = SessionMCPVault(vault.ref, name, secrets=tuple(secrets))
         ids: list[str] = []
         try:
             for index, (connection, secret) in enumerate(zip(connections, secrets, strict=True)):
@@ -162,7 +164,7 @@ async def prepare(
             # No session request has been sent, so deleting the child is safe.
             await managed.cleanup_after(context, scope, error, key=key + ":mcp-cleanup")
             raise
-        managed = SessionMCPVault(vault.ref, name, ",".join(ids))
+        managed = SessionMCPVault(vault.ref, name, ",".join(ids), tuple(secrets))
         for native, credential_id in zip(expected, ids, strict=True):
             tools.append({**native, "credential_id": credential_id, "connection_origin": "service"})
         return tools, managed
@@ -217,7 +219,7 @@ async def rotate(
     if scope.is_platform or scope.is_legacy_host_authorized:
         raise context.unsupported("caller_scoped_mcp_vault")
     secrets = [await _secret(resolver, scope, c) for c in connections]
-    with suppress_mcp_error_details():
+    with suppress_mcp_error_details(secrets):
         actual = await _port(context, scope, {managed.vault.id}).retrieve(scope, managed.vault)
         if actual.name != managed.name:
             raise ScopeViolation(managed.vault.id, "session MCP vault identity changed")

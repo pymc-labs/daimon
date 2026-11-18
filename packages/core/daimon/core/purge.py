@@ -141,6 +141,7 @@ import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
@@ -589,6 +590,7 @@ async def purge_principal(
                 tenant_id=str(tenant_id),
                 account_id=str(account_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             return PrincipalPurgeResult(
                 db=db_report, sessions=SessionDeletionReport(upstream_error=True)
@@ -929,6 +931,7 @@ async def _retry_account_session_delete_locked(
                 account_id=str(account_id),
                 tenant_id=str(tenant_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             upstream_error = True
             continue

@@ -44,6 +44,7 @@ import structlog
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.authz import build_agent_ref
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
@@ -349,6 +350,7 @@ async def _destination_may_carry(
             "session_preparation.handoff_source_unreadable",
             session_id=row.ma_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return False
     async with deps.sessionmaker() as session:
@@ -558,6 +560,7 @@ async def _run_replacement(
             mapping_id=str(row.id),
             session_id=row.ma_session_id,
             error=str(error),
+            causes=backend_refusal_causes(error),
         )
         if isinstance(error, AdmissionDenied | DmSourceSealedError | SessionBusyError):
             # Decided again just before the successor was created: refused or
@@ -728,6 +731,7 @@ async def _resolve_legacy_budget_stamp(
             "session_preparation.budget_stamp_unreadable",
             session_id=row.ma_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return None
     stamp = observed.metadata.get(MA_METADATA_KEY_BUDGET_CHANNEL)
@@ -1188,6 +1192,7 @@ async def _prepare_session_for_turn_locked(
                         "session_preparation.replacement_source_unreadable",
                         session_id=row.ma_session_id,
                         error=type(error).__name__,
+                        causes=backend_refusal_causes(error),
                     )
                     return PreparationBusy(
                         pending_reasons=decision.reasons,
@@ -1320,6 +1325,7 @@ async def _prepare_session_for_turn_locked(
                 "session_preparation.update_failed",
                 session_id=row.ma_session_id,
                 error=str(error),
+                causes=backend_refusal_causes(error),
             )
             return PreparationFailure(reasons=decision.reasons, stage="update", retry_after=moment)
 

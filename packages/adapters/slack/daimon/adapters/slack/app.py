@@ -249,6 +249,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -2014,6 +2015,7 @@ class SlackApp:
                 event_ts=event_ts,
                 request_id=request_id,
                 exc_info=exc,
+                causes=backend_refusal_causes(exc),
             )
             capture_exception_with_scope(exc)
             # Before the per-event client exists there is no token to post
@@ -2306,6 +2308,7 @@ class SlackApp:
                     thread_id=thread_id,
                     team_id=team_id,
                     exc_info=exc,
+                    causes=backend_refusal_causes(exc),
                 )
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
@@ -2679,7 +2682,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -3613,7 +3620,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(

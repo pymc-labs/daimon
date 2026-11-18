@@ -21,6 +21,7 @@ from typing import Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.handoff_context import (
     HandoffFraming,
     TranscriptTurn,
@@ -230,7 +231,12 @@ async def read_turns(scope: Scope, old: OldSession) -> list[TranscriptTurn] | No
                 break
             page = PageRequest(cursor=result.next_cursor, limit=100, order="desc")
     except MuxError as error:
-        log.warning("binding.transcript_unreadable", binding_id=old.binding.id, error=str(error))
+        log.warning(
+            "binding.transcript_unreadable",
+            binding_id=old.binding.id,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         return None
     texts.reverse()
     return select_recent_turn_texts(texts)
@@ -275,7 +281,12 @@ async def carry_files(
                 key=f"{key}:file:{artifact.ref.id}",
             )
         except MuxError as error:
-            log.warning("binding.file_not_carried", artifact_id=artifact.ref.id, error=str(error))
+            log.warning(
+                "binding.file_not_carried",
+                artifact_id=artifact.ref.id,
+                error=str(error),
+                causes=backend_refusal_causes(error),
+            )
             continue
         total += size
         mounts.append(
@@ -302,7 +313,12 @@ async def end_session(
             continue
         except MuxError as error:
             # A session left open costs only storage.
-            log.warning("binding.session_kept", session_id=ref.id, error=str(error))
+            log.warning(
+                "binding.session_kept",
+                session_id=ref.id,
+                error=str(error),
+                causes=backend_refusal_causes(error),
+            )
             return False
         return True
     return False

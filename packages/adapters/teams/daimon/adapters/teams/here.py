@@ -23,6 +23,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import (
     HereCard,
@@ -109,7 +110,7 @@ async def show_here(context: CommandContext) -> None:
     try:
         card = here_card(await _load(context))
     except (DaimonError, anthropic.APIError) as exc:
-        log.warning("teams.here.failed", exc_info=exc)
+        log.warning("teams.here.failed", exc_info=exc, causes=backend_refusal_causes(exc))
         text = str(exc) if isinstance(exc, DaimonError) else _FAILED
         card = AdaptiveCard(body=[heading(TITLE), TextBlock(text=text, wrap=True)])
     await context.send_card(card)

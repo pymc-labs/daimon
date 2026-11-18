@@ -54,6 +54,7 @@ from daimon.core.agent_details import AgentDetails, RepoBinding
 from daimon.core.agent_editing import AgentActor, AgentEditDeps
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.authz import build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
@@ -826,7 +827,11 @@ class DetailsView(PanelViewBase):
             )
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
-            log.exception("agent_setup.add_skill.check_failed", request_id=request_id)
+            log.exception(
+                "agent_setup.add_skill.check_failed",
+                request_id=request_id,
+                causes=backend_refusal_causes(exc),
+            )
             await interaction.response.send_message(
                 embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )

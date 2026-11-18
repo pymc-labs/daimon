@@ -1321,7 +1321,8 @@ async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase:
             )
     error = refused.value
     assert error.category == "permission" and error.native_code == "403"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    fields = (error.native_message, error.native_error_code, error.native_param)
+    assert fields == ("[redacted]",) * 3, "a known MCP secret is masked, never kept"
     assert not wire.vaults
     assert not any(r.method == "GET" and r.url.path == "/v1/vaults" for r in wire.requests)
     for request in wire.requests:
@@ -1360,7 +1361,7 @@ async def test_mcp_cleanup_failure_preserves_original_error(phase: str) -> None:
             )
     error = refused.value
     assert error.category == "invalid_request" and error.native_code == "400"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    assert error.native_message == "[redacted]", "the echoed MCP secret is masked"
     assert any(
         "cleanup failed (ProviderError)" in note and "vault-1" in note for note in error.__notes__
     )
