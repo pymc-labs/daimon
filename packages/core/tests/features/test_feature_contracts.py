@@ -385,6 +385,16 @@ def test_every_origin_note_follows_origin_fragments() -> None:
         )
 
 
+_TURN_PATH = "core/turn/prepare.py"
+# Built once and reused without the turn path's drift check, so their tools stay as built;
+# the server gate still refuses a tool turned Off since, call by call.
+_KEPT_AS_BUILT = {
+    "core/headless_runner.py": "one session per routine fire, never reused",
+    "adapters/cli/commands/sessions.py": "a CLI session its operator keeps",
+    "adapters/mcp/tools/agent_chat.py": "`send_message` continues the `start_turn` session",
+}
+
+
 def test_every_session_creation_gets_the_place_toolset() -> None:
     """Every MA session, admitted or not (CLI, agent chat, routines), runs its place's tools."""
     calls = [
@@ -394,6 +404,13 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
         if isinstance(call.func, ast.Name)
     ]
     assert len(calls) >= 4, "the session creators moved; point this test at them"
+    as_built = {
+        p.relative_to(_ROOT / "packages").as_posix().split("/daimon/", 1)[-1] for p, _ in calls
+    } - {_TURN_PATH}
+    assert as_built == _KEPT_AS_BUILT.keys(), (
+        "a session reused outside the turn path's drift check (`session_compat`) keeps its "
+        "tools as built: list it with a reason and say so in docs/features.md"
+    )
     for path, call in calls:
         assert any(k.arg == "toolset" for k in call.keywords), (
             f"{path.name}:{call.lineno} must pass toolset="
