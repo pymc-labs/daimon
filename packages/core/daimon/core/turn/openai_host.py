@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -39,12 +39,13 @@ from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.openai_late_usage import LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
     invocation_baseline,
 )
-from daimon.core.turn.persistence import UncertainSend, current_persistence
+from daimon.core.turn.persistence import TurnPersistence, UncertainSend, current_persistence
 from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
@@ -56,6 +57,7 @@ from daimon.core.turn.replace_binding import (
     OldSession,
     binding_decision,
     end_session,
+    hold_slot,
     recorded_facts,
     replace_binding,
 )
@@ -110,6 +112,8 @@ class OpenAIHostRuntime(TurnRuntime):
     infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]] = unknown_infrastructure
     #: Enforces the row's spend limit host-side; set when the profile has no native cap.
     spend_guard: SpendGuard | None = field(default=None, kw_only=True)
+    #: Re-reads an ended root turn whose usage was unknown; None never re-reads.
+    late_usage: LateUsage | None = field(default=None, kw_only=True)
 
 
 def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) -> OpenAIHostRuntime:
@@ -660,8 +664,28 @@ async def _prepare_with_runtime(
             channel_id=revision.channel.channel_id,
             agent_id=current.agent.id,
         )
-
+        late, turn_id = runtime.late_usage, observation.turn_id
+        if observation.completeness == "unknown" and late is not None and turn_id is not None:
+            late.defer(f"{binding.id}:{observation.id}", lambda now: reread(now, turn_id))
         return settled
+
+    async def reread(now: datetime, turn_id: str) -> bool:
+        """One late read of an ended root turn, under the thread's lease; True when done."""
+        bound = await store.get_binding(slot)
+        if bound is None or bound.native_refs.get("session") != ref.id:
+            return True  # the thread moved to another session
+        async with hold_slot(store, slot, now) as lease:
+            reading = TurnPersistence(
+                store, bound, request.scope, operation_key="late-usage:" + turn_id, session_ref=ref
+            )
+            with reading.holding(lease):
+                values = await driver(runtime, revision, request.scope, bound).usage.reconcile_turn(
+                    request.scope, ref, turn_id
+                )
+        known = [value for value in values if value.completeness != "unknown"]
+        for value in known:
+            await record(observation=value)
+        return bool(known) or not values
 
     return PreparedTurn(
         admission=request.admission,

@@ -7,13 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **OpenAI turns record their tokens and cost when the turn resource has no
-  usage yet.** OpenAI can end a turn before its turn resource reports usage. A
-  turn that ended that way was billed as unknown: no tokens, no cost, and spend
-  caps could not count it. Daimon now takes the usage that the turn's own
-  completion event carries. Without it, Daimon re-reads the ended turn for a few
-  seconds, so usage that arrives just after the end is still billed. A running
-  turn is never waited on, and usage OpenAI never reports stays unknown.
+- **OpenAI turns record their tokens and cost when usage arrives late.** OpenAI
+  can end a turn before its turn resource reports usage, and fill it in up to
+  half an hour later. Daimon takes the usage the turn's completion event carries,
+  else the last usage the turn reported while it ran. A turn with neither is
+  billed as unknown at first and re-read in the background for about an hour;
+  usage that turns up is billed then and counts toward spend caps. No turn waits
+  for its usage, a replayed turn keeps the counts already recorded, and a restart
+  within that hour leaves the turn unknown.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
   change.** A switch asks again only when the model or what the agent loses
   changes. An agent whose Daimon tool list was long no longer fails to start on

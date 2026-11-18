@@ -16,6 +16,7 @@ import pytest
 from daimon.core import channel_backend
 from daimon.core.turn import openai_host
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runtime_for
+from daimon.core.turn.openai_late_usage import LateUsage
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -24,6 +25,7 @@ from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
+from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ContinuityLost, OperationConflict, ScopeViolation, UnsupportedCapability
@@ -760,6 +762,64 @@ async def test_durable_usage_revision_survives_runtime_restart(composed):
     assert await allocate({"usage": {"input_tokens": 3}, "subagent_id": None}) == 2
     with pytest.raises(ScopeViolation):
         await OpenAIUsageRevisions().revise(prepared.session_ref, "root", {})
+    reading = TurnPersistence(store, binding, SCOPE, operation_key="revision")
+
+    async def newest():
+        return await OpenAIUsageRevisions().latest(prepared.session_ref, "openai:turn:root")
+
+    with reading.activate():
+        meter = await reading.run(newest)
+    assert meter == {"usage": {"input_tokens": 3}, "subagent_id": None}, meter
+
+
+async def test_an_unknown_turn_is_reread_after_it_and_recorded_measured(composed):
+    """The recorder never waits on late usage; the deferred re-read records the priced revision."""
+    request, wire, store, observations, runtime = composed
+    gate = asyncio.Event()
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    late = LateUsage(delays_s=(1.0, 2.0), sleep=held)
+    runtimes = {PROFILE: replace(runtime, late_usage=late)}
+    prepared = await prepare_openai(
+        replace(request, deps=replace(request.deps, turn_runtimes=runtimes))
+    )
+    binding = await store.get_binding(
+        Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+            account_id=SCOPE.account_id,
+        )
+    )
+    wire.turns = [
+        {
+            "id": "root",
+            "session_id": SESSION_ID,
+            "agent_id": "native-agent",
+            "subagent_id": None,
+            "status": "completed",
+            "created_at": 0,
+            "usage": None,
+        }
+    ]
+    active = TurnPersistence(store, binding, SCOPE, operation_key="ended")
+
+    async def ended():
+        driver = cast(OpenAIDriver, prepared.backend)
+        (value,) = await driver.usage.reconcile_turn(SCOPE, prepared.session_ref, "root")
+        return value
+
+    with active.activate():
+        unknown = await active.run(ended)
+    assert unknown.completeness == "unknown", unknown
+    await cast(ObservationRecorder, prepared._record)(observation=unknown)
+    assert len(observations) == 1, "the recorder returns before any re-read"
+    wire.turns[0]["usage"] = {"input_tokens": 100, "output_tokens": 20}
+    gate.set()
+    await late.wait()
+    later = [x["observation"] for x in observations]
+    assert [x.completeness for x in later] == ["unknown", "measured"], later
+    assert (later[1].revision, later[1].input_tokens) == (unknown.revision + 1, 100), later
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
