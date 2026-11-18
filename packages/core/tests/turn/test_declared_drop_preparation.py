@@ -229,7 +229,17 @@ async def test_real_preparation_uses_original_consent_after_latest_setting_chang
     ]
 
 
-@pytest.mark.parametrize("change", ["system", "version", "publishing"])
+async def test_new_instructions_keep_the_confirmed_switch(consent_request):
+    """The model and the losses decide; an instruction edit asks no one again."""
+    request, _, _, _, _, router, _, constructions, _, _ = consent_request
+    router.routes.clear()
+    router.add_agent(request.admission.agent.model_copy(update={"system": "Changed"}))
+    router.add_environment(request.admission.environment)
+    await read_preparation_counterpart(request)
+    assert len(constructions) == 1
+
+
+@pytest.mark.parametrize("change", ["version", "publishing"])
 async def test_real_source_drift_refuses_before_target_runtime(consent_request, change):
     request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
     if change == "publishing":
@@ -237,9 +247,7 @@ async def test_real_source_drift_refuses_before_target_runtime(consent_request, 
             request, admission=replace(request.admission, asks_before_publishing=True)
         )
     else:
-        native = request.admission.agent.model_copy(
-            update={change: "Changed" if change == "system" else 2}
-        )
+        native = request.admission.agent.model_copy(update={change: 2})
         router.routes.clear()
         router.add_agent(native)
         router.add_environment(request.admission.environment)
@@ -327,7 +335,7 @@ async def test_selector_passes_original_consent_to_the_existing_prewrite_proof(
 
     if drift:
         router.routes.clear()
-        router.add_agent(request.admission.agent.model_copy(update={"system": "Changed source"}))
+        router.add_agent(request.admission.agent.model_copy(update={"version": 2}))
         router.add_environment(request.admission.environment)
         with pytest.raises(AgentBackendRefused, match="re confirm"):
             async with request.deps.sessionmaker.begin() as db:
@@ -432,8 +440,8 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
     assert refused.value.reason == "backend_unsupported"
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
+    # Confirming again can't fix a source the switch refuses: never "confirm again".
+    assert refused.value.cause == "preparation_failed"
     assert not constructions and not targets
     assert all(call.method == "GET" for call in reads)
 
@@ -481,8 +489,8 @@ async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as refused:
         await read_preparation_counterpart(request)
-    assert isinstance(refused.value.__cause__, AgentBackendRefused)
-    assert refused.value.__cause__.reason == "re_confirm"
+    # Confirming again can't fix a source the switch refuses: never "confirm again".
+    assert refused.value.cause == "preparation_failed"
     assert constructions == targets == []
     assert all(call.method == "GET" for call in reads)
 
@@ -863,8 +871,8 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as handoff:
         await read_preparation_counterpart(request)
-    assert isinstance(handoff.value.__cause__, AgentBackendRefused)
-    assert handoff.value.__cause__.reason == "re_confirm"
+    # Confirming again can't fix a source the switch refuses: never "confirm again".
+    assert handoff.value.cause == "preparation_failed"
     assert constructions == targets == []
     assert reads and all(call.method == "GET" for call in reads)
 
@@ -1023,8 +1031,8 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
         assert commit.value.reason == "source_unsupported"
         with pytest.raises(AdmissionDenied) as handoff:
             await read_preparation_counterpart(request)
-        assert isinstance(handoff.value.__cause__, AgentBackendRefused)
-        assert handoff.value.__cause__.reason == "re_confirm"
+        # Confirming again can't fix a source the switch refuses: never "confirm again".
+        assert handoff.value.cause == "preparation_failed"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     assert constructions == targets == []
@@ -1420,8 +1428,9 @@ async def test_portable_native_no_drop_consent_survives_store_and_retained_prepa
     router.routes.clear()
     router.add_agent(request.admission.agent.model_copy(update={"model": changed}))
     router.add_environment(request.admission.environment)
-    with pytest.raises(AgentBackendRefused, match="confirm"):
-        await prepare_source(request)
+    # The owner's own edit on the agent's own provider: no card, the edit applies.
+    prepared = await prepare_source(request)
+    assert agent_payload(prepared.target_spec)["model"]["effort"] == {"type": "high"}
 
 
 @pytest.mark.parametrize(

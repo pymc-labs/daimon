@@ -368,9 +368,8 @@ async def test_unconfirmed_or_foreign_source_refuses_before_factory(ordinary, mo
         router.routes = [
             row for row in router.routes if not (row[0] == "GET" and row[1].fullmatch(path))
         ]
-        router.add_agent(
-            request.admission.agent.model_copy(update={"system": "Changed source instructions"})
-        )
+        # A new version mid-turn (a prompt edit alone keeps a confirmed switch).
+        router.add_agent(request.admission.agent.model_copy(update={"version": 2}))
     elif defect == "tenant":
         from uuid import uuid4
 
@@ -625,7 +624,13 @@ async def test_missing_or_stale_consent_refuses_before_publication(
     if consent == "valid":
         drop = accepted.drop_consent.model_dump(mode="json")
     if consent == "stale":
-        drop = {**accepted.drop_consent.model_dump(mode="json"), "source_pin": "0" * 64}
+        # Losses other than the confirmed ones: the source fingerprint alone no longer decides.
+        confirmed = accepted.drop_consent.model_dump(mode="json")
+        drop = {
+            **confirmed,
+            "declared_drops": [*confirmed["declared_drops"], "skill:not-confirmed"],
+            "target_digest": "0" * 64,
+        }
     current = request.admission.backend_revision
     linked = ConfigRevision.create(current.channel, current.local + 1, current)
     async with request.deps.sessionmaker.begin() as db:

@@ -17,7 +17,7 @@ from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolS
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Context, objects
 from mux.drivers.openai.agents import agent_body, agent_spec
-from mux.drivers.openai.mcp_auth import KEY, MCPSecretResolver
+from mux.drivers.openai.mcp_auth import KEY, METADATA_LIMIT, MCPSecretResolver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import decode
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
@@ -1135,6 +1135,32 @@ def test_shared_credential_decode_refuses_a_changed_destination(edit: str) -> No
     raw["tools"], raw["metadata"] = list(tools), metadata
     with pytest.raises(ValueError, match="changed"):
         agent_spec(raw, context)
+
+
+@pytest.mark.parametrize("required", [None, True])
+def test_one_server_with_a_long_tool_list_round_trips_by_digest(required: bool | None) -> None:
+    """Daimon's own server lists ~40 tools: over 512 characters whole, so it binds by digest."""
+    names: list[JsonValue] = [f"tool_number_{n}" for n in range(40)]
+    policy: dict[str, JsonValue] = {"allowed_tools": names}
+    if required is not None:
+        policy["required"] = required
+    connection = MCPConnection(
+        name="daimon-mcp", url=URL, credential_ref="host:owned-token", tool_policy=policy
+    )
+    requested = spec(connection)
+    context = _offline_context()
+    body = agent_body(requested, context)
+    assert len(str(object_json(body["metadata"])[KEY])) <= METADATA_LIMIT
+    tools = objects(body["tools"])
+    tools[0].update(mode="live", context_size="medium", allowed_domains=None, location=None)
+    # The API echoes an unset `required` as false.
+    tools[-1].setdefault("required", False)
+    body["tools"] = list(tools)
+    raw: Object = {"id": "a", "created_at": 0, **body}
+    assert agent_spec(raw, context).mcp_servers == requested.mcp_servers, "read back as written"
+    tools[-1]["allowed_tools"] = [*names, "delete_everything"]
+    with pytest.raises(ValueError, match="changed"):
+        agent_spec({**raw, "tools": list(tools)}, context)
 
 
 @pytest.mark.parametrize(

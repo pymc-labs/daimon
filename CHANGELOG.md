@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent switched to OpenAI keeps answering there after its prompt or tools
+  change.** A switch asks again only when the model or what the agent loses
+  changes. An agent whose Daimon tool list was long no longer fails to start on
+  OpenAI, and a provider that is set up is never reported as missing.
 - **Chat sessions keep notebook and report tools the MCP server is set up for.**
   In a deployment where only the MCP server carries the notebook host, report host,
   Gemini, cloud computer or Microsoft 365 settings, the worker running a chat turn no
