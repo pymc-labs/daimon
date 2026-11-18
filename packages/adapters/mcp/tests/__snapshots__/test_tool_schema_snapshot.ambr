@@ -5381,8 +5381,9 @@
     'list_audit_log': dict({
       'description': '''
         List the workspace's audit log, newest first: ``web`` for admin changes made outside
-        chat, ``security`` for chat tool calls and panel writes. Filter by acting person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
-        (YYYY-MM-DD). Admin-only.
+        chat, ``security`` for chat tool calls and panel writes. Filter by acting person,
+        ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last`` (YYYY-MM-DD).
+        Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
