@@ -6,15 +6,16 @@ import uuid
 from typing import cast
 
 from anthropic import AsyncAnthropic
-from daimon.core.config import WebSettings
+from daimon.core.config import DatabaseSettings, Settings, WebSettings
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.routine_delivery import routine_links
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.web_links import Assignment, TenantLinks, WebLinks, links_at
-from daimon.testing.factories import make_tenant, make_tenant_config
+from daimon.testing.factories import make_routine, make_tenant, make_tenant_config
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.UUID("11111111-2222-3333-4444-555555555555")
@@ -123,3 +124,29 @@ async def test_a_channel_card_follows_the_agent_assigned_there(
 async def _assign(db: AsyncSession, tenant_id: uuid.UUID, agent_name: str) -> None:
     scope = ChannelScopeRef(tenant_id=tenant_id, channel_id="C1")
     await set_fields(db, scope=scope, tenant_id=tenant_id, agent_name=agent_name, mode="agent")
+
+
+async def test_a_routine_fire_has_no_links_in_a_thread_with_the_web_app_off(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        row = await make_routine(db, tenant=tenant, channel_id="R1")
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("thread", channel_id="R1", thread_key="T1"),
+            key="web_awareness",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),  # type: ignore[arg-type]
+        web=WebSettings(public_url="https://app.example.com/"),  # type: ignore[arg-type]
+    )
+    into = row.model_copy(update={"destination_kind": "thread", "destination_id": "T1"})
+    assert await routine_links(db_session_factory, settings, row, "discord") is not None
+    assert await routine_links(db_session_factory, settings, into, "discord") is None, (
+        "a fire into the Off thread has no links"
+    )

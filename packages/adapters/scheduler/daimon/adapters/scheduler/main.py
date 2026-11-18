@@ -469,7 +469,7 @@ async def _build_fire(
                 row,
                 platform="discord",
                 direct_post=direct_post,
-                web=await routine_links(sm, settings, row),
+                web=await routine_links(sm, settings, row, "discord"),
             )
             + "\n"
             + row.trigger_message
@@ -903,7 +903,7 @@ async def _build_fire(
                     row,
                     platform=platform,
                     direct_post=direct_post,
-                    web=await routine_links(sm, settings, row),
+                    web=await routine_links(sm, settings, row, platform),
                     held=fire_hold is not None,
                 )
                 + "\n"

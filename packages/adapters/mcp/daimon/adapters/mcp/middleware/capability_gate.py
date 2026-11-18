@@ -30,9 +30,11 @@ from daimon.core.features.tool_gate import (
     hides_tools,
     server_gate_key,
 )
+from daimon.core.rule_views import routine_feature_place
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.tenants import get_tenant
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -96,9 +98,10 @@ async def caller_places(
     if auth.routine_id is not None:
         async with runtime.session_factory() as session:
             routine = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-        if routine is not None:
-            # As the scheduler reads it (`scheduler.py`).
-            return [FeaturePlace(auth.tenant_id, "", routine.channel_id, agent_id=routine.agent_id)]
+            tenant = await get_tenant(session, auth.tenant_id)
+        if routine is not None and tenant is not None:
+            # As its session's toolset reads it (`headless_runner.py`).
+            return [routine_feature_place(routine, platform=tenant.platform)]
     return [FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth))]
 
 

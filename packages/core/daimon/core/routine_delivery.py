@@ -48,7 +48,6 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authori
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import attribution_line, render_post
@@ -190,11 +189,13 @@ DirectPost = Literal["allowed", "protected", "unverified"]
 
 
 async def routine_links(
-    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
 ) -> TenantLinks | None:
-    """A routine fire's web links, with a member's access, where `web_awareness` is On at the
-    routine's place (its channel and agent, as the scheduler reads its features)."""
-    place = FeaturePlace(row.tenant_id, "", row.channel_id, agent_id=row.agent_id)
+    """A routine fire's web links, with a member's access, where `web_awareness` is On where
+    it fires (`routine_feature_place`)."""
+    from daimon.core.rule_views import routine_feature_place  # imports this module
+
+    place = routine_feature_place(row, platform=platform)
     return await links_at(
         sessions, settings, place, panel_links(settings.web, row.tenant_id, admin=False)
     )
