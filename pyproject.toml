@@ -230,6 +230,7 @@ source_modules = [
     "daimon.core.cursor",
     "daimon.core.db",
     "daimon.core.env_file",
+    "daimon.core.erasure",
     "daimon.core.direct_messages",
     "daimon.core.errors",
     "daimon.core.features",
