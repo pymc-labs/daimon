@@ -61,12 +61,12 @@ class LateUsage:
                     return
             except Exception as error:  # a busy thread or failed read: retry later
                 log.info(
-                    "openai.late_usage_retry",
+                    "openai_late_usage.retry",
                     key=key,
                     attempt=attempt,
                     error_class=type(error).__name__,
                 )
-        log.warning("openai.late_usage_unknown", key=key, attempts=len(self._delays))
+        log.warning("openai_late_usage.unknown", key=key, attempts=len(self._delays))
 
 
 #: The process's re-reads, shared by every OpenAI runtime.
