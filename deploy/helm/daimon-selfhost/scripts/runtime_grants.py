@@ -15,8 +15,9 @@ import sys
 from pathlib import Path
 
 PROFILE = "selfhosted.loop"
-# Per-turn caps shared by every grant: a short tool loop and a two-minute deadline.
-LIMITS = {"infrastructure_usd": "0", "max_tool_calls": 5, "deadline_s": 120}
+# Per-turn caps shared by every grant: the host's own defaults for tool calls (100), and a
+# ten-minute deadline, so a reply that reads a skill, starts a job and waits for it fits.
+LIMITS = {"infrastructure_usd": "0", "max_tool_calls": 100, "deadline_s": 600}
 CLI_CHANNEL = "selfhosted-operator"
 
 
