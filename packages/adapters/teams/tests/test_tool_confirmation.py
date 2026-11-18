@@ -52,6 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
@@ -818,3 +819,62 @@ async def test_a_card_still_open_reminds_with_an_at_mention_of_its_requester(mon
     (mention,) = mentions
     assert mention.mentioned.id == AAD_OBJECT_ID
     assert mention.text in reminder.text
+
+
+@pytest.mark.parametrize(
+    ("chat", "inside"), [(CHANNEL_ID, True), (CONVERSATION_ID, False)], ids=["channel", "dm"]
+)
+async def test_always_click_carries_the_clicks_own_conversation_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, chat: str, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from a DM."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    cards = TeamsConfirmationCards(FakeSender())
+    token, _future = cards._controls.pending.open()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards._controls.cards[token] = confirmation_module._PostedCard(
+        prompt,
+        CHANNEL_ID,
+        SERVICE_URL,
+        "m-1",
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(
+            return_value=Subject(is_admin=True, platform_user_id=OTHER_AAD_OBJECT_ID)
+        ),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    payload = make_card_action(VERB, "always", user=OTHER_AAD_OBJECT_ID, token=token)
+    payload["conversation"] = {**payload["conversation"], "id": chat}  # pyright: ignore[reportIndexIssue, reportGeneralTypeIssues]
+    click = SimpleNamespace(
+        activity=AdaptiveCardInvokeActivity.model_validate(payload), send=AsyncMock()
+    )
+    await cards._on_always(click, token)
+    await asyncio.gather(*cards._always_tasks)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={CHANNEL_ID: ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=(CHANNEL_ID,))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(subject.inside) is inside
+    assert bool(decision) is inside, decision.reason

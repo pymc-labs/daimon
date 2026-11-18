@@ -438,3 +438,18 @@ async def get_channel_names(
         )
     )
     return {channel_id: name for channel_id, name in rows.all()}
+
+
+async def get_channel_name_any_platform(
+    session: AsyncSession, *, tenant_id: uuid.UUID, channel_id: str
+) -> str | None:
+    """The stored name of one channel on whichever platform the tenant named it, or None."""
+    return await session.scalar(
+        select(PlatformChannelName.name)
+        .where(
+            PlatformChannelName.tenant_id == tenant_id,
+            PlatformChannelName.channel_id == channel_id,
+            PlatformChannelName.name != "",
+        )
+        .limit(1)
+    )

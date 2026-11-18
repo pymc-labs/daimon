@@ -390,6 +390,9 @@ class _DiscordCredentialPort:
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
         return self.runtime.sessionmaker
 
+    def location_verified(self, row: CredentialRequestRow) -> bool:
+        return is_credential_interaction_valid(self.interaction, row)
+
     async def reply(self, text: str) -> None:
         await self.interaction.followup.send(embed=build_notice_embed(text), ephemeral=True)
 
@@ -834,7 +837,11 @@ class SkillRepoModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(
@@ -1220,7 +1227,11 @@ class RepoBindModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(

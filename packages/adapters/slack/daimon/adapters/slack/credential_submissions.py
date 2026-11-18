@@ -150,6 +150,9 @@ class _SlackCredentialPort:
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
         return self.runtime.sessionmaker
 
+    def location_verified(self, row: CredentialRequestRow) -> bool:
+        return False
+
     async def reply(self, text: str) -> None:
         await post_ephemeral(
             self.client,

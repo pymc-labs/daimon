@@ -143,9 +143,9 @@ async def test_delegated_admin_is_refused_at_money_gates(token_kind: McpTokenKin
     import uuid
 
     auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False, token_kind=token_kind)
-    with pytest.raises(ToolError, match="admin"):
-        require_budget_write(auth, "channel")
     runtime = MagicMock(spec=McpRuntime, session_factory=MagicMock())
+    with pytest.raises(ToolError, match="admin"):
+        await require_budget_write(runtime, auth, "channel")
     with pytest.raises(ToolError, match="platform admin"):
         await _redeem_promo_code_impl(runtime, auth, "CODE")
     runtime.session_factory.assert_not_called()

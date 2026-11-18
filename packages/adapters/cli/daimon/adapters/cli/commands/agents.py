@@ -187,7 +187,7 @@ def tool_rules_set_command(
                     rule=rule,
                     scope=scope,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: "
@@ -238,7 +238,7 @@ def tool_rules_clear_command(
                     channel_id=channel,
                     server_url=url,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: cleared, "
@@ -1008,7 +1008,7 @@ async def agents_backend_change(
     actor = channel_backend.BackendActor(
         tenant_id=tenant_id,
         account_id=principal.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     from functools import partial
 
@@ -1279,7 +1279,7 @@ async def agents_convert(
             rt.sessionmaker,
             tenant_id=tenant_id,
             name=name,
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             public_url=public_url,
         )
     else:
@@ -1288,7 +1288,7 @@ async def agents_convert(
             rt.sessionmaker,
             tenant_id=tenant_id,
             name=name,
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             provider=to,
         )
     console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
@@ -1362,7 +1362,7 @@ async def agents_fork(
         new_name=dst,
         public_url=public_url,
         # The CLI is the deployment operator.
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         default_agent_name=rt.deployment_default.agent_name,
     )
     await ensure_agent_face(

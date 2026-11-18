@@ -35,6 +35,7 @@ from daimon.adapters.mcp.tools.github_connect import (
 from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
+    require_unsealed_agent,
     resolve_setup_agent,
 )
 from daimon.core.admin_actions import DelegatedAction
@@ -225,6 +226,7 @@ async def _sync_impl(
         # Refused before the import rather than at attach time, so a seeded
         # target leaves nothing half-done behind.
         _reject_system_agent(agent)
+        await require_unsealed_agent(runtime, auth, agent)
         expected_ma_agent_id = agent.id
         agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     async with runtime.session_factory() as session:

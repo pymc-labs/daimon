@@ -87,6 +87,14 @@ class CredentialPort(Protocol):
     @property
     def log_prefix(self) -> str: ...
 
+    def location_verified(self, row: CredentialRequestRow) -> bool:
+        """True when this submission just proved it came from the place the form was posted.
+
+        It decides the inside-only rule of a private channel's agent. A port that checks
+        nothing says False: that proves no place, so the submitter counts as outside.
+        """
+        ...
+
     async def reply(self, text: str) -> None:
         """Tell only the submitter. A no-op where the form has closed with no reply path."""
         ...
@@ -141,6 +149,7 @@ async def submit_env(
             value=value,
             plan=plan,
             now=datetime.now(UTC),
+            location_verified=port.location_verified(row),
         )
     except FormPinRefused as refused:
         # Decided with the consume: rolled back, nothing stored.
@@ -195,6 +204,7 @@ async def submit_env_file(
             platform=port.platform,
             entries=entries,
             now=datetime.now(UTC),
+            location_verified=port.location_verified(row),
         )
     except FormPinRefused as refused:
         return await port.reply(refused.refusal)
@@ -286,7 +296,13 @@ async def submit_mcp(
     a stored-but-not-vaulted token is `partial` and promises no turn.
     """
     try:
-        consumed = await consume_credential_submit(port.sessionmaker, row=row, agent=agent, now=now)
+        consumed = await consume_credential_submit(
+            port.sessionmaker,
+            row=row,
+            agent=agent,
+            now=now,
+            location_verified=port.location_verified(row),
+        )
     except FormPinRefused as refused:
         return await port.reply(refused.refusal)
     if consumed is None:

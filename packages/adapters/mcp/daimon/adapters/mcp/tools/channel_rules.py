@@ -119,7 +119,7 @@ async def _channel_label(runtime: McpRuntime, auth: AuthIdentity, channel_id: st
 
 
 def _refused(exc: DaimonError, action: Action) -> ToolError:
-    if isinstance(exc, ChannelRuleRefused) and exc.reason == "admin_required":
+    if isinstance(exc, ChannelRuleRefused) and exc.reason in ("admin_required", "sealed_channel"):
         record_authz_denial(action, exc.reason)
     return ToolError(f"{exc} Nothing was changed. Tell the caller.")
 

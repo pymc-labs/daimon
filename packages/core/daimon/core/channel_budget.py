@@ -245,13 +245,15 @@ async def balance_footer(
     return f"${balance:.2f} left" if balance > 0 else "No credit left"
 
 
-def may_set_channel_budget(subject: Subject, channel_id: str) -> Decision:
+def may_set_channel_budget(
+    policy: TenantAccessPolicy, subject: Subject, channel_id: str
+) -> Decision:
     """Whether ``subject`` may set, clear or raise ``channel_id``'s budget. Pure.
 
-    No access policy fact counts, so the empty policy stands in for it.
+    A private channel's budget changes only from inside it (`sealed_outside`).
     """
     return authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=subject,
         action=Action.SET_CHANNEL_BUDGET,
         place=Place(channel_id=channel_id),

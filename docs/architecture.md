@@ -203,6 +203,7 @@ an admin. So an admin is exempt only where the output reaches no one else.
 | `fork_agent` of an agent with a rule | refused | refused |
 | Agent chat, and any agent-scoped key or bearer token with no platform user | rules apply | rules apply |
 | An agent key minted in a channel with limited readers, or one its agent's rule names | runs inside that channel only | runs inside that channel only |
+| Settings of a channel with limited readers, or of its own agent | rules apply | change only from inside the channel; web, hub, DM, agent key and routine refused |
 
 - **One decision function.** `daimon.core.authz.authorize` decides channel
   rules, agent rules, the invoker allowlist, [agent invoker

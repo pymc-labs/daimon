@@ -204,10 +204,11 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
             saved.agent_name if action is DelegatedAction.ROUTING else saved.environment_name
         ) == ("Helper" if action is DelegatedAction.ROUTING else "science")
     elif action is DelegatedAction.SKILLS:
+        from daimon.core.access_policy import TenantAccessPolicy
         from daimon.core.channel_skills import may_set_channel_skills
         from daimon.core.stores.channel_skills import add_channel_skill
 
-        assert may_set_channel_skills(subject, "channel")
+        assert may_set_channel_skills(TenantAccessPolicy(), subject, "channel")
         skill = await add_channel_skill(
             db_session,
             tenant_id=tenant.id,

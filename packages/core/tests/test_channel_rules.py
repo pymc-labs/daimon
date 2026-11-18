@@ -60,7 +60,9 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ADMIN = Subject(is_admin=True)
+ADMIN = Subject(
+    is_admin=True, operator=True
+)  # operator: the sealed-channel rule is tested in test_sealed_settings.py
 DEFAULT = DeploymentDefault(agent_name="daimon")
 OWN = ChannelRule(readers="own", writers="own")
 RULES = {"roamer": AgentRule(runs_in=("c6", "c7")), "homebody": AgentRule(runs_in=("c8",))}

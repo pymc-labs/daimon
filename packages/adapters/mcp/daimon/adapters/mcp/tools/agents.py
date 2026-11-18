@@ -53,6 +53,7 @@ from daimon.adapters.mcp.tools.setup_target import (
     get_chat_origin,
     origin_channel_id,
     refuse_helper,
+    require_unsealed_agent,
     resolve_setup_agent,
 )
 from daimon.core import agent_editing, channel_backend
@@ -61,7 +62,7 @@ from daimon.core.agent_catalog import provider_efforts
 from daimon.core.agent_changes import change_model
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import queue_agent_face
-from daimon.core.agent_lifecycle import forget_archived_agent
+from daimon.core.agent_lifecycle import archive_sealed_refusal, forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
 from daimon.core.anthropic_guard import anthropic_configured
@@ -89,6 +90,7 @@ from daimon.core.model_presets import ModelSelection, model_choice_id
 from daimon.core.models_catalog import is_priced_claude_model
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
@@ -1510,6 +1512,17 @@ async def _archive_agent_impl(
         runtime, auth, name=name, expected_ma_agent_id=expected_ma_agent_id
     )
     _reject_system_agent(agent)
+    await require_unsealed_agent(runtime, auth, agent)
+    async with runtime.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session,
+            tenant_id=auth.tenant_id,
+            name=name,
+            agent=agent,
+            subject=mcp_subject(auth, is_admin=auth.is_admin),
+        )
+    if refusal is not None:
+        raise ToolError(f"{refusal} Do not retry.")
     await archive_agent(
         runtime.client,
         agent.id,
@@ -1773,7 +1786,10 @@ async def _require_agent_editor(
     auth: AuthIdentity,
 ) -> None:
     """The agent's owner or a current admin; the service checks again when it writes."""
-    if not await service.may_edit(agent, actor):
+    refusal = await service.edit_refusal(agent, actor)
+    if refusal == "sealed_channel":
+        raise ToolError(f"{SEALED_REFUSAL} Nothing changed. Do not retry.")
+    if refusal is not None:
         raise ToolError(
             f"Changing '{agent.name}' needs its owner or {admin_noun(auth.platform)}. "
             "Nothing changed. Do not retry."

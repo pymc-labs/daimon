@@ -63,6 +63,10 @@ class _Port:
         self.edits: list[tuple[str, dict[str, Any]]] = []
         self.resumed = 0
         self.failed: list[str] = []
+        self.verified = False
+
+    def location_verified(self, row: CredentialRequestRow) -> bool:
+        return self.verified
 
     async def reply(self, text: str) -> None:
         self.replies.append(text)
@@ -204,3 +208,32 @@ def test_collision_lines_name_three_keys_then_count_the_rest() -> None:
 )
 def test_spent_outcome_records_why_nothing_was_written(reason: Any, outcome: str) -> None:
     assert spent_outcome(reason) == outcome
+
+
+@pytest.mark.parametrize("verified", [True, False])
+async def test_every_submit_hands_the_ports_location_check_to_the_pin_rule(
+    monkeypatch: pytest.MonkeyPatch, verified: bool
+) -> None:
+    seen: list[object] = []
+
+    async def fake(*_: object, **kwargs: object) -> object:
+        seen.append(kwargs["location_verified"])
+        raise FormPinRefused("stop")
+
+    for name in ("apply_env_submit", "apply_env_file_submit", "consume_credential_submit"):
+        monkeypatch.setattr(credential_flow, name, fake)
+    port = _Port("discord")
+    port.verified = verified
+    row = _row()
+    await submit_env(port, row=row, agent=_AGENT, value="v", plan=_PLAN)
+    await submit_env_file(port, row=row, agent=_AGENT, entries=())
+    await credential_flow.submit_mcp(
+        port,
+        row=row,
+        agent=_AGENT,
+        value="v",
+        connect=cast(Any, None),
+        config=cast(Any, None),
+        now=_NOW,
+    )
+    assert seen == [verified] * 3

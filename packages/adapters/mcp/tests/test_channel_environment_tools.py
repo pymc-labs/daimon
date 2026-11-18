@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,6 +13,7 @@ from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _channel_target as channel_target
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
 from daimon.adapters.mcp.tools.channel_environments import (
     _clear_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
     _set_channel_environment_impl,  # pyright: ignore[reportPrivateUsage]
@@ -40,6 +43,17 @@ ROLE = "666666666666666666"
 OTHER_ROLE = "777777777777777777"
 HIDDEN = "555555555555555555"
 """A channel the Discord lookup refuses: deleted, or not visible to the caller."""
+
+
+@pytest.fixture(autouse=True)
+def _inside_the_channels() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """These calls come from inside the channels they change (a private channel is inside-only)."""
+    ids = frozenset(
+        v for v in globals().values() if isinstance(v, str) and re.fullmatch(r"\d{18}", v)
+    )
+    token = CALL_ORIGIN.set(ids)
+    yield
+    CALL_ORIGIN.reset(token)
 
 
 @pytest.fixture(autouse=True)

@@ -8,10 +8,31 @@ MCP decision -- admission, configuration, sends, seals, fork -- at once.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Place, Subject, build_subject, build_turn_place
 from daimon.core.channel_changes import ChannelActor
+from daimon.core.stores.domain import TurnOriginRow
+
+#: Where the running tool call verifiably started: its turn's channel and thread, set once
+#: per call by `CallOriginMiddleware`. Empty for a call with no live turn (a hub or web
+#: login, a routine) and for an agent key, which keeps an old origin.
+CALL_ORIGIN: ContextVar[frozenset[str]] = ContextVar("daimon_call_origin", default=frozenset())
+
+
+def origin_proves_presence(auth: AuthIdentity, origin: TurnOriginRow) -> bool:
+    """Whether a turn origin proves someone is in that channel now.
+
+    Unattended or resumed work proves nobody is there. A held credential stays in its
+    hold. Middleware and every explicit origin use this one check.
+    """
+    if not origin.attended:
+        return False
+    return auth.hold is None or auth.hold.contains(
+        origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+    )
 
 
 def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
@@ -29,6 +50,7 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
         platform_user_id=auth.platform_user_id,
         via_agent_key=auth.is_external_agent,
         client=auth.client,
+        origin_channel_ids=() if auth.is_external_agent else CALL_ORIGIN.get(),
     )
 
 

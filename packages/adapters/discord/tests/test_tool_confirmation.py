@@ -1138,3 +1138,54 @@ def test_an_admin_card_shows_its_details_once_without_a_details_button() -> None
     )
     assert [b.label for b in _buttons(view)] == ["Confirm", "Deny"]
     assert _texts(view).count("Model: gpt-6-luna") == 1
+
+
+@pytest.mark.parametrize(("channel", "inside"), [(777, True), (888, False)])
+async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, channel: int, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from elsewhere."""
+    from types import SimpleNamespace
+
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
+    view = confirmation_module._ConfirmationView(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh", allow_always=True),
+        prompt,
+        answer,
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="222")),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    click = _interaction(222)
+    click.channel_id = channel
+    click.channel = SimpleNamespace(parent_id=None)
+    await view._on_always(click)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={"777": ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=("777",))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(decision) is inside, decision.reason

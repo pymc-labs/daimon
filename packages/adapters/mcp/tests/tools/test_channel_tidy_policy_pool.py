@@ -298,7 +298,7 @@ async def test_channel_rule_writer_waits_for_tidy_effect(committing_sessionmaker
                 release_agents=not own,
                 default=DeploymentDefault(agent_name="daimon"),
                 actor_account_id=None,
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
             )
         )
         await asyncio.wait_for(backoff.wait(), 2)
