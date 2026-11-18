@@ -64,6 +64,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
+    HIDING_KEYS,
     HISTORY_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
@@ -2701,17 +2702,15 @@ async def capture_backend_source(
                 else (context.platform or account.platform)
             )
             # The turn leaves out what is Off here, so the preview names none of it as lost.
-            feature_place = FeaturePlace.of(
-                context.tenant_id,
-                read_on,
-                context.channel_id,
-                context.thread_id,
-                agent_id=actual.id,
-                backend=running_on(admission)["provider"],
+            # Only those keys: the target, which narrows others by backend, is not known here.
+            ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
+            here = FeaturePlace.of(*ids, agent_id=actual.id)
+            features = await place_features(deps, here, actual, HIDING_KEYS)
+            relay = agent_has_identity_relay(
+                (server.url for server in actual.mcp_servers), public_url=deps.public_url
             )
-            admission = replace(
-                admission, features=await place_features(deps, feature_place, actual)
-            )
+            features = without_long_term_memory(features) if relay else features
+            admission = replace(admission, features=features)
             request = ProviderPreparationRequest(
                 deps,
                 admission,
@@ -2781,14 +2780,17 @@ _TURN_FEATURE_KEYS: Final = tuple(
 
 
 async def place_features(
-    deps: TurnDeps, place: FeaturePlace, agent: BetaManagedAgentsAgent
+    deps: TurnDeps,
+    place: FeaturePlace,
+    agent: BetaManagedAgentsAgent,
+    keys: tuple[str, ...] = _TURN_FEATURE_KEYS,
 ) -> FeatureSnapshot:
     """The features a turn of `agent` reads at `place`; its toolset hides tools by them."""
     return await resolve_features(
         deps.sessionmaker,
         deps.settings,
         place,
-        keys=_TURN_FEATURE_KEYS,
+        keys=keys,
         agent_builtins=builtins_of(agent),
         server_setup=False,
     )

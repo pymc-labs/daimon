@@ -326,21 +326,31 @@ async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmatio
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
-async def test_a_preview_hides_what_its_turn_hides(template, switched_request, monkeypatch):
-    """A tool Off here is never named lost: the preview reads the place's features."""
-    from daimon.core.turn import runtime_manifest
+@pytest.mark.parametrize("relay_agent", [False, True])
+async def test_a_preview_hides_what_its_turn_hides(
+    template, switched_request, monkeypatch, relay_agent
+):
+    """A tool Off here is never named lost: the preview reads the place's features that
+    hide tools, which no backend narrows, and a relay agent's memory is Off as on its turn."""
+    from daimon.core.features.model_input import HIDING_KEYS
+    from daimon.core.turn import admission, runtime_manifest
 
     request, *_ = template
     _, _, source, actor, *_ = switched_request
     real, seen = runtime_manifest.capture_preparation_source, []
 
     async def spy(preparation, **kwargs):
-        seen.append(preparation.admission.toolset.hidden_daimon_tools)
+        seen.append(preparation.admission)
         return await real(preparation, **kwargs)
 
     monkeypatch.setattr(runtime_manifest, "capture_preparation_source", spy)
+    monkeypatch.setattr(admission, "agent_has_identity_relay", lambda *_a, **_k: relay_agent)
     await _bound_capture(request, actor)(source)
-    assert seen and all(seen), "default capabilities are Off, so their tools are hidden"
+    assert seen, "the preview captured"
+    for read in seen:
+        assert read.toolset.hidden_daimon_tools, "default capabilities are Off: tools hidden"
+        assert set(read.features.features) == set(HIDING_KEYS)
+        assert read.resolved("repo_memory").locked is relay_agent
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
