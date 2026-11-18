@@ -30,6 +30,7 @@ from daimon.core.turn import session_skills
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.contracts.ids import SkillRef
+from mux.profiles import PERSISTENT_WORKSPACE
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -485,7 +486,7 @@ async def test_a_converted_record_loads_its_skills_after_the_original_is_gone(
         cast(Any, Skills()),
         scope=person_scope,
         tenant_id=tenant.id,
-        provider="openai",
+        profile=PERSISTENT_WORKSPACE,
         account_scope_id="project",
         pins=(SkillRef(id="skill_a", version="1"),),
         record=record,
@@ -543,7 +544,7 @@ async def test_a_turn_reads_a_converted_records_skills_from_its_catalog_copy(
     copies = await session_skills.turn_session_skills(
         cast(Any, request),
         lambda: cast(Any, Skills()),
-        profile=cast(Any, SimpleNamespace(provider="openai")),
+        profile=PERSISTENT_WORKSPACE,
         scope=resource_scope(tenant_id=str(tenant.id), account_id=str(person.id)),
         account_scope_id="project",
     )

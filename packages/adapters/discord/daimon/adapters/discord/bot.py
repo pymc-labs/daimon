@@ -108,6 +108,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.config import DirectMessagePolicy, Settings
@@ -1530,7 +1531,12 @@ class DaimonBot(commands.Bot):
                     await self._finish_welcome(guild, _build_snag_embed())
                 return False
         except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
-            log.warning("guild_seed_failed", tenant_id=str(tenant_id), error=str(exc))
+            log.warning(
+                "guild_seed_failed",
+                tenant_id=str(tenant_id),
+                error=str(exc),
+                causes=backend_refusal_causes(exc),
+            )
             # Best-effort flip before posting so the tenant is never left wedged in
             # 'pending' — a raise inside this handler would NOT be caught by the
             # sibling except clause below and would skip the snag embed entirely.
@@ -2531,7 +2537,12 @@ class DaimonBot(commands.Bot):
             except discord.HTTPException as exc:
                 log.warning("tree_sync_failed_on_join", guild_id=guild_id, error=str(exc))
         except (DaimonError, _anthropic.APIError, discord.HTTPException) as exc:
-            log.warning("guild_join_failed", guild_id=guild_id, error=str(exc))
+            log.warning(
+                "guild_join_failed",
+                guild_id=guild_id,
+                error=str(exc),
+                causes=backend_refusal_causes(exc),
+            )
             return
         # Background seed → flips status + posts the ✅/⚠️ follow-up.
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
@@ -3625,7 +3636,12 @@ class DaimonBot(commands.Bot):
                 path="mention",
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             )
-            log.warning("turn.failed", error=str(exc), channel_id=str(message.channel.id))
+            log.warning(
+                "turn.failed",
+                error=str(exc),
+                channel_id=str(message.channel.id),
+                causes=backend_refusal_causes(exc),
+            )
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
         except Exception as exc:  # mention-turn adapter boundary
             log.exception(

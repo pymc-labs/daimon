@@ -23,6 +23,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import owns_agent
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import decrypt_token
@@ -318,6 +319,7 @@ async def _withdraw_grant(
                     credential_id=credential_id,
                     vault_id=vault_id,
                     error_type=type(exc).__name__,
+                    causes=backend_refusal_causes(exc),
                 )
 
 

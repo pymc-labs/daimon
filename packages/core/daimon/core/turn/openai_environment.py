@@ -37,6 +37,7 @@ from typing import Protocol
 
 import httpx
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import Page, PageRequest, Scope
 from mux.contracts.resources import Environment, EnvironmentFilter, EnvironmentSpec
@@ -288,6 +289,7 @@ async def _create(
             "openai_environment.create_failed",
             tenant_id=tenant_id,
             error_class=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         raise _pending() from error
     try:

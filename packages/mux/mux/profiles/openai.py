@@ -44,6 +44,8 @@ PERSISTENT_WORKSPACE = Profile(
     mcp_policy_keys=("allowed_tools", "required"),
     tool_readback="compiled",
     skill_digest="content",
+    # SKILL.md uploads with plain frontmatter (`drivers/openai/skills.py` `plain_manifest`).
+    skill_copy_format="plain-frontmatter",
     # The readback bounds in `drivers/openai/skills.py`: what is installed can be read back.
     skill_limits=SkillLimits(total_bytes=28 * MIB, file_bytes=25 * MIB, files=500),
     support={

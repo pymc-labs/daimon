@@ -309,3 +309,41 @@ def test_every_name_our_code_raises_is_logged_by_name():
     names = _raised_names()
     assert len(names) > 100  # the scan finds the drivers' names
     assert sorted(n for n in names if not _raised_capability(n)) == []
+
+
+def test_every_logged_provider_failure_handler_logs_its_causes() -> None:
+    """A provider error handler that logs must log why: `backend_refusal_causes`
+    carries the redacted native code, param and message (incident: a skill
+    archive mismatch logged only as `invalid_request (400)`)."""
+    import ast
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4] / "packages"
+    provider = {"ProviderError", "MuxError", "APIStatusError", "APIError", "AnthropicError"}
+    paths = [*root.glob("core/daimon/**/*.py"), *root.glob("adapters/*/daimon/**/*.py")]
+    trees = {path: ast.parse(path.read_text()) for path in paths}
+    # Module-level tuple aliases, starred ones too: `_ERRORS = (MuxError, *_OTHERS)`.
+    aliases = {
+        target.id: set(re.findall(r"\w+", ast.unparse(node.value)))
+        for tree in trees.values()
+        for node in tree.body
+        if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Tuple)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+    missing: list[str] = []
+    for path, tree in trees.items():
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                continue
+            caught = set(re.findall(r"\w+", ast.unparse(handler.type)))
+            while grown := {name for word in caught for name in aliases.get(word, ())} - caught:
+                caught |= grown
+            if not provider & caught:
+                continue
+            body = "\n".join(ast.unparse(statement) for statement in handler.body)
+            logs = re.search(r"log\w*(\(\))?\.(debug|info|warning|error|exception)\(", body)
+            if logs and "backend_refusal_causes(" not in body:
+                missing.append(f"{path.relative_to(root)}:{handler.lineno}")
+    assert not missing, f"provider failure logs without causes: {missing}"

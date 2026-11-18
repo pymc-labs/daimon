@@ -103,6 +103,7 @@ from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -1243,6 +1244,7 @@ class TeamsApp:
             status, error_code = send_error_details(exc)
             log.error(
                 "teams.message.failed",
+                causes=backend_refusal_causes(exc),
                 conversation_id=inbound.conversation_id,
                 status=status,
                 error_code=error_code,
@@ -1410,7 +1412,12 @@ class TeamsApp:
         try:
             await self._run_turn(inbound, tenant_id)
         except _TURN_ERRORS as exc:
-            log.error("teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc)
+            log.error(
+                "teams.turn.failed",
+                causes=backend_refusal_causes(exc),
+                conversation_id=inbound.conversation_id,
+                exc_info=exc,
+            )
             capture_exception_with_scope(exc)
             with contextlib.suppress(*TEAMS_SEND_ERRORS):
                 await self._say(inbound, _FAILED)
@@ -2143,7 +2150,12 @@ class TeamsApp:
                 dispatch_errors=(Exception,),
             )
         except _TURN_ERRORS as exc:
-            log.error("teams.continuation.dispatch_failed", conversation_id=key, exc_info=exc)
+            log.error(
+                "teams.continuation.dispatch_failed",
+                causes=backend_refusal_causes(exc),
+                conversation_id=key,
+                exc_info=exc,
+            )
 
     async def _asking_agent_id(self, row: TaskContinuationRow, tenant_id: uuid.UUID) -> str | None:
         """The agent that asked for a private input, while the requester's live session is

@@ -17,7 +17,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from daimon.core.agent_editing import system_agent_rejection
-from daimon.core.channel_backend import AgentBackendRefused
+from daimon.core.channel_backend import AgentBackendRefused, backend_refusal_causes
 from daimon.core.defaults.ma_index import download_skill_version, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.ma import update_agent_with_version_retry
@@ -97,6 +97,7 @@ class ManagedAgentsTarget:
         except (*_FAILURES, SkillIngestError) as err:
             log.warning(
                 "server_skill.published_unreadable",
+                causes=backend_refusal_causes(err),
                 mirror_id=str(mirror.id),
                 err_type=type(err).__name__,
             )

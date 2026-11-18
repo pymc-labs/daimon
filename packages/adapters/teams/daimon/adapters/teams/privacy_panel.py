@@ -35,6 +35,7 @@ from daimon.adapters.teams.privacy_card import (
     post_delete_card,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import DELETE_PAUSED, collect_purge_preview
 from daimon.core.purge import purge_account
@@ -161,7 +162,12 @@ class PrivacyPanel:
             )
             card = post_delete_card(result, bot=bot)
         except PANEL_ERRORS as exc:
-            log.error("teams.privacy.purge_failed", account_id=str(account_id), exc_info=exc)
+            log.error(
+                "teams.privacy.purge_failed",
+                causes=backend_refusal_causes(exc),
+                account_id=str(account_id),
+                exc_info=exc,
+            )
             capture_exception_with_scope(exc)
             card = text_card("🔒 Privacy", FAILED)
         await edit_origin_card(ctx, card)

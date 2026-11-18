@@ -45,6 +45,7 @@ from daimon.core.caller_resources import (
     CALLER_RESOURCES_ID,
     CALLER_VAULT_PREFIX,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
     github_repo_map_sha256,
@@ -1133,6 +1134,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=resource_agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
             else:
                 personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
@@ -1154,6 +1156,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
                 if identity.shared_memory:
                     try:
@@ -1175,6 +1178,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=resource_agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
                 if personal_mount is not None:
                     resources.append(personal_mount)
@@ -1372,7 +1376,11 @@ async def create_session(
                                 )
                             )
                     except anthropic_pkg.APIError as exc:
-                        _log.warning("git_identity.mount_failed", error=str(exc))
+                        _log.warning(
+                            "git_identity.mount_failed",
+                            error=str(exc),
+                            causes=backend_refusal_causes(exc),
+                        )
                 await add_app_credentials(
                     anthropic, vault_id=vault_id, access=app_access, scope=scope
                 )

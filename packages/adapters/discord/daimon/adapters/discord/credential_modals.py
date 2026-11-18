@@ -111,6 +111,7 @@ from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import FormPinRefused, agent_pin_names
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.messages import (
     ConfigurationChange,
@@ -1514,6 +1515,7 @@ class SkillRepoModal(discord.ui.Modal):
                 "credential_modal.skill_repo_attach_failed",
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
+                causes=backend_refusal_causes(err),
             )
             return "Attaching them did not finish. Try again using the same form."
         return None

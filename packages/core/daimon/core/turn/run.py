@@ -27,6 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
@@ -388,8 +389,12 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
         log.info("billing.settle_skipped", managed_session_id=session_id)
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session_id)
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session_id,
+            causes=backend_refusal_causes(error),
+        )
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -632,6 +637,7 @@ async def _replay_previous_session(
             "turn.recovery_transcript_unavailable",
             session_id=session_id,
             error=str(err)[:200],
+            causes=backend_refusal_causes(err),
         )
         return None
     turns = select_recent_turns(events)

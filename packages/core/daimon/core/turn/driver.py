@@ -73,6 +73,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserMessageEventParams,
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import load_turn_settings
 from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
@@ -216,6 +217,7 @@ async def _read_after_quiet[R](
                 raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
+                causes=backend_refusal_causes(error),
                 read=name,
                 session_id=session_id,
                 error_type=type(error).__name__,
@@ -1071,6 +1073,7 @@ async def run_turn(
                     "turn.usage_reconciliation_failed",
                     session_id=session_id,
                     error_class=type(error).__name__,
+                    causes=backend_refusal_causes(error),
                 )
             raise
         final_cell = [final]
@@ -1224,7 +1227,12 @@ async def _interrupt_and_settle(
         log.warning("turn.session_unwedge_timeout", session_id=session_id)
         return "failed"
     if (error := recovery.exception()) is not None:
-        log.warning("turn.session_unwedge_failed", session_id=session_id, error=str(error))
+        log.warning(
+            "turn.session_unwedge_failed",
+            session_id=session_id,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         return "failed"
     if not recovery.result():
         log.warning("turn.session_unwedge_failed", session_id=session_id, error="terminated")
@@ -2095,6 +2103,7 @@ async def _consume_with_reconnect(
                         "turn.idle_check_failed",
                         session_id=session_id,
                         error_type=type(error).__name__,
+                        causes=backend_refusal_causes(error),
                     )
                     continue
                 if silence is not None:
@@ -2437,6 +2446,7 @@ async def _finalize_success_or_error(
             turn_error_kind=final_state.error.kind,
             error=final_state.error.message,
             renders_failed=renders_failed,
+            causes=backend_refusal_causes(final_state.error),
         )
         await lifecycle.on_terminal_failure(final_state, final_state.error)
     else:
@@ -2481,6 +2491,7 @@ async def _finalize_connection_lost(
         turn_error_kind="connection_lost",
         error=str(err),
         renders_failed=renders_failed,
+        causes=backend_refusal_causes(err),
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -2513,17 +2524,13 @@ async def _finalize_upstream(
         ),
     )
     await render_once(state_cell[0])
-    provider = err if isinstance(err, ProviderError) else None
     log.warning(
         "turn.failed",
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
         renders_failed=renders_failed,
-        # Redacted provider detail: which check or HTTP status ended the turn.
-        provider_category=provider.category if provider else None,
-        provider_native_code=provider.native_code if provider else None,
-        provider_http_status=provider.native_error_code if provider else None,
+        causes=backend_refusal_causes(err),
     )
     if rate_limit_until is not None:
         log.warning(
@@ -2561,6 +2568,7 @@ async def _finalize_interrupted(
         turn_error_kind="interrupted",
         error=turn_err.message,
         renders_failed=renders_failed,
+        causes=backend_refusal_causes(turn_err),
     )
     await lifecycle.on_terminal_failure(state_cell[0], turn_err)
     return state_cell[0]
@@ -2599,6 +2607,7 @@ async def _handle_interrupt_in_consume(
             turn_error_kind=err.kind,
             error=err.message,
             renders_failed=renders_failed,
+            causes=backend_refusal_causes(err),
         )
         await lifecycle.on_terminal_failure(state_cell[0], err)
         return state_cell[0]

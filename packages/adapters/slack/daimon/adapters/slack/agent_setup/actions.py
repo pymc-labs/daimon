@@ -133,6 +133,7 @@ from daimon.core.agent_identity import (
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
 from daimon.core.authz import build_subject, origin_ids
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -402,7 +403,12 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
         aiohttp.ClientError,
         TimeoutError,
     ) as exc:
-        log.error("slack.agent_setup_command_failed", team_id=team_id, exc_info=exc)
+        log.error(
+            "slack.agent_setup_command_failed",
+            team_id=team_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         capture_exception_with_scope(exc)
         # No infinite spinner — update to error view on failure.
         if view_id:
@@ -1701,6 +1707,7 @@ async def handle_agent_setup_action(runtime: SlackRuntime, payload: dict[str, An
             team_id=team_id,
             action_id=action_id,
             exc_info=exc,
+            causes=backend_refusal_causes(exc),
         )
         capture_exception_with_scope(exc)
         # A failed click is never silent. With a view on screen the failure

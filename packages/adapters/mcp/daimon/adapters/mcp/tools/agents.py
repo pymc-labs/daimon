@@ -67,6 +67,7 @@ from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Surface
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.confirmation import agent_loss_word
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -1536,7 +1537,7 @@ async def _archive_agent_impl(
             tenant_id=auth.tenant_id,
             agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id)),
         )
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         # Best-effort degrade: the agent is already archived and the retry path
         # is dead (archived agents are filtered from lookup), so a transient
         # memory-store archive failure must not strand the agent in a failed
@@ -1546,6 +1547,7 @@ async def _archive_agent_impl(
             tenant_id=str(auth.tenant_id),
             agent_name=name,
             ma_agent_id=agent.id,
+            causes=backend_refusal_causes(error),
         )
     # Outside the best-effort degrade on purpose: a transient memory-store
     # failure must not skip the scope clear, or every turn in the affected

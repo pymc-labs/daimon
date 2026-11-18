@@ -62,6 +62,8 @@ class Wire:
         if request.method in ("POST", "DELETE"):
             assert request.headers["Idempotency-Key"]
         path = request.url.path.removeprefix("/v1")
+        if request.method == "GET" and path.startswith("/skills/skill/versions/"):
+            return httpx.Response(200, json={"skill_id": "skill", "version": path.split("/")[-1]})
         if request.method == "POST" and path in ("/files", "/skills", "/skills/skill/versions"):
             msg = email.message_from_bytes(
                 ("Content-Type: " + request.headers["content-type"] + "\r\n\r\n").encode()

@@ -8,6 +8,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import CredentialRequestRow
@@ -69,9 +70,11 @@ async def resolve_credential_target(
             agent_id=row.agent_id,
             records=runtime.sessionmaker,
         )
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         structlog.get_logger().exception(
-            "credential_target.lookup_failed", tenant_id=str(row.tenant_id)
+            "credential_target.lookup_failed",
+            tenant_id=str(row.tenant_id),
+            causes=backend_refusal_causes(error),
         )
         await interaction.followup.send(
             embed=build_notice_embed(
