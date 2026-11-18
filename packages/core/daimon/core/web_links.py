@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final, Literal, NamedTuple
 from urllib.parse import quote
 
 from daimon.core.config import Settings, WebModuleKey, WebSettings
 from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
+from daimon.core.stores.thread_sessions import get_answering_agent
 
 OPEN_IN_WEB: Final = "Open in web"
 """The label of every panel button that opens the web app, on every platform."""
@@ -229,10 +230,22 @@ async def links_at(
     place: FeaturePlace,
     links: TenantLinks | None,
 ) -> TenantLinks | None:
-    """`links` where `web_awareness` is On at `place`; None when it is Off or unreadable.
+    """`links` where `web_awareness` is On at `place`; None when it is Off or unreadable. A
+    place with a channel but no agent takes the agent answering there (`get_answering_agent`).
     Every path that tells the agent about the web app or puts a link to it on a card asks
     this (a turn's controls ask its snapshot in `render_turn_origin`)."""
     if links is None:
         return None
+    if place.agent_id is None and place.channel_id is not None and place.platform:
+        # A card in a channel follows the agent that answers there (#1775).
+        async with sessions() as session:
+            agent = await get_answering_agent(
+                session,
+                tenant_id=place.tenant_id,
+                platform=place.platform,
+                channel_id=place.channel_id,
+                thread_key=place.thread_key,
+            )
+        place = replace(place, agent_id=agent)
     found = await place_feature_or_none(sessions, settings, place, "web_awareness")
     return links if found is not None and found.on else None

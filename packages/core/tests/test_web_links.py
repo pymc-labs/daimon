@@ -1,11 +1,17 @@
-"""The chat-to-web link builder: encoding, role and module limits."""
+"""The chat-to-web link builder: encoding, role and module limits, and `web_awareness`."""
 
 from __future__ import annotations
 
 import uuid
 
 from daimon.core.config import WebSettings
-from daimon.core.web_links import WebLinks
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.core.web_links import WebLinks, links_at
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TENANT = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
@@ -74,3 +80,35 @@ def test_pages_are_the_list_pages_the_caller_may_open() -> None:
 def test_pages_leave_out_modules_that_are_off_but_keep_the_profile() -> None:
     pages = _links("chat").for_tenant(TENANT, admin=True).pages()
     assert set(pages) == {"chat", "profile"}, "every other page belongs to a module that is off"
+
+
+async def test_a_channel_card_follows_the_agent_answering_there(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent's Off reaches a card in a channel that agent answers, and only there."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        await create_thread_session(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id="T1",
+            account_id=account.id,
+            ma_session_id="sesn_1",
+            ma_agent_id="agent_off",
+            channel_id="C1",
+        )
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("agent", agent_id="agent_off"),
+            key="web_awareness",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    links = _links().for_tenant(tenant.id, admin=False)
+    at = [FeaturePlace(tenant.id, "discord", channel) for channel in ("C1", "C2")]
+    found = [await links_at(db_session_factory, None, place, links) for place in at]
+    assert found == [None, links], "Off for the agent answering in C1 only, not in C2"

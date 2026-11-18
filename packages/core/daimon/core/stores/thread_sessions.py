@@ -286,6 +286,38 @@ async def thread_in_channel(
     return found is not None
 
 
+async def get_answering_agent(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_key: str | None,
+) -> str | None:
+    """The MA agent id of the newest live session in the thread, else in the channel: the
+    agent that answers there as it last ran, for a reader with no turn in hand (a card).
+    None when nothing has run there yet."""
+    where = (
+        ThreadSession.thread_id == thread_key
+        if thread_key is not None
+        else ThreadSession.channel_id == channel_id
+    )
+    return (
+        await session.execute(
+            select(ThreadSession.ma_agent_id)
+            .where(
+                ThreadSession.tenant_id == tenant_id,
+                ThreadSession.platform == platform,
+                ThreadSession.status == "live",
+                ThreadSession.ma_agent_id.is_not(None),
+                where,
+            )
+            .order_by(ThreadSession.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def get_latest_thread_session(
     session: AsyncSession,
     *,
