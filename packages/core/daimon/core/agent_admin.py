@@ -21,14 +21,15 @@ from daimon.core.agent_fork import AgentCopy, copy_agent
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
 from daimon.core.agent_ownership import agent_name_lock
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target
-from daimon.core.authz import Action, authorize
+from daimon.core.authz import Action, agent_names, authorize
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import archive_agent
-from daimon.core.permissions import SEALED_REFUSAL
+from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_backends, agent_helpers, web_people
+from daimon.core.stores.access_policy import load_access_policy
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -148,6 +149,14 @@ async def set_helpers(
         raise AgentEditError("No such agent.", kind="not_found")
     wanted = list(dict.fromkeys(helper_ids))
     async with session_factory() as session, session.begin():
+        # A private channel's own agent changes only from inside the channel.
+        if sealed_outside(
+            await load_access_policy(session, tenant_id=actor.tenant_id),
+            actor.subject.inside,
+            agent_names=agent_names(agent.name, agent.metadata),
+            operator=actor.subject.operator,
+        ):
+            raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
         before = await agent_helpers.list_helper_ids(
             session, tenant_id=actor.tenant_id, agent_id=agent.id
         )

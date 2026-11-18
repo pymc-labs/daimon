@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
-from daimon.core.agent_target import ChangeRecorder, load_target
+from daimon.core.agent_target import ChangeRecorder, load_target, require_setup
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.channel_settings import tool_server_url
 from daimon.core.stores import agent_tool_rules as store
@@ -60,6 +60,7 @@ async def set_agent_rule(
     if not enabled:
         raise AgentEditError(_OFF, kind="invalid")
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    require_setup(target, "Tool rules")
     async with deps.session_factory.begin() as session:
         existing = await store.get_rule(
             session,
