@@ -31,6 +31,7 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.prepare import CONTINUED, admitted_session_scope
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
+from daimon.testing.settings_mock import bare_settings
 from mux.contracts.config import ConfigRevision
 from mux.contracts.resources import EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY
@@ -81,7 +82,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
-            **({"settings": object()} if relay else {}),
+            **({"settings": bare_settings()} if relay else {}),
         ),
     )
     if relay:
@@ -582,7 +583,7 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     request, quote, native, *_ = template
     assert "mcp_server:linear" in quote.declared_drops, "confirmed while the relay was off"
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     selected, runtime = await _prepared(request)
     daimon, linear = selected.target_spec.mcp_servers
     public = str(request.deps.mcp.public_url).rstrip("/")
@@ -609,7 +610,7 @@ async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_rela
         "deployment_on",
         lambda _s, key, platform: key == "mcp_connector_relay" and platform == "slack",
     )
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     both = replace(request, answers_on=("discord", "slack"))
     selected, _ = await _prepared(both)
     assert "mcp_server:linear" in selected.target_spec.declared_drops, (
@@ -659,7 +660,7 @@ async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, mon
 
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, key, _p: key == "host_call_gate")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     captured = await capture_preparation_source(request, fresh=True)
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers

@@ -28,6 +28,7 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.prepare import admitted_session_scope, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.testing.settings_mock import bare_settings
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import ConfigRevision
 
@@ -169,7 +170,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
-            **({"settings": object()} if relay else {}),
+            **({"settings": bare_settings()} if relay else {}),
         ),
     )
     if relay:
@@ -460,7 +461,7 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
 
     request, _, wire, _ = template
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     captured = await capture_preparation_source(request, fresh=True)
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     daimon, linear = representation.target.mcp_servers
