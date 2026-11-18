@@ -498,23 +498,28 @@ async def copy_skills(
     # emulated catalogue's records share one host transaction (a single writer).
     gate = asyncio.Semaphore(4 if profile.support_for("skills_bundle") == "native" else 1)
 
+    handled = (AnthropicError, DaimonError, MuxError, ValueError)
+
     async def attempt(pin: SkillRef) -> SkillRef | Exception:
         async with gate:
             try:
                 return await copy(pin)
-            except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            except handled as error:
                 return error
 
-    outcomes = await asyncio.gather(*(attempt(pin) for pin in pins))
+    # Every copy settles first, so none is left running when one raises.
+    outcomes = await asyncio.gather(*(attempt(pin) for pin in pins), return_exceptions=True)
     # A transient failure retries with the reply; only a permanent one is a loss,
     # because the session is created once with whatever copied.
     for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, handled):
+            raise outcome
         if isinstance(outcome, ProviderError) and outcome.retryable:
             raise outcome
     copies: list[SkillRef] = []
     losses: list[str] = []
     for pin, made in zip(pins, outcomes, strict=True):
-        if isinstance(made, Exception):
+        if isinstance(made, BaseException):
             log.warning(
                 "session_skills.copy_failed", skill_id=pin.id, causes=backend_refusal_causes(made)
             )

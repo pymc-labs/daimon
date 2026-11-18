@@ -87,6 +87,10 @@ FOLDED = b"---\nname: lint\ndescription: >\n  Lint data.\n  Use it: often.\nlice
             b"---\nname: marimo-notebooks\ndescription: d\n---\n",
         ),
         (b'---\nname: lint\ndescription: "Lint data."\n---\n', None),
+        (
+            b'---\nname: lint\ndescription: "a\\nb"\n---\n',
+            b'---\nname: lint\ndescription: "a b"\n---\n',
+        ),
         (b"---\nname: lint\ndescription: Lint data. # why\n---\n", None),
         (b"---\nname: __\ndescription: d\n---\n", None),
         (b"---\nname: lint\ndescription: &d >\n  a\n  b\nsummary: *d\n---\n", None),
@@ -103,6 +107,7 @@ FOLDED = b"---\nname: lint\ndescription: >\n  Lint data.\n  Use it: often.\nlice
         "plain",
         "bad-name",
         "quoted",
+        "escaped-break",
         "commented",
         "no-slug",
         "anchor",

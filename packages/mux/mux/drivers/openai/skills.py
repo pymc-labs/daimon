@@ -107,7 +107,7 @@ def plain_manifest(content: bytes) -> bytes:
         if key[1] == "name" and _NAME.fullmatch(value) is None:
             # OpenAI refuses any other name; its slug is written unquoted.
             plain = written = "-".join(re.findall(r"[a-z0-9]+", value.lower()))
-        elif end > index:
+        elif end > index or "\n" in value:
             plain = " ".join(value.split())
             written = json.dumps(plain, ensure_ascii=False)
         else:
