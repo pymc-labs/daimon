@@ -258,6 +258,12 @@ def features_router(runtime: WebRuntime) -> APIRouter:
 
             write_tool = audited_write
 
+        async def names_of(ma_agent_id: str) -> tuple[str | None, ...]:
+            # Built on use: only a change at the agent tier needs the provider.
+            return await agent_names_loader(change_deps(runtime).edit, agent_actor_of(caller))(
+                ma_agent_id
+            )
+
         actor = FeatureActor(
             place.tenant_id,
             account,
@@ -269,7 +275,7 @@ def features_router(runtime: WebRuntime) -> APIRouter:
             write_builtin=write_tool,
             read_builtins=read_tools,
             # The web app proves no origin: a private channel and its own agent are read only here.
-            agent_names=agent_names_loader(change_deps(runtime).edit, agent_actor_of(caller)),
+            agent_names=names_of,
         )
         with channel_refusals():
             result = await change_feature(

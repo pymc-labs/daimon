@@ -413,7 +413,7 @@ async def run_sandbox_tools(
                 enabled=enabled,
                 set_by=str(principal.id),
                 # Whoever holds the database credentials is the operator.
-                actor=Subject(is_admin=True, operator=True),
+                actor=Subject(is_admin=True),
                 via="cli",
                 pin=pins.get(rid),
             )

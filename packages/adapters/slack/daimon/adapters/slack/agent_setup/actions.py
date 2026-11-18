@@ -1391,7 +1391,13 @@ async def _dispatch_panel_action(
         value = str(selected.get("value") or "")
         if not value or not meta.channel_id:
             return
-        subject = await load_picker_subject(runtime, client, tenant_id=tenant_id, user_id=user_id)
+        subject = await load_picker_subject(
+            runtime,
+            client,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            origin=origin_ids(meta.channel_id, meta.thread_id),
+        )
         if not await may_pick_environment(
             runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
         ):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Final, cast, get_args
 
 import anthropic
@@ -35,7 +36,7 @@ from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import load_answering_map
-from daimon.core.authz import Subject, build_subject, origin_ids
+from daimon.core.authz import Subject, build_subject
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     authorize_environment_pick,
@@ -142,7 +143,7 @@ class ChannelSettingsDialog:
 
     async def _subject(self, actor: Actor) -> Subject:
         async with self._runtime.sessionmaker() as session:
-            return await load_live_subject(
+            subject = await load_live_subject(
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
@@ -151,6 +152,7 @@ class ChannelSettingsDialog:
                 ),
                 action=DelegatedAction.CHANNEL_PERMISSIONS,
             )
+        return replace(subject, origin_channel_ids=actor.origin)
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:
         async with self._runtime.sessionmaker() as session:
@@ -396,7 +398,7 @@ class ChannelSettingsDialog:
                 subject=build_subject(
                     is_admin=True,
                     platform_user_id=actor.user_id,
-                    origin_channel_ids=origin_ids(channel_id),
+                    origin_channel_ids=actor.origin,
                 ),
                 surface="panel",
                 default=self._runtime.deployment_default,

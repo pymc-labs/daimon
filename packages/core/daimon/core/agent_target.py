@@ -60,7 +60,7 @@ async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: st
         )
     async with deps.session_factory() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
-    # A private channel's own agent shows its setup and memory only inside the channel.
+    # A private channel's own agent changes, and shows its memory, only inside the channel.
     # Only an admin is held to it: an owner's own view of the agent stays as it was.
     sealed = (
         sealed_outside(
@@ -72,9 +72,8 @@ async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: st
         if actor.subject.is_admin
         else None
     )
-    sees = sealed is None and (
-        actor.subject.is_admin
-        or (owned and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) != "true")
+    sees = actor.subject.is_admin or (
+        owned and agent.metadata.get(MA_METADATA_KEY_SETUP_HIDDEN) != "true"
     )
     return AgentTarget(
         agent=agent,
@@ -100,10 +99,13 @@ def agent_names_loader(
     return load
 
 
-def require_setup(target: AgentTarget, what: str) -> None:
-    """Refuse unless the actor sees the agent's setup (an admin, or its owner), and, for a
-    private channel's own agent, is inside that channel."""
-    if target.sealed:
+def require_setup(target: AgentTarget, what: str, *, read_only: bool = False) -> None:
+    """Refuse unless the actor sees the agent's setup (an admin, or its owner).
+
+    A change, or memory text, of a private channel's own agent also needs the actor inside
+    that channel. A `read_only` view of the setup does not.
+    """
+    if target.sealed and not read_only:
         raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     if not target.sees_setup:
         raise AgentEditError(f"{what} is for the agent's owner or an admin.", kind="forbidden")

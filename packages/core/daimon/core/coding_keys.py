@@ -313,7 +313,7 @@ async def list_agent_coding_keys(
 ) -> list[CodingKeyEntry]:
     """The coding keys of this agent the actor may see: all for an admin, their own for an owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Coding keys")
+    require_setup(target, "Coding keys", read_only=True)
     access = coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned)
     if access is None:
         return []

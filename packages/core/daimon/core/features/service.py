@@ -616,8 +616,8 @@ async def change_feature(
     )
     if refusal is not None:
         raise refusal
-    await _require_inside(sessions, actor, tier, place)
     spec = FEATURES[key]
+    await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
     if spec.authority.native:
         before = await _change_approvals(sessions, settings, actor, tier, value, place, expected)
@@ -639,11 +639,13 @@ async def change_feature(
 
 
 async def _require_inside(
-    sessions: Sessions, actor: FeatureActor, tier: Tier, place: FeaturePlace
+    sessions: Sessions, actor: FeatureActor, spec: FeatureSpec, tier: Tier, place: FeaturePlace
 ) -> None:
     """A private channel's switches, and its own agent's, change only from inside the channel
-    (`sealed_outside`), for admins too."""
+    (`sealed_outside`), for admins too. Whoever is not an admin here is held as before."""
     if actor.operator or tier in ("deployment", "workspace"):
+        return
+    if actor.via_agent_key or not await actor.admin_for(spec.authority.action):
         return
     async with sessions() as session:
         policy = await load_access_policy(session, tenant_id=place.tenant_id)

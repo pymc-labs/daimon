@@ -690,7 +690,9 @@ class SetupPanel:
             )
 
         account_id = await get_or_create_account(self._runtime, actor)
-        subject = build_subject(is_admin=admin, platform_user_id=actor.user_id)
+        subject = build_subject(
+            is_admin=admin, platform_user_id=actor.user_id, origin_channel_ids=actor.origin
+        )
         service = channel_backend.make_backend_service(
             self._runtime.sessionmaker,
             self._runtime.settings.turn,

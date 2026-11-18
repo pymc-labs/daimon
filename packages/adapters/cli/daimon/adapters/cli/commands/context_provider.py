@@ -39,7 +39,7 @@ def set_command(
                 session,
                 tenant_id=tenant,
                 config=config,
-                actor=Subject(is_admin=True, operator=True),
+                actor=Subject(is_admin=True),
                 set_by="cli:deployment-operator",
                 channel_id=channel,
                 agent_id=agent,

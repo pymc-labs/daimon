@@ -145,7 +145,7 @@ def _actor(target: _Target, *, command: str, reason: str) -> ChannelActor:
     return ChannelActor(
         tenant_id=target.tenant_id,
         account_id=target.account_id,
-        subject=Subject(is_admin=True, operator=True),
+        subject=Subject(is_admin=True),
         surface="cli",
         on_write=audit,
     )

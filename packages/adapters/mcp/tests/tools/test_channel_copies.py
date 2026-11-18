@@ -45,7 +45,7 @@ OWN = ChannelRule(readers="own", writers="own")
 
 
 @pytest.fixture(autouse=True)
-def _inside_the_channels() -> Iterator[None]:
+def _inside_the_channels() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
     """These calls come from inside the channels they change (a private channel is inside-only)."""
     token = CALL_ORIGIN.set(frozenset({ROOM, OTHER}))
     yield

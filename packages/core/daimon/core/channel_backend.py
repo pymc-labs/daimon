@@ -1364,8 +1364,8 @@ class AgentBackendService:
         if not await agent_backends.actor_exists(session, agent.tenant_id, actor.account_id):
             raise AgentBackendRefused("actor_not_found")
         policy = await policy_store.load_access_policy(session, tenant_id=agent.tenant_id)
-        # A private channel's own agent changes only from inside the channel, owner or admin.
-        if sealed_outside(
+        # A private channel's own agent changes only from inside the channel, for admins too.
+        if actor.subject.is_admin and sealed_outside(
             policy,
             actor.subject.inside,
             agent_names=(agent.name,),

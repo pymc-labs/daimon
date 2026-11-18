@@ -25,7 +25,7 @@ log = structlog.get_logger(__name__)
 async def call_origin_ids(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: object
 ) -> frozenset[str]:
-    """The channel and thread the call's turn runs in; empty when it proves none.
+    """The channel and thread the call's turn runs in; empty when it proves none or is unattended.
 
     With several running turns of one session and no named origin, only what they all
     share counts. An agent key proves nothing: it keeps its old origin.
@@ -37,6 +37,14 @@ async def call_origin_ids(
     origins = [origin] if origin is not None else await list_running_origins(runtime, auth)
     shared: frozenset[str] | None = None
     for found in origins:
+        # Unattended or resumed work proves nobody is there; a held credential stays in its hold.
+        if not found.attended or (
+            auth.hold is not None
+            and not auth.hold.contains(
+                found.thread_id or found.parent_channel_id, found.parent_channel_id
+            )
+        ):
+            return frozenset()
         ids = origin_ids(found.parent_channel_id, found.thread_id)
         shared = ids if shared is None else shared & ids
     return shared or frozenset()

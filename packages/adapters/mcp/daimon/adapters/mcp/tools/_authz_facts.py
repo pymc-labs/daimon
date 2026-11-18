@@ -37,7 +37,6 @@ def mcp_subject(auth: AuthIdentity, *, is_admin: bool = False) -> Subject:
         via_agent_key=auth.is_external_agent,
         client=auth.client,
         origin_channel_ids=() if auth.is_external_agent else CALL_ORIGIN.get(),
-        operator=auth.is_operator,
     )
 
 

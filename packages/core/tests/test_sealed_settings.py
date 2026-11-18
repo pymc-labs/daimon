@@ -11,7 +11,7 @@ import ast
 from pathlib import Path
 
 import pytest
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import (
     SEALED_SETTINGS_ACTIONS,
     Action,
@@ -165,6 +165,7 @@ DIRECT_GUARDS = {
     "core/daimon/core/channel_rules.py": "sealed_outside",
     "core/daimon/core/channel_backend.py": "sealed_outside",
     "core/daimon/core/agent_target.py": "sealed_outside",
+    "core/daimon/core/agent_knowledge.py": "sealed_outside",
     "core/daimon/core/approval_gate.py": "sealed_outside",
     "core/daimon/core/features/service.py": "sealed_outside",
     "adapters/mcp/daimon/adapters/mcp/tools/_pin_guard.py": "authorize",
@@ -179,3 +180,128 @@ def test_each_listed_funnel_still_calls_the_rule(rel: str) -> None:
 def test_a_funnel_with_no_origin_is_refused_by_default() -> None:
     assert Subject(is_admin=True).inside == frozenset()
     assert not Subject(is_admin=True).operator
+
+
+# --- the fixes the review asked for ---------------------------------------------------
+
+
+class _Session:
+    """Stands in for a session where the code under test only passes it on."""
+
+    async def __aenter__(self) -> _Session:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+def _sessions() -> _Session:
+    return _Session()
+
+
+@pytest.mark.asyncio
+async def test_a_member_owner_changes_their_agents_backend_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid
+
+    from daimon.core import channel_backend as cb
+    from daimon.core.stores import access_policy as policy_store
+    from daimon.core.stores import agent_backends
+    from daimon.core.stores.domain import BackendAgent
+
+    tenant = uuid.uuid4()
+    owned = [True]
+
+    async def actor_exists(*_: object) -> bool:
+        return True
+
+    async def load(*_a: object, **_k: object) -> TenantAccessPolicy:
+        return SEALED_HOME
+
+    async def owner(*_: object) -> bool:
+        return owned[0]
+
+    monkeypatch.setattr(agent_backends, "actor_exists", actor_exists)
+    monkeypatch.setattr(policy_store, "load_access_policy", load)
+    monkeypatch.setattr(cb, "may_edit_as_owner", owner)
+    service = cb.AgentBackendService(_sessions, enabled=True)  # pyright: ignore[reportArgumentType]
+    agent = BackendAgent(
+        tenant_id=tenant, agent_id=uuid.uuid4(), name="acme", configuration_digest="d"
+    )
+    member = cb.BackendActor(tenant, uuid.uuid4(), MEMBER)
+    admin = cb.BackendActor(tenant, uuid.uuid4(), OUTSIDE)
+    inside = cb.BackendActor(tenant, uuid.uuid4(), INSIDE)
+
+    assert await service._authorize_edit(_Session(), agent, member) is False  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    assert await service._authorize_edit(_Session(), agent, inside) is True  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    with pytest.raises(cb.AgentBackendRefused) as refused:
+        await service._authorize_edit(_Session(), agent, admin)  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    assert refused.value.reason == "sealed_channel"
+
+
+SEALED_HOME = TenantAccessPolicy(
+    channel_rules={"C_ACME": ChannelRule(readers="own", writers="own")},
+    agent_rules={"acme": AgentRule(runs_in=("C_ACME",))},
+)
+
+
+@pytest.mark.asyncio
+async def test_a_member_keeps_a_feature_change_an_admin_outside_loses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid
+
+    from daimon.core.features import service as fs
+    from daimon.core.features.registry import FEATURES
+    from daimon.core.features.snapshot import FeaturePlace
+
+    async def load(*_a: object, **_k: object) -> TenantAccessPolicy:
+        return SEALED
+
+    monkeypatch.setattr(fs, "load_access_policy", load)
+    spec = FEATURES["memory_channel"]
+    place = FeaturePlace(tenant_id=uuid.uuid4(), platform="discord", channel_id="C_ACME")
+
+    def actor(admin: bool, inside: frozenset[str] = frozenset()) -> fs.FeatureActor:
+        async def admin_for(_: object) -> bool:
+            return admin
+
+        return fs.FeatureActor(place.tenant_id, None, "web", None, admin_for, inside=inside)
+
+    await fs._require_inside(_sessions, actor(False), spec, "channel", place)  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    await fs._require_inside(_sessions, actor(True, frozenset({"C_ACME"})), spec, "channel", place)  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    with pytest.raises(Exception, match="private"):
+        await fs._require_inside(_sessions, actor(True), spec, "channel", place)  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+
+
+@pytest.mark.asyncio
+async def test_memory_text_is_refused_by_the_stores_channel_not_the_agents_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared agent has no home, yet its store for a private channel stays inside-only."""
+    import uuid
+
+    from daimon.core import agent_knowledge as ak
+    from daimon.core.agent_editing import AgentActor, AgentEditError
+    from daimon.core.authz import Surface
+
+    async def load(*_a: object, **_k: object) -> TenantAccessPolicy:
+        return TenantAccessPolicy(channel_rules={"C_ACME": ChannelRule(readers="inside")})
+
+    async def store_id(*_a: object, **_k: object) -> str:
+        return "mem_1"
+
+    monkeypatch.setattr(ak, "load_access_policy", load)
+    monkeypatch.setattr(ak, "get_channel_memory_store_id", store_id)
+    deps = type("D", (), {"session_factory": staticmethod(_sessions)})()
+    target = type("T", (), {"agent_id": uuid.uuid4()})()
+    tenant = uuid.uuid4()
+
+    def actor(subject: Subject) -> AgentActor:
+        return AgentActor(tenant, uuid.uuid4(), subject, Surface.CONFIG)
+
+    with pytest.raises(AgentEditError, match="private"):
+        await ak._store_id(deps, target, actor(OUTSIDE), "discord/C_ACME")  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    assert await ak._store_id(deps, target, actor(INSIDE), "discord/C_ACME") == "mem_1"  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+    assert await ak._store_id(deps, target, actor(OUTSIDE), "discord/C_OPEN") == "mem_1"  # pyright: ignore[reportPrivateUsage,reportArgumentType]

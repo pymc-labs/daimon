@@ -20,9 +20,12 @@ from daimon.adapters.teams.identity import canonical_uuid, foreign_tenant, live_
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction, admin_for_action
+from daimon.core.authz import origin_ids
+from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
+from daimon.core.routine_delivery import teams_channel_of
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, panel_links
 from microsoft_teams.api import (
@@ -71,6 +74,20 @@ class Actor:
     conversation_id: str
     is_platform_admin: bool = False
     foreign: bool = False
+
+    @property
+    def origin(self) -> frozenset[str]:
+        """The channel this click came from, as Teams delivered it; empty in a 1:1 chat.
+
+        Never a channel the clicker typed or picked: that is the target, not the origin.
+        """
+        channel = teams_channel_of(self.conversation_id.strip())
+        if channel is None:
+            return frozenset()
+        try:
+            return origin_ids(normalize_channel_id("teams", channel))
+        except InvalidChannelId:
+            return frozenset()
 
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return admin_for_action(
