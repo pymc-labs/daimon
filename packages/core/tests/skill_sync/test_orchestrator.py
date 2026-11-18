@@ -17,8 +17,6 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
-from email.parser import BytesParser
-from email.policy import default
 from functools import partial
 
 import httpx
@@ -59,6 +57,8 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..shared_fakes import assert_skill_multipart as _assert_skill_multipart
+
 _upsert_user_skill = partial(
     upsert_user_skill,
     agent_name="agent",
@@ -66,22 +66,6 @@ _upsert_user_skill = partial(
     source_path="",
     anthropic_latest_version="1",
 )
-
-
-def _assert_skill_multipart(request: httpx.Request) -> bytes:
-    """Pin the old SDK file tuple at the actual host upload call site."""
-    message = BytesParser(policy=default).parsebytes(
-        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
-    )
-    files = [part for part in message.iter_parts() if part.get_filename() is not None]
-    assert len(files) == 1
-    part = files[0]
-    assert part.get_param("name", header="content-disposition") == "files[]"
-    assert part.get_filename() == "SKILL.zip"
-    assert part.get_content_type() == "application/zip"
-    data = part.get_payload(decode=True)
-    assert isinstance(data, bytes)
-    return data
 
 
 async def test_bound_sync_target_rejects_archived_or_foreign_agent() -> None:

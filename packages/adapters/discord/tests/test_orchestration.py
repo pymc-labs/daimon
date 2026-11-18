@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import anthropic as _anthropic
 import discord
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -27,7 +26,6 @@ from daimon.core import allowance_limits
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.ma_resolver import ResolverCache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig, ScopeContext
 from daimon.core.session_snapshot import (
     SessionSnapshot,
@@ -44,7 +42,6 @@ from daimon.core.stores.turn_card_intents import (
     TurnCardIntentRow,
     list_recoverable_turn_card_intents,
 )
-from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.protection import ConfirmedProtection, ProtectionState
 from daimon.core.turn_queue import TurnTicket
 from daimon.testing.builders import new_thread_session
@@ -58,6 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
 from .harness import make_bot
+from .shared_fakes import make_channel_message as _make_channel_message
+from .shared_fakes import make_turn_deps as _make_turn_deps
 
 
 def _snapshot_of(session: BetaManagedAgentsSession) -> SessionSnapshot:
@@ -134,29 +133,6 @@ def _make_runtime(
     )
 
 
-def _make_turn_deps(
-    settings: MagicMock,
-    anthropic: AsyncAnthropic,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    *,
-    resolver_cache: ResolverCache,
-    deployment_default: DeploymentDefault,
-) -> TurnDeps:
-    """Build the TurnDeps a DiscordRuntime carries via the production
-    `build_turn_deps` helper, so tests see the same derivation build_runtime
-    does. `settings.crypto.keys` on an unconfigured MagicMock iterates empty
-    (MagicMock auto-specs `__iter__`), so fernet is None here as in the
-    pre-cutover tests."""
-    return build_turn_deps(
-        settings,
-        anthropic,
-        sessionmaker,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=None,
-    )
-
-
 class _EmptyEventPage:
     """An SDK cursor page with no events and nothing after it."""
 
@@ -181,54 +157,6 @@ class _EmptyEventList:
             return _EmptyEventPage()
 
         return _first().__await__()
-
-
-class _AsyncIter:
-    """Async iterator adapter for mocked channel/thread history."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
-
-
-def _make_channel_message(
-    *,
-    content: str = "<@999> hello",
-    guild_id: int = 123456,
-    channel_id: int = 789,
-    author_id: int = 111,
-) -> discord.Message:
-    """Mock a message in a regular text channel (not a thread)."""
-    message = MagicMock(spec=discord.Message)
-    message.content = content
-    message.author = MagicMock()
-    message.author.bot = False
-    message.author.id = author_id
-    message.guild = MagicMock(spec=discord.Guild)
-    message.guild.id = guild_id
-    # Channel is a regular text channel (not a Thread)
-    message.channel = MagicMock()
-    # Make isinstance(message.channel, discord.Thread) return False
-    # and isinstance(message.channel, discord.TextChannel) return True
-    message.channel.__class__ = discord.TextChannel
-    message.channel.id = channel_id
-    message.channel.send = AsyncMock()
-    # Stub channel.history so build_channel_context_xml can be called; empty list
-    # produces a valid <channel_context count="0"> envelope.
-    message.channel.history = MagicMock(return_value=_AsyncIter([]))
-    message.create_thread = AsyncMock()
-    message.add_reaction = AsyncMock()
-    message.attachments = []
-    message.mentions = [types.SimpleNamespace(id=999)]
-    return message
 
 
 def _make_thread_message(

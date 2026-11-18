@@ -7,7 +7,6 @@ the platform-user-scoped erasure helpers.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -24,6 +23,8 @@ from daimon.core.stores.domain import CredentialRequestRow
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ..shared_fakes import concurrency_dsn as _concurrency_dsn
 
 _credential_request = partial(
     store.create_credential_request,
@@ -256,20 +257,6 @@ async def test_count_credential_requests_for_platform_user_matches_delete_rowcou
     )
 
     assert count_before == deleted == 3
-
-
-def _concurrency_dsn() -> str:
-    """Read the real test DSN.
-
-    The single-use guarantee rests on Postgres row locks serializing two
-    *separate* connections, so this needs two independent engines rather than
-    the shared single-connection ``db_session`` fixture the rest of this file
-    uses.
-    """
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    if not url:
-        pytest.skip("DAIMON_DATABASE__TEST_URL must be set for the concurrency test")
-    return url
 
 
 async def test_concurrent_consume_of_one_token_succeeds_exactly_once() -> None:

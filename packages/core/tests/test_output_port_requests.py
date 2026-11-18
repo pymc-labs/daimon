@@ -1,6 +1,5 @@
 """Session output migration preserves MA headers, page boundaries and SDK errors."""
 
-from datetime import UTC, datetime
 from typing import Literal
 
 import httpx
@@ -22,7 +21,6 @@ from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 SCOPE = resource_scope(tenant_id="tenant-a", account_id="account-a")
 MA_BETA = "managed-agents-2026-04-01"
 

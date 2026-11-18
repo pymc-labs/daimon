@@ -58,6 +58,7 @@ from daimon.core.stores.domain import AccountRow, McpTokenRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.shared_helpers import walk as _walk
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -193,17 +194,6 @@ def _member_interaction(user_id: int = 42) -> MagicMock:
     interaction.user.guild_permissions.administrator = False
     interaction.user.guild_permissions.manage_guild = False
     return interaction
-
-
-def _walk(item: Any) -> list[Any]:
-    """Every component in the tree, the way discord.py counts them."""
-    found = [item]
-    for child in getattr(item, "children", []) or []:
-        found.extend(_walk(child))
-    accessory = getattr(item, "accessory", None)
-    if accessory is not None:
-        found.extend(_walk(accessory))
-    return found
 
 
 def _container_text(container: discord.ui.Container[Any]) -> str:

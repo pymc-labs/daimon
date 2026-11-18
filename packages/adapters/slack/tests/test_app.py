@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import functools
 import json
 import pathlib
@@ -71,6 +70,7 @@ from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.builders import provision_workspace
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.settings_mock import mock_settings
+from daimon.testing.shared_helpers import FakeSocketClient as _FakeSocketClient
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from pydantic import SecretStr
@@ -277,25 +277,6 @@ def _seeded_snapshot(*, agent_id: str, environment_id: str) -> SessionSnapshot:
         vault_id=None,
         tool_safety=OPEN_TOOL_SAFETY,
     )
-
-
-@dataclasses.dataclass
-class _FakeSocketClient:
-    """Minimal Socket Mode client fake — records call order and ack payloads."""
-
-    call_log: list[str] = dataclasses.field(default_factory=list[str])
-    # Ordered list of SocketModeResponse objects sent via send_socket_mode_response.
-    # Tests can inspect .sent_responses[0].payload to assert ack payload content.
-    sent_responses: list[SocketModeResponse] = dataclasses.field(
-        default_factory=list[SocketModeResponse]
-    )
-
-    async def send_socket_mode_response(self, response: SocketModeResponse) -> None:
-        self.call_log.append("send_socket_mode_response")
-        self.sent_responses.append(response)
-
-    async def close(self) -> None:
-        self.call_log.append("close")
 
 
 def _make_events_api_request(

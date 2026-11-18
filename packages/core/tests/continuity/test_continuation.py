@@ -8,7 +8,6 @@ destination is one of the decisions under test.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -43,6 +42,8 @@ from daimon.testing.factories import make_account, make_tenant, make_thread_sess
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, not_found_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ..shared_fakes import concurrency_dsn as _concurrency_dsn
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
@@ -437,13 +438,6 @@ async def test_settle_records_delivery_and_skip_distinctly(
         "a skipped row must never read as though a turn ran for it"
     )
     assert skipped_row.skip_reason == "skip_superseded", "the skip records why it was skipped"
-
-
-def _concurrency_dsn() -> str:
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    if not url:
-        pytest.skip("DAIMON_DATABASE__TEST_URL must be set for the concurrency test")
-    return url
 
 
 async def test_two_dispatchers_racing_one_continuation_claim_it_exactly_once() -> None:

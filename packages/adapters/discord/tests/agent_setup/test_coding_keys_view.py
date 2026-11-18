@@ -20,17 +20,17 @@ from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti
 from daimon.core.stores.agent_owners import set_owner
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.shared_helpers import walk as _walk
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_details_view import (
-    _admin_interaction,  # pyright: ignore[reportPrivateUsage]
-    _details,  # pyright: ignore[reportPrivateUsage]
-    _find_button,  # pyright: ignore[reportPrivateUsage]
-    _make_runtime,  # pyright: ignore[reportPrivateUsage]
-    _member_interaction,  # pyright: ignore[reportPrivateUsage]
-    _roster_agent,  # pyright: ignore[reportPrivateUsage]
-    _state,  # pyright: ignore[reportPrivateUsage]
-    _walk,  # pyright: ignore[reportPrivateUsage]
+    _admin_interaction,
+    _details,
+    _find_button,
+    _make_runtime,
+    _member_interaction,
+    _roster_agent,
+    _state,
 )
 
 _MA_ID = "ag_research"

@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from functools import partial
 from typing import cast
@@ -20,6 +20,7 @@ from daimon.core.stores.domain import TenantLedgerRow, UsageEventRow
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.usage_recording import TurnLedgerReason, record_turn_usage
 from daimon.testing.factories import make_tenant
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
@@ -32,7 +33,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TENANT = uuid.UUID(int=8)
 RATES = ModelRates(input=2, output=10, cache_write=3, cache_read=1)
 

@@ -8,12 +8,10 @@ exactly one caller through no matter how many processes race it.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from datetime import UTC, datetime
 from functools import partial
 
-import pytest
 import pytest_asyncio
 from daimon.core.stores.task_continuations import (
     claim_continuation,
@@ -24,6 +22,8 @@ from daimon.core.stores.task_continuations import (
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ..shared_fakes import concurrency_dsn as _concurrency_dsn
 
 _record_continuation = partial(
     record_continuation,
@@ -182,19 +182,6 @@ async def test_pending_listing_covers_one_thread_and_drops_settled_rows(
     assert [row.idempotency_key for row in pending] == [mine], (
         "only this thread's still-undispatched continuations may be listed"
     )
-
-
-def _concurrency_dsn() -> str:
-    """The real test DSN, for the one test that needs two real connections.
-
-    The at-most-once guarantee rests on Postgres row locks serializing two
-    *separate* connections; the shared single-connection `db_session` fixture
-    cannot demonstrate it.
-    """
-    url = os.environ.get("DAIMON_DATABASE__TEST_URL")
-    if not url:
-        pytest.skip("DAIMON_DATABASE__TEST_URL must be set for the concurrency test")
-    return url
 
 
 async def test_two_connections_racing_one_continuation_claim_it_exactly_once() -> None:

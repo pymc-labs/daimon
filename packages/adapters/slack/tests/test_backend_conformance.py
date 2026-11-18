@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
-import re
 import textwrap
 import uuid
 from collections.abc import Awaitable, Callable
@@ -16,7 +15,6 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import app as platform_module
 from daimon.adapters.slack.app import SlackApp
@@ -25,7 +23,6 @@ from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
     DatabaseSettings,
-    Settings,
     SlackSettings,
     TurnSettings,
 )
@@ -44,17 +41,14 @@ from daimon.testing.adapters.slack.backend_conformance import (
     backend_selection_turn,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.turn_router import build_turn_router
+from daimon.testing.shared_helpers import OfflineSettings, Wire, build_client
 from mux.contracts.config import BackendConfig, ConfigRevision
-from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.isolated_sdk import (
     SDK_ENV_VARS,
     AmbientSDKConfigurationError,
-    build_async_anthropic,
 )
 from pydantic import PostgresDsn, SecretStr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import FakeSlackWebClient
@@ -62,71 +56,6 @@ from .harness import build_slack_runtime
 
 WORKSPACE, CHANNEL, USER, THREAD = "T_TEST", "C_TEST", "U_TEST", "1000000000.000001"
 OTHER_USER, NEW_THREAD = "U_OTHER", "1000000000.000002"
-
-
-class OfflineSettings(Settings):
-    """Validate synthetic settings without reading environment or credential files."""
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
-
-
-class Wire:
-    def __init__(self, tenant_id: uuid.UUID) -> None:
-        self.tenant_id = tenant_id
-        self.requests: list[httpx.Request] = []
-        self.created: list[str] = []
-        self.sessions: dict[str, dict[str, Any]] = {}
-        self.stream_hits: list[str] = []
-        self.router = build_turn_router(
-            str(tenant_id), fresh_event_ids=True, stream_hits=self.stream_hits
-        )
-        self.memory = make_fake_memory_store_handler()
-        self.router.add("POST", r"/v1/sessions", self.create)
-        self.router.add(
-            "GET",
-            r"/v1/sessions/(?P<session_id>[^/]+)",
-            lambda _r, m: httpx.Response(200, json=self.sessions[m["session_id"]]),
-        )
-
-    def create(self, request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
-        body = json_body(request)
-        native = f"sess_backend_{len(self.created) + 1}"
-        self.created.append(native)
-        response = ma_session(
-            id=native,
-            agent_id="ag_parity_test",
-            environment_id="env_parity_test",
-            metadata=body.get("metadata"),
-            resources=body.get("resources", ()),
-        ).model_dump(mode="json")
-        self.sessions[native] = response
-        return httpx.Response(200, json=response)
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        self.requests.append(request)
-        if request.url.path.startswith("/v1/memory_stores"):
-            return self.memory(request)
-        return self.router.dispatch(request)
-
-
-def build_client(wire: Wire) -> AsyncAnthropic:
-    """Keep the original test wire policy while refusing ambient SDK settings."""
-    return build_async_anthropic(
-        transport=httpx.MockTransport(wire.handle),
-        api_key="test",
-        base_url="https://api.anthropic.com",
-        max_retries=2,
-        timeout=httpx.Timeout(600.0, connect=5.0),
-    )
 
 
 async def setup(

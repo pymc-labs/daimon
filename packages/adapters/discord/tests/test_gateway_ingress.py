@@ -27,7 +27,6 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    Settings,
     ThreadNamingSettings,
     TurnSettings,
 )
@@ -53,24 +52,12 @@ from mux.contracts.ids import Provider, Scope
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
+from .shared_fakes import InitOnlySettings
+
 _scope = partial(Scope, principal_id="qa-operator:100", authorization_id="qa-offline:100")
-
-
-class InitOnlySettings(Settings):
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
 
 
 @dataclasses.dataclass

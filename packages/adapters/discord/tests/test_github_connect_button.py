@@ -1,7 +1,6 @@
 """The shared Discord button reveals its URL only privately, to whoever clicks it."""
 
 import uuid
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,18 +10,8 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.discord import github_connect_button as button_module
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.testing.shared_helpers import Sessions as _Sessions
 from pydantic import SecretStr
-
-
-class _Sessions:
-    @asynccontextmanager
-    async def begin(self):  # type: ignore[no-untyped-def]
-        yield object()
-
-    @asynccontextmanager
-    async def __call__(self):  # type: ignore[no-untyped-def]
-        yield object()
-
 
 _AGENT_NAME = "ResearchBot"
 _MA_AGENT = "ma-agent"

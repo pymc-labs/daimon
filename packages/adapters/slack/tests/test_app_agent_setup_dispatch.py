@@ -10,67 +10,19 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
-import dataclasses
 import json
-from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
-from anthropic import AsyncAnthropic
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
-from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.testing.turn_fakes import deps_for
-from pydantic import SecretStr
+from daimon.testing.shared_helpers import FakeSocketClient as _FakeSocketClient
+from daimon.testing.shared_helpers import drain as _drain
+from daimon.testing.shared_helpers import make_app as _make_app
 from slack_sdk.socket_mode.request import SocketModeRequest
-from slack_sdk.socket_mode.response import SocketModeResponse
 
 # ---------------------------------------------------------------------------
 # Shared fakes (transport-level discipline — no method-level mocks on web client)
 # ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class _FakeSocketClient:
-    """Minimal Socket Mode client fake — records call order and ack payloads."""
-
-    call_log: list[str] = dataclasses.field(default_factory=list[str])
-    sent_responses: list[SocketModeResponse] = dataclasses.field(
-        default_factory=list[SocketModeResponse]
-    )
-
-    async def send_socket_mode_response(self, response: SocketModeResponse) -> None:
-        self.call_log.append("send_socket_mode_response")
-        self.sent_responses.append(response)
-
-    async def close(self) -> None:
-        self.call_log.append("close")
-
-
-def _make_app() -> SlackApp:
-    """Build a minimal SlackApp for dispatch tests (no real DB needed)."""
-    settings = MagicMock()
-    settings.crypto.keys = (SecretStr("dummykey"),)
-    settings.slack.max_concurrent_turns_per_tenant = 3
-    runtime = SlackRuntime(
-        settings=settings,
-        anthropic=MagicMock(spec=AsyncAnthropic),
-        sessionmaker=MagicMock(),
-        billing_config=None,
-        http_client=MagicMock(spec=httpx.AsyncClient),
-        resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
-    )
-    return SlackApp(runtime=runtime)
-
-
-async def _drain(app: SlackApp) -> None:
-    """Await all background tasks spawned by the app."""
-    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------

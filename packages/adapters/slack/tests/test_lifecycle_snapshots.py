@@ -21,23 +21,11 @@ from typing import Any
 import yarl
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.testing.shared_helpers import make_clock as _make_clock
 from syrupy.assertion import SnapshotAssertion
 
 _POST_URL = yarl.URL("https://slack.com/api/chat.postMessage")
 _UPDATE_URL = yarl.URL("https://slack.com/api/chat.update")
-
-
-def _make_clock(times: list[float]) -> Any:
-    """Return a clock callable that yields `times` in order, repeating the last
-    value once exhausted (extra internal reads stay deterministic)."""
-    remaining = list(times)
-
-    def clock() -> float:
-        if len(remaining) > 1:
-            return remaining.pop(0)
-        return remaining[0]
-
-    return clock
 
 
 def _thinking_event() -> Any:

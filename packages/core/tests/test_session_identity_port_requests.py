@@ -1,9 +1,8 @@
 """Responder identity accepts SDK null/partial metadata without binding projection."""
 
-import contextlib
 import uuid
 from datetime import UTC, datetime
-from typing import Self, cast
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -17,15 +16,9 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTr
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .shared_fakes import SessionFactory
+
 TENANT, ACCOUNT = uuid.UUID(int=801), uuid.UUID(int=802)
-
-
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
 
 
 def mapping() -> ThreadSessionRow:

@@ -51,6 +51,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
+from .shared_fakes import until_lock_wait as _until_lock_wait
+
 _thread_session = partial(make_thread_session, platform="slack", thread_id="T1", channel_id="C1")
 
 
@@ -176,22 +178,6 @@ async def race_engine(db_engine: AsyncEngine, db_schema: str) -> AsyncIterator[A
 
 async def _pid(session: AsyncSession) -> int:
     return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
-
-
-async def _until_lock_wait(engine: AsyncEngine, pid: int) -> None:
-    async with engine.connect() as probe:
-        for _ in range(200):
-            waiting = (
-                await probe.execute(
-                    text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
-                    {"pid": pid},
-                )
-            ).scalar_one_or_none()
-            if waiting == "Lock":
-                return
-            await probe.rollback()
-            await asyncio.sleep(0.025)
-    raise AssertionError(f"backend {pid} never waited on a lock")
 
 
 _PIN_ELSEWHERE = TenantAccessPolicy(agent_channel_pins={"research-bot": ("C9",)})

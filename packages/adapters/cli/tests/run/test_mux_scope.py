@@ -19,6 +19,7 @@ from daimon.core.stores.domain import AccountRow, CliPrincipalRow, Role
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_tenant, make_thread_session
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
@@ -31,7 +32,6 @@ from packages.adapters.cli.tests.run.conftest import cli_principal_count
 
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
 class Sessionmaker:

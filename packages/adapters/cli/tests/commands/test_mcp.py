@@ -32,6 +32,7 @@ from daimon.core.config import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import ConfigError
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.shared_helpers import cred_wire as _cred_wire
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from rich.console import Console
@@ -420,24 +421,6 @@ def _vault_wire(vault_id: str, display_name: str) -> dict[str, Any]:
         created_at=dt.datetime(2026, 6, 1, tzinfo=dt.UTC),
         updated_at=dt.datetime(2026, 6, 1, tzinfo=dt.UTC),
     ).model_dump(mode="json")
-
-
-def _cred_wire(
-    *,
-    cred_id: str,
-    vault_id: str,
-    mcp_server_url: str,
-) -> dict[str, Any]:
-    """Minimal static_bearer credential wire shape."""
-    return {
-        "id": cred_id,
-        "type": "vault_credential",
-        "vault_id": vault_id,
-        "metadata": {},
-        "created_at": "2026-06-01T00:00:00Z",
-        "updated_at": "2026-06-01T00:00:00Z",
-        "auth": {"type": "static_bearer", "mcp_server_url": mcp_server_url},
-    }
 
 
 def _make_sweep_rt(

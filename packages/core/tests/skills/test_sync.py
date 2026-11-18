@@ -11,8 +11,6 @@ import io
 import re
 import uuid
 import zipfile
-from email.parser import BytesParser
-from email.policy import default
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -27,6 +25,8 @@ from daimon.core.specs import SkillSpec
 from daimon.testing.builders import skill_listed
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+
+from ..shared_fakes import assert_skill_multipart as _assert_skill_multipart
 
 _TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 
@@ -62,22 +62,6 @@ def _parse_display_title_from_multipart(req: httpx.Request) -> str:
             if value_start != -1:
                 return part[value_start + 4 :].strip().strip("\r\n")
     return ""
-
-
-def _assert_skill_multipart(request: httpx.Request) -> bytes:
-    """Pin the old SDK file tuple at the actual host upload call site."""
-    message = BytesParser(policy=default).parsebytes(
-        b"Content-Type: " + request.headers["content-type"].encode() + b"\r\n\r\n" + request.content
-    )
-    files = [part for part in message.iter_parts() if part.get_filename() is not None]
-    assert len(files) == 1
-    part = files[0]
-    assert part.get_param("name", header="content-disposition") == "files[]"
-    assert part.get_filename() == "SKILL.zip"
-    assert part.get_content_type() == "application/zip"
-    data = part.get_payload(decode=True)
-    assert isinstance(data, bytes)
-    return data
 
 
 async def test_sync_creates_new_skill(tmp_path: Path) -> None:

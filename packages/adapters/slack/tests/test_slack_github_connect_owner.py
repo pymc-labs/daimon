@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,12 +14,11 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_owners
-from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
 from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.shared_helpers import role_and_invitations as _role_and_invitations
 from pydantic import SecretStr
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TEAM = "T-OWNERS"
@@ -111,22 +109,6 @@ async def people(db_session: AsyncSession, db_session_factory: async_sessionmake
     )
     await db_session.commit()
     return accounts, agent_id
-
-
-async def _role_and_invitations(
-    sessions: async_sessionmaker[AsyncSession], account_id: uuid.UUID
-) -> tuple[Role, list[Mapping[str, Any]]]:
-    async with sessions() as session:
-        account = await get_account(session, account_id)
-        rows = await session.execute(
-            text(
-                "SELECT agent_id, agent_ma_id, requester_platform_user_id "
-                "FROM github_connect_invitations WHERE requester_account_id = :account"
-            ),
-            {"account": account_id},
-        )
-    assert account is not None
-    return account.role, list(rows.mappings())
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,6 @@ from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
     DiscordSettings,
-    Settings,
     ThreadNamingSettings,
     TurnSettings,
 )
@@ -53,7 +52,6 @@ from mux.contracts.ids import Provider, Scope
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import PostgresDsn, SecretStr, ValidationError
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -72,6 +70,8 @@ from packages.adapters.discord.tests.forbidden_hook import (
     evaluate_new14,
 )
 
+from .shared_fakes import InitOnlySettings
+
 _scope = partial(Scope, principal_id="qa-admin:100", authorization_id="qa-offline:100")
 
 
@@ -80,19 +80,6 @@ if TYPE_CHECKING:
     from discord.types.guild import Guild as GuildPayload
     from discord.types.message import Message as MessagePayload
     from discord.types.user import User as UserPayload
-
-
-class InitOnlySettings(Settings):
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings,)
 
 
 @dataclasses.dataclass

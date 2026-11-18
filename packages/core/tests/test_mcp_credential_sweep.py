@@ -35,6 +35,7 @@ from daimon.core.mcp_hold import hold_vault_suffix
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.shared_helpers import cred_wire as _cred_wire
 
 # asyncio_mode = "auto" in pyproject.toml — no pytestmark needed; async tests run automatically.
 
@@ -72,27 +73,6 @@ def _make_client(handler: httpx.MockTransport) -> AsyncAnthropic:
 def _vault_wire(vault_id: str, display_name: str) -> dict[str, Any]:
     """Serialized vault for use in transport handler responses."""
     return _vault(vault_id, display_name).model_dump(mode="json")
-
-
-def _cred_wire(
-    *,
-    cred_id: str,
-    vault_id: str,
-    mcp_server_url: str,
-) -> dict[str, Any]:
-    """Minimal static_bearer credential wire shape."""
-    return {
-        "id": cred_id,
-        "type": "vault_credential",
-        "vault_id": vault_id,
-        "metadata": {},
-        "created_at": "2026-06-01T00:00:00Z",
-        "updated_at": "2026-06-01T00:00:00Z",
-        "auth": {
-            "type": "static_bearer",
-            "mcp_server_url": mcp_server_url,
-        },
-    }
 
 
 # ---------------------------------------------------------------------------

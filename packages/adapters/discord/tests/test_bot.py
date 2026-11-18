@@ -35,6 +35,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
 
 _resolved_config = partial(
     ResolvedConfig,
@@ -1642,22 +1643,6 @@ def _make_thread_message_for_bot(
     message.attachments = []
     message.mentions = [SimpleNamespace(id=999)]
     return message
-
-
-class _AsyncIter:
-    """Minimal async iterator for history stubs in bot tests."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 class TestPerCallerSessionKeying:

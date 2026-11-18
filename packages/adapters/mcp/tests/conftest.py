@@ -48,16 +48,6 @@ async def isolate_confirmation_workers() -> AsyncIterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def isolate_agent_faces() -> Iterator[None]:
-    """Creating an agent starts its face render in the background; one test's
-    render must not write into the next test's database or back-off state."""
-    from daimon.core.agent_identity import cancel_pending_agent_faces
-
-    yield
-    cancel_pending_agent_faces()
-
-
-@pytest.fixture(autouse=True)
 def isolate_skill_reads() -> Iterator[None]:
     """Skill sizes are measured in the background and latest versions are remembered
     process-wide; neither may carry one test's fakes into the next."""

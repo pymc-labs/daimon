@@ -4,7 +4,6 @@
 # pyright: reportPrivateUsage=false
 import asyncio
 from collections.abc import Coroutine
-from datetime import UTC, datetime
 from io import StringIO
 from types import SimpleNamespace
 from uuid import UUID
@@ -17,6 +16,7 @@ from daimon.core.github_app_session import archive_app_vault
 from daimon.core.mux_compat import archive_session
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.domain import AccountIdentityRow, Role, ThreadSessionRow
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import SecretStr
@@ -26,7 +26,6 @@ TENANT = UUID("00000000-0000-0000-0000-000000000007")
 ADMIN = UUID("00000000-0000-0000-0000-000000000008")
 AGENT = UUID("00000000-0000-0000-0000-000000000009")
 OWNER = UUID("00000000-0000-0000-0000-000000000010")
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 
 
 class Transaction:

@@ -38,27 +38,13 @@ from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .shared_fakes import AsyncIter as _AsyncIter
+
 _STORED_KEY_ONE = "OPENAI_API_KEY"
 _STORED_VALUE_ONE = "sk-sentinel-discord-guard-4b7e1a"
 _STORED_KEY_TWO = "TOGGL_TOKEN"
 _STORED_VALUE_TWO = "toggl-sentinel-discord-guard-c2a9"
 _STORED_NAMES = (_STORED_KEY_ONE, _STORED_KEY_TWO)
-
-
-class _AsyncIter:
-    """Async iterator adapter for mocked ``thread.history()`` / ``channel.history()``."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _make_message(*, msg_id: int = 10, content: str = "what keys do you have?") -> discord.Message:
