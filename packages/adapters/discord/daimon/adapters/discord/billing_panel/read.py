@@ -1,9 +1,9 @@
 """Load + sort + cap the (user, tenant)-attributed billing snapshot for /billing.
 
-Composition layer: reads from core stores, names the top spenders the panel
-shows (the member cache, else one member fetch each under a short shared
-timeout, else the name stored when they were last seen, else their account's
-own name), assembles a BillingPanelState.
+Core's snapshot (`daimon.core.billing_panel`), with the top spenders the panel
+shows named from Discord: the member cache, else one member fetch each under a
+short shared timeout, else the name stored when they were last seen, else
+their account's own name.
 
 `is_platform_admin` is Discord-native: manage_guild | administrator | owner_id.
 Gating on a daimon-DB role would block legitimate guild admins, so we resolve
@@ -16,28 +16,11 @@ import dataclasses
 from datetime import datetime
 
 import structlog
-from daimon.adapters.discord.billing_panel.state import (
-    BillingPanelState,
-    MemberRow,
-)
 from daimon.adapters.discord.checks import is_platform_admin as is_platform_admin
-from daimon.core.allowance_limits import monthly_limit
-from daimon.core.billing_panel import TOP_SPENDERS_SHOWN, stored_name_labels
-from daimon.core.channel_budget import get_channel_budget_status, list_channel_budget_statuses
+from daimon.core.billing_panel import TOP_SPENDERS_SHOWN, BillingPanelState, MemberRow
+from daimon.core.billing_panel import load_billing_snapshot as load_core_snapshot
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import KnownName, remember_user_names, resolve_names
-from daimon.core.promo_credit import get_active_timed_credit
-from daimon.core.stores.promo_codes import has_redeemable_promo_code
-from daimon.core.stores.tenant_ledger import get_balance
-from daimon.core.stores.usage_events import (
-    cost_for_tenant_since,
-    cost_for_user_in_tenant_since,
-    costs_by_user_in_tenant_since,
-    turn_count_for_tenant_since,
-    turn_count_for_user_in_tenant_since,
-    turns_by_user_in_tenant_since,
-)
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -48,7 +31,6 @@ BotInteraction = Interaction[commands.Bot]
 
 _log = structlog.get_logger()
 
-_TOP_MEMBERS_CAP = 25  # same number as _PICKER_CAP, different semantics
 # The panel waits at most this long for the member fetches, all together.
 NAME_FETCH_TIMEOUT_S = 1.5
 
@@ -141,23 +123,6 @@ async def resolve_shown_names(
     return named + rows[TOP_SPENDERS_SHOWN:], found
 
 
-async def _has_redeemable_promo_code_best_effort(
-    session: AsyncSession, *, now: datetime, channel_codes_only: bool = False
-) -> bool:
-    """Whether a promo code is redeemable now; False when the lookup fails.
-
-    Runs in a savepoint so a failed lookup leaves the session usable.
-    """
-    try:
-        async with session.begin_nested():
-            return await has_redeemable_promo_code(
-                session, now=now, channel_codes_only=channel_codes_only
-            )
-    except SQLAlchemyError as exc:
-        _log.warning("promo_code_lookup_failed", error=str(exc))
-        return False
-
-
 async def load_billing_snapshot(
     session: AsyncSession,
     *,
@@ -171,141 +136,25 @@ async def load_billing_snapshot(
     client: discord.Client | None = None,
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
 ) -> BillingPanelState:
-    """Read everything needed to render /billing for a single invocation.
+    """Core's snapshot for this server, with the shown top spenders named from Discord.
 
-    For regular (non-admin) viewers, only the caller-scoped reads happen.
-    For admin viewers, additionally pulls tenant aggregates + per-member
-    breakdown, applies sort+cap, and names the shown rows
-    (`resolve_shown_names`, with ``client`` for people who left). With a
+    Naming is `resolve_shown_names`, with ``client`` for people who left. With a
     ``sessionmaker``, the names Discord gave are remembered in the background.
     """
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-
-    caller_spend = await cost_for_user_in_tenant_since(
+    state = await load_core_snapshot(
         session,
+        tenant_id=tenant_id,
         platform_user_id=caller_user_id,
-        tenant_id=tenant_id,
+        is_admin=is_admin,
         since=since,
-    )
-    caller_turns = await turn_count_for_user_in_tenant_since(
-        session,
-        platform_user_id=caller_user_id,
-        tenant_id=tenant_id,
-        since=since,
-    )
-    caller_cap = await monthly_limit(
-        session, tenant_id=tenant_id, platform_user_id=caller_user_id, now=now
-    )
-    guild_balance = await get_balance(session, tenant_id=tenant_id)
-    timed_credit = tuple(await get_active_timed_credit(session, tenant_id=tenant_id, now=now))
-    channel_budget = (
-        None
-        if channel_id is None
-        else await get_channel_budget_status(
-            session,
-            tenant_id=tenant_id,
-            platform="discord",
-            channel_id=channel_id,
-            now=now,
-        )
-    )
-
-    if not is_admin:
-        return BillingPanelState(
-            is_admin=False,
-            caller_user_id=caller_user_id,
-            caller_spend=caller_spend,
-            caller_turns=caller_turns,
-            caller_cap=caller_cap,
-            guild_balance_usd=guild_balance,
-            guild_spend=0.0,
-            guild_turns=0,
-            guild_distinct_members=0,
-            member_rows=(),
-            over_cap_count=0,
-            timed_credit=timed_credit,
-            channel_budget=channel_budget,
-            has_redeemable_promo_code=await _has_redeemable_promo_code_best_effort(
-                session, now=now, channel_codes_only=True
-            ),
-        )
-
-    # Admin path
-    has_redeemable = await _has_redeemable_promo_code_best_effort(session, now=now)
-    guild_spend = await cost_for_tenant_since(
-        session,
-        tenant_id=tenant_id,
-        since=since,
-    )
-    guild_turns = await turn_count_for_tenant_since(
-        session,
-        tenant_id=tenant_id,
-        since=since,
-    )
-    costs_by_user = await costs_by_user_in_tenant_since(
-        session,
-        tenant_id=tenant_id,
-        since=since,
-    )
-    turns_by_user = await turns_by_user_in_tenant_since(
-        session,
-        tenant_id=tenant_id,
-        since=since,
-    )
-
-    # Merge cost dict and turn dict by platform_user_id — keys may differ in
-    # edge cases; union both key sets defensively.
-    all_user_ids = set(costs_by_user) | set(turns_by_user)
-    rows: list[MemberRow] = []
-    for user_id in all_user_ids:
-        rows.append(
-            MemberRow(
-                platform_user_id=user_id,
-                display_name=None,
-                cost_usd=costs_by_user.get(user_id, 0.0),
-                turn_count=turns_by_user.get(user_id, 0),
-                is_caller=(user_id == caller_user_id),
-            )
-        )
-
-    # D-SORT-01: by cost_usd DESC, tie-break by platform_user_id ASC.
-    rows.sort(key=lambda r: (-r.cost_usd, r.platform_user_id))
-    over_cap_count = max(0, len(rows) - _TOP_MEMBERS_CAP)
-    stored = await stored_name_labels(
-        session,
-        tenant_id=tenant_id,
+        now=now,
         platform="discord",
-        user_ids=[row.platform_user_id for row in rows[:_TOP_MEMBERS_CAP]],
+        channel_id=channel_id,
     )
-    capped, found = await resolve_shown_names(
-        guild,
-        tuple(
-            dataclasses.replace(row, display_name=stored.get(row.platform_user_id))
-            for row in rows[:_TOP_MEMBERS_CAP]
-        ),
-        client=client,
-    )
+    if not is_admin:
+        return state
+    rows, found = await resolve_shown_names(guild, state.member_rows, client=client)
     if sessionmaker is not None and found:
         remember_user_names(sessionmaker, tenant_id=tenant_id, platform="discord", names=found)
-
-    return BillingPanelState(
-        is_admin=True,
-        caller_user_id=caller_user_id,
-        caller_spend=caller_spend,
-        caller_turns=caller_turns,
-        caller_cap=caller_cap,
-        guild_balance_usd=guild_balance,
-        guild_spend=guild_spend,
-        guild_turns=guild_turns,
-        guild_distinct_members=len(all_user_ids),
-        member_rows=capped,
-        over_cap_count=over_cap_count,
-        timed_credit=timed_credit,
-        channel_budget=channel_budget,
-        has_redeemable_promo_code=has_redeemable,
-        channel_budgets=tuple(
-            await list_channel_budget_statuses(
-                session, tenant_id=tenant_id, platform="discord", now=now
-            )
-        ),
-    )
+    return dataclasses.replace(state, member_rows=rows)
