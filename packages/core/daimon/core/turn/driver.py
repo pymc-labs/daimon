@@ -217,6 +217,7 @@ async def _read_after_quiet[R](
                 raise TurnConnectionLost(f"{name} read kept failing") from error
             log.warning(
                 "turn.quiet_read_retry",
+                causes=backend_refusal_causes(error),
                 read=name,
                 session_id=session_id,
                 error_type=type(error).__name__,

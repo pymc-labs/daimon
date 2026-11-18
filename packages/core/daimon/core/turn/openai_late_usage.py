@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 
 log = structlog.get_logger(__name__)
 
@@ -76,6 +77,7 @@ class LateUsage:
             except Exception as error:  # a busy thread or failed read: retry later
                 log.info(
                     "openai_late_usage.retry",
+                    causes=backend_refusal_causes(error),
                     key=key,
                     attempt=attempt,
                     error_class=type(error).__name__,

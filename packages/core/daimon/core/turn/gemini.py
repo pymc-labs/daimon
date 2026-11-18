@@ -733,6 +733,7 @@ class GeminiTurnIO:
         except Exception as error:
             log.warning(
                 "turn.gemini_native_abandon_failed",
+                causes=backend_refusal_causes(error),
                 session_id=self.session.id,
                 error_class=type(error).__name__,
                 category=getattr(error, "category", None),

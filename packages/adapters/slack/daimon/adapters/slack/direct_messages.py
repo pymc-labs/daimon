@@ -270,7 +270,11 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             channel=channel_id, user=user_id, **fields
         )
     except _ERRORS as exc:
-        log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.dm.command_failed",
+            causes=backend_refusal_causes(exc),
+            error_type=type(exc).__name__,
+        )
         if client is not None:
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -398,7 +402,11 @@ async def handle_direct_message(
                     **thread_kwargs,
                 )
     except _ERRORS as exc:
-        log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.dm.turn_failed",
+            causes=backend_refusal_causes(exc),
+            error_type=type(exc).__name__,
+        )
         if client is not None:
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

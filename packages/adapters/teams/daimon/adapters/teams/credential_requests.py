@@ -46,6 +46,7 @@ from daimon.core.agent_pins import (
     request_pin_refusal,
 )
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
@@ -304,7 +305,11 @@ async def _guarded(
     try:
         return await work
     except SENDING_PANEL_ERRORS as err:
-        log.error("teams.credential.failed", err_type=type(err).__name__)
+        log.error(
+            "teams.credential.failed",
+            causes=backend_refusal_causes(err),
+            err_type=type(err).__name__,
+        )
         return failed
 
 
