@@ -1378,14 +1378,18 @@ class AgentBackendService:
             raise AgentBackendRefused("owner_or_admin_required")
         return False
 
-    async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
-        """Whether `actor` may change this agent now: a read for previews and cards."""
+    async def edit_refusal(self, agent: BackendAgent, actor: BackendActor) -> str | None:
+        """Why `actor` may not change this agent now (a refusal code), or None: a read."""
         try:
             async with self._sessions() as session:
                 await self._authorize_edit(session, agent, actor)
-        except AgentBackendRefused:
-            return False
-        return True
+        except AgentBackendRefused as refused:
+            return refused.reason
+        return None
+
+    async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
+        """Whether `actor` may change this agent now: a read for previews and cards."""
+        return await self.edit_refusal(agent, actor) is None
 
     async def _policy(self, session: AsyncSession, tenant_id: uuid.UUID) -> TenantBackendPolicy:
         policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)

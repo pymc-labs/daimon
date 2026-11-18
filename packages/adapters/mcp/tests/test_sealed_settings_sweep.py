@@ -15,22 +15,32 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.adapters.mcp.hub.app import build_hub_app
+from daimon.adapters.mcp.middleware.call_origin import call_origin_ids
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app  # pyright: ignore[reportUnknownVariableType]
 from daimon.adapters.mcp.tools import _channel_target as channel_target
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
+from daimon.core._models import Base
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
-from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import SEALED_REFUSAL
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import agent_owners
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_environment
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import (
@@ -39,6 +49,7 @@ from mux.testing.drivers.anthropic.ma import (
     build_stub_anthropic,
     list_response,
 )
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_tool_schema_snapshot import (
@@ -49,7 +60,13 @@ SEAL = "900000000000000001"
 OPEN = "900000000000000002"
 AGENT = "ag_acme"
 NAME = "acme"
-TURN = str(uuid.uuid4())  # a turn context nobody opened: the caller has no origin
+#: The agent that runs the caller's turn in the open channel. The sealed agent is not it.
+CHAT_AGENT = "ag_chat"
+CHAT_NAME = "chatty"
+#: The caller's own chat session, and the one attended turn it runs in `OPEN`.
+SESSION = "sweep-session"
+APPROVED = uuid.uuid4()  # the person pressed Approve on every call: only the seal is left to refuse
+TURN = "TURN"  # filled with the id of that turn's origin row when a call is made
 
 #: Tools that change a channel or an agent, with the arguments of one call at the private
 #: channel or its own agent. A call must raise, change nothing, and say the text in the entry.
@@ -57,149 +74,177 @@ _EXP = {"expected_ma_agent_id": AGENT}
 SWEPT: dict[str, tuple[dict[str, Any], str]] = {
     "add_channel_skill": (
         {"channel_id": SEAL, "skill": "sk"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "remove_channel_skill": (
         {"channel_id": SEAL, "skill": "sk"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "archive_channel_copy": (
         {"name": NAME, "channel_id": SEAL, **_EXP},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "clear_agent_default": (
         {"channel_id": SEAL},
-        "Only a server admin can change the channel's default",
+        SEALED_REFUSAL,
     ),
     "set_agent_default": (
         {"agent_name": NAME, "channel_id": SEAL, **_EXP},
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
     "clear_channel_budget": (
         {"channel_id": SEAL},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "set_channel_budget": (
         {"channel_id": SEAL, "limit_usd": "10", "window": "monthly"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
-    "clear_channel_environment": ({"channel_id": SEAL}, "This change needs a server admin"),
+    "clear_channel_environment": ({"channel_id": SEAL}, SEALED_REFUSAL),
     "set_channel_environment": (
         {"environment_name": "e", "channel_id": SEAL},
-        "This change needs a server admin",
+        SEALED_REFUSAL,
     ),
     "clear_thread_override": (
         {"channel_id": SEAL, "thread_id": "t", "kind": "progress_plans"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "set_channel_rule": (
         {"channel_id": SEAL, "readers": "inside"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "set_agent_rule": (
         {"agent_name": NAME, "runs_in": [OPEN]},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "set_agent_tool_rule": (
         {"agent_name": NAME, "tool_key": "n/t", "rule": "ask", "channel_id": SEAL},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "clear_agent_tool_rule": (
         {"agent_name": NAME, "tool_key": "n/t", "channel_id": SEAL},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
-    "archive_agent": ({"name": NAME, **_EXP}, "is missing or changed"),
+    # SEAL and OPEN both pick "shared", so the isolation view shows it and only the seal refuses.
+    "archive_environment": (
+        {"name": "shared", "confirm_open_network": True},
+        SEALED_REFUSAL,
+    ),
+    "archive_agent": ({"name": NAME, **_EXP}, SEALED_REFUSAL),
     "attach_mcp_server": (
         {"agent_name": NAME, "server_name": "n", "url": "https://x.example.com/mcp", **_EXP},
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
     "detach_mcp_server": (
         {"agent_name": NAME, "server_name": "n", **_EXP},
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
-    "remove_agent_key": ({"agent_name": NAME, "key": "K", **_EXP}, "is missing or changed"),
-    "remove_skill": ({"agent_name": NAME, "skill_id": "sk", **_EXP}, "is missing or changed"),
+    "remove_agent_key": ({"agent_name": NAME, "key": "K", **_EXP}, SEALED_REFUSAL),
+    "remove_skill": ({"agent_name": NAME, "skill_id": "sk", **_EXP}, SEALED_REFUSAL),
     "set_agent_builtin_tool": (
         {"name": NAME, "tool": "bash", "enabled": True, **_EXP},
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
-    "update_agent": ({"name": NAME, "description": "d", **_EXP}, "is missing or changed"),
+    "update_agent": ({"name": NAME, "description": "d", **_EXP}, SEALED_REFUSAL),
     "add_skill": (
         {"agent_name": NAME, "skill_md": "---\nname: a\ndescription: b\n---\nx", **_EXP},
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
-    "set_agent_backend": ({"name": NAME, "backend": "openai"}, "needs its owner or a server admin"),
+    "set_agent_backend": ({"name": NAME, "backend": "openai"}, SEALED_REFUSAL),
     "set_agent_helpers": (
         {"agent_id": AGENT, "helpers": [], "origin_context_id": TURN},
-        "Use the origin_context_id and signed conversation grant",
+        "No agent called",
     ),
     "set_agent_owners": (
         {"agent_id": AGENT, "owner": None, "origin_context_id": TURN},
-        "Confirm this in your chat conversation",
+        SEALED_REFUSAL,
     ),
     "set_agent_web_access": (
         {"agent_id": AGENT, "web": False, "origin_context_id": TURN},
-        "Confirm this in your chat conversation",
+        "This agent is kept to its channel.",
     ),
     "set_setup_target": (
         {"agent_id": AGENT, "origin_context_id": TURN},
-        "Use the origin_context_id and signed conversation grant",
+        "That agent is missing here.",
     ),
     "revert_agent": (
         {"agent_id": AGENT, "version": 1, "origin_context_id": TURN},
-        "Confirm this in your chat conversation",
+        SEALED_REFUSAL,
     ),
-    "resync_agent_skills": ({"agent_id": AGENT}, "Ask an admin or the agent's owner"),
+    "resync_agent_skills": ({"agent_id": AGENT}, SEALED_REFUSAL),
     "save_agent_skill_files": (
         {"agent_id": AGENT, "files": {"SKILL.md": "x"}},
-        "is a system agent",
+        SEALED_REFUSAL,
     ),
     "set_server_skill_follow": (
         {"agent_id": AGENT, "skill_id": "s", "follow": True},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "apply_server_skill_update": (
         {"agent_id": AGENT, "skill_id": "s"},
-        "This channel is private. Change its settings from inside the channel.",
+        SEALED_REFUSAL,
     ),
     "set_working_repo": (
-        {"repo_name": "o/r", "origin_context_id": TURN, "agent_name": NAME, **_EXP},
-        "Use the origin_context_id and signed conversation grant",
+        {"repo_name": "none", "origin_context_id": TURN, "agent_name": NAME, **_EXP},
+        SEALED_REFUSAL,
     ),
     "remove_repo": (
         {"repo_name": "o/r", "origin_context_id": TURN, "agent_name": NAME, **_EXP},
-        "Use the origin_context_id and signed conversation grant",
-    ),
-    "change_setting": (
-        {"origin_context_id": TURN, "key": "progress_plans", "tier": "channel", "value": "on"},
-        "Confirm this in your chat conversation",
+        SEALED_REFUSAL,
     ),
     "sync_skills": (
         {
-            "url": "https://x.example.com/r",
+            "url": "https://github.com/o/r",
             "branch": "main",
             "path": "s",
             "agent_name": NAME,
             **_EXP,
         },
-        "is missing or changed",
+        SEALED_REFUSAL,
     ),
     "request_agent_backend_switch": (
         {"agent_name": NAME, "target_backend": "openai", "origin_context_id": TURN},
-        "Request this change from your active chat conversation",
+        SEALED_REFUSAL,
     ),
-    "request_channel_pin": (
-        {"model": "m", "origin_context_id": TURN},
-        "Request this change from your active chat conversation",
+}
+
+#: Tools that refuse an outside admin in their own words, with the reason the seal cannot be the
+#: refusal. Each is still a refusal that changes nothing; every other swept tool must say
+#: `SEALED_REFUSAL`.
+OTHER_REFUSAL: dict[str, str] = {
+    "set_agent_helpers": (
+        "the isolation view hides a private channel's own agent from anyone outside it, its owner "
+        "included (`sees_agent` has no owner bypass), so the tool finds no such agent"
     ),
-    "request_channel_pin_clear": (
-        {"origin_context_id": TURN},
-        "Request this change from your active chat conversation",
+    "set_setup_target": (
+        "the same hiding: a setup target is chosen among the agents the caller sees, and the tool "
+        "only moves the setup thread of the caller's own open channel"
     ),
-    "set_thread_model": (
-        {"origin_context_id": TURN, "model": "m"},
-        "Use the origin_context_id and signed conversation grant",
+    "set_agent_web_access": (
+        "an agent kept to its channel takes no web access change from anyone, inside or out "
+        "(`set_agent_access` refuses `fixed_to`)"
     ),
+}
+
+#: Tools that change only the place of the caller's own verified origin: they take no channel or
+#: agent argument (`test_own_place_tools_name_no_other_place`). From an origin outside a private
+#: channel they can reach only that open place; at the private channel itself the caller is inside.
+OWN_PLACE_ONLY: dict[str, str] = {
+    "change_setting": "the workspace, agent, channel or thread of this conversation; no other place can be named",
+    "request_channel_pin": "only this chat's channel can be pinned",
+    "request_channel_pin_clear": "only this chat's channel can be cleared",
+    "set_thread_model": "only this conversation's thread",
+}
+
+#: Tools that cannot take a verified origin, with the reason. A chat turn's credential is never a
+#: personal user credential, and these tools need one (or the CLI or the hub). They run as the
+#: admin's CLI credential, which has no origin and so is outside every private channel.
+NO_ORIGIN: dict[str, str] = {
+    "set_channel_budget": "money: needs a live platform admin on a personal user credential",
+    "clear_channel_budget": "money: needs a live platform admin on a personal user credential",
+    "set_agent_tool_rule": "a person's change from the CLI or the hub, never an agent in a chat",
+    "clear_agent_tool_rule": "a person's change from the CLI or the hub, never an agent in a chat",
+    "set_agent_backend": "in chat the switch is `request_agent_backend_switch`, which is swept",
 }
 
 _READS = "reads only; changes nothing"
@@ -217,7 +262,6 @@ EXEMPT: dict[str, str] = {
     "add_server_skill": _NEW,
     "approve_reach": _LIVE,
     "approve_server_skill_update": _NEW,
-    "archive_environment": _NEW,
     "archive_my_session": _LIVE,
     "archive_thread": _LIVE,
     "ask": _TURN,
@@ -429,6 +473,8 @@ class _Tools:
     writes: list[str]
     sessionmaker: async_sessionmaker[AsyncSession]
     tenant_id: uuid.UUID
+    runtime: McpRuntime
+    origin_id: str
 
 
 class _Ctx:
@@ -449,8 +495,15 @@ async def _server(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    with_origin: bool = True,
 ) -> AsyncIterator[_Tools]:
-    """A workspace with a private channel and its own agent, and an admin with no origin."""
+    """A workspace with a private channel and its own agent, and an admin outside it.
+
+    The admin runs an attended chat turn in the open channel `OPEN`, so its verified origin is
+    that channel: every origin check passes, and only the seal can refuse a call. A tool in
+    `NO_ORIGIN` gets the admin's CLI credential instead, which has no origin.
+    """
     tenant = await make_tenant(db_session, platform="discord")
     account = await make_account(db_session, tenant=tenant)
     await set_role(db_session, account.id, Role.ADMIN)
@@ -462,17 +515,69 @@ async def _server(
             agent_rules={NAME: AgentRule(runs_in=(SEAL,))},
         ),
     )
+    now = datetime.now(UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id=OPEN,
+        thread_id=OPEN,
+        responder_ma_agent_id=CHAT_AGENT,
+        responder_name=CHAT_NAME,
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+        expires_at=now + timedelta(minutes=10),
+        now=now,
+        chat_session_id=SESSION,
+    )
+    # The admin owns the private channel's agent, so isolation does not hide it: only the seal can refuse.
+    await agent_owners.record_creator(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=AGENT),
+        account_id=account.id,
+    )
     await db_session.commit()
-    agent = ma_agent(
-        id=AGENT,
-        name=NAME,
-        metadata={"daimon_tenant": str(tenant.id), "daimon_name": NAME},
-        mcp_servers=[{"type": "url", "name": "n", "url": "https://x.example.com/mcp"}],
-    ).model_dump(mode="json")
+    metadata = {"daimon_tenant": str(tenant.id)}
+    agents = [
+        ma_agent(
+            id=AGENT,
+            name=NAME,
+            metadata={**metadata, "daimon_name": NAME, "daimon_account": str(account.id)},
+            mcp_servers=[{"type": "url", "name": "n", "url": "https://x.example.com/mcp"}],
+        ).model_dump(mode="json"),
+        ma_agent(
+            id=CHAT_AGENT, name=CHAT_NAME, metadata={**metadata, "daimon_name": CHAT_NAME}
+        ).model_dump(mode="json"),
+    ]
+    for channel_id in (SEAL, OPEN):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel_id),
+            tenant_id=tenant.id,
+            environment_name="shared",
+        )
+    await db_session.commit()
+    shared = ma_environment(
+        id="env_shared",
+        name="shared",
+        tenant_id=tenant.id,
+        metadata={"daimon_tenant": str(tenant.id), "daimon_name": "shared"},
+    )
     writes: list[str] = []
     router = MARouter()
-    router.add("GET", r"/v1/agents$", lambda _r, _m: list_response([agent]))
-    router.add("GET", rf"/v1/agents/{AGENT}", lambda _r, _m: httpx.Response(200, json=agent))
+    router.add_environment_list(shared)
+    router.add("GET", r"/v1/agents$", lambda _r, _m: list_response(agents))
+    for each in agents:
+        router.add(
+            "GET",
+            rf"/v1/agents/{each['id']}",
+            lambda _r, _m, each=each: httpx.Response(200, json=each),
+        )
 
     def dispatch(request: httpx.Request) -> httpx.Response:
         if request.method != "GET":
@@ -483,13 +588,21 @@ async def _server(
         return channel_id
 
     monkeypatch.setattr(channel_target, "resolve_visible_channel", visible)
+    client = build_fake_anthropic(dispatch)
+    settings = _fully_configured_settings()
     app = create_mcp_app(
-        settings=_fully_configured_settings(),
+        settings=settings,
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
-        anthropic=build_fake_anthropic(dispatch),
+        anthropic=client,
     )
     tools = {t.name: t for t in await app.state.mcp.local_provider.list_tools()}  # type: ignore[attr-defined]
+    chat = {
+        "chat_session_id": SESSION,
+        "chat_agent_id": derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=CHAT_AGENT),
+        "is_chat_execution": True,
+        "confirmed_call_id": APPROVED,
+    }
     auth = AuthIdentity(
         account_id=account.id,
         tenant_id=tenant.id,
@@ -499,9 +612,38 @@ async def _server(
         platform_user_id="u-admin",
         is_admin=True,
         is_platform_admin=True,
-        token_kind="cli",
+        token_kind=None if with_origin else "cli",
+        **(chat if with_origin else {}),  # pyright: ignore[reportArgumentType]
     )
-    yield _Tools(tools, auth, writes, sessionmaker, tenant.id)
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=client,
+        settings=settings,
+        deployment_default=DeploymentDefault(environment_name=None),
+    )
+    # What `CallOriginMiddleware` sets for each call: the channel of the caller's attended turn.
+    inside: frozenset[str] = (
+        await call_origin_ids(runtime, auth, str(origin.id)) if with_origin else frozenset()
+    )
+    assert with_origin == (OPEN in inside) and SEAL not in inside, "the caller is outside SEAL"
+    token = CALL_ORIGIN.set(inside)
+    approved = host_confirmed_call.set(APPROVED)
+    try:
+        yield _Tools(tools, auth, writes, sessionmaker, tenant.id, runtime, str(origin.id))
+    finally:
+        host_confirmed_call.reset(approved)
+        CALL_ORIGIN.reset(token)
+
+
+async def _tenant_rows(session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, list[str]]:
+    """Every row of every table that carries the workspace's id, so any change shows."""
+    rows: dict[str, list[str]] = {}
+    for table in Base.metadata.sorted_tables:
+        if "tenant_id" not in table.c:
+            continue
+        found = await session.execute(select(table).where(table.c.tenant_id == tenant_id))
+        rows[table.name] = sorted(repr(tuple(row)) for row in found)
+    return rows
 
 
 @pytest.mark.parametrize("name", sorted(SWEPT))
@@ -512,17 +654,20 @@ async def test_an_admin_outside_changes_no_setting_of_a_private_channel_or_its_a
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     arguments, words = SWEPT[name]
-    async with _server(db_session, sessionmaker, monkeypatch) as server:
+    async with _server(
+        db_session, sessionmaker, monkeypatch, with_origin=name not in NO_ORIGIN
+    ) as server:
+        arguments = {k: server.origin_id if v == TURN else v for k, v in arguments.items()}
         async with sessionmaker() as session:
-            before = (await load_access_policy(session, tenant_id=server.tenant_id)).model_dump()
+            before = await _tenant_rows(session, server.tenant_id)
         with pytest.raises(ToolError) as refused:
             await server.by_name[name].fn(ctx=_Ctx(server.auth), **arguments)
         async with sessionmaker() as session:
-            after = (await load_access_policy(session, tenant_id=server.tenant_id)).model_dump()
+            after = await _tenant_rows(session, server.tenant_id)
     print("OBSERVED", name, json.dumps(str(refused.value))[:200])
     assert words in str(refused.value), (name, str(refused.value))
     assert server.writes == [], "nothing reached the provider"
-    assert before == after, "the access policy is as it was"
+    assert before == after, "no row of the workspace changed"
 
 
 async def test_every_tool_is_swept_or_exempt(
@@ -548,11 +693,44 @@ async def test_every_tool_is_swept_or_exempt(
     )
     hub_live = {t.name for t in await hub.local_provider.list_tools()}
     assert not set(SWEPT) & set(EXEMPT), "a tool is swept or exempt, not both"
-    assert live == set(SWEPT) | set(EXEMPT), (
+    assert not set(OWN_PLACE_ONLY) & (set(SWEPT) | set(EXEMPT))
+    assert live == set(SWEPT) | set(EXEMPT) | set(OWN_PLACE_ONLY), (
         "new tools: sweep them or list them in EXEMPT with a reason",
         sorted(live - set(SWEPT) - set(EXEMPT)),
         "gone tools",
-        sorted((set(SWEPT) | set(EXEMPT)) - live),
+        sorted((set(SWEPT) | set(EXEMPT) | set(OWN_PLACE_ONLY)) - live),
     )
     assert hub_live == set(HUB_EXEMPT), sorted(hub_live ^ set(HUB_EXEMPT))
     assert all(EXEMPT.values()) and all(HUB_EXEMPT.values())
+
+
+#: Arguments that would name a place other than the caller's own.
+_PLACE_ARGUMENTS = frozenset(
+    {"channel_id", "thread_id", "agent_id", "agent_name", "name", "channel", "agent", "target"}
+)
+
+
+async def test_own_place_tools_name_no_other_place(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    app = create_mcp_app(
+        settings=_fully_configured_settings(),
+        sessionmaker=sessionmaker,
+        auth=StaticTokenVerifier(tokens={}),
+        anthropic=build_fake_anthropic(lambda _r: httpx.Response(404)),
+    )
+    tools = {t.name: t for t in await app.state.mcp.local_provider.list_tools()}  # type: ignore[attr-defined]
+    for name in OWN_PLACE_ONLY:
+        assert not set(tools[name].parameters["properties"]) & _PLACE_ARGUMENTS, name
+
+
+def test_every_other_refusal_and_origin_free_tool_is_swept() -> None:
+    for name in OTHER_REFUSAL:
+        assert SWEPT[name][1] != SEALED_REFUSAL, (
+            f"{name} says the sealed words; drop it from OTHER_REFUSAL"
+        )
+    for name, (_arguments, words) in SWEPT.items():
+        assert (words != SEALED_REFUSAL) == (name in OTHER_REFUSAL), (
+            f"{name}: a refusal in other words needs its reason in OTHER_REFUSAL"
+        )
+    assert set(NO_ORIGIN) <= set(SWEPT)

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import anthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
@@ -15,7 +16,7 @@ from daimon.core.agent_editing import (
     system_agent_rejection,
 )
 from daimon.core.agent_ownership import owns_agent
-from daimon.core.authz import agent_names
+from daimon.core.authz import Subject, agent_names
 from daimon.core.defaults.metadata import MA_METADATA_KEY_SETUP_HIDDEN, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import retrieve_agent
@@ -88,6 +89,22 @@ async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: st
         sealed=sealed is not None,
         views_setup=sees,
     )
+
+
+def sealed_agent_refusal(
+    policy: TenantAccessPolicy, subject: Subject, agent: BetaManagedAgentsAgent
+) -> str | None:
+    """`SEALED_REFUSAL` when `agent` is a private channel's own agent and `subject` is outside it.
+
+    For a write path that has no `AgentTarget` of its own (`sealed_outside` decides).
+    """
+    outside = sealed_outside(
+        policy,
+        subject.inside,
+        agent_names=agent_names(agent.name, agent.metadata),
+        operator=subject.operator,
+    )
+    return SEALED_REFUSAL if outside else None
 
 
 def agent_names_loader(

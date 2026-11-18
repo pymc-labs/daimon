@@ -21,7 +21,6 @@ from typing import Literal
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_ownership import account_owns_agent
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target, require_setup
-from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.agent_view import people_by_account
 from daimon.core.authz import build_agent_ref
 from daimon.core.mcp_auth import (
@@ -30,6 +29,7 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.stores import mcp_tokens, platform_names
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant

@@ -11,6 +11,7 @@ from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
+    require_unsealed_agent,
     resolve_setup_agent,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
@@ -58,6 +59,7 @@ async def set_working_repo_impl(
         expected_ma_agent_id=target_id,
         location_channel_id=origin_channel_id(origin),
     )
+    await require_unsealed_agent(runtime, auth, agent)
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(agent.id))
     requested = repo_name.strip()
     if not requested:

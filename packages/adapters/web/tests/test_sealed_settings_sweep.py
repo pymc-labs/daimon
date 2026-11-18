@@ -9,6 +9,7 @@ its reason, fails `test_every_mutating_route_is_swept_or_exempt`.
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,10 +22,14 @@ from daimon.core.config import Settings, TurnSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.platform_names import ChannelSighting
+from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role as AccountRole
 from daimon.core.stores.platform_names import upsert_channel_names
+from daimon.core.stores.scoped_config_read import get_scope
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.testing.ma_models import ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN, agent_client, agent_people, make_admin, sign_in_token
@@ -103,33 +108,48 @@ SWEPT: dict[str, object] = {
     },
     "PUT /api/features?agent={agent_id}": {"key": "long_jobs", "tier": "agent", "value": "on"},
     "POST /api/channels/{channel_id}/threads/clear": {"thread_id": "t1", "kind": "progress_plans"},
+    # Archiving clears every channel's pick of the environment; `SHARED_ENV` is picked by SEAL and OPEN.
+    "DELETE /api/agents/environments/{environment_id}": None,
 }
+
+_MANAGED = (
+    "a seeded agent's managed refusal comes before the seal; the same handler reaches the seal "
+    "for the custom agent in the same sweep"
+)
+_CANVAS = (
+    "a custom agent's helpers change on its canvas (PATCH draft, swept), so this route is 422 "
+    "for it before any seal check; the seeded agent in the same sweep reaches the seal"
+)
 
 #: Routes that refuse an outside admin in their own words, with the reason. The key is the
 #: route and whether the agent is a seeded one (None: either). Each is still a 403 or a 422 that
-#: changes nothing; the sealed words are the default.
-OTHER_REFUSAL: dict[tuple[str, bool | None], tuple[int, str]] = {
+#: changes nothing; the sealed words are the default. `test_every_other_refusal_has_a_twin_at_the_seal`
+#: checks that the run of the other kind of agent reaches the seal.
+OTHER_REFUSAL: dict[tuple[str, bool | None], tuple[int, str, str]] = {
     ("PATCH /api/admin/agent-access/{agent_id}", None): (
         403,
         "This agent is kept to its channel.",
+        "the agent's own refusal: it is kept to its channel and cannot take web access from outside",
     ),
-    ("POST /api/agents/{agent_id}/github/connect", None): (403, "Ask an admin or the agent's"),
-    ("PUT /api/agents/{agent_id}/github/working", None): (403, "Ask an admin or the agent's"),
-    ("DELETE /api/agents/{agent_id}/github/repos/{owner}/{name}", None): (
+    ("DELETE /api/agents/{agent_id}/draft", True): (403, "is managed by defaults", _MANAGED),
+    ("DELETE /api/agents/{agent_id}/mcp/{key}/token", True): (
         403,
-        "Ask an admin or the agent's",
+        "is managed by defaults",
+        _MANAGED,
     ),
-    ("POST /api/agents/{agent_id}/github/resync", None): (403, "Ask an admin or the agent's"),
-    ("DELETE /api/agents/{agent_id}/draft", True): (403, "is managed by defaults"),
-    ("DELETE /api/agents/{agent_id}/mcp/{key}/token", True): (403, "is managed by defaults"),
-    ("PATCH /api/agents/{agent_id}/draft", True): (403, "is managed by defaults"),
-    ("POST /api/agents/{agent_id}/apply", True): (403, "is managed by defaults"),
-    ("POST /api/agents/{agent_id}/revert", True): (403, "is managed by defaults"),
-    ("POST /api/agents/{agent_id}/skills", True): (403, "is managed by defaults"),
-    ("PUT /api/agents/{agent_id}/mcp/{key}/token", True): (403, "is managed by defaults"),
+    ("PATCH /api/agents/{agent_id}/draft", True): (403, "is managed by defaults", _MANAGED),
+    ("POST /api/agents/{agent_id}/apply", True): (403, "is managed by defaults", _MANAGED),
+    ("POST /api/agents/{agent_id}/revert", True): (403, "is managed by defaults", _MANAGED),
+    ("POST /api/agents/{agent_id}/skills", True): (403, "is managed by defaults", _MANAGED),
+    ("PUT /api/agents/{agent_id}/mcp/{key}/token", True): (
+        403,
+        "is managed by defaults",
+        _MANAGED,
+    ),
     ("PUT /api/agents/{agent_id}/helpers", False): (
         422,
         "Change this agent's helpers on its canvas, then apply.",
+        _CANVAS,
     ),
 }
 
@@ -179,9 +199,6 @@ EXEMPT: dict[str, str] = {
     ),
     "POST /api/agents/environments": ("workspace level: no channel and no agent (environments)"),
     "PUT /api/agents/environments/{environment_id}": (
-        "workspace level: no channel and no agent (environments)"
-    ),
-    "DELETE /api/agents/environments/{environment_id}": (
         "workspace level: no channel and no agent (environments)"
     ),
     "POST /api/agents": ("a new agent has no channel yet (CREATE_AGENT)"),
@@ -287,7 +304,14 @@ FILL = {
     "key": "key",
     "key_id": str(uuid.uuid4()),
     "skill_id": SKILL,
+    "environment_id": "env_shared",
 }
+SHARED_ENV = "Shared"
+OPEN_ENV = "OpenOnly"
+#: Each environment archive the provider received.
+ARCHIVED: list[str] = []
+#: The workspace of the last `_sealed` call.
+TENANT: list[uuid.UUID] = []
 
 
 @asynccontextmanager
@@ -324,6 +348,27 @@ async def _sealed(
         turn=TurnSettings(path="mux", channel_backends=True),
         tool_safety={"enabled": True, "agent_rules": True},  # pyright: ignore[reportArgumentType]
     )
+    # An environment SEAL and OPEN both pick (so the isolation view shows it), and one only OPEN picks.
+    shared = ma_environment(id="env_shared", name=SHARED_ENV, tenant_id=owner.tenant_id)
+    open_only = ma_environment(id="env_open", name=OPEN_ENV, tenant_id=owner.tenant_id)
+    agents.router.add_environment_list(shared, open_only, ma_environment(tenant_id=owner.tenant_id))
+    agents.router.add_environment(ma_environment(tenant_id=owner.tenant_id))
+    ARCHIVED.clear()
+    TENANT[:] = [owner.tenant_id]
+
+    def archive(_request: httpx.Request, found: re.Match[str]) -> httpx.Response:
+        ARCHIVED.append(found.group(1))
+        return httpx.Response(200, json=shared.model_dump(mode="json"))
+
+    agents.router.add("POST", r"/v1/environments/(env_[a-z]+)/archive", archive)
+    async with factory.begin() as db:
+        for channel_id, name in ((SEAL, SHARED_ENV), (OPEN, SHARED_ENV)):
+            await set_fields(
+                db,
+                scope=ChannelScopeRef(tenant_id=owner.tenant_id, channel_id=channel_id),
+                tenant_id=owner.tenant_id,
+                environment_name=name,
+            )
     token = await sign_in_token(factory, other)
     async with agent_client(
         agents, owner.tenant_id, factory, token, settings=settings, with_turns=True
@@ -351,11 +396,56 @@ async def test_an_admin_outside_changes_nothing_of_a_private_channel_or_its_agen
 ) -> None:
     async with _sealed(db_session, db_session_factory, seeded=seeded) as client:
         response = await _call(client, key)
-    status, words = OTHER_REFUSAL.get(
-        (key, seeded), OTHER_REFUSAL.get((key, None), (403, SEALED_REFUSAL))
+    status, words, _reason = OTHER_REFUSAL.get(
+        (key, seeded), OTHER_REFUSAL.get((key, None), (403, SEALED_REFUSAL, ""))
     )
     assert response.status_code == status, (key, response.status_code, response.text)
     assert words in response.text, (key, response.text)
+    assert ARCHIVED == [], "no environment was archived"
+
+
+def test_every_other_refusal_has_a_twin_at_the_seal() -> None:
+    """A refusal in other words must not leave a route unswept: the other kind of agent reaches the seal."""
+    for (key, seeded), (_status, _words, reason) in OTHER_REFUSAL.items():
+        assert len(reason) > 20, (key, "give the reason")
+        if seeded is not None:
+            assert (key, not seeded) not in OTHER_REFUSAL and (key, None) not in OTHER_REFUSAL, key
+        assert key in SWEPT, key
+
+
+async def test_an_admin_outside_archives_no_environment_a_private_channel_picks(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with _sealed(db_session, db_session_factory, seeded=False) as client:
+        refused = await client.delete("/api/agents/environments/env_shared", headers=OWN)
+        confirmed = await client.delete(
+            "/api/agents/environments/env_shared?confirm_open_network=true", headers=OWN
+        )
+    for response in (refused, confirmed):
+        assert response.status_code == 403, response.text
+        assert SEALED_REFUSAL in response.text and "#vault" in response.text, response.text
+    assert ARCHIVED == [], "nothing reached the provider"
+    async with db_session_factory() as session:
+        pick = await get_scope(session, scope=ChannelScopeRef(tenant_id=TENANT[0], channel_id=SEAL))
+    assert pick is not None and pick.environment_name == SHARED_ENV, "the channel keeps its pick"
+
+
+async def test_an_environment_only_open_channels_pick_archives_as_before(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    async with _sealed(db_session, db_session_factory, seeded=False) as client:
+        async with db_session_factory.begin() as db:
+            await set_fields(
+                db,
+                scope=ChannelScopeRef(tenant_id=TENANT[0], channel_id=OPEN),
+                tenant_id=TENANT[0],
+                environment_name=OPEN_ENV,
+            )
+        response = await client.delete(
+            "/api/agents/environments/env_open?confirm_open_network=true", headers=OWN
+        )
+    assert response.status_code == 200, response.text
+    assert ARCHIVED == ["env_open"]
 
 
 def _routes(client: httpx.AsyncClient) -> set[str]:

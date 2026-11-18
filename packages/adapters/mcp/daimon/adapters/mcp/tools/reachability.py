@@ -26,6 +26,7 @@ from daimon.core.authz import Action
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.native_admins import AdminCaller
 from daimon.core.operation_policy import OperationKind, TargetFacts
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial
 from fastmcp.exceptions import ToolError
 
@@ -98,6 +99,8 @@ def channel_default_refusal(
             "every request here and cannot be this channel's default. Nothing was changed. "
             "Pick another agent, or ask an admin to change its rule. Do not retry."
         )
+    if exc.reason == "sealed_channel":
+        return ToolError(f"{SEALED_REFUSAL} Nothing was changed. Do not retry.")
     if exc.kind == "forbidden":
         return ToolError(
             f"Only {admin_noun(auth.platform)} can change the channel's default. "
