@@ -155,9 +155,11 @@ class WebControlCards:
                 raise ControlRefused(NOT_YOURS if press is None else press.text)
             text, settled = press.text, press.approved
             wake_agent = row.executing_ma_agent_id if press.approved else None
-        else:
+        elif kind == "bsw":
             # Switches apply at once now: an older card only closes as expired.
             text, settled = host_calls.EXPIRED_TEXT, False
+        else:
+            raise ControlRefused(NOT_YOURS)
         log.info("web.control_card.answered", kind=kind, settled=settled)
         message = await self._settle(thread.id, card_id, text, approved=settled)
         return ControlAnswered(message=message, wake_agent=wake_agent)
