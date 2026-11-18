@@ -44,7 +44,7 @@ RefusalAction = Literal[
 
 #: Lines for refusals that need no provider name, with their action.
 _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
-    "stale_revision": ("This changed since you looked. Review it again.", "fresh_preview"),
+    "stale_revision": ("This changed since you looked. Try again.", "fresh_preview"),
     "admin_required_for_shared_threads": ("A shared thread needs an admin to switch.", None),
     "admin_required": ("Only an admin can do that.", None),
     "owner_or_admin_required": ("Only the agent's owner or an admin can do that.", None),

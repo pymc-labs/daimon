@@ -923,7 +923,7 @@ async def _model_action(
         option = cast("Mapping[str, object]", action.get("selected_option") or {})
         value = str(option.get("value") or "")
     else:
-        # Review again, or Switch on a card from before picks applied at once.
+        # Try again, or Switch on a card from before picks applied at once.
         value = meta.backend_target or ""
     if not value:
         await post_ephemeral(

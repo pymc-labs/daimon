@@ -59,7 +59,7 @@ from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.model_switch import (
     CANCEL_LABEL,
-    REVIEW_AGAIN_LABEL,
+    TRY_AGAIN_LABEL,
     SWITCH_BACK_LABEL,
     SwitchRefusal,
     back_to_claude,
@@ -535,7 +535,7 @@ class DetailsView(PanelViewBase):
             row.add_item(back)
         elif refusal.action == "fresh_preview" and self.switch_value:
             again: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label=REVIEW_AGAIN_LABEL, style=discord.ButtonStyle.primary
+                label=TRY_AGAIN_LABEL, style=discord.ButtonStyle.primary
             )
             again.callback = self._on_review_again  # type: ignore[method-assign]
             row.add_item(again)

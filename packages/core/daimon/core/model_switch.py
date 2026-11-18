@@ -49,7 +49,7 @@ CANCEL_LABEL: Final = "Cancel"
 #: The button under what a pick turned off: back to the agent.
 BACK_LABEL: Final = "Back"
 SWITCH_BACK_LABEL: Final = "Switch back to Claude"
-REVIEW_AGAIN_LABEL: Final = "Review again"
+TRY_AGAIN_LABEL: Final = "Try again"
 
 
 @dataclass(frozen=True)

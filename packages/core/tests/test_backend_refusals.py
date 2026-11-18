@@ -105,7 +105,7 @@ def test_every_refusal_detail_has_a_line() -> None:
         (
             AgentBackendRefused("stale_revision"),
             {},
-            ("This changed since you looked. Review it again.", "fresh_preview"),
+            ("This changed since you looked. Try again.", "fresh_preview"),
         ),
         (
             BackendUnsupported("profile_not_runnable"),

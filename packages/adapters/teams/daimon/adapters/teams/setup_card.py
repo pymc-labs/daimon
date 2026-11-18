@@ -28,7 +28,7 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.model_switch import (
     BACK_LABEL,
     CANCEL_LABEL,
-    REVIEW_AGAIN_LABEL,
+    TRY_AGAIN_LABEL,
     SWITCH_BACK_LABEL,
     ModelPicker,
 )
@@ -350,7 +350,7 @@ def model_switch_card(
     if refused and action == "switch_back_to_claude":
         actions.append(_button(SWITCH_BACK_LABEL, "backend_back", "positive", **fields))
     elif refused and action == "fresh_preview":
-        actions.append(_button(REVIEW_AGAIN_LABEL, "backend_again", "positive", **fields))
+        actions.append(_button(TRY_AGAIN_LABEL, "backend_again", "positive", **fields))
     return _card("Model", [_text("\n".join(lines)[:3000])], actions)
 
 

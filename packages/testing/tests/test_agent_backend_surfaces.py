@@ -1095,7 +1095,7 @@ def test_each_panel_offers_an_effort_select_only_where_the_provider_has_levels(s
 
 @pytest.mark.parametrize(
     "action,label",
-    [("switch_back_to_claude", "Switch back to Claude"), ("fresh_preview", "Review again")],
+    [("switch_back_to_claude", "Switch back to Claude"), ("fresh_preview", "Try again")],
 )
 def test_a_refusal_offers_its_one_way_out_on_every_panel(seam, action, label):
     from daimon.core.model_switch import SwitchRefusal

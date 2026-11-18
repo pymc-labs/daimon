@@ -50,7 +50,7 @@ from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.model_switch import (
     BACK_LABEL,
     CANCEL_LABEL,
-    REVIEW_AGAIN_LABEL,
+    TRY_AGAIN_LABEL,
     SWITCH_BACK_LABEL,
     ModelPicker,
 )
@@ -233,7 +233,7 @@ ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
 ACTION_BACKEND_BACK: Final = "agent_setup__backend_back"
 """The refusal's "Switch back to Claude" button."""
 ACTION_BACKEND_AGAIN: Final = "agent_setup__backend_again"
-"""The refusal's "Review again" button: previews the same pick again."""
+"""The refusal's "Try again" button: previews the same pick again."""
 
 ACTION_REVOKE_TOKEN: Final = "agent_setup__revoke_token"
 """Revoke one minted token; the button's `value` is its jti.
@@ -729,7 +729,7 @@ def build_model_switch_view(
             buttons.append(
                 _button(
                     action_id=ACTION_BACKEND_AGAIN,
-                    label=REVIEW_AGAIN_LABEL,
+                    label=TRY_AGAIN_LABEL,
                     value=name,
                     style="primary",
                 )
