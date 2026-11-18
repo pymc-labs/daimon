@@ -1542,8 +1542,14 @@ async def _admit_gates(
             return None
         return chosen.thread_id
 
+    resolved: dict[tuple[str, str], FeatureSnapshot] = {}
+
     async def features_at(admission: Admission) -> FeatureSnapshot:
-        """The features this admission's turn runs with; the counterpart check reads the same."""
+        """The features this admission's turn runs with, read once: the counterpart check
+        and the turn hide the same tools, or their copies differ."""
+        key = (admission.agent.id, running_on(admission)["provider"])
+        if key in resolved:
+            return resolved[key]
         features = await resolve_features(
             deps.sessionmaker,
             deps.settings,
@@ -1552,8 +1558,8 @@ async def _admit_gates(
                 platform,
                 channel_id,
                 thread_id,
-                agent_id=admission.agent.id,
-                backend=running_on(admission)["provider"],
+                agent_id=key[0],
+                backend=key[1],
             ),
             keys=tuple(
                 dict.fromkeys(
@@ -1570,7 +1576,8 @@ async def _admit_gates(
             agent_builtins=builtins_of(admission.agent),
             server_setup=False,
         )
-        return without_long_term_memory(features) if relay_agent else features
+        resolved[key] = without_long_term_memory(features) if relay_agent else features
+        return resolved[key]
 
     async def verify_origin(
         selection: ResolvedBackend,
