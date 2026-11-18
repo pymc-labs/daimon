@@ -268,7 +268,8 @@ def test_every_chat_listing_of_features_hides_the_not_set_up_ones() -> None:
             filters = [
                 n
                 for n in ast.walk(func)
-                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "listed"
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "id", "") in {"listed", "agent_listed"}
             ]
             assert filters, (
                 f"{path.name}:{func.name} lists features without `listed()`; use it or add the "

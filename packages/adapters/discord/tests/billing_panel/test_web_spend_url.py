@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock
 
 import discord
 import pytest
@@ -21,6 +20,13 @@ from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD = "745"
+
+
+class _Thread(discord.Thread):
+    """Thread "20" under channel "10"."""
+
+    def __init__(self) -> None:
+        self.id, self.parent_id = 20, 10
 
 
 @pytest.mark.parametrize(
@@ -66,7 +72,7 @@ async def test_billing_panel_drops_the_web_button_when_web_awareness_is_off(
         ),
     )
     # Channel "20" is a thread under "10".
-    thread = MagicMock(spec=discord.Thread, id=20, parent_id=10)
+    thread = _Thread()
     where = thread if channel == "20" else SimpleNamespace(id=int(channel))
     interaction = cast(BotInteraction, SimpleNamespace(channel=where, channel_id=int(channel)))
     url = await web_spend_url(runtime, GUILD, is_admin=False, interaction=interaction)

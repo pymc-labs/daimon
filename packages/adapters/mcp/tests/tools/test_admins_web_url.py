@@ -9,6 +9,8 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.admins import granted
 from daimon.core.config import WebSettings
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import (
     make_account,
@@ -25,7 +27,16 @@ _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-ar
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], web: WebSettings | None) -> McpRuntime:
     settings = mock_settings()
     settings.web = web
-    return cast(McpRuntime, SimpleNamespace(session_factory=sessionmaker, settings=settings))
+    return cast(
+        McpRuntime,
+        SimpleNamespace(
+            session_factory=sessionmaker,
+            settings=settings,
+            deployment_default=DeploymentDefault(),
+            client=None,
+            resolver_cache=new_resolver_cache(),
+        ),
+    )
 
 
 async def test_a_granted_user_with_a_web_person_links_to_their_admin_page(
