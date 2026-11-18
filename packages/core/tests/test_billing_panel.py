@@ -50,6 +50,7 @@ from daimon.testing.factories import (
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
+    make_usage_event,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
@@ -400,6 +401,67 @@ async def test_load_billing_snapshot_empty_period_is_well_formed(db_session: Asy
     assert (state.caller_spend, state.caller_turns, state.member_rows) == (0.0, 0, ()), (
         "an empty month reads as zeros, not an error"
     )
+
+
+async def test_load_billing_snapshot_leaves_unattributed_usage_out_of_the_members(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant_with_usage(db_session)
+    tenant = await tenants.get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    await make_usage_event(db_session, tenant=tenant, platform_user_id=None, input_tokens=5_000_000)
+    await db_session.commit()
+
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
+    )
+
+    assert state.guild_distinct_members == 2, "usage with no user is not a member"
+    assert [row.platform_user_id for row in state.member_rows] == [_OTHER_ID, _CALLER_ID]
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_load_billing_snapshot_carries_the_balance_for_members_and_admins(
+    db_session: AsyncSession, is_admin: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_BAL_{is_admin}")
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
+    )
+    assert state.guild_balance_usd == Decimal("0"), "no ledger rows is a zero balance"
+
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("75.50"))
+    await db_session.commit()
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
+    )
+    assert state.guild_balance_usd == Decimal("75.50")
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_load_billing_snapshot_reads_the_invoking_channels_budget(
+    db_session: AsyncSession, is_admin: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CHAN_{is_admin}")
+    await make_channel_budget(db_session, tenant=tenant, channel_id="c1", limit_usd=Decimal("5"))
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=Decimal("-2"), channel_id="c1", occurred_at=_NOW
+    )
+    await db_session.commit()
+
+    async def snapshot(channel_id: str) -> BillingPanelState:
+        return await _load_billing_snapshot(
+            db_session,
+            tenant_id=tenant.id,
+            platform_user_id=_CALLER_ID,
+            is_admin=is_admin,
+            platform="slack",
+            channel_id=channel_id,
+        )
+
+    budget = (await snapshot("c1")).channel_budget
+    assert budget is not None and budget.spent_usd == Decimal("2")
+    assert (await snapshot("c2")).channel_budget is None, "a channel without a budget shows none"
 
 
 def _mcp_settings() -> MagicMock:
