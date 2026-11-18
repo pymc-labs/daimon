@@ -138,8 +138,11 @@ class HostCallGate:
         """Whether the host call gate is off on this credential's platform."""
         return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
 
-    async def ask(self, context: MiddlewareContext, identity: AuthIdentity) -> ToolResult:
-        """Record the gated call and post its card; fail closed on anything missing."""
+    async def ask(
+        self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
+    ) -> object:
+        """Record the gated call and post its card; fail closed on anything missing.
+        A call Claude's session runs without a card runs through `run` here too."""
         from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.turn.approvals import tool_call_verdict
         from daimon.core.turn.unattended_capabilities import protected_tools
@@ -150,13 +153,12 @@ class HostCallGate:
         if self.off_for(identity):
             raise _refuse("off")
         if name not in host_call_carded_tools():
-            # A reach approval is tallied under the asking turn, which is gone by the press.
-            raise _refuse("reach")
+            raise _refuse("not_gated")
+        # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
             identity.chat_agent_id is None
             or identity.chat_session_id is None
             or identity.platform_user_id is None
-            or identity.hold is not None
         ):
             raise _refuse("no_claim")
         now = datetime.now(UTC)
@@ -194,11 +196,14 @@ class HostCallGate:
             ),
             attended=origin.attended,
             trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            confirmed_tools=protected_tools(policy),
+            # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
+            confirmed_tools=protected_tools(policy) | {"approve_reach"},
             agent_rule=None,
         )
+        if verdict.outcome == "allow":
+            return await run(context)
         if verdict.outcome != "ask":
-            # A gated tool is never `allow` here; `deny` is an unattended or operator refusal.
+            # An unattended or operator refusal, as on Claude.
             raise _refuse(f"verdict_{verdict.reason}")
         expires_at = now + timedelta(seconds=min(policy.confirmation_timeout_s, SWITCH_CARD_MAX_S))
         async with self._runtime.session_factory.begin() as session:

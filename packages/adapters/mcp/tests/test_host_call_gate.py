@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -29,13 +29,16 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.host_call_cards import HostCallCardRow, list_cards
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
 from daimon.core.stores.turn_origins import create_origin, get_session_origin
+from daimon.core.tool_safety import CONFIRMED_DAIMON_TOOLS, confirmation_gated_tools
 from daimon.core.turn_origin import ExecutionFlags, current_execution_origin_id, execution_origin
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.search import BM25SearchTransform
-from pydantic import HttpUrl, PostgresDsn, SecretStr
+from fastmcp.tools import Tool, ToolResult
+from mcp.types import TextContent
+from pydantic import HttpUrl, PostgresDsn, PrivateAttr, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _SECRET = "s" * 32
@@ -62,6 +65,8 @@ class Rig:
     ran: _Ran
     posted: list[object]
     failure: list[Exception]
+    #: More gated tools to serve as no-argument stubs under their real names.
+    extra: tuple[str, ...] = ()
 
     def identity(self, **changes: Any) -> AuthIdentity:
         base = AuthIdentity(
@@ -87,8 +92,9 @@ class Rig:
         def revoke_web_link(kind: str) -> str:
             return self._record("revoke_web_link", {"kind": kind})
 
-        def approve_reach(threads: str) -> str:
-            return self._record("approve_reach", {"threads": threads})
+        def approve_reach(threads: int, places: int, people: int, where: str) -> str:
+            plan = {"threads": threads, "places": places, "people": people, "where": where}
+            return self._record("approve_reach", plan)
 
         def list_agents() -> str:
             return self._record("list_agents", {})
@@ -98,6 +104,12 @@ class Rig:
 
         for fn in (delete_allowance, revoke_web_link, approve_reach, list_agents, set_thread_model):
             server.tool(fn)
+        for name in self.extra:
+            field = CONFIRMED_DAIMON_TOOLS.get(name)
+            properties = {} if field is None else {field: {"type": "string"}}
+            stub = _Stub(name=name, parameters={"type": "object", "properties": properties})
+            stub._ran = self._record  # pyright: ignore[reportPrivateUsage]
+            server.add_tool(stub)
         # The stock proxy: it re-enters the middleware with the inner tool's name.
         server.add_transform(BM25SearchTransform(max_results=5))
         server.add_middleware(_Dispatch(self.middleware, identity))
@@ -108,6 +120,15 @@ class Rig:
         if self.failure:
             raise self.failure[0]
         return f"{name} done"
+
+
+class _Stub(Tool):
+    """A gated tool under its real name, taking its confirmation field."""
+
+    _ran: Callable[[str, dict[str, Any]], str] = PrivateAttr()
+
+    async def run(self, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(content=[TextContent(type="text", text=self._ran(self.name, arguments))])
 
 
 class _Dispatch(Middleware):
@@ -323,15 +344,65 @@ async def test_ask_refuses_when_the_call_cannot_be_tied_to_a_live_turn(
     assert rig.ran == [], "the tool does not run"
 
 
-async def test_ask_refuses_a_reach_approval_when_press_applies(rig: Rig) -> None:
-    """A reach approval is tallied under the asking turn, which is gone by the press."""
-    _attach(rig)
+_REACH = {"threads": 3, "places": 2, "people": 0, "where": "#general and #news"}
 
-    with pytest.raises(ToolError, match=host_calls.REFUSED_TEXT):
-        await _call(rig, rig.identity(), "approve_reach", {"threads": "t1"})
 
-    assert await _cards(rig) == [], "no record for a reach approval"
-    assert rig.ran == [], "the reach is not approved"
+#: Every tool that needs a card, with arguments its stub takes.
+_GATED_ARGS = {
+    "delete_allowance": _ARGS,
+    "revoke_web_link": {"kind": "all"},
+    "approve_reach": _REACH,
+}
+
+
+#: Tools Claude's session runs without a card under that policy (`always_allow`).
+_UNCARDED = {
+    "off": {"add_server_skill", "add_skill", "microsoft_write", "set_routine_sandbox_tools"},
+    "on": {"set_routine_sandbox_tools"},
+}
+
+
+@pytest.mark.parametrize("policy", ["off", "on"], ids=["safety_off", "safety_on"])
+@pytest.mark.parametrize("name", sorted(confirmation_gated_tools()))
+async def test_each_gated_tool_asks_and_runs_as_on_claude(rig: Rig, name: str, policy: str) -> None:
+    """OpenAI and Gemini turns share this credential. Each gated tool is carded where
+    Claude's session asks, then runs once after its requester's press; elsewhere it
+    runs at once, as on Claude."""
+    rig.extra = tuple(sorted(confirmation_gated_tools() - {*_GATED_ARGS}))
+    field = CONFIRMED_DAIMON_TOOLS.get(name)
+    args = _GATED_ARGS.get(name, {} if field is None else {field: "x"})
+    settings = _settings()
+    safety = settings.tool_safety.model_copy(update={"enabled": policy == "on"})
+    settings = settings.model_copy(update={"tool_safety": safety})
+    runtime = SimpleNamespace(session_factory=rig.sessions, settings=settings)
+    rig.middleware.attach_host_call_gate(HostCallGate(runtime, public_url=_URL))  # pyright: ignore[reportArgumentType]
+
+    await _call(rig, rig.identity(), name, args)
+    if name in _UNCARDED[policy]:
+        assert [ran for ran, _, _ in rig.ran] == [name], "ran at once, as on Claude"
+        assert await _cards(rig) == [], "no card where Claude asks none"
+        return
+    card = await _card(rig)
+    assert card.tool_name == name and rig.ran == [], "carded, not run"
+
+    async def admin(_: str) -> bool:
+        return True
+
+    pressed = await host_calls.press_host_call(
+        sessionmaker=rig.sessions,
+        enabled=True,
+        tenant_id=rig.tenant_id,
+        card_id=card.id,
+        action="approve",
+        clicker=_USER,
+        message_id=_MESSAGE,
+        current_admin=admin,
+        now=dt.datetime.now(dt.UTC),
+    )
+    assert pressed is not None and pressed.approved, pressed
+    await _call(rig, await _credential(rig, card.id), name, args)
+    assert [ran for ran, _, _ in rig.ran] == [name], "ran once after the press"
+    assert (await _card(rig)).status == "applied"
 
 
 async def test_ask_refuses_when_the_host_call_gate_is_off(rig: Rig) -> None:

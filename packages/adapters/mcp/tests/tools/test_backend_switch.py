@@ -273,7 +273,7 @@ async def test_a_chat_switch_applies_on_the_first_call_like_a_model_change(
     if model_controls:
         payload["model"] = {
             "id": "claude-haiku-5-5",
-            "speed": "standard",
+            "speed": "fast",
             "effort": {"type": "medium"},
         }
     switch = {
