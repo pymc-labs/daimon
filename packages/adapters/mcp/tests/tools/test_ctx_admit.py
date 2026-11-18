@@ -320,9 +320,10 @@ _ISOLATED = TenantAccessPolicy(
 )
 
 
-async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_budget(
+async def test_an_admins_hub_run_of_an_isolated_channels_own_agent_is_refused(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
+    """The channel's own agent answers only in its home; another agent still runs."""
     admin = await _member(db_session, policy=_ISOLATED, role=Role.ADMIN)
     tenant = await get_tenant(db_session, admin.tenant_id)
     assert tenant is not None
@@ -333,7 +334,7 @@ async def test_a_hub_run_of_an_isolated_channels_agent_is_held_to_that_channels_
     async def names(agent: str) -> tuple[str | None, ...]:
         return agent, None
 
-    with _BALANCE_OK, pytest.raises(ToolError, match="This channel has used its spending budget"):
+    with _BALANCE_OK, pytest.raises(ToolError, match="only runs in a conversation inside them"):
         await _admit(
             auth,
             membership_resolver=_current_member(is_admin=True),
