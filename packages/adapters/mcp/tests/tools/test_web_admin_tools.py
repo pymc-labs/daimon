@@ -41,6 +41,11 @@ def runtime(monkeypatch):
 
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
 
+    async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
+        return links
+
+    monkeypatch.setattr(web_url, "_where_aware", aware)
+
     async def carded(*_a: Any, **_k: Any) -> None:
         return None
 
@@ -617,7 +622,7 @@ async def test_web_admin_of_when_person_not_admin_then_no_admin_links(runtime, m
     monkeypatch.setattr(shared.web_roles_rules, "role_of", own_role)
     actor = await shared.web_admin_of(runtime, make_auth())
     assert actor.role == role, "the person's own role, not the member-kind one"
-    links = web_url.admin_links(runtime, actor)
+    links = await web_url.admin_links(runtime, make_auth(), actor)
     assert links is not None and links.audit() is None, "no admin pages"
 
 

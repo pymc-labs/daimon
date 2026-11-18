@@ -16,15 +16,16 @@ from daimon.testing.factories import (
     make_tenant,
     make_web_person,
 )
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], web: WebSettings | None) -> McpRuntime:
-    return cast(
-        McpRuntime, SimpleNamespace(session_factory=sessionmaker, settings=SimpleNamespace(web=web))
-    )
+    settings = mock_settings()
+    settings.web = web
+    return cast(McpRuntime, SimpleNamespace(session_factory=sessionmaker, settings=settings))
 
 
 async def test_a_granted_user_with_a_web_person_links_to_their_admin_page(
