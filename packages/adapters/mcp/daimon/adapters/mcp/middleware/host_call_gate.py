@@ -148,11 +148,13 @@ class HostCallGate:
         from daimon.core.confirmation import reach_title
         from daimon.core.turn.approvals import (
             agent_rule_lookup,
+            channel_for_tool_rules,
             read_error_verdict,
             rule_for,
             tool_call_verdict,
         )
         from daimon.core.turn.unattended_capabilities import protected_tools
+        from daimon.core.turn_origin import origin_place
 
         name, args = _call_of(context)
         settings = self._runtime.settings
@@ -213,7 +215,14 @@ class HostCallGate:
                 agent_id=origin.responder_ma_agent_id,
                 server_urls={DAIMON_SERVER_NAME: self._server},
                 also_urls={DAIMON_SERVER_NAME: self._server},
-                channel_id=origin.parent_channel_id,
+                # Never a DM's channel, and a Slack thread's parent channel.
+                channel_id=None
+                if origin_place(origin) == "dm"
+                else channel_for_tool_rules(
+                    platform=origin.platform,
+                    channel_id=origin.parent_channel_id,
+                    private_dm_id=None,
+                ),
             ),
         )
         verdict = await tool_call_verdict(
