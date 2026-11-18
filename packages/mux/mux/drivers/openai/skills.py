@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
+import re
 import stat
 import struct
 import zipfile
 import zlib
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
+from typing import cast
+
+import yaml
 
 from mux.contracts.errors import ProviderError
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
@@ -59,11 +64,64 @@ async def retry_not_found[T](call: Callable[[], Awaitable[T]]) -> T:
     return await call()
 
 
-def bundle_digest(bundle: SkillUpload) -> str:
-    """Pin file paths and bytes independently of ZIP ordering and timestamps."""
-    canonical = bundle.model_copy(
-        update={"files": tuple(sorted(bundle.files, key=lambda f: f.path))}
+_FRONTMATTER = re.compile(r"\A---\r?\n(.*?\r?\n)---[ \t]*(?=\r?\n|\Z)", re.DOTALL)
+_KEY = re.compile(r"(name|description)[ \t]*:")
+
+
+def plain_manifest(content: bytes) -> bytes:
+    """SKILL.md with a multi-line or styled `name`/`description` as one quoted line.
+
+    OpenAI stores a block scalar (`description: >`) with its line breaks at upload,
+    then refuses every session attaching it: "archive metadata does not match its
+    Skills API version". A plain one-line value is kept byte for byte, so the
+    digests of skills already pinned do not change.
+    """
+    try:
+        match = _FRONTMATTER.match(content.decode())
+        loaded: object = yaml.safe_load(match[1]) if match else None
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return content
+    if match is None or not isinstance(loaded, dict):
+        return content
+    values = cast(dict[object, object], loaded)
+    lines, out, index = match[1].splitlines(keepends=True), list[str](), 0
+    while index < len(lines):
+        line, index = lines[index], index + 1
+        key = _KEY.match(line)
+        value = values.get(key[1]) if key else None
+        if key is None or not isinstance(value, str):
+            out.append(line)
+            continue
+        # A value's own lines: indented ones, and blank ones before another indented.
+        end = index
+        while end < len(lines) and (lines[end][:1] in (" ", "\t") or not lines[end].strip()):
+            end += 1
+        while end > index and not lines[end - 1].strip():
+            end -= 1
+        if end > index or line[key.end() :].strip() != value:
+            line = f"{key[1]}: {json.dumps(' '.join(value.split()), ensure_ascii=False)}\n"
+        out.append(line)
+        index = end
+    return (match.string[: match.start(1)] + "".join(out) + match.string[match.end(1) :]).encode()
+
+
+def _plain(bundle: SkillUpload) -> SkillUpload:
+    return bundle.model_copy(
+        update={
+            "files": tuple(
+                f.model_copy(update={"content": plain_manifest(f.content)})
+                if f.path == "SKILL.md"
+                else f
+                for f in bundle.files
+            )
+        }
     )
+
+
+def bundle_digest(bundle: SkillUpload) -> str:
+    """Pin file paths and the uploaded bytes independently of ZIP ordering and timestamps."""
+    plain = _plain(bundle)
+    canonical = plain.model_copy(update={"files": tuple(sorted(plain.files, key=lambda f: f.path))})
     return request_digest(canonical.model_dump(mode="json"))
 
 
@@ -151,7 +209,7 @@ def bundle_zip(bundle: SkillUpload) -> bytes:
     manifests: list[str] = []
     result = io.BytesIO()
     with zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file in bundle.files:
+        for file in _plain(bundle).files:
             path = PurePosixPath(file.path)
             if (
                 path.is_absolute()

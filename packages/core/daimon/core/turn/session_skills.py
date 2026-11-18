@@ -62,6 +62,9 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 _DROP_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _MANIFEST_BYTES = 1024 * 1024
+#: A provider's copy format, kept beside the source version: OpenAI uploads plain
+#: SKILL.md frontmatter (mux `plain_manifest`), so its older copies are never reused.
+_COPY_FORMATS = {"openai": "plain-frontmatter"}
 
 
 def read_blip(error: BaseException) -> TurnError | None:
@@ -439,6 +442,7 @@ async def copy_skills(
         if pin.version in (None, "latest"):
             raise ValueError("a carried skill needs a concrete version")
         assert pin.version is not None
+        version = "+".join(filter(None, (pin.version, _COPY_FORMATS.get(provider))))
         async with sessionmaker() as db:
             row = await get_skill_copy(
                 db,
@@ -446,7 +450,7 @@ async def copy_skills(
                 provider=provider,
                 account_scope_id=account_scope_id,
                 skill_id=pin.id,
-                version=pin.version,
+                version=version,
             )
         if row is None:
             files = retained_archive_files(
@@ -465,7 +469,7 @@ async def copy_skills(
                 )
             )
             # One key per source version and project: a retried upload is the same one.
-            seed = f"{tenant_id}:{account_scope_id}:{pin.id}:{pin.version}"
+            seed = f"{tenant_id}:{account_scope_id}:{pin.id}:{version}"
             created = await skills.create(
                 scope, upload, key="skill-copy-" + hashlib.sha256(seed.encode()).hexdigest()[:32]
             )
@@ -479,7 +483,7 @@ async def copy_skills(
                         provider=provider,
                         account_scope_id=account_scope_id,
                         skill_id=pin.id,
-                        version=pin.version,
+                        version=version,
                         copy_id=created.id,
                         copy_version=created.latest_version.version,
                     ),
@@ -497,7 +501,14 @@ async def copy_skills(
             # because the session is created once with whatever copied.
             if isinstance(error, ProviderError) and error.retryable:
                 raise
-            log.warning("session_skills.copy_failed", skill_id=pin.id, error=type(error).__name__)
+            log.warning(
+                "session_skills.copy_failed",
+                skill_id=pin.id,
+                error=type(error).__name__,
+                native_message=getattr(error, "native_message", None),
+                native_code=getattr(error, "native_error_code", None),
+                native_param=getattr(error, "native_param", None),
+            )
             losses.append(f"skill:{pin.id}")
             continue
         if sources is not None:

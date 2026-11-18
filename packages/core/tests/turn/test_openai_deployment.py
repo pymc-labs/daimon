@@ -584,6 +584,60 @@ async def test_copy_skills_when_one_archive_is_bad_then_copies_the_rest_and_name
     assert losses == ("skill:skill_bad",), "the bad one is named, not raised"
 
 
+async def test_copy_skills_when_an_openai_copy_predates_plain_frontmatter_then_uploads_anew(
+    application: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A copy uploaded before `plain_manifest` may be refused by every session, so it is not reused."""
+    import io
+    import zipfile
+
+    from daimon.core.stores.domain import SkillCopyRow
+    from daimon.core.stores.skill_copies import put_skill_copy
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+        await put_skill_copy(
+            db,
+            SkillCopyRow(
+                tenant_id=TENANT,
+                provider="openai",
+                account_scope_id="project",
+                skill_id="skill_team",
+                version="7",
+                copy_id="copy-stale",
+                copy_version="1",
+            ),
+        )
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(*_: object, **__: object) -> bytes:
+        return archive_bytes.getvalue()
+
+    class Created(SimpleNamespace):
+        pass
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> Created:
+            return Created(id="copy-plain", latest_version=Created(version="1"))
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    copies, _ = await session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        provider="openai",
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_team", version="7"),),
+    )
+    assert copies == (SkillRef(id="copy-plain", version="1"),), "the stale copy is not reused"
+
+
 @pytest.mark.parametrize(
     ("retryable", "outcome"), [(True, "retried"), (False, "named")], ids=["retryable", "permanent"]
 )

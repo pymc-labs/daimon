@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **GPT threads start with skills whose description spans lines.** A custom
+  skill whose SKILL.md used a block scalar (`description: >`) made OpenAI
+  refuse the session with "archive metadata does not match its Skills API
+  version", so the thread failed. Its `name` and `description` now upload as
+  one quoted line, older copies are uploaded again, and a refused skill upload
+  logs OpenAI's message.
+
 - **An agent's page shows it is loading.** While a slow agent loaded, the page
   stayed blank.
 - **Switching a Gemini conversation's model no longer times out.** The switch

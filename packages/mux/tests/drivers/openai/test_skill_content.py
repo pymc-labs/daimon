@@ -69,3 +69,20 @@ async def test_native_archive_pin_verifies_all_files_and_closes_owned_stream(fau
         "/v1/skills/native/versions/7",
         "/v1/skills/native/versions/7/content",
     ]
+
+
+def test_plain_manifest_when_description_is_a_block_scalar_then_uploads_one_quoted_line():
+    """OpenAI rejects sessions attaching a `description: >` skill; plain ones stay byte for byte."""
+    from mux.drivers.openai.skills import bundle_zip, plain_manifest
+
+    folded = (
+        b"---\nname: lint\ndescription: >\n  Lint data.\n  Use it: often.\nlicense: MIT\n---\nbody"
+    )
+    zipped = bundle_zip(SkillUpload(files=(SkillUploadFile(path="SKILL.md", content=folded),)))
+    uploaded = zipfile.ZipFile(io.BytesIO(zipped)).read("bundle/SKILL.md")
+    assert uploaded == (
+        b'---\nname: lint\ndescription: "Lint data. Use it: often."\nlicense: MIT\n---\nbody'
+    ), "the folded value becomes one quoted line; other keys and the body are kept"
+    assert plain_manifest(uploaded) == uploaded, "a rewritten manifest is stable"
+    plain = b"---\nname: lint\ndescription: Lint data.\n---\nbody"
+    assert plain_manifest(plain) == plain, "a plain manifest keeps its bytes and pinned digest"
