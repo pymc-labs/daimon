@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 PROFILE = "selfhosted.loop"
-# Per-turn caps shared by every grant: the host's own defaults for tool calls (100), and a
-# ten-minute deadline, so a reply that reads a skill, starts a job and waits for it fits.
+# Per-turn caps shared by every grant, the CLI's and Teams': the host's default of 100 tool
+# calls, and 600 s (twice the host's default deadline), so a reply can poll a job to its end.
 LIMITS = {"infrastructure_usd": "0", "max_tool_calls": 100, "deadline_s": 600}
 CLI_CHANNEL = "selfhosted-operator"
 
