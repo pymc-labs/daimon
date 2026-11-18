@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The Web app setting (`web_awareness`, was "Web app links") turns off every
+  mention of the web app at its place.** Off at the deployment, workspace,
+  agent, channel or thread leaves the web address out of routine runs and tool
+  results, hides and refuses the web people and invite tools, and drops the
+  "Open in web" buttons from Discord, Slack and Teams cards there, as well as
+  from a message's own controls. A card in a channel follows the agent that
+  answers there. Tool descriptions and the setup skill no longer name the web app.
 - **A sealed channel's conversations and its own agent stay in the channel,
   admins included.** Admins no longer read another person's conversation from a
   sealed or limited channel through the hub, even after the channel is opened
