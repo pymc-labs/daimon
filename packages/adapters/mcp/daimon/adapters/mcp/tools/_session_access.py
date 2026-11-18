@@ -286,8 +286,8 @@ async def sessions_outside_seals(
     read tools check it (`load_read_policy`); without one every sealed
     conversation is dropped -- except inside `hub_session_access(..., "read")`,
     where an admin's hub read keeps the caller's own sealed sessions and other
-    people's open channel sessions, never another person's sealed one, and a
-    caller first). Only a chat turn's own credential can claim one:
+    people's open channel sessions, never another person's sealed one. Only a
+    chat turn's own credential can claim an origin:
     an agent key (``agent_id``) runs outside every channel, unless it was minted
     in one (`token_channel_id`), which then counts as its origin. Call after the
     ownership filter.

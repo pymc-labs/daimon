@@ -555,7 +555,7 @@ def _decide_shared_agent_change(req: Request) -> Decision:
 
 def _channel_bound(agent: AgentRef) -> bool:
     """An agent ruled to channels without the web chat. Naming the web chat in every
-    rule lets it answer there, even as a channel's own agent."""
+    rule lets it answer there, unless it is a channel's own agent (`_decide`)."""
     return agent.permissions.keeps_off_web
 
 
