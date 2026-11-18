@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from daimon.core.turn import gemini_state
 from daimon.core.turn.gemini_state import SQLiteGeminiStorage
+from mux.drivers.gemini import Records
 
 
 @pytest.mark.asyncio
@@ -18,11 +19,11 @@ async def test_records_codec_runs_off_the_event_loop(
     threads: list[str] = []
     load, dump = gemini_state._load, gemini_state._dump  # pyright: ignore[reportPrivateUsage]
 
-    def traced_load(body: str | None):
+    def traced_load(body: str | None) -> Records:
         threads.append(threading.current_thread().name)
         return load(body)
 
-    def traced_dump(records):
+    def traced_dump(records: Records) -> str:
         threads.append(threading.current_thread().name)
         return dump(records)
 
