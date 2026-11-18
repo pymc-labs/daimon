@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **GPT threads start with skills whose description spans lines.** A custom
-  skill whose SKILL.md used a block scalar (`description: >`) made OpenAI
-  refuse the session with "archive metadata does not match its Skills API
-  version", so the thread failed. Its `name` and `description` now upload as
-  one quoted line, older copies are uploaded again, and a refused skill upload
-  logs OpenAI's message.
+- **GPT threads start with skills whose description spans lines.** A SKILL.md
+  block scalar (`description: >`) made OpenAI refuse the session. `name` and
+  `description` now upload as one line, an invalid name such as
+  `marimo_notebooks` uploads as `marimo-notebooks`, and older copies upload again.
+- **Provider failures log the provider's reason.** Turn, session and sync
+  failure logs carry the redacted provider code, field and message.
 
 - **An agent's page shows it is loading.** While a slow agent loaded, the page
   stayed blank.
