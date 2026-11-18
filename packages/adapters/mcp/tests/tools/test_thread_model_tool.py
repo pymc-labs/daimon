@@ -266,20 +266,16 @@ _LIMIT = "Only people here can use it."
 
 
 def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Previews here lose something, so a pick asks first."""
-    from dataclasses import replace
+    """A pick's preview here loses something."""
+    from daimon.core.channel_backend import AgentBackendService
 
-    from daimon.core import thread_model_switch as core
+    real = AgentBackendService.thread_revision
 
-    real = core.preview_thread_model
+    async def lossy(self, agent, target, model):
+        run, preview = await real(self, agent, target, model)
+        return run, preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
 
-    async def lossy(pick, value):
-        shown = await real(pick, value)
-        assert shown.preview is not None, "another provider's pick is previewed"
-        limited = shown.preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
-        return replace(shown, preview=limited)
-
-    monkeypatch.setattr(core, "preview_thread_model", lossy)
+    monkeypatch.setattr(AgentBackendService, "thread_revision", lossy)
 
 
 @pytest.mark.parametrize("carded", [True, False], ids=["card_surface", "no_card_surface"])

@@ -146,6 +146,7 @@ from daimon.core.turn.errors import (
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
+from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.core.web_links import TenantLinks
 from daimon.core.web_roles_rules import is_admin as is_web_admin
@@ -907,17 +908,12 @@ async def _admit_gates(
     provider (M03); each slot moved is added to `followed`, so a refused move can be
     withdrawn.
     """
-    started = last_stage = perf_counter()
+    started = perf_counter()
     stage_ms: dict[str, float] = {}
+    mark = stage_timer(stage_ms)
     # A helper's own conversation keys its session and provider slot; the place it
     # runs in (rules, seals, holds) stays the asking turn's thread.
     slot_thread_id = helper.thread_key if helper is not None else thread_id
-
-    def mark(stage: str) -> None:
-        nonlocal last_stage
-        current = perf_counter()
-        stage_ms[stage] = round((current - last_stage) * 1000, 1)
-        last_stage = current
 
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
@@ -2010,7 +2006,7 @@ async def _admit_gates(
         platform=platform,
         channel_id=channel_id,
         thread_id=thread_id,
-        total_ms=round((perf_counter() - started) * 1000, 1),
+        total_ms=elapsed_ms(started),
         stage_ms=stage_ms,
     )
     return result
@@ -2503,7 +2499,61 @@ async def capture_backend_source(
     """Read the actual target's source in a verified host context, without admitting a turn.
 
     `responder_ma_agent_id` is the verified turn's responder, for a copy of it made here.
+    Logs one `backend_source.capture_timing` line: its stages, and the outcome.
     """
+    started, stage_ms = perf_counter(), dict[str, float]()
+    outcome, detail = "failed", None
+    try:
+        captured = await _capture_backend_source(
+            deps,
+            source,
+            context=context,
+            subject=subject,
+            place=place,
+            is_dm=is_dm,
+            slack_turn_context_id=slack_turn_context_id,
+            private_dm_id=private_dm_id,
+            external_user_id=external_user_id,
+            explicit_target_name=explicit_target_name,
+            responder_ma_agent_id=responder_ma_agent_id,
+            stage_ms=stage_ms,
+        )
+        outcome = "captured"
+        return captured
+    except channel_backend.AgentBackendRefused as error:
+        outcome = error.reason
+        detail = error.detail if error.detail in channel_backend.REFUSAL_DETAILS else None
+        raise
+    finally:
+        _log.info(
+            "backend_source.capture_timing",
+            tenant_id=str(context.tenant_id),
+            agent_id=str(source.agent_id),
+            platform=context.platform,
+            channel_id=context.channel_id,
+            thread_id=context.thread_id,
+            outcome=outcome,
+            detail=detail,
+            total_ms=elapsed_ms(started),
+            stage_ms=stage_ms,
+        )
+
+
+async def _capture_backend_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    context: ScopeContext,
+    subject: Subject,
+    place: Place,
+    is_dm: bool,
+    slack_turn_context_id: uuid.UUID | None,
+    private_dm_id: str | None,
+    external_user_id: str | None,
+    explicit_target_name: str | None,
+    responder_ma_agent_id: str | None,
+    stage_ms: dict[str, float],
+) -> BackendAgent:
     from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
     from daimon.core.mux_backend import resource_scope
     from daimon.core.mux_compat import retrieve_agent
@@ -2513,6 +2563,7 @@ async def capture_backend_source(
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from daimon.core.turn.runtime_manifest import capture_preparation_source
 
+    mark = stage_timer(stage_ms)
     try:
         async with asyncio.timeout(PREVIEW_CAPTURE_BUDGET_S):
             if context.tenant_id != source.tenant_id or context.account_id is None:
@@ -2528,6 +2579,7 @@ async def capture_backend_source(
                     if explicit_target_name is not None
                     else ()
                 )
+            mark("config")
             if account is None or account.tenant_id != context.tenant_id:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if (
@@ -2606,9 +2658,19 @@ async def capture_backend_source(
                 account_id=str(context.account_id),
                 authorization_id="backend-preview",
             )
-            actual = await retrieve_agent(
-                deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+            # Independent reads: one round trip, not two.
+            actual, environment = await asyncio.gather(
+                retrieve_agent(
+                    deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+                ),
+                find_environment_by_daimon_tag(
+                    deps.anthropic,
+                    tenant_id=context.tenant_id,
+                    name=config.environment_name,
+                    records=deps.sessionmaker,
+                ),
             )
+            mark("agent_environment_reads")
             if explicit_target_name is not None:
                 await channel_backend.load_backend_agent(
                     deps.anthropic,
@@ -2617,12 +2679,7 @@ async def capture_backend_source(
                     agent_name=explicit_target_name,
                     actual_agent=actual,
                 )
-            environment = await find_environment_by_daimon_tag(
-                deps.anthropic,
-                tenant_id=context.tenant_id,
-                name=config.environment_name,
-                records=deps.sessionmaker,
-            )
+                mark("load_backend_agent")
             if environment is None or environment.archived_at is not None:
                 raise channel_backend.AgentBackendRefused(
                     "source_unavailable", detail="environment"
@@ -2650,6 +2707,7 @@ async def capture_backend_source(
             ):
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="place")
             seals = limiting_ids_at(policy, channel_id=grant.channel_id, thread_id=grant.thread_id)
+            mark("place")
             skills = (
                 await turn_channel_skills(
                     deps.sessionmaker,
@@ -2711,6 +2769,7 @@ async def capture_backend_source(
             )
             features = without_long_term_memory(features) if relay else features
             admission = replace(admission, features=features)
+            mark("admission")
             request = ProviderPreparationRequest(
                 deps,
                 admission,
@@ -2728,16 +2787,22 @@ async def capture_backend_source(
                 answers_on=answers_on,
             )
             captured = await capture_preparation_source(
-                request, fresh=True, capability_preview=True
+                request, fresh=True, capability_preview=True, stage_ms=stage_ms
             )
             if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             return captured
     except (APIError, TimeoutError) as error:
+        _log.warning(
+            "backend_source.unavailable", causes=channel_backend.backend_refusal_causes(error)
+        )
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
     except TurnError as error:
         # A capture blip asks for a retry; it never confirms a loss.
         if channel_backend.transient_failure(error):
+            _log.warning(
+                "backend_source.unavailable", causes=channel_backend.backend_refusal_causes(error)
+            )
             raise channel_backend.AgentBackendRefused("source_unavailable") from error
         raise
     except ScopeViolation as error:
