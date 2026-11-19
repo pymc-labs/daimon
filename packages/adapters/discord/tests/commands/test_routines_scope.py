@@ -15,7 +15,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -65,14 +65,11 @@ async def _open_panel(db_session_factory, monkeypatch, *, admin: bool):
     async with db_session_factory.begin() as session:
         await make_tenant(session, platform="discord", workspace_id=str(GUILD))
         for creator, text in ((str(ME), "mine"), (str(OTHER), "theirs")):
-            await create_routine(
+            await new_routine(
                 session,
-                tenant_id=tenant_id,
+                tenant_id,
                 created_by_user_id=creator,
-                agent_id="agent_a",
-                agent_name="daimon",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message=text,
             )
     admin_flags: list[bool] = []
@@ -115,14 +112,11 @@ async def test_only_own_loads_nothing_without_a_matching_creator(db_session_fact
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD))
     async with db_session_factory.begin() as session:
         await make_tenant(session, platform="discord", workspace_id=str(GUILD))
-        await create_routine(
+        await new_routine(
             session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id=str(ME),
-            agent_id="agent_a",
-            agent_name="daimon",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="mine",
         )
     async with db_session_factory() as session:
@@ -144,14 +138,11 @@ async def _panel_view(db_session_factory, monkeypatch, *, admin: bool):
     async with db_session_factory.begin() as session:
         await make_tenant(session, platform="discord", workspace_id=str(GUILD))
         for creator, text in ((str(ME), "mine"), (str(OTHER), "theirs")):
-            await create_routine(
+            await new_routine(
                 session,
-                tenant_id=tenant_id,
+                tenant_id,
                 created_by_user_id=creator,
-                agent_id="agent_a",
-                agent_name="daimon",
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message=text,
             )
     interaction = _interaction(_runtime(db_session_factory), admin=admin)

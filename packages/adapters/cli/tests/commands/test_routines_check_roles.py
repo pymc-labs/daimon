@@ -11,8 +11,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
 from daimon.testing import ma_agent
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from mux.testing.drivers.anthropic.ma import not_found_response
@@ -54,14 +55,13 @@ async def test_check_roles_lists_lapsed_and_unverified_owners_without_writing(
             policy=TenantAccessPolicy(agent_rules={"gated": AgentRule(invoker_role_ids=("123",))}),
         )
         rows = {
-            (owner, agent, enabled): await create_routine(
+            (owner, agent, enabled): await new_routine(
                 session,
-                tenant_id=tenant.id,
+                tenant,
                 created_by_user_id=owner,
                 agent_id=f"ag-{agent}",
                 agent_name=agent,
                 cron_expr="0 9 * * *",
-                timezone_="UTC",
                 trigger_message="go",
                 enabled=enabled,
             )
@@ -141,14 +141,13 @@ async def test_check_roles_lists_a_role_gate_added_by_an_agent_alias(db_session_
                 agent_rules={"Reviewer": AgentRule(invoker_role_ids=("123",))}
             ),
         )
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id="2",
             agent_id="ag-old" if not by_id else "ag-alias",
             agent_name="plain",
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message="go",
         )
     agent = ma_agent(

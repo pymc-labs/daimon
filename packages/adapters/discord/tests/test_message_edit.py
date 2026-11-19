@@ -11,12 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import discord
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import ThreadNamingSettings
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -39,12 +38,10 @@ def _bot(sessionmaker: async_sessionmaker[AsyncSession]) -> DaimonBot:
     anthropic = AsyncMock()
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(

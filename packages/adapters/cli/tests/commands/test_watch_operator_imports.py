@@ -16,7 +16,7 @@ from daimon.adapters.cli.commands import watches as watch_commands
 from daimon.adapters.cli.commands.watches import watches_app
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -337,10 +337,9 @@ async def bind_owner(operator) -> uuid.UUID:
         principal = await get_or_create_platform_principal(
             db, tenant_id=operator.tenant.id, platform="discord", external_id="555"
         )
-        await create_thread_session(
+        await new_thread_session(
             db,
             tenant_id=operator.tenant.id,
-            platform="discord",
             thread_id="4242",
             channel_id="4241",
             account_id=principal.account_id,
