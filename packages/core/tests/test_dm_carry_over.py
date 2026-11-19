@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from daimon.core.direct_messages import start_cold_dm
+from daimon.core.direct_messages import owner_dm_turn, start_cold_dm
 from daimon.core.dm_carry_over import (
     CONTEXT_CHARS,
     HISTORY_TURNS,
@@ -264,8 +264,10 @@ async def test_a_busy_start_leaves_it_for_the_next_one(db_session_factory):
         )
     await hold(db_session_factory, tenant)
 
-    with pytest.raises(Exception, match="Wait for the current DM reply"):
-        await start(deps, admission, tenant, expected_scope_id=first.scope_id)
+    # The set claim is live while its owner's turn holds the fence.
+    async with owner_dm_turn(deps, platform="discord", owner="999", wait=True):
+        with pytest.raises(Exception, match="Wait for the current DM reply"):
+            await start(deps, admission, tenant, expected_scope_id=first.scope_id)
 
     async with db_session_factory.begin() as session:
         assert (

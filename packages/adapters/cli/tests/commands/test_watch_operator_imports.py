@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 from daimon.adapters.cli.commands import watches as watch_commands
 from daimon.adapters.cli.commands.watches import watches_app
@@ -437,7 +438,7 @@ async def test_timers_need_an_agent_to_be_held_for(operator, tmp_path):
         watches_app,
         ["import", str(path), "--tenant", str(operator.tenant.id)],
     )
-    assert result.exit_code == 2 and "--agent-id" in result.output, result.output
+    assert result.exit_code == 2 and "--agent-id" in click.unstyle(result.output), result.output
     assert await rows(operator, "SELECT 1 FROM held_timers") == []
 
 
