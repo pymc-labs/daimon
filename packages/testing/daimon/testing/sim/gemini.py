@@ -16,7 +16,7 @@ import re
 import tarfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Required, TypedDict
 
 import httpx
@@ -108,10 +108,9 @@ class GeminiAPI(StrictFake):
     def _id(self, kind: str) -> str:
         return f"{kind}-{next(self._ids):04d}"
 
-    def _stamp(self, *, precise: bool = False) -> str:
-        at = datetime.now(UTC).replace(microsecond=0)
-        if precise:
-            return (at + timedelta(microseconds=142775)).isoformat().replace("+00:00", "Z")
+    def _stamp(self) -> str:
+        """Now, as the create reply stamps it: with microseconds (#1614)."""
+        at = datetime.now(UTC).replace(microsecond=142775)
         return at.isoformat().replace("+00:00", "Z")
 
     # agents and environments
@@ -159,8 +158,8 @@ class GeminiAPI(StrictFake):
         raw: dict[str, Json] = {
             "id": id_,
             "status": "in_progress",
-            "created": self._stamp(precise=True),
-            "updated": self._stamp(precise=True),
+            "created": self._stamp(),
+            "updated": self._stamp(),
             "steps": [],
             "environment_id": self._workspace(body.get("environment")),
             **{k: v for k, v in body.items() if k not in ("input", "background", "store")},
@@ -229,10 +228,11 @@ class GeminiAPI(StrictFake):
         interaction.done.set()
 
     def _snapshot(self, id_: str) -> dict[str, Json]:
-        # Later reads are whole seconds (#1614) and carry the tools as sent (#1767).
+        # Every read says whole seconds, so a turn that ends within the second it
+        # started reads older than its create reply (#1614).
         raw = dict(self.interactions[id_].raw)
-        raw["created"] = raw["created"].split(".")[0] + "Z"
-        raw["updated"] = self._stamp()
+        for key in ("created", "updated"):
+            raw[key] = raw[key].split(".")[0] + "Z"
         return raw
 
     def _read(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
