@@ -35,6 +35,7 @@ from daimon.core.channel_budget import (
     load_budget_status,
     may_set_channel_budget,
     parse_budget_spec,
+    require_alert_destination,
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.channel_post_check import alert_channel_problem
@@ -368,6 +369,17 @@ async def _set_channel_budget_impl(
         alert_id = await _budget_channel(runtime, auth, alert_channel_id)
         await _require_alert_channel_postable(runtime, auth, platform, alert_id)
         spec = replace(spec, alert_channel_id=alert_id)
+    async with runtime.session_factory() as session:
+        try:
+            await require_alert_destination(
+                session,
+                spec,
+                tenant_id=auth.tenant_id,
+                platform=platform,
+                settings=runtime.settings,
+            )
+        except ChannelBudgetError as err:
+            raise ToolError(f"{err}. Nothing was saved.") from err
     await require_budget_write(runtime, auth, target)
     budget = await set_budget(
         runtime.session_factory,

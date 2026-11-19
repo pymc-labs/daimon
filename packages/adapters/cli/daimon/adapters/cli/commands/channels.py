@@ -41,6 +41,7 @@ from daimon.core.channel_budget import (
     describe_budget,
     load_budget_status,
     parse_budget_spec,
+    require_alert_destination,
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
@@ -249,6 +250,13 @@ async def budget_set(
         if problem is not None:
             raise typer.BadParameter(problem)
         spec = replace(spec, alert_channel_id=alert_id)
+    async with rt.sessionmaker() as session:
+        try:
+            await require_alert_destination(
+                session, spec, tenant_id=tenant_id, platform=platform, settings=rt.settings
+            )
+        except ChannelBudgetError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     budget = await set_budget(
         rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target, spec=spec
     )

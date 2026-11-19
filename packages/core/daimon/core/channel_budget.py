@@ -24,10 +24,12 @@ from typing import Literal, get_args
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
+from daimon.core.config import Settings
 from daimon.core.errors import DaimonError
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetOnLimit, BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
+from daimon.core.support_routing import support_destination
 from daimon.core.windows import (
     WINDOWS,
     WindowError,
@@ -161,6 +163,32 @@ def parse_budget_spec(
         on_limit=mode,
         alert_channel_id=alert_channel_id,
     )
+
+
+NO_ALERT_DESTINATION = (
+    "An alert-only budget needs an alert channel, or a support channel to alert in"
+)
+
+
+async def require_alert_destination(
+    session: AsyncSession,
+    spec: BudgetSpec,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    settings: Settings,
+) -> None:
+    """An alert budget with no alert channel posts to the support channel; with neither it
+    would never alert and say nothing, so every surface refuses it before the write."""
+    if (
+        spec.on_limit == "alert"
+        and spec.alert_channel_id is None
+        and await support_destination(
+            session, tenant_id=tenant_id, platform=platform, settings=settings
+        )
+        is None
+    ):
+        raise ChannelBudgetError(NO_ALERT_DESTINATION)
 
 
 # The window rules live in `daimon.core.windows`, shared with support plans.

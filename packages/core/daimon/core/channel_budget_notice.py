@@ -371,6 +371,12 @@ async def claim_budget_alert_post(
         return None
     destination = await _alert_destination(session, budget, tenant, settings)
     if destination is None:
+        log.warning(
+            "channel_budget.alert_destination_missing",
+            tenant_id=str(tenant_id),
+            platform=platform,
+            channel_id=channel_id,
+        )
         return None
     if not await claim_budget_alert(session, budget_id=budget.id, key=key, level=level):
         return None

@@ -35,6 +35,7 @@ from daimon.testing.factories import (
 )
 from daimon.testing.settings_mock import bare_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
@@ -372,8 +373,12 @@ async def test_an_alert_without_a_destination_claims_nothing(
 ) -> None:
     tenant = await _alert_budget(db_session, spent="6", channel=None)
     sent: list[BudgetAlert] = []
-    await _alert(db_session_factory, tenant, sent)
+    with capture_logs() as logs:
+        await _alert(db_session_factory, tenant, sent)
     assert sent == [], "no alert channel and no support channel leaves nowhere to post"
+    assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
+        "channel_budget.alert_destination_missing"
+    ], "the poller says why it stays silent"
     async with db_session_factory() as session:
         status = await channel_budgets.get_channel_budget(
             session, tenant_id=tenant.id, platform=tenant.platform, channel_id="chan-1"
