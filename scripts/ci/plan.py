@@ -80,8 +80,10 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/mcp/", "mcp"),
     ("packages/adapters/scheduler/", "scheduler"),
     ("packages/testing/", "testing"),
-    # Only a migration needs the migrate job; any other core change skips it.
+    # Only a migration or a change to the table models needs the migrate job; any other
+    # core change skips it.
     ("packages/core/alembic/", "migrations"),
+    ("packages/core/daimon/core/_models.py", "migrations"),
     # Core and the CLI, which migrations and the smoke turn run through.
     ("packages/", "core"),
     ("defaults/", "core"),

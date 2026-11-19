@@ -39,6 +39,7 @@ def _ci() -> dict[str, Any]:
         ("packages/testing/daimon/testing/asgi.py", "testing"),
         ("packages/core/daimon/core/x.py", "core"),
         ("packages/core/alembic/versions/0100_x.py", "migrations"),
+        ("packages/core/daimon/core/_models.py", "migrations"),
         ("alembic.ini", "migrations"),
         ("tests/test_ci_plan.py", "repo"),
         ("tests/conftest.py", "tests"),
@@ -119,6 +120,10 @@ def test_test_helpers_run_every_pytest_job() -> None:
 def test_a_migration_runs_the_upgrade_check_and_nothing_else_does() -> None:
     _, jobs = _tests(["packages/core/alembic/versions/0220_x.py"])
     assert "migration-upgrade" in jobs
+    _, jobs = _tests(["packages/core/daimon/core/_models.py"])
+    assert "migration-upgrade" in jobs, "a change to the table models can need a migration"
+    _, jobs = _tests(["packages/core/daimon/core/stores/domain.py"])
+    assert "migration-upgrade" not in jobs
     _, jobs = _tests(["packages/adapters/slack/daimon/adapters/slack/app.py"])
     assert "migration-upgrade" not in jobs
     _, jobs = _tests(["scripts/ci/migration_upgrade.py"])

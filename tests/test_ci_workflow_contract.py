@@ -898,3 +898,35 @@ def test_guard_jobs_run_the_checks_in_parallel_and_stay_out_of_the_deploy_gate()
         assert jobs[name]["needs"] == "changes"
         assert jobs[name]["timeout-minutes"] <= 15
         assert name not in jobs["deploy-gcp"]["needs"]
+
+
+def test_the_tls_check_retries_a_blip_and_fails_a_stale_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runpy
+    import time
+
+    import httpx
+
+    def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(time, "sleep", no_sleep)
+    answers = {"calls": 0, "blips": 1}
+
+    def get(_client: httpx.Client, url: str) -> httpx.Response:
+        answers["calls"] += 1
+        if answers["blips"] > 0 and answers["calls"] == 1 or answers["blips"] < 0:
+            raise httpx.ConnectError("handshake")
+        return httpx.Response(401, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    script = str(_ROOT / "scripts/ci/image_tls_check.py")
+
+    with pytest.raises(SystemExit) as one_blip:
+        runpy.run_path(script, run_name="__main__")
+    assert one_blip.value.code == 0, "one blip at one provider must not fail the run"
+    answers.update(calls=0, blips=-1)
+    with pytest.raises(SystemExit) as stale:
+        runpy.run_path(script, run_name="__main__")
+    assert stale.value.code == 1, "a store that never handshakes still fails"
