@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from daimon.core._models import ChannelBudget
 from daimon.core.stores import read_persisted_columns
-from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
+from daimon.core.stores.domain import BudgetOnLimit, BudgetWindow, ChannelBudgetRow
 from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
@@ -58,6 +58,16 @@ async def list_channel_budgets(
     return [ChannelBudgetRow.model_validate(row) for row in rows]
 
 
+async def list_alert_budgets(session: AsyncSession, *, platform: str) -> list[ChannelBudgetRow]:
+    """Every tenant's alert-only budgets on `platform`, for the alert poller."""
+    rows = await session.scalars(
+        select(ChannelBudget).where(
+            ChannelBudget.platform == platform, ChannelBudget.on_limit == "alert"
+        )
+    )
+    return [ChannelBudgetRow.model_validate(row) for row in rows]
+
+
 async def set_channel_budget(
     session: AsyncSession,
     *,
@@ -69,6 +79,8 @@ async def set_channel_budget(
     starts_at: datetime | None,
     ends_at: datetime | None,
     set_by_account_id: uuid.UUID | None,
+    on_limit: BudgetOnLimit = "stop",
+    alert_channel_id: str | None = None,
 ) -> ChannelBudgetRow:
     """Insert or replace the channel's budget; the table's CHECKs refuse bad bounds."""
     values = {
@@ -78,6 +90,10 @@ async def set_channel_budget(
         "ends_at": ends_at,
         "set_by_account_id": set_by_account_id,
         "exhausted_notice_key": None,
+        "on_limit": on_limit,
+        "alert_channel_id": alert_channel_id,
+        "alert_window_key": None,
+        "alert_level": 0,
     }
     stmt = (
         pg_insert(ChannelBudget)
@@ -106,7 +122,7 @@ async def raise_channel_budget(
     """Add ``amount_usd`` to the channel's limit in one statement; None when it has no budget.
 
     A raised limit may lift the channel out of its exhausted state, so the
-    exhausted notice may go out again.
+    exhausted notice and the alerts may go out again.
     """
     stmt = (
         update(ChannelBudget)
@@ -119,6 +135,8 @@ async def raise_channel_budget(
             limit_usd=ChannelBudget.limit_usd + amount_usd,
             updated_at=func.now(),
             exhausted_notice_key=None,
+            alert_window_key=None,
+            alert_level=0,
         )
         .returning(ChannelBudget)
         .execution_options(populate_existing=True)
@@ -171,4 +189,49 @@ async def release_exhausted_notice(
         update(ChannelBudget)
         .where(ChannelBudget.id == budget_id, ChannelBudget.exhausted_notice_key == key)
         .values(exhausted_notice_key=None, updated_at=ChannelBudget.updated_at)
+    )
+
+
+async def claim_budget_alert(
+    session: AsyncSession, *, budget_id: uuid.UUID, key: str, level: int
+) -> bool:
+    """Record that window ``key``'s alert for multiple ``level`` is going out; False if sent.
+
+    One UPDATE, so of several workers that see the same spend only one wins.
+    """
+    stmt = (
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.id == budget_id,
+            (ChannelBudget.alert_window_key.is_distinct_from(key))
+            | (ChannelBudget.alert_level < level),
+        )
+        .values(alert_window_key=key, alert_level=level, updated_at=ChannelBudget.updated_at)
+    )
+    return cast(CursorResult[Any], await session.execute(stmt)).rowcount > 0
+
+
+async def release_budget_alert(
+    session: AsyncSession,
+    *,
+    budget_id: uuid.UUID,
+    key: str,
+    level: int,
+    prior_key: str | None,
+    prior_level: int,
+) -> None:
+    """Undo `claim_budget_alert` when the alert was not delivered.
+
+    Matching on ``key`` and ``level`` leaves a later claim, or a reset, alone.
+    """
+    await session.execute(
+        update(ChannelBudget)
+        .where(
+            ChannelBudget.id == budget_id,
+            ChannelBudget.alert_window_key == key,
+            ChannelBudget.alert_level == level,
+        )
+        .values(
+            alert_window_key=prior_key, alert_level=prior_level, updated_at=ChannelBudget.updated_at
+        )
     )

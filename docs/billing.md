@@ -66,13 +66,13 @@ the ledger and to a finished turn's summary line. Usage panels and
 
 ## The gates
 
-Three gates run before a turn starts, always in this order: balance, channel
-budget, allowance.
+Three gates run before a turn, in this order: balance, channel budget,
+allowance.
 
 1. **Balance.** A prepaid tenant needs a strictly positive balance. This holds
-   even with no Stripe setup, so a spent trial credit blocks the tenant.
+   without Stripe, so a spent trial credit blocks the tenant.
 2. **Channel budget.** The channel's spend in its window must be under its
-   [budget](#channel-budgets).
+   [budget](#channel-budgets), unless that budget only alerts.
 3. **Allowance.** A person's spend must be under the [allowance](allowances.md)
    that governs them, if one does. [Long jobs](#long-jobs) add a separate
    per-job limit.
@@ -92,8 +92,8 @@ routine runs and wakes pass the same gates. Unprompted thread participation skip
 A watch wake checks all three again before each model call, approval card and
 report it sends.
 
-A finished turn ends with one summary line: the agent, the time, what the turn
-was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
+A finished turn ends with one summary line: agent, time, debit and money left,
+for example `Ada  12s  $0.042 used  $41.20
 left`. The money left is the channel budget's remainder, else the prepaid
 balance.
 
@@ -110,19 +110,18 @@ concurrent-turn cap times one turn's cost. The cap is the adapter's
 `daimon tenants turn-cap`. A turn over the cap queues and runs the balance gate
 again once it holds a slot.
 
-MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
+MCP `start_turn` sessions are worse: their spend reaches the ledger only when
 a read or the sweep settles it, and they have no concurrency cap.
 
 ### Exempt usage
 
 A caller with no platform user, such as an operator, the CLI or an internal
-token, runs with no balance check, no allowance check and no debit. The operator
-absorbs that spend. The session is stamped billing-exempt when created, so its
+token, runs with no balance check, no allowance check and no debit. The session is stamped billing-exempt when created, so its
 creator's posture covers every turn on it. An exempt caller on a billed
 session, such as `daimon run --session` on a chat thread, is debited to the
 tenant. `daimon sessions create` makes a session that is never settled.
 
-To see absorbed spend, total the `usage_sweep.exempt_skipped` log lines by
+To see the spend the operator absorbs, total the `usage_sweep.exempt_skipped` log lines by
 distinct `managed_session_id`, taking the latest line of each.
 
 ## Channel budgets
@@ -134,15 +133,16 @@ or the CLI. With no budget there is no limit, and nothing is set by default.
 daimon channels budget set <platform> <workspace-id> <channel-id> <usd>
 ```
 
-Budgets work on Discord, Slack and Teams channels, with or without Stripe.
-A Teams 1:1 chat has none.
+Budgets work on Discord, Slack and Teams channels, not Teams 1:1 chats,
+with or without Stripe.
 
 - **Spend** is the channel's debits in the window, markup included. A thread
   counts toward its channel.
 - **Window** is `monthly` (the UTC month), `total` (since `starts_at`, or ever)
   or `fixed` (from `starts_at` to `ends_at`).
 - **The gate** trips once spend reaches the limit, so a limit of 0 stops the
-  channel. A turn in progress finishes past it.
+  channel. A turn in progress finishes past it. An `--on-limit alert` budget
+  only posts an alert at each multiple of the limit.
 - **The notice.** The first chat turn refused in a window DMs the server
   admins. Raising the budget re-arms it.
   `DAIMON_BUDGET_NOTICES` turns it off per tenant

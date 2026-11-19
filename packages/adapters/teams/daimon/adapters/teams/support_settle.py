@@ -1,4 +1,4 @@
-"""Set charge and Decline on a pending support post, at parity with Slack and Discord.
+"""Accept or Set charge, and Decline, on a pending support post, as on Slack and Discord.
 
 Anyone acting in the channel the request was posted to may settle (decision 4);
 `settle_from_post` audits it. The requester is never messaged (decision 8):
@@ -37,6 +37,7 @@ from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import (
     CHARGE_FIELD,
     LIMIT_GONE,
+    OWN_REQUEST,
     REQUEST_GONE,
     SETTLE_ELSEWHERE,
     SupportError,
@@ -68,7 +69,7 @@ def _escalation_id(value: object) -> uuid.UUID | None:
 
 
 class TeamsSupportSettle:
-    """The Set charge and Decline buttons on a pending request's support post."""
+    """The Accept, Set charge and Decline buttons on a pending request's support post."""
 
     def __init__(self, runtime: TeamsRuntime) -> None:
         self._runtime = runtime
@@ -128,7 +129,7 @@ class TeamsSupportSettle:
             outcome = SettleOutcome(status="already_settled", row=row)
             return await self._finish(ctx, actor, data, before=row, outcome=outcome)
         charge = None
-        if data.get("op") != "decline":
+        if data.get("op") not in ("decline", "accept"):
             value = data.get(CHARGE_INPUT)
             try:
                 charge = parse_amount(
@@ -136,7 +137,8 @@ class TeamsSupportSettle:
                 )
             except SupportError as err:
                 return toast(str(err))
-        return await self._settle(ctx, actor, data, row=row, charge=charge)
+        accept = data.get("op") == "accept"
+        return await self._settle(ctx, actor, data, row=row, charge=charge, accept=accept)
 
     async def _settle(
         self,
@@ -146,8 +148,9 @@ class TeamsSupportSettle:
         *,
         row: SupportEscalationRow,
         charge: Decimal | None,
+        accept: bool = False,
     ) -> AdaptiveCardInvokeResponse:
-        """Settle at `charge` (None declines) and say how it went."""
+        """Settle at `charge` (None declines), or `accept`, and say how it went."""
         async with self._runtime.sessionmaker() as session:
             principal = await find_platform_principal(
                 session, tenant_id=actor.tenant_id, platform="teams", external_id=actor.user_id
@@ -162,6 +165,8 @@ class TeamsSupportSettle:
             channel_id=ctx.activity.conversation.id.split(";", 1)[0],
             parent_id=None,
             default_channel_id=deployment_channel(self._runtime.settings.support, "teams"),
+            accept=accept,
+            native_admin=actor.is_platform_admin,
         )
         log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
         return await self._finish(ctx, actor, data, before=row, outcome=outcome)
@@ -182,6 +187,8 @@ class TeamsSupportSettle:
             return toast(LIMIT_GONE)
         if outcome.status == "not_here":
             return toast(SETTLE_ELSEWHERE)
+        if outcome.status == "own_request":
+            return toast(OWN_REQUEST)
         if outcome.status in ("invalid", "over_balance"):
             return toast(
                 settle_range_text(after.bounds, counted=after.counted, available=outcome.available)

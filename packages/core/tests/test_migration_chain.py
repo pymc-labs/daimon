@@ -179,6 +179,8 @@ TAIL = (
     "0215_gemini_records",
     "0216_usage_obs_observed_at",
     "0217_monitored_events",
+    "0218_support_menu_channel",
+    "0219_channel_budget_alerts",
 )
 HEAD = TAIL[-1]
 

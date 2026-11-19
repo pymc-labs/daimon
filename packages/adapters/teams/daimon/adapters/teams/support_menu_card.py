@@ -16,6 +16,7 @@ from daimon.adapters.teams.card_actions import error_text, text_lines
 from daimon.adapters.teams.post_size import fit_lines
 from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.support import (
+    ACCEPT,
     CHARGE_FIELD,
     CHOOSE_OPTION,
     CLIENT_NOT_NOTIFIED,
@@ -188,24 +189,42 @@ def _note_blocks(note: str) -> list[CardElement]:
 def settle_card(row: SupportEscalationRow, lines: Sequence[str]) -> AdaptiveCard:
     """The support channel's post of a pending request: `lines`, the note, the charge and buttons.
 
-    The input starts at the request's hold; Decline sends no input.
+    A fixed price has Accept and no input; else the input starts at the request's hold.
+    Accept and Decline send no input.
     """
     shown = [line for line in lines if line]
     data: dict[str, object] = {"action": SETTLE_VERB, "request": row.id.hex}
-    actions: list[Action] = [
+    fixed = row.accept_charge is not None
+    first = (
         ExecuteAction(
+            title=ACCEPT,
+            verb=SETTLE_VERB,
+            data=data | {"op": "accept"},
+            style="positive",
+            associated_inputs="none",
+        )
+        if fixed
+        else ExecuteAction(
             title=SET_CHARGE, verb=SETTLE_VERB, data=data | {"op": "set"}, style="positive"
-        ),
+        )
+    )
+    actions: list[Action] = [
+        first,
         ExecuteAction(
             title=DECLINE, verb=SETTLE_VERB, data=data | {"op": "decline"}, associated_inputs="none"
         ),
     ]
+    amount = (
+        []
+        if fixed
+        else [NumberInput(id=CHARGE_INPUT, label=CHARGE_FIELD, value=float(row.hold), min=0)]
+    )
     return AdaptiveCard(
         body=[
             *text_lines(*shown),
             subtle(CLIENT_NOT_NOTIFIED),
             *_note_blocks(row.note),
-            NumberInput(id=CHARGE_INPUT, label=CHARGE_FIELD, value=float(row.hold), min=0),
+            *amount,
             ActionSet(actions=actions),
         ],
         fallback_text=shown[0] if shown else TITLE,

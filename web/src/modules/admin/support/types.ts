@@ -45,6 +45,8 @@ export type Menu = {
   summary: string
   options: number
   used_in: { scope: Scope; scope_id: string; name: string }[]
+  /** Where its requests go; null is the request channel. */
+  channel: { id: string; name: string } | null
   body: Record<string, unknown>
 }
 

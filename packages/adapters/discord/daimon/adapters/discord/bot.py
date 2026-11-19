@@ -23,7 +23,7 @@ import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
-from daimon.adapters.discord.budget_notice import with_budget_notifier
+from daimon.adapters.discord.budget_notice import discord_budget_alerter, with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.context import (
@@ -111,7 +111,7 @@ from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_backend import backend_refusal_causes
-from daimon.core.channel_budget_notice import drain_budget_notices
+from daimon.core.channel_budget_notice import drain_budget_notices, run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.config import Settings, env_dm_policy
 from daimon.core.continuity.continuation import (
@@ -1232,6 +1232,15 @@ class DaimonBot(commands.Bot):
                             default_agent_name=self.runtime.deployment_default.agent_name,
                         ),
                     ),
+                    should_stop=lambda: self.draining or self.is_closed(),
+                )
+            )
+            self._spawn(
+                run_budget_alert_poller(
+                    self.runtime.sessionmaker,
+                    platform="discord",
+                    alerter=discord_budget_alerter(self),
+                    settings=self.runtime.settings,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )

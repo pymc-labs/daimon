@@ -458,12 +458,18 @@ async def _set_menu_impl(
                 runtime.session_factory, _actor(auth), platform=platform, key=key, expected=expected
             )
             return SetSupportMenuResult(key=key.strip(), revision=0, summary="")
+        spec = parse_menu(body)
+        pick = None
+        if (c := spec.channel) is not None:
+            pick = await _channel_pick(runtime, auth, platform, c.id, c.service_url)
         row = await set_menu(
             runtime.session_factory,
             _actor(auth),
             platform=platform,
             key=key,
-            spec=parse_menu(body),
+            spec=spec,
+            channel=pick,
+            own_allowed=pick is not None and own_channel_allowed(runtime.settings),
             expected=expected,
         )
     except (SupportError, ChannelChangeRefused, StaleChannelValue) as exc:
@@ -526,21 +532,9 @@ async def _set_channel_impl(
 ) -> SupportChannelResult:
     """Send this workspace's requests to `channel_id`; null goes back to the default."""
     platform = _require_support_admin(auth)
-    pick: ChannelPick | None = None
+    pick = None
     if channel_id is not None:
-        if platform == "teams" and not service_url:
-            raise ToolError("Teams needs service_url, the bot's service URL. Nothing was saved.")
-        channel = await resolve_channel(runtime, auth, channel_id)
-        pick = ChannelPick(
-            platform=platform,
-            channel_id=channel.channel_id,
-            discord_guild_id=auth.external_id if platform == "discord" else None,
-            slack_team_id=_require_team_id(auth) if platform == "slack" else None,
-            teams_team_id=await _teams_team(runtime, auth, channel.channel_id)
-            if platform == "teams"
-            else None,
-            teams_service_url=service_url if platform == "teams" else None,
-        )
+        pick = await _channel_pick(runtime, auth, platform, channel_id, service_url)
     try:
         await set_support_channel(
             runtime.session_factory,
@@ -552,6 +546,25 @@ async def _set_channel_impl(
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
     return await _get_channel_impl(runtime, auth)
+
+
+async def _channel_pick(
+    runtime: McpRuntime, auth: AuthIdentity, platform: str, channel_id: str, service_url: str | None
+) -> ChannelPick:
+    """A channel of the workspace for requests, as `support_channel_set` and a menu take it."""
+    if platform == "teams" and not service_url:
+        raise ToolError("Teams needs service_url, the bot's service URL. Nothing was saved.")
+    channel = await resolve_channel(runtime, auth, channel_id)
+    return ChannelPick(
+        platform=platform,
+        channel_id=channel.channel_id,
+        discord_guild_id=auth.external_id if platform == "discord" else None,
+        slack_team_id=_require_team_id(auth) if platform == "slack" else None,
+        teams_team_id=await _teams_team(runtime, auth, channel.channel_id)
+        if platform == "teams"
+        else None,
+        teams_service_url=service_url if platform == "teams" else None,
+    )
 
 
 async def _teams_team(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> str:
@@ -599,8 +612,11 @@ async def _settle_request_impl(
     request_id: str,
     charge: str | None,
     expected_charge: str | None,
+    accept: bool = False,
 ) -> SettleSupportRequestResult:
     _require_support_admin(auth)
+    if accept and charge is not None:
+        raise ToolError("Pass charge or accept, not both. Nothing was saved.")
     try:
         escalation_id = uuid.UUID(request_id)
         amount = None if charge is None else parse_credits(charge, name="charge")
@@ -617,6 +633,7 @@ async def _settle_request_impl(
             charge=amount,
             default_allowance=runtime.settings.support.credits_per_user,
             expected=None if correction is None else Expected(correction),
+            accept=accept,
         )
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
@@ -728,9 +745,10 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SetSupportMenuResult:
         """Set, replace or remove (``body`` null) a support menu. Admin-only.
 
-        ``key``: 1 to 32 lowercase letters, digits or dashes. ``body``: a ``name`` and
-        1 to 10 ``options``, each with ``key``, ``label``, an optional
-        ``description``, a ``price`` and up to 4 ``fields``. Prices:
+        ``key``: 1 to 32 lowercase letters, digits or dashes. ``body``: a ``name``, an
+        optional ``channel`` its requests go to (``{"id", "service_url"}``, checked as
+        ``support_channel_set`` checks one) and 1 to 10 ``options``, each with ``key``,
+        ``label``, an optional ``description``, a ``price`` and up to 4 ``fields``. Prices:
         ``{"kind": "fixed", "amount"}``; ``{"kind": "steps", "label", "steps":
         [{"label", "amount"}]}``; ``{"kind": "range", "min", "max"}``; ``{"kind":
         "quoted"}`` with optional ``min`` and ``max``. Amounts are decimal strings.
@@ -842,13 +860,18 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"admin"})
     async def support_requests_settle(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, request_id: str, charge: str | None, expected_charge: str | None = None
+        ctx: Context,
+        request_id: str,
+        charge: str | None,
+        expected_charge: str | None = None,
+        accept: bool = False,
     ) -> SettleSupportRequestResult:
         """Settle a support request at ``charge`` credits, or decline it (null). Admin-only.
 
+        ``accept`` true, with ``charge`` null, charges a fixed or steps price as it is.
         A range or quoted option takes an amount within its bounds. A request
         already charged at submit (``charge`` shown, not pending) keeps that
-        charge when ``charge`` equals it, or is refunded when null. To correct
+        charge when ``charge`` equals it or on ``accept``, or is refunded when null. To correct
         or refund one a person settled, pass its current charge as
         ``expected_charge``. The person who asked is not told; read ``text`` back.
         Example: ``request_id`` from ``support_requests_list``, ``charge="2.5"``.
@@ -859,4 +882,5 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             request_id=request_id,
             charge=charge,
             expected_charge=expected_charge,
+            accept=accept,
         )

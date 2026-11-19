@@ -30,7 +30,7 @@ const C = (id: string, name: string | null, path: PathNode[], more: Partial<Stor
 })
 const monthly = (spent: number, limit = 25): Channel["budget"] => ({
   limit_usd: limit.toFixed(2), window: "monthly", starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)),
-  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit, on_limit: "stop", alert_channel_id: null,
 })
 const thread = (id: string, name: string, path: PathNode[], more: Partial<Stored> = {}) => C(id, name, path, { kind: "thread", ...more })
 
@@ -306,17 +306,19 @@ export const channelsHandlers: HttpHandler[] = [
     if (!c) return notFound()
     if (c.id === "web") return invalid("Web chat has no channel budget.")
     const body = (await request.json()) as BudgetChange
-    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at }
+    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at, on_limit: c.budget.on_limit, alert_channel_id: c.budget.alert_channel_id }
     if (!same(body.expected, now)) return stale()
     if (body.action === "clear") return changed(c, { budget: null }, "budget", now, null)
     const limit = body.action === "raise" ? Number(c.budget?.limit_usd ?? 0) + Number(body.amount_usd) : Number(body.limit_usd)
     if (!(limit > 0)) return invalid("Enter a budget in dollars and pick a window.")
     const spent = c.budget?.spent_usd ?? c.spend.month_usd
+    const onLimit = body.action === "raise" ? (c.budget?.on_limit ?? "stop") : (body.on_limit ?? "stop")
     const budget = {
       limit_usd: limit.toFixed(2), window: body.window ?? c.budget?.window ?? "monthly", starts_at: body.starts_at ?? null, ends_at: body.ends_at ?? null,
-      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: onLimit === "stop" && spent >= limit,
+      on_limit: onLimit, alert_channel_id: onLimit === "alert" ? (body.alert_channel_id ?? c.budget?.alert_channel_id ?? null) : null,
     }
-    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at })
+    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at, on_limit: budget.on_limit, alert_channel_id: budget.alert_channel_id })
   }),
   http.get("/api/channel-defaults", async () => {
     await wait()

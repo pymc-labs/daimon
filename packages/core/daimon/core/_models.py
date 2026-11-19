@@ -1305,6 +1305,11 @@ class ChannelBudget(Base):
         CheckConstraint(
             "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_channel_budgets_window"
         ),
+        CheckConstraint("on_limit IN ('stop', 'alert')", name="ck_channel_budgets_on_limit"),
+        CheckConstraint(
+            "alert_channel_id IS NULL OR on_limit = 'alert'",
+            name="ck_channel_budgets_alert_channel",
+        ),
         CheckConstraint(
             "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
             "AND starts_at < ends_at) "
@@ -1331,6 +1336,13 @@ class ChannelBudget(Base):
     )
     # The window whose exhausted notice went out; cleared when the budget is set or raised.
     exhausted_notice_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # `stop` refuses turns at the limit; `alert` never does and posts to `alert_channel_id`
+    # (NULL: the support destination) at each full multiple of the limit.
+    on_limit: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'stop'"))
+    alert_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The window and highest multiple already alerted; cleared when the budget is set or raised.
+    alert_window_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alert_level: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -2612,8 +2624,10 @@ class SupportMenu(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
     )
-    # `SupportOption`s as JSON; the menu is `name` and these.
+    # `SupportOption`s as JSON; the menu is `name`, these and `channel`.
     options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    # `support.MenuChannel` as JSON; NULL: requests go to the workspace's channel.
+    channel: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )

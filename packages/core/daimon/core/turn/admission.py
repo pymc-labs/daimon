@@ -1898,7 +1898,6 @@ async def _admit_gates(
                 server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
-
     register_spend_recheck(
         partial(
             spend_gate_in_new_session,

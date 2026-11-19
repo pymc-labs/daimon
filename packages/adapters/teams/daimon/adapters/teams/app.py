@@ -41,7 +41,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.billing_panel import TeamChannels
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
-from daimon.adapters.teams.budget_notice import with_budget_notifier
+from daimon.adapters.teams.budget_notice import teams_budget_alerter, with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -105,6 +105,7 @@ from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -438,6 +439,7 @@ class TeamsApp:
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime = with_budget_notifier(runtime, direct)
+        self._budget_alerter = None if direct is None else teams_budget_alerter(runtime, direct)
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -506,6 +508,7 @@ class TeamsApp:
         self._serving = asyncio.Event()
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
+        self._budget_alert_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Bot Framework cannot list a chat's history).
         self._last_message_at: dict[str, datetime] = {}
@@ -564,6 +567,17 @@ class TeamsApp:
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"
+                    )
+                if self._budget_alerter is not None:
+                    alerts = run_budget_alert_poller(
+                        self.runtime.sessionmaker,
+                        platform="teams",
+                        alerter=self._budget_alerter,
+                        settings=self.runtime.settings,
+                        should_stop=lambda: self.draining,
+                    )
+                    self._budget_alert_poller = asyncio.create_task(
+                        alerts, name="teams.budget-alerts"
                     )
                 if self._team_channels is not None:
                     listing = run_channel_listing(
@@ -880,6 +894,7 @@ class TeamsApp:
         pollers = (
             self._wake_poller,
             self._delivery_poller,
+            self._budget_alert_poller,
             self._reclaimer,
             self._renewals,
             self._channel_listing,

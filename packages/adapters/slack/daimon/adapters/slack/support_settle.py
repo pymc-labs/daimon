@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any, Final, cast
 
 import structlog
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.click_replies import (
     CLICK_REPLY_ERRORS,
     error_name,
@@ -31,6 +32,7 @@ from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.support_post import (
+    SETTLE_ACCEPT_ACTION_ID,
     SETTLE_DECLINE_ACTION_ID,
     closed_post,
     status_line,
@@ -44,6 +46,7 @@ from daimon.core.support import (
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
     LIMIT_GONE,
+    OWN_REQUEST,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
@@ -196,6 +199,9 @@ async def _finish(
     if outcome.status == "not_here":
         await _notice(client, post, SETTLE_ELSEWHERE, error=True, view_id=view_id)
         return
+    if outcome.status == "own_request":
+        await _notice(client, post, OWN_REQUEST, error=True, view_id=view_id)
+        return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
         await _notice(client, post, text, error=True, view_id=view_id)
@@ -220,8 +226,9 @@ async def _settle(
     row: SupportEscalationRow,
     charge: Decimal | None,
     message: dict[str, Any] | None = None,
+    accept: bool = False,
 ) -> None:
-    """Settle at `charge` (None declines) and say how it went."""
+    """Settle at `charge` (None declines), or `accept`, and say how it went."""
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=post.team_id)
     async with runtime.sessionmaker() as session:
         principal = await find_platform_principal(
@@ -237,6 +244,12 @@ async def _settle(
         channel_id=post.channel_id,
         parent_id=None,
         default_channel_id=deployment_channel(runtime.settings.support, "slack"),
+        accept=accept,
+        # Asked only of the requester, the one click the answer can change.
+        native_admin=post.user_id == row.platform_user_id
+        and await resolve_is_platform_admin(
+            client, user_id=post.user_id, host_team_id=post.team_id
+        ),
     )
     log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(client, post, before=row, outcome=outcome, message=message)
@@ -309,11 +322,12 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
     client = await resolve_web_client(runtime, team_id=post.team_id)
     if client is None:
         return
-    # Set charge opens its form, and the checks below (a request read and a team
-    # lookup) could outlive the click's 3-second trigger_id, so a loading modal
-    # opens first and is updated, as on the escalate click.
+    # Set charge opens its form (Accept and Decline settle at once), and the checks
+    # below (a request read and a team lookup) could outlive the click's 3-second
+    # trigger_id, so a loading modal opens first and is updated, as on the escalate click.
     view_id = None
-    if action.get("action_id") != SETTLE_DECLINE_ACTION_ID:
+    action_id = action.get("action_id")
+    if action_id not in (SETTLE_DECLINE_ACTION_ID, SETTLE_ACCEPT_ACTION_ID):
         view_id = await open_modal(
             client,
             trigger_id=trigger_id,
@@ -336,8 +350,11 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
             await _finish(
                 client, post, before=row, outcome=outcome, message=message, view_id=view_id
             )
-        elif action.get("action_id") == SETTLE_DECLINE_ACTION_ID:
-            await _settle(runtime, client, post, row=row, charge=None, message=message)
+        elif action_id in (SETTLE_DECLINE_ACTION_ID, SETTLE_ACCEPT_ACTION_ID):
+            accept = action_id == SETTLE_ACCEPT_ACTION_ID
+            await _settle(
+                runtime, client, post, row=row, charge=None, message=message, accept=accept
+            )
         else:
             view = settle_modal(row, channel_id=post.channel_id, message_ts=post.ts)
             if view_id is None or not await update_modal(client, view_id=view_id, view=view):

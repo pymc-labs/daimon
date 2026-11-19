@@ -36,6 +36,7 @@ from daimon.core.support import (
     cheapest_bounds,
     format_credits,
     governing_limit,
+    has_set_charge,
     hold_for,
     inactive_text,
     limit_period,
@@ -61,7 +62,6 @@ from daimon.core.support import (
     settle_problem,
     settle_range_text,
     settled_text,
-    settles_at_submit,
     snapshot_option,
     validate_answers,
 )
@@ -207,7 +207,7 @@ def test_price_bounds_when_each_kind_then_gives_lower_and_upper() -> None:
     assert price_bounds(call.price, step=1) == PriceBounds(D(1), D(1)), "the picked step"
     assert price_bounds(review.price) == PriceBounds(D(1), D(3)), "range"
     assert price_bounds(custom.price) == PriceBounds(D(0), None), "open quote"
-    assert settles_at_submit(call.price) and not settles_at_submit(review.price), "settle at submit"
+    assert has_set_charge(call.price) and not has_set_charge(review.price), "Accept charges it"
     with pytest.raises(SupportError):
         price_bounds(call.price)
     with pytest.raises(SupportError):
@@ -465,6 +465,9 @@ def test_post_status_text_when_each_state_then_reads_plainly() -> None:
     assert texts == ["Pending: 0.5-1 credits", "Charged 1 credit", "Declined"], texts
     exempt = post_status_text(status="settled", charged_to="exempt", charge=D(0), bounds=bounds)
     assert exempt == "No charge: an admin asked", exempt
+    fixed = PriceBounds(D(2), D(2))
+    one = post_status_text(status="pending", charged_to="limit", charge=None, bounds=fixed)
+    assert one == "Pending: 2 credits", one
 
 
 def test_price_text_when_each_kind_then_reads_plainly() -> None:

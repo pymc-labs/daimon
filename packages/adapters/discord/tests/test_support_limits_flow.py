@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord import feedback_reactions, support_escalation
+from daimon.adapters.discord import feedback_reactions, support_escalation, support_settle
 from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
@@ -297,7 +297,7 @@ async def test_confirm_when_charged_to_the_default_then_post_shows_facts_and_set
     assert (status, post_id) == ("pending", "555"), "held and posted"
 
 
-async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settled(
+async def test_pick_when_option_has_steps_then_held_until_accepted_at_its_price(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _seed(db_session_factory)
@@ -311,15 +311,17 @@ async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settl
     topic = modal.field_inputs["topic"]
     assert isinstance(topic, discord.ui.TextInput)
     topic._value = "Billing export"  # pyright: ignore[reportPrivateUsage]
-    submit = _interaction(bot)
-    await modal.on_submit(submit)
-    body = bot.support.send.await_args.args[0]
-    assert "Call, 1 hour: 1 credit\nCharged 1 credit" in body, "a step is charged at submit"
+    await modal.on_submit(_interaction(bot))
+    body, view = bot.support.send.await_args.args[0], bot.support.send.await_args.kwargs["view"]
+    assert "Call, 1 hour: 1 credit\nPending: 1 credit" in body, "a step waits"
     assert "Topic: Billing export" in body, "the answers are the note"
-    assert "view" not in bot.support.send.await_args.kwargs, "nothing left to settle"
-    assert _said(submit.followup.send) == (
-        "Request sent. Someone will reply.\nUsed 1 credit. 1 of 2 credits left."
-    ), "the confirmation says what it used and what is left"
+    assert [b.item.label for b in view.children] == ["Accept", "Decline"], "no amount to type"
+    ((_id, status, hold, _post),) = await _rows(db_session_factory)
+    assert (status, hold) == ("pending", D(1)), "holds its price"
+    click = _on_post(bot, body)
+    await view.children[0].callback(click)
+    assert _said(click.followup.send) == f"Charged 1 credit. {CLIENT_NOT_NOTIFIED}", "accepted"
+    assert "Charged 1 credit by <@8>" in click.edit_original_response.await_args.kwargs["content"]
 
 
 async def test_pick_when_the_menu_changed_then_options_changed(
@@ -539,10 +541,10 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
     assert (status, hold) == ("settled", D(0)), "an admin's request holds nothing"
 
 
-async def test_default_note_when_no_limit_then_post_is_unchanged(
+async def test_default_note_when_no_limit_then_post_waits_for_accept(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Without a limit the default note posts as before."""
+    """Without a limit the default note holds its credit until someone accepts it."""
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", workspace_id=_GUILD)
     bot = _bot(db_session_factory)
@@ -552,8 +554,11 @@ async def test_default_note_when_no_limit_then_post_is_unchanged(
     modal.note_input._value = "help please"  # pyright: ignore[reportPrivateUsage]
     await modal.on_submit(_interaction(bot))
     send = bot.support.send.await_args
-    assert send.args[0].split("\n\n")[2:] == ["help please"], "head, link, note: as before"
-    assert send.kwargs == {}, "no buttons and no mention override on the default post"
+    parts = send.args[0].split("\n\n")
+    assert parts[1].startswith("Pending: 1 credit"), "held, not charged"
+    assert parts[3:] == ["help please"], "head, status, link, note"
+    buttons = [b.item.label for b in send.kwargs["view"].children]
+    assert buttons == ["Accept", "Decline"], "staff accept or decline it"
 
 
 async def _pending(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[Any, str]:
@@ -623,6 +628,27 @@ async def test_decline_when_pending_then_releases_the_hold(
     async with db_session_factory() as session:
         row = await get_request(session, escalation_id=escalation_id)
     assert status == "declined" and row is not None and row.settled_by == "8"
+
+
+async def test_decline_when_the_clicker_is_a_guild_admin_requester_then_settles_own_request(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Submit exempts a guild admin, so settle lets them settle their own request."""
+    view, content = await _pending(db_session_factory)
+    bot = _bot(db_session_factory)
+    refused = _on_post(bot, content)
+    refused.user.id = 7  # the requester
+    refused.guild_id = int(_GUILD)
+    await view.children[1].callback(refused)
+    ((_id, status, _hold, _post),) = await _rows(db_session_factory)
+    assert status == "pending", "a plain requester settles nothing"
+    monkeypatch.setattr(support_settle, "requester_role", AsyncMock(return_value=(Role.ADMIN, [])))
+    click = _on_post(bot, content)
+    click.user.id = 7
+    click.guild_id = int(_GUILD)
+    await view.children[1].callback(click)
+    ((_id, status, _hold, _post),) = await _rows(db_session_factory)
+    assert status == "declined", "a guild admin settles their own request"
 
 
 async def test_settle_button_when_outside_the_support_channel_then_refuses(

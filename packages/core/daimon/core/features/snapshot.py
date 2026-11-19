@@ -37,6 +37,7 @@ from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.feature_values import feature_revision, place_values
 from daimon.core.stores.support import get_support_setup
 from daimon.core.stores.support_rows import SupportSetup
+from daimon.core.support import SupportPlace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
@@ -133,7 +134,7 @@ def support_met(
     if need == "support_channel":
         return settings.support.channel_for(platform) is not None or (
             setup is not None
-            and setup.own_platform == platform
+            and (setup.own_platform == platform or setup.menu_channel)
             and deployment_on(settings, "support_own_channel", platform)
         )
     return settings.support.credits_per_user > 0 or (setup is not None and setup.limits)
@@ -206,7 +207,10 @@ async def support_setup(
         for need in spec.requires
         if need in _SUPPORT
     )
-    return await get_support_setup(session, tenant_id=place.tenant_id) if short else None
+    if not short:
+        return None
+    where = SupportPlace(channel_id=place.channel_id, agent_id=place.agent_id)
+    return await get_support_setup(session, tenant_id=place.tenant_id, place=where)
 
 
 @cache

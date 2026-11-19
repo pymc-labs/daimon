@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from daimon.adapters.slack import budget_notice
+from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
+from daimon.testing.factories import budget_alert
 from slack_sdk.errors import SlackApiError
 
 from .conftest import shown_text
@@ -102,3 +104,20 @@ def test_a_real_runtime_gets_the_notifier() -> None:
     assert budget_notice.with_budget_notifier(runtime).turn_deps.budget_notifier is not None
     stand_in = MagicMock()
     assert budget_notice.with_budget_notifier(stand_in) is stand_in
+
+
+async def test_an_alert_posts_a_neutral_card_and_a_channel_daimon_left_is_refused() -> None:
+    runtime = SlackRuntime(**_required(SlackRuntime, settings=MagicMock()))
+    client = MagicMock()
+    client.chat_postMessage = AsyncMock()
+    alerter = budget_notice.slack_budget_alerter(runtime)
+    with patch.object(budget_notice, "resolve_web_client", AsyncMock(return_value=client)):
+        assert await alerter(budget_alert()) == "sent"
+        kwargs = client.chat_postMessage.await_args.kwargs
+        assert kwargs == {"channel": "C9", **notice_fields(shown_text(kwargs), neutral=True)}
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "not_in_channel"})
+        assert await alerter(budget_alert()) == "refused", "the next post would be refused too"
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "token_revoked"})
+        assert await alerter(budget_alert()) == "refused", "a dead token never recovers on a retry"
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "ratelimited"})
+        assert await alerter(budget_alert()) == "failed", "a rate limit passes on a later poll"

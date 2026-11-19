@@ -86,7 +86,7 @@ from daimon.adapters.slack.boot_sweep import (
     retire_orphaned_turns,
     snapshot_slack_card_intents,
 )
-from daimon.adapters.slack.budget_notice import with_budget_notifier
+from daimon.adapters.slack.budget_notice import slack_budget_alerter, with_budget_notifier
 from daimon.adapters.slack.channel_listing import list_all_once
 from daimon.adapters.slack.channel_reads import load_channel_read_policy
 from daimon.adapters.slack.context import (
@@ -212,7 +212,11 @@ from daimon.adapters.slack.support_escalation import (
     run_support_submission,
 )
 from daimon.adapters.slack.support_menu_form import MENU_CALLBACK_ID, OPTION_ACTION_ID
-from daimon.adapters.slack.support_post import SETTLE_DECLINE_ACTION_ID, SETTLE_SET_ACTION_ID
+from daimon.adapters.slack.support_post import (
+    SETTLE_ACCEPT_ACTION_ID,
+    SETTLE_DECLINE_ACTION_ID,
+    SETTLE_SET_ACTION_ID,
+)
 from daimon.adapters.slack.support_settle import (
     SETTLE_CALLBACK_ID,
     evaluate_settle_submission,
@@ -252,6 +256,7 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -673,7 +678,16 @@ class SlackApp:
             )
 
     def start_delivery_poller(self) -> asyncio.Task[None]:
-        """Post routine results to their destinations until draining."""
+        """Post routine results and budget alerts to their destinations until draining."""
+        self._spawn(
+            run_budget_alert_poller(
+                self.runtime.sessionmaker,
+                platform="slack",
+                alerter=slack_budget_alerter(self.runtime),
+                settings=self.runtime.settings,
+                should_stop=lambda: self.draining,
+            )
+        )
         return self._spawn(
             run_delivery_poller(
                 self.runtime.sessionmaker,
@@ -1640,7 +1654,7 @@ class SlackApp:
             self._spawn(handle_ask_human_click(self.runtime, payload))
         elif action_id == OPTION_ACTION_ID:
             self._spawn(handle_option_pick(self.runtime, payload))
-        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
+        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_ACCEPT_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
             self._spawn(handle_settle_click(self.runtime, payload))
         elif action_id.startswith(PROVIDER_ACTION_PREFIX):
             self._spawn(self._provider_actions.handle_click(payload))

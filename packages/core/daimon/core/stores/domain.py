@@ -671,6 +671,10 @@ class UsageEventRow(BaseModel):
     agent_id: str | None = None
 
 
+BudgetOnLimit = Literal["stop", "alert"]
+"""What a channel budget does at its limit: refuse new turns, or only alert."""
+
+
 class ChannelBudgetRow(BaseModel):
     """One channel's spend limit. `window` bounds which debits count (see `ChannelBudget`)."""
 
@@ -688,6 +692,10 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
+    alert_window_key: str | None = None
+    alert_level: int = 0
 
 
 ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]

@@ -33,6 +33,7 @@ from daimon.core.config import SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.support import PENDING_RECEIVED
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     OUT_OF_CREDITS,
@@ -62,6 +63,7 @@ _THREAD = "1700000000.000001"
 _ANSWER_TS = "1700000001.000100"
 _ESC_CHANNEL = "C_ESCALATE"
 _PERMALINK = "https://sup.slack.com/archives/C_ANSWERS/p1700000001000100"
+_PENDING = f"{received_text(remaining=19)}\n{PENDING_RECEIVED}"
 
 _EPHEMERAL = ("POST", yarl.URL("https://slack.com/api/chat.postEphemeral"))
 _POST = ("POST", yarl.URL("https://slack.com/api/chat.postMessage"))
@@ -365,7 +367,7 @@ async def test_submission_records_posts_and_confirms(
     assert body["unfurl_links"] is False and body["unfurl_media"] is False, (
         "an unfurled permalink would copy the answer into the escalation channel"
     )
-    assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
+    assert _ephemeral_texts(permalink) == [_PENDING]
 
 
 async def test_double_submit_spends_one_credit_and_posts_once(
@@ -382,7 +384,7 @@ async def test_double_submit_spends_one_credit_and_posts_once(
 
     assert len(await _rows(db_session_factory)) == 1
     assert len(_posts(permalink)) == 1, "a retry must not post twice"
-    assert _ephemeral_texts(permalink) == [received_text(remaining=19), ALREADY_REQUESTED]
+    assert _ephemeral_texts(permalink) == [_PENDING, ALREADY_REQUESTED]
 
 
 async def test_out_of_credits_submission_records_nothing(
@@ -402,7 +404,7 @@ async def test_out_of_credits_submission_records_nothing(
 
     assert len(await _rows(db_session_factory)) == 1
     assert len(_posts(permalink)) == 1
-    assert _ephemeral_texts(permalink) == [received_text(remaining=0), OUT_OF_CREDITS]
+    assert _ephemeral_texts(permalink) == [_PENDING, OUT_OF_CREDITS]
 
 
 async def test_submission_is_refused_when_access_was_revoked_after_the_click(
@@ -453,9 +455,10 @@ async def test_sealed_origin_posts_a_link_and_the_note_only(
     (body,) = _posts(permalink)
     lines = body["text"].split("\n\n")
     assert lines[0].startswith("*Human support requested* by ")
-    assert lines[1] == _PERMALINK
-    assert lines[2] == "_Reply in the original channel._"
-    assert lines[3:] == ["help me"], "nothing but the requester, link and note"
+    assert lines[1].startswith("Pending: 1 credit\n"), "waits for Accept"
+    assert lines[2:] == [_PERMALINK, "_Reply in the original channel._", "help me"], (
+        "nothing but the requester, status, link and note"
+    )
     assert body["unfurl_links"] is False
 
 
@@ -667,7 +670,7 @@ async def test_a_failure_stamping_a_delivered_request_still_says_it_was_received
         await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
 
     assert len(_posts(permalink)) == 1, "it landed"
-    assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
+    assert _ephemeral_texts(permalink) == [_PENDING]
 
 
 def test_support_modal_note_input_stays_within_slack_input_limit() -> None:

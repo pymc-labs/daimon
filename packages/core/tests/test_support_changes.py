@@ -12,7 +12,9 @@ from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expected
 from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support_escalation as ledger
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import (
@@ -45,6 +47,7 @@ from daimon.core.support_changes import (
 )
 from daimon.core.support_routing import in_channel
 from daimon.testing.factories import make_platform_principal, make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 D = Decimal
@@ -98,8 +101,11 @@ async def _pending(
     *,
     option: int = 0,
     post: bool = True,
+    charged: bool = False,
 ) -> uuid.UUID:
-    """A request in C1, posted to the support channel S1 (`post` False: never delivered)."""
+    """A request in C1, posted to the support channel S1 (`post` False: never delivered).
+
+    `charged` makes it one charged at submit, as a fixed price was before Accept."""
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -115,6 +121,13 @@ async def _pending(
             default_allowance=20,
         )
         assert outcome.status == "recorded" and outcome.row, "a recorded request"
+        if charged:
+            await session.execute(
+                text(
+                    "UPDATE support_escalations SET status = 'settled', charge = hold WHERE id = :id"
+                ),
+                {"id": outcome.row.id},
+            )
         if post:
             await ledger.mark_delivered(
                 session, escalation_id=outcome.row.id, support_channel_id="S1"
@@ -379,6 +392,40 @@ async def test_set_support_channel_when_outside_the_workspace_then_refused_and_u
     assert row and row.teams_team_id == "TM_OWN", "an installed team is this workspace's"
 
 
+async def test_set_menu_when_channel_then_checked_like_the_request_channel(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    own = ChannelPick("slack", "S9", slack_team_id=TEAM)
+    with pytest.raises(ChannelChangeRefused) as locked:
+        await set_menu(db_session_factory, actor, platform="slack", key="m", spec=MENU, channel=own)
+    assert locked.value.kind == "forbidden", "a deployment that keeps its channel refuses"
+    foreign = ChannelPick("slack", "S9", slack_team_id="T_OTHER")
+    with pytest.raises(ChannelChangeRefused) as refused:
+        await set_menu(
+            db_session_factory,
+            actor,
+            platform="slack",
+            key="m",
+            spec=MENU,
+            channel=foreign,
+            own_allowed=True,
+        )
+    assert str(refused.value) == NOT_IN_WORKSPACE, "another workspace's channel is refused"
+    row = await set_menu(
+        db_session_factory,
+        actor,
+        platform="slack",
+        key="m",
+        spec=MENU,
+        channel=own,
+        own_allowed=True,
+    )
+    assert row.channel and (row.channel.id, row.channel.team_id) == ("S9", TEAM), "stored"
+    assert row.spec.channel == row.channel, "the menu as shown carries it"
+
+
 async def test_set_support_channel_when_discord_then_guild_must_be_the_tenants(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
@@ -480,8 +527,12 @@ async def test_settle_when_charged_at_submit_then_keep_or_refund_and_audit(
     actor = _actor(tenant_id)
     await _menu(db_session_factory, actor)
     await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
-    kept_id = await _pending(db_session_factory, tenant_id, "m1", option=1, post=False)
-    refunded_id = await _pending(db_session_factory, tenant_id, "m2", option=1, post=False)
+    kept_id = await _pending(
+        db_session_factory, tenant_id, "m1", option=1, post=False, charged=True
+    )
+    refunded_id = await _pending(
+        db_session_factory, tenant_id, "m2", option=1, post=False, charged=True
+    )
     async with db_session_factory() as session:
         lost = await ledger.list_requests(session, tenant_id=tenant_id, undelivered=True)
         assert {r.id for r in lost} == {kept_id, refunded_id}, "charged at submit, not seen"
@@ -592,6 +643,38 @@ async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     surfaces = [c.surface for c in changes if c.setting == SETTLE_SETTING]
     assert surfaces == ["panel"], "one record, from the support post"
+
+
+async def test_settle_from_post_when_the_requester_clicks_then_only_an_admin_settles(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
+    request_id = await _pending(db_session_factory, tenant_id)
+    for accept, charge in ((True, None), (False, None), (False, D(1))):
+        own = await settle_from_post(
+            db_session_factory,
+            escalation_id=request_id,
+            charge=charge,
+            settled_by="U1",
+            settled_by_account_id=None,
+            default_allowance=20,
+            channel_id="S1",
+            parent_id=None,
+            default_channel_id="SDEFAULT",
+            accept=accept,
+        )
+        assert own.status == "own_request", "the requester never settles their own request"
+    tenant = await get_tenant(db_session, tenant_id)
+    requester = await make_platform_principal(
+        db_session, platform="slack", external_id="U1", tenant=tenant
+    )
+    await set_role(db_session, requester.account_id, Role.ADMIN)
+    await db_session.commit()
+    settled = await _from_post(db_session_factory, request_id, None, by="U1")
+    assert settled.status == "declined", "an admin may settle their own request"
 
 
 async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_no_account(
