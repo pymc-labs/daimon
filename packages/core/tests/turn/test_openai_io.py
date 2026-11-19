@@ -638,7 +638,7 @@ async def test_guard_when_meter_fails_then_keeps_the_last_known_total():
 
 
 def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_rate():
-    """gpt-6-luna has no sourced long-context rate; its usage still counts toward the cap."""
+    """A turn total past the limit bills at the base rate and counts toward the cap."""
     from daimon.core.pricing import provider_cost_of
 
     price = ProviderPrice(
@@ -651,8 +651,8 @@ def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_r
         max_priced_input_tokens=1000,
     )
     observation = _observation(2_000_000, 0)
-    assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) is None, (
-        "the tariff itself stays unpriced past its limit"
+    assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) == Decimal(2), (
+        "a turn total is not one request, so it bills at the base rate"
     )
     assert priced_cents([observation], price) == Decimal(200), "base rate: 2M at $1/M"
 
