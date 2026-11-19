@@ -32,6 +32,8 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.reconcile_environments import reconcile_environment
 from daimon.core.defaults.reconcile_skills import reconcile_skill
 from daimon.core.defaults.rename_agents import (
+    AgentRenameAmbiguous,
+    AgentRenameBlocked,
     SeededRename,
     move_seeded_rename,
     pending_renames,
@@ -176,7 +178,6 @@ async def rename_selfhosted_defaults(
                 ),
                 kind="agent",
                 name=new,
-                failed=Action.DEFERRED,
             )
     return report
 
@@ -199,9 +200,11 @@ async def _run_isolated(
     *,
     kind: ResourceKind,
     name: str,
-    failed: Action = Action.FAILED,
 ) -> ResourceOutcome | None:
-    """Run one step, recording an error as its outcome (`failed`); None adds nothing."""
+    """Run one step, recording an error as its outcome; None adds nothing.
+
+    Only a rename that must wait on the workspace is deferred; any other error fails.
+    """
     try:
         outcome = await fn()
     except (APIError, DaimonError) as err:
@@ -214,11 +217,16 @@ async def _run_isolated(
             error=str(err),
             causes=backend_refusal_causes(err),
         )
-        outcome = ResourceOutcome(kind=kind, name=name, action=failed, error=str(err))
+        deferred = isinstance(err, AgentRenameBlocked | AgentRenameAmbiguous)
+        action = Action.DEFERRED if deferred else Action.FAILED
+        outcome = ResourceOutcome(kind=kind, name=name, action=action, error=str(err))
     except Exception as err:  # per-resource isolation boundary
         _log.exception("defaults.reconcile_unexpected", kind=kind, name=name)
         outcome = ResourceOutcome(
-            kind=kind, name=name, action=failed, error=f"internal error: {type(err).__name__}"
+            kind=kind,
+            name=name,
+            action=Action.FAILED,
+            error=f"internal error: {type(err).__name__}",
         )
     if outcome is not None:
         report.add(outcome)
@@ -278,7 +286,6 @@ async def _reconcile_core(
                 ),
                 kind="agent",
                 name=new,
-                failed=Action.DEFERRED,
             )
         return await _reconcile_owned(
             client,
@@ -304,18 +311,16 @@ async def _reconcile_core(
                 f"aborting before any writes. Rejections: {failed}"
             )
 
-    async def _deferred(step: Callable[[], Awaitable[None]]) -> bool:
-        """Run one rename step; True when it could not run (reported deferred)."""
-        outcome = await _run_isolated(
-            report, step, kind="agent", name=renames[0][1], failed=Action.DEFERRED
-        )
+    async def _halted(step: Callable[[], Awaitable[None]]) -> bool:
+        """Run one rename step; True when it could not run (reported deferred or failed)."""
+        outcome = await _run_isolated(report, step, kind="agent", name=renames[0][1])
         return outcome is not None
 
     async def _plan(
         session: AsyncSession,
     ) -> tuple[list[SeededRename], list[BetaManagedAgentsAgent] | None] | None:
         """The due renames and the listing they were planned from, which the agent
-        pass reuses when none is due; None when deferred."""
+        pass reuses when none is due; None when it could not run."""
         if not renames:
             return [], None
         due: list[SeededRename] = []
@@ -330,7 +335,7 @@ async def _reconcile_core(
                 if rename is not None:
                     due.append(rename)
 
-        return None if await _deferred(_step) else (due, listed)
+        return None if await _halted(_step) else (due, listed)
 
     async def _run_passes(
         skill_session: AsyncSession | None,
@@ -458,7 +463,7 @@ async def _reconcile_core(
 
     # Seeded agents are renamed in place before the agent pass and sweep: the
     # sweep would archive the old name and the pass would create the new one.
-    # While a rename is deferred or (dry run) pending, both are skipped.
+    # While a rename is deferred, failed or (dry run) pending, both are skipped.
     if dry_run:
         # Verification is read-only and must not acquire a DB lock transaction.
         async with session_factory() as read_session:
@@ -503,7 +508,7 @@ async def _reconcile_core(
                     for rename in due:
                         await write_seeded_rename(lock_session, rename, tenant_id=tenant_id)
 
-            if await _deferred(_write):
+            if await _halted(_write):
                 due, planned = [], None
         if not due:
             return await _finish(
@@ -516,7 +521,7 @@ async def _reconcile_core(
         for rename in due:
             await move_seeded_rename(client, rename, tenant_id=tenant_id)
 
-    moved = not await _deferred(_move)
+    moved = not await _halted(_move)
     if moved:
         for rename in due:
             report.add(rename.outcome)

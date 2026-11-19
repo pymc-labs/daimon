@@ -103,12 +103,18 @@ async def _apply(
     dry_run: bool,
     refuse_update: str | None = None,
     requests: list[str] | None = None,
+    fail_first_list: bool = False,
 ) -> ApplyReport:
     agents = make_fake_ma_handler(state)
+    listed: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if requests is not None:
             requests.append(f"{request.method} {request.url.path}")
+        if request.method == "GET" and request.url.path == "/v1/agents":
+            listed.append(request.url.path)
+            if fail_first_list and len(listed) == 1:
+                return httpx.Response(400, json={"type": "error", "error": {"message": "down"}})
         if request.method == "GET" and request.url.path == "/v1/environments":
             return list_response([])
         if request.method == "POST" and request.url.path == f"/v1/agents/{refuse_update}":
@@ -249,17 +255,19 @@ async def test_apply_when_reader_source_is_not_seeded_then_reader_stays(
         assert {"default", "default-reader"} == set(live), "the seeded agent's reader follows it"
 
 
-@pytest.mark.parametrize("name", ["default", "Default"])
-async def test_apply_when_only_own_default_exists_then_defers_without_adopting_it(
-    name: str, tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+async def test_apply_when_only_own_default_exists_then_refuses_it_without_deferring(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
+    name = "default"
     own = ma_agent(id="ag_own", name=name, tenant_id=_TENANT)
     state = FakeMAState()
     _seed(state, own)
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    _deferred(report)
+    assert _actions(report) == [("default", Action.FAILED)], (
+        f"with nothing to rename the agent pass runs and refuses to adopt it: {report}"
+    )
     live = _live(state)
     assert list(live) == [name], f"nothing is created or archived: {live}"
     metadata = live[name]["metadata"]
@@ -373,7 +381,7 @@ async def test_apply_when_provider_rename_fails_after_commit_then_rerun_finishes
 
     failed = await _apply(db_session_factory, state, root, dry_run=False, refuse_update="ag_daimon")
 
-    _deferred(failed)
+    assert ("default", Action.FAILED) in _actions(failed), "a provider error fails, never defers"
     assert list(_live(state)) == ["daimon"], "the agent keeps its old name and nothing is created"
     routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert routines == ["default"], "the database references committed first"
@@ -386,6 +394,21 @@ async def test_apply_when_provider_rename_fails_after_commit_then_rerun_finishes
     assert list(live) == ["default"] and live["default"]["id"] == "ag_daimon", (
         f"the same agent now holds the new name: {live}"
     )
+
+
+async def test_apply_when_listing_fails_while_planning_then_fails_and_skips_the_agent_pass(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    state = FakeMAState()
+    _seed(state, _legacy_daimon())
+
+    report = await _apply(
+        db_session_factory, state, _tree(tmp_path), dry_run=False, fail_first_list=True
+    )
+
+    assert report.is_failure(), f"a provider error fails the apply, never defers it: {report}"
+    assert [o.action for o in report.agents] == [Action.FAILED], f"only the rename ran: {report}"
+    assert list(_live(state)) == ["daimon"], "nothing is renamed, created or archived"
 
 
 async def test_rename_when_reader_name_differs_in_case_then_reader_is_renamed(
