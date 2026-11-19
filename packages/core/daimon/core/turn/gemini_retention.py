@@ -11,9 +11,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal, cast
+from uuid import UUID
 
 from daimon.core.stores import gemini_retention as store
-from daimon.core.stores.gemini_retention import Owner, RowId, StoredRow
+from daimon.core.stores.gemini_retention import ListedRow, Owner, RowId, SessionFacts, StoredRow
 from daimon.core.turn.gemini_state import dump_row, held_interactions, load_row
 from mux.contracts.resources import Agent
 from mux.drivers.gemini import CATALOG_MODE
@@ -23,6 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Decision = Literal["keep", "stub", "delete"]
 BATCH = 200
+
+Kept = dict[tuple[UUID, UUID, str, str, str], tuple[int, SessionFacts, frozenset[str]]]
+#: Session rows the last sweep kept, with the version, facts and holds it decided on.
+#: A row none of them changed for keeps its decision without being decoded again.
+_KEPT: Kept = {}
 
 
 @dataclass(frozen=True)
@@ -136,14 +142,27 @@ async def _drop(
 
 async def _session(
     sessions: async_sessionmaker[AsyncSession],
-    row: StoredRow,
+    listed: ListedRow,
     held: frozenset[str],
     *,
     now: datetime,
     window: timedelta,
+    kept: Kept,
 ) -> str:
+    # The binding_id column is written with the body, from its binding; checked below.
+    facts = await store.session_facts(sessions, listed.owner, listed.binding_id or "")
+    decided = (listed.version, facts, held)
+    if _KEPT.get(listed.key) == decided:
+        kept[listed.key] = decided
+        return "kept"
+    row = (await store.rows(sessions, listed.owner, [("session", listed.id)])).get(
+        ("session", listed.id)
+    )
+    if row is None or row.version != listed.version:
+        return "busy"
     record = cast(SessionRow, load_row("session", row.body)).record
-    facts = await store.session_facts(sessions, row.owner, record.session.binding.id)
+    if record.session.binding.id != listed.binding_id:
+        facts = await store.session_facts(sessions, row.owner, record.session.binding.id)
     binding = facts.binding
     named = (
         binding is not None
@@ -152,6 +171,7 @@ async def _session(
     )
     decision = retention(record, Facts(row.touched_at, named, facts.settled, held), now, window)
     if decision == "keep":
+        kept[listed.key] = decided
         return "kept"
     # Seam: Gemini offers no delete for stored interactions. Once the driver has
     # one, delete `record.interactions` provider-side here, before their ids go.
@@ -187,6 +207,7 @@ async def prune_idle_records(
         if not mine:
             return {}
         holds: dict[Owner, frozenset[str]] = {}
+        kept: Kept = {}
         after = None
         while page := await store.stale_rows(
             sessions, kinds=("session",), cutoff=cutoff, after=after, limit=BATCH
@@ -194,8 +215,13 @@ async def prune_idle_records(
             for row in page:
                 if row.owner not in holds:
                     holds[row.owner] = held_interactions(await store.holds(sessions, row.owner))
-                counts[await _session(sessions, row, holds[row.owner], now=now, window=window)] += 1
+                outcome = await _session(
+                    sessions, row, holds[row.owner], now=now, window=window, kept=kept
+                )
+                counts[outcome] += 1
             after = page[-1].key
+        _KEPT.clear()
+        _KEPT.update(kept)
         after = None
         while page := await store.stale_rows(
             sessions, kinds=("agent", "environment"), cutoff=cutoff, after=after, limit=BATCH

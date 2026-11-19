@@ -36,22 +36,28 @@ Owner = tuple[UUID, UUID, str]
 RowId = tuple[str, str]
 
 
-class StoredRow(BaseModel):
-    """One `gemini_records` row with its owner, as the sweep reads it."""
+class ListedRow(BaseModel):
+    """One `gemini_records` row with its owner, without its body."""
 
     model_config = ConfigDict(frozen=True)
 
     owner: Owner
     kind: str
     id: str
-    body: str
     version: int
     touched_at: datetime
     refs: tuple[str, ...] = ()
+    binding_id: str | None = None
 
     @property
     def key(self) -> tuple[UUID, UUID, str, str, str]:
         return (*self.owner, self.kind, self.id)
+
+
+class StoredRow(ListedRow):
+    """One `gemini_records` row with its owner and body, as the sweep decodes it."""
+
+    body: str
 
 
 class SessionFacts(BaseModel):
@@ -65,29 +71,34 @@ class SessionFacts(BaseModel):
     """Observation id -> highest applied revision, for ids with nothing pending."""
 
 
-_COLUMNS = (
+_LISTED = (
     GeminiRecord.tenant_id,
     GeminiRecord.account_id,
     GeminiRecord.project,
     GeminiRecord.kind,
     GeminiRecord.id,
-    GeminiRecord.body,
     GeminiRecord.version,
     GeminiRecord.touched_at,
     GeminiRecord.refs,
+    GeminiRecord.binding_id,
 )
+_COLUMNS = (*_LISTED, GeminiRecord.body)
 
 
-def _stored(r: Row[Any]) -> StoredRow:
-    return StoredRow(
+def _listed(r: Row[Any]) -> ListedRow:
+    return ListedRow(
         owner=(r.tenant_id, r.account_id, r.project),
         kind=r.kind,
         id=r.id,
-        body=r.body,
         version=r.version,
         touched_at=r.touched_at,
         refs=tuple(r.refs),
+        binding_id=r.binding_id,
     )
+
+
+def _stored(r: Row[Any]) -> StoredRow:
+    return StoredRow(**_listed(r).model_dump(), body=r.body)
 
 
 def _of(owner: Owner) -> tuple[ColumnElement[bool], ...]:
@@ -118,8 +129,8 @@ async def stale_rows(
     cutoff: datetime,
     after: tuple[UUID, UUID, str, str, str] | None,
     limit: int,
-) -> list[StoredRow]:
-    """Rows of `kinds` untouched since `cutoff`, in key order after `after`."""
+) -> list[ListedRow]:
+    """Rows of `kinds` untouched since `cutoff`, in key order after `after`; no bodies."""
     key = tuple_(
         GeminiRecord.tenant_id,
         GeminiRecord.account_id,
@@ -127,14 +138,14 @@ async def stale_rows(
         GeminiRecord.kind,
         GeminiRecord.id,
     )
-    statement = select(*_COLUMNS).where(
+    statement = select(*_LISTED).where(
         GeminiRecord.kind.in_(kinds), GeminiRecord.touched_at < cutoff
     )
     if after is not None:
         statement = statement.where(key > tuple_(*map(literal, after)))
     async with sessions() as db:
         found = await db.execute(statement.order_by(*key.clauses).limit(limit))
-        return [_stored(row) for row in found]
+        return [_listed(row) for row in found]
 
 
 async def rows(

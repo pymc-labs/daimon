@@ -6,11 +6,12 @@ from uuid import UUID
 
 import pytest
 from daimon.core._models import GeminiRecord, ProviderBinding, ProviderBindingSlot, UsageObservation
+from daimon.core.turn import gemini_retention
 from daimon.core.turn.gemini_retention import Facts, prune_idle_records, retention, stubbed
 from daimon.core.turn.gemini_state import PostgresGeminiStorage
 from mux.errors import ContinuityLost
 from mux.testing.drivers.gemini.fake import MemoryStorage
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from .test_gemini_postgres_state import (  # noqa: F401  # fixture
     _gemini_session,  # pyright: ignore[reportPrivateUsage]  # shared driver setup
@@ -73,7 +74,10 @@ def _scope():
     )
 
 
-async def test_sweep_deletes_an_unbound_session_and_stubs_a_bound_one(postgres_state):  # noqa: F811
+async def test_sweep_deletes_an_unbound_session_and_stubs_a_bound_one(
+    postgres_state,  # noqa: F811
+    monkeypatch,
+):
     """The unbound session goes with its account records; the agent and environment
     stay while another session uses them; the bound one reads as lost after."""
     sessions, scope, _, _ = postgres_state
@@ -141,3 +145,25 @@ async def test_sweep_deletes_an_unbound_session_and_stubs_a_bound_one(postgres_s
         assert records.sessions[second.ref.id] == stubbed(kept[1])
     with pytest.raises(ContinuityLost):
         await driver.sessions.retrieve(scope, second.ref)
+
+    async def idle() -> None:
+        async with sessions.begin() as db:
+            await db.execute(
+                update(GeminiRecord).values(touched_at=func.now() - timedelta(days=40))
+            )
+
+    await idle()
+    assert await prune_idle_records(sessions, now=now, window=WINDOW) == {"kept": 1}
+
+    def undecodable(*_: object) -> None:
+        raise AssertionError("an unchanged kept row is decoded again")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gemini_retention, "load_row", undecodable)
+        assert await prune_idle_records(sessions, now=now, window=WINDOW) == {"kept": 1}
+    async with sessions.begin() as db:
+        await db.execute(delete(ProviderBinding))
+        await db.execute(delete(ProviderBindingSlot))
+    assert await prune_idle_records(sessions, now=now, window=WINDOW) == {"deleted": 1}, (
+        "a kept row whose binding went is decided again"
+    )
