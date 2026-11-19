@@ -212,10 +212,16 @@ async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is
 
 
 async def test_unknown_openai_usage_is_left_to_the_process_that_ran_the_turn(sm, monkeypatch):
-    """Within its in-process re-reads the scheduler never reads the turn too."""
+    """Within its hold-off the scheduler leaves the turn to the process that ran it."""
     reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(minutes=5))
     assert (reads, read) == (0, []), "the scheduler read a turn the bot still re-reads"
     assert await _pending(sm) == 1 and await _debited(sm) == 0
+
+
+async def test_unknown_openai_usage_just_past_the_hold_off_is_read(sm, monkeypatch):
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(minutes=11))
+    assert (reads, read) == (1, ["turn"]), "the scheduler takes a turn after its hold-off"
+    assert await _debited(sm) < 0, "the read usage was debited"
 
 
 async def test_unknown_openai_usage_is_given_up_a_day_after_it_was_seen(sm, monkeypatch):

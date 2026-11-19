@@ -152,5 +152,11 @@ def _calling(name: str) -> set[str]:
 def test_both_triggers_start_the_one_shared_recheck() -> None:
     """Found from the code: the in-process and scheduler triggers call `reread_turn`,
     the only late read of a turn resource."""
-    assert _calling("reread_turn") == {"openai_host.py", "openai_late_usage.py"}
-    assert _calling("reconcile_turn") == {"openai_late_usage.py", *NOT_LATE_READS}
+    triggers = _calling("reread_turn")
+    assert triggers == {"openai_host.py", "openai_late_usage.py"}, (
+        f"the in-process and scheduler triggers must both start reread_turn: {triggers}"
+    )
+    reads = _calling("reconcile_turn")
+    assert reads == {"openai_late_usage.py", *NOT_LATE_READS}, (
+        f"a late read outside reread_turn copies the shared check: {reads}"
+    )

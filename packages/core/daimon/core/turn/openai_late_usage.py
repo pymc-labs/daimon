@@ -2,14 +2,17 @@
 
 A turn resource can report usage long after the turn ended (half an hour has been
 seen). No turn waits for it: the host hands the turn here and returns. One re-check
-(`reread_turn`) reads it under the thread's lease and records a new revision, priced
-by the turn's profile, so the cost reaches the ledger and the daily cap like any other usage.
+(`reread_turn`) reads it under the thread's lease and records a new revision, at the
+price its trigger carries, so the cost reaches the ledger and the daily cap like any
+other usage.
 
 Two triggers start it. The process that ran the turn re-reads it (`LateUsage`), so a
-footer it posted can take the debit. The scheduler's `DurableRereads` reads the
-pending usage rows and takes a turn only once that process's re-reads would be over
-(`IN_PROCESS_S`), so a restart or a late answer past the hour loses nothing and no
-turn is read by both. It gives up, with a log line, a day after the usage was seen.
+footer it posted can take the debit. The scheduler's `DurableRereads` reads turns
+whose usage is still pending `TAKE_AFTER` after it was seen, so a restart or a late
+answer past the hour still gets read; it gives up, with a log line, a day after the
+usage was seen. Reads of both overlap only in the long tail, harmlessly: a revision
+already recorded is ignored and ledger keys are idempotent. A turn whose fallback
+revision was already charged keeps no pending row, so only its own process re-reads it.
 """
 
 from __future__ import annotations
@@ -27,8 +30,10 @@ import structlog
 from daimon.core.channel_backend import backend_refusal_causes
 
 if TYPE_CHECKING:
+    from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.mux_state import PendingSettlement
     from mux.contracts.ids import ResourceRef, Scope
+    from mux.contracts.usage import UsageObservation
     from mux.drivers.openai import OpenAIUsage
     from mux.state.lease import Slot
     from mux.state.store import StateStore
@@ -45,8 +50,9 @@ DURABLE_DELAYS_S = (60.0, 120.0, 240.0, 480.0, 960.0, 1920.0)
 #: How long one late read of a turn resource may take, lease included.
 READ_TIMEOUT_S = 20.0
 
-#: After this long since its usage was last seen, a turn's in-process re-reads are over.
-IN_PROCESS_S = sum(DELAYS_S) + len(DELAYS_S) * READ_TIMEOUT_S
+#: How long after its usage was seen the scheduler takes a turn: the early, dense
+#: in-process re-reads are over by then.
+TAKE_AFTER = timedelta(minutes=10)
 
 #: Most turns waiting on a re-read at once, per process.
 MAX_PENDING = 256
@@ -65,7 +71,9 @@ class LateTurn:
     session: ResourceRef
     turn_id: str
     model_id: str
-    profile: str
+    #: The tariff and infrastructure its trigger charges at.
+    price: ProviderPrice | None
+    infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]]
     #: When its usage was last seen.
     observed_at: datetime
     platform_user_id: str | None
@@ -83,14 +91,13 @@ async def reread_turn(
     markup: Decimal,
     now: datetime,
     read_timeout_s: float = READ_TIMEOUT_S,
+    durable: bool = False,
 ) -> bool:
     """One late read of the turn under its thread's lease, recording what it found.
 
     True once the turn resource itself gave final usage, or the thread has no such
     turn to read; a fallback value never ends the re-reads.
     """
-    from daimon.core.infrastructure_cost import known_infrastructure_usd
-    from daimon.core.pricing import provider_prices
     from daimon.core.turn.persistence import TurnPersistence
     from daimon.core.turn.replace_binding import hold_slot
     from daimon.core.usage_recording import record_provider_usage
@@ -104,6 +111,7 @@ async def reread_turn(
             session_id=ref.id,
             bound_session_id=None if bound is None else bound.native_refs.get("session"),
             binding_id=turn.binding_id,
+            durable=durable,
         )
         return True  # the thread moved to another session, or was erased
     async with hold_slot(store, turn.slot, now) as lease:
@@ -128,8 +136,8 @@ async def reread_turn(
             observation=value,
             tenant_id=turn.tenant_id,
             platform_user_id=turn.platform_user_id,
-            provider_price=provider_prices(turn.profile).get((ref.provider, turn.model_id)),
-            infrastructure_usd=known_infrastructure_usd(turn.profile),
+            provider_price=turn.price,
+            infrastructure_usd=await turn.infrastructure(value),
             billing_grain="turn",
             managed_session_id=ref.id,
             model_id=turn.model_id,
@@ -209,8 +217,8 @@ PASS_BUDGET_S = 10.0
 class DurableRereads:
     """Re-reads ended OpenAI turns whose pending usage is not final, from the scheduler.
 
-    A turn is taken once `take_after` passed since its usage was seen: until then the
-    process that ran it re-reads it. Rows are durable, so a restart only resets the
+    A turn is taken once `take_after` passed since its usage was seen: until then only
+    the process that ran it re-reads it. Rows are durable, so a restart only resets the
     backoff: each turn is read again after `delays_s` (the last repeating) until its
     usage is final, the thread moved, or `give_up_after` passed since the usage was
     seen. A pass stops at `budget_s`; the read it cuts off backs off like a failed one,
@@ -221,7 +229,7 @@ class DurableRereads:
         self,
         *,
         delays_s: Sequence[float] = DURABLE_DELAYS_S,
-        take_after: timedelta = timedelta(seconds=IN_PROCESS_S),
+        take_after: timedelta = TAKE_AFTER,
         give_up_after: timedelta = GIVE_UP_AFTER,
         reads: int = PASS_READS,
         budget_s: float = PASS_BUDGET_S,
@@ -257,7 +265,7 @@ class DurableRereads:
                 continue
             seen.add(key)  # the newest revision comes first
             if now - observation.observed_at < self._take_after:
-                continue  # still the in-process re-reads' to read
+                continue  # the in-process re-reads come first
             if now - observation.observed_at > self._give_up_after:
                 if key not in self._given_up:
                     self._given_up.add(key)
@@ -300,6 +308,8 @@ async def _reread(
     now: datetime,
 ) -> bool:
     """The shared re-check of a pending row's turn, read with the tenant's key."""
+    from daimon.core.infrastructure_cost import known_infrastructure_usd
+    from daimon.core.pricing import provider_prices
     from daimon.core.stores import mux_state
     from daimon.core.turn.openai_deployment import usage_transport
     from daimon.core.turn.openai_state import OpenAIUsageRevisions
@@ -330,6 +340,9 @@ async def _reread(
     def authorized(asked: Scope, kind: str, id_: str | None) -> bool:
         return asked == scope and kind == "session" and id_ == ref.id
 
+    async def infrastructure(value: UsageObservation) -> Decimal | None:
+        return known_infrastructure_usd(settlement.profile)
+
     turn = LateTurn(
         tenant_id=settlement.tenant_id,
         binding_id=row.binding_id,
@@ -337,7 +350,8 @@ async def _reread(
         session=ref,
         turn_id=turn_id,
         model_id=model.id,
-        profile=settlement.profile,
+        price=provider_prices(settlement.profile).get((ref.provider, model.id)),
+        infrastructure=infrastructure,
         observed_at=observation.observed_at,
         platform_user_id=settlement.platform_user_id,
         channel_id=settlement.channel_id,
@@ -354,6 +368,7 @@ async def _reread(
         scope=scope,
         markup=markup,
         now=now,
+        durable=True,
     )
 
 

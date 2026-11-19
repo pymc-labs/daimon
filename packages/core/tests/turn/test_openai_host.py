@@ -879,6 +879,44 @@ async def test_an_unknown_turn_is_reread_after_it_and_recorded_measured(composed
     assert (later[1].revision, later[1].input_tokens) == (unknown.revision + 1, 100), later
 
 
+async def test_a_late_reread_charges_the_runtimes_own_price_and_infrastructure(composed):
+    """The process's re-read prices the turn as the turn itself did."""
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    wire, gate = composed[1], asyncio.Event()
+    price = ProviderPrice(
+        provider="openai",
+        model="gpt-6-luna",
+        checked_on=date(2020, 1, 1),
+        input=Decimal("7"),
+        output=Decimal("9"),
+        cache_read=Decimal("1"),
+    )
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    async def infrastructure(observation: UsageObservation) -> Decimal:
+        return Decimal("0.0053")
+
+    late = LateUsage(delays_s=(1.0,), sleep=held)
+    async with _late_turn(composed, late, price=price, infrastructure=infrastructure) as turn:
+        wire.turns = [_root(None)]
+        await turn.record(await turn.read())
+        wire.turns[0]["usage"] = FINAL_USAGE
+        gate.set()
+        await late.wait()
+    reread = turn.observations[-1]
+    assert reread["observation"].final, "the re-read recorded the final usage"
+    assert (reread["provider_price"], reread["infrastructure_usd"]) == (
+        price,
+        Decimal("0.0053"),
+    ), "the re-read must charge the runtime's tariff and infrastructure"
+
+
 async def test_a_fallback_usage_when_the_resource_still_lacks_it_then_is_reread_to_the_final(
     composed,
 ):
