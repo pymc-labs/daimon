@@ -11,7 +11,7 @@ import anthropic
 import httpx
 import pytest
 from daimon.core import routine_delivery as routine_delivery_module
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
@@ -689,6 +689,60 @@ async def test_clear_creator_returns_the_policy_or_why_not(
 
 
 @pytest.mark.parametrize(
+    ("member", "roles", "admin", "expected"),
+    [
+        (True, ("123",), False, "cleared"),
+        (True, ("999",), True, "agent_not_allowed"),
+        (True, (), False, "agent_not_allowed"),
+        (False, (), False, "invoker_not_allowed"),
+    ],
+)
+async def test_a_dm_for_a_role_gated_agent_is_sent_only_for_an_owner_holding_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    member: bool,
+    roles: tuple[str, ...],
+    admin: bool,
+    expected: str,
+) -> None:
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="1234",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="go",
+        destination_kind="dm",
+        destination_id="1234",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=member, role_ids=roles, is_admin=admin)
+
+    result = await clear_creator(
+        db_session_factory,
+        row,
+        platform="discord",
+        membership_resolver=CachedMembershipResolver(fetch),  # type: ignore[arg-type]
+    )
+    assert ("cleared" if isinstance(result, TenantAccessPolicy) else result) == expected
+
+
+@pytest.mark.parametrize(
     ("policy", "platform", "kind", "unsafe"),
     [
         (TenantAccessPolicy(), "discord", "thread", False),
@@ -828,3 +882,46 @@ def test_a_routine_result_never_names_another_chat_app(
     dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
     assert dm.endswith(f"\n\n{scrubbed}")
     assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"
+
+
+def test_lapsed_role_card_names_the_routine_and_how_to_resume() -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.routine_delivery import lapsed_role_card
+
+    row = SimpleNamespace(
+        name="Weekly digest", agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC"
+    )
+    title, todo = lapsed_role_card(row)  # type: ignore[arg-type]
+    assert "Weekly digest" in title and "paused" in title
+    assert "admin" in todo and "/routines" in todo
+    unnamed = SimpleNamespace(name=None, agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC")
+    assert "Monday routine at 09:00 UTC" in lapsed_role_card(unnamed)[0]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("roles", "fresh", "gated", "lapsed"),
+    [
+        ((), True, True, True),
+        (("999",), True, True, True),
+        (("123",), True, True, False),
+        ((), False, True, False),
+        ((), True, False, False),
+    ],
+)
+def test_lapsed_role_is_a_fresh_member_missing_a_gated_agents_role(
+    roles: tuple[str, ...], fresh: bool, gated: bool, lapsed: bool
+) -> None:
+    """Admins get no bypass; a stale or missing membership is retried, not paused."""
+    from daimon.core.authz import build_subject
+    from daimon.core.routine_delivery import lapsed_role
+
+    rules = {"helper": AgentRule(invoker_role_ids=("123",))} if gated else {}
+    owner = build_subject(
+        is_admin=roles == ("999",),
+        platform_user_id="U1",
+        role_ids=roles,
+        verified_membership=fresh or None,
+        membership_fresh=fresh,
+    )
+    assert lapsed_role(TenantAccessPolicy(agent_rules=rules), ("helper",), owner) is lapsed

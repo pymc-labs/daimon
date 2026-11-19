@@ -100,6 +100,27 @@ def test_factory_requires_identity_signer_only_on_mcp_service() -> None:
         create_mcp_app(settings=settings)
 
 
+def test_factory_requires_a_key_for_every_bearer_server() -> None:
+    settings = _settings(
+        jwt_secret=SecretStr("a" * 32),
+        public_url=HttpUrl("https://x/mcp"),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="tools",
+                url="https://tools.example.test/mcp",
+                auth="bearer",
+                requester_meta=True,
+                workspaces=frozenset({"discord:1"}),
+                agents=("Agent A",),
+            )
+        ]
+    )
+    with pytest.raises(BootstrapError, match="BEARERS needs a key for bearer servers: tools"):
+        create_mcp_app(settings=settings)
+
+
 def test_factory_accepts_valid_settings() -> None:
     settings = _settings(
         jwt_secret=SecretStr("a" * 32),
