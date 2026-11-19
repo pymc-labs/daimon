@@ -88,7 +88,7 @@ _NARROWED: dict[str, str] = {
     "support_feedback": "set where credits apply: the workspace, an agent or a channel",
     "support_own_channel": "operator-only: whether a workspace may pick its own channel",
     "private_channel_messages": "operator-only: read once at startup",
-    "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
+    "direct_messages": "a workspace or agent policy for DMs, which have no channel or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_history_depth": "DMs have no channel or thread; an agent and its workspace set the memory",
     "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",

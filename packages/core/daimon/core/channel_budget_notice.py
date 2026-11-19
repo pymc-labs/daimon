@@ -30,6 +30,9 @@ log = structlog.get_logger()
 MAX_RECIPIENTS: Final = 10
 NOTICE_TIMEOUT_S: Final = 15.0
 
+RecipientCheck = Callable[[str], Awaitable[bool]]
+"""Whether a DM grant admits this recipient (`dm_access.sender_admits`)."""
+
 
 @dataclass(frozen=True)
 class BudgetNotice:
@@ -53,8 +56,11 @@ class BudgetNotice:
         """The channel as a reader sees it where the platform cannot mention it."""
         return f"#{self.channel_name}" if self.channel_name else "This channel"
 
-    def allowed_recipients(self, policy: DirectMessagePolicy) -> tuple[str, ...]:
-        return tuple(r for r in self.recipient_ids if policy.allows(r))
+    async def allowed_recipients(
+        self, policy: DirectMessagePolicy, admits: RecipientCheck
+    ) -> tuple[str, ...]:
+        """Recipients the env policy and `admits` (the default agent's DM grant) both allow."""
+        return tuple([r for r in self.recipient_ids if policy.allows(r) and await admits(r)])
 
     def text(self, channel_ref: str) -> str:
         """Two lines with a blank line between; only a monthly budget offers the wait."""

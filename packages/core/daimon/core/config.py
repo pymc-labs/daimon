@@ -13,6 +13,7 @@ import json
 import os
 import ssl
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -2267,6 +2268,24 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+def env_dm_policy(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID
+) -> DirectMessagePolicy:
+    """A workspace's deprecated env DM policy; `members` (no limit) when it has none."""
+    return policies.get(tenant_id, DirectMessagePolicy())
+
+
+def env_admits(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID, user_id: str
+) -> bool:
+    """Whether `DAIMON_DIRECT_MESSAGE_POLICIES` lets `user_id` have a private message here.
+
+    The one env rule. Every path applies it with the stored access, inbound, agent-sent
+    and explain alike, so the stricter wins until the env value is removed.
+    """
+    return env_dm_policy(policies, tenant_id).allows(user_id)
+
+
 class SignedIdentityServer(BaseModel):
     """One remote MCP server reached through the identity relay.
 
@@ -2910,7 +2929,9 @@ class Settings(BaseSettings):
             "invalid keys rejected). Default is "
             "members (live membership required). Set mode=disabled to disable DMs, "
             "or mode=allowlist with recipient_ids to restrict delivery to listed "
-            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+            "members. Deprecated: checked with per-agent DM access on every path, the "
+            "stricter wins; `daimon dm import-policies` copies it into stored access. "
+            "Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
         ),
     )
     table_rendering: dict[uuid.UUID, bool] = Field(

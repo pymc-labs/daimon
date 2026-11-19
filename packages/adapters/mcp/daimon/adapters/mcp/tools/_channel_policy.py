@@ -45,7 +45,9 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
+from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.dm_access import DmGroups, sender_admits
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mux_backend import resource_scope
@@ -271,6 +273,48 @@ async def _executing_agent(
     if agent is None:
         return AgentRef.unresolved()
     return build_agent_ref(agent.name, agent.metadata)
+
+
+async def require_dm_grant(
+    runtime: McpRuntime, auth: AuthIdentity, *, recipient_id: str, groups: DmGroups
+) -> None:
+    """The sending agent's DM grant must admit the recipient; locks do not apply here.
+
+    An identity with no agent (the operator, a user key) is held to the workspace
+    default agent's grant. An agent that cannot be resolved admits nobody. `groups`
+    is the platform's lookup for the groups the grant names; a failed lookup refuses.
+    The deprecated env policy (`env_admits`) applies first.
+    """
+    if not env_admits(runtime.settings.direct_message_policies, auth.tenant_id, recipient_id):
+        raise ToolError("direct messages to this recipient are not allowed here")
+    executing = auth.chat_agent_id or auth.agent_id
+    name: str | None = None
+    if executing is not None:
+        if auth.anthropic_disabled or anthropic_disabled():
+            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+                resource_scope(tenant_id=str(auth.tenant_id)), executing
+            )
+            name = None if record is None else record.spec.name
+        else:
+            agent = await find_agent_by_derived_uuid_cached(
+                runtime.client,
+                runtime.resolver_cache,
+                tenant_id=auth.tenant_id,
+                agent_id=executing,
+                records=runtime.session_factory,
+            )
+            name = None if agent is None else agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+        if name is None:
+            raise ToolError(_RUNS_IN_SEND_MSG)
+    admitted = await sender_admits(
+        runtime.session_factory,
+        tenant_id=auth.tenant_id,
+        agent_name=name,
+        user_id=recipient_id,
+        groups=groups,
+    )
+    if not admitted:
+        raise ToolError("this agent may not send direct messages to this person")
 
 
 async def require_dm_recipient_allowed(

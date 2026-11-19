@@ -12,6 +12,7 @@ import structlog
 from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
+    Tenant,
     ThreadAgentBinding,
 )
 from daimon.core.errors import DaimonError, UserFacingError
@@ -26,6 +27,13 @@ COLD_DM_ORIGIN = "Private conversation"
 
 DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
+
+
+def is_dm_thread(platform: str, thread_id: str) -> bool:
+    """A private conversation's scope, or a Teams personal chat (`a:…`), which is its own."""
+    return thread_id.startswith(DM_SCOPE_PREFIX) or (
+        platform == "teams" and thread_id.startswith("a:")
+    )
 
 
 class DirectMessageBusy(DaimonError):
@@ -312,6 +320,17 @@ async def lock_route(
     )
 
 
+async def dm_turned_off(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether someone set `direct_messages` off for the workspace; the default off is not."""
+    from daimon.core.features.snapshot import FeaturePlace, feature_in
+
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
+    found = await feature_in(session, None, FeaturePlace(tenant_id, platform), "direct_messages")
+    return not found.on and found.tier != "default"
+
+
 async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> str | None:
     return await session.scalar(
         select(DirectMessagePolicy.dm_agent_name).where(DirectMessagePolicy.tenant_id == tenant_id)
@@ -321,6 +340,8 @@ async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> s
 async def set_dm_agent_name(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str | None
 ) -> None:
+    """Store the DM default agent: the one value cold DMs and `daimon dm default` read. Only
+    `dm_settings.set_default` calls this outside tests, so a change is checked and audited."""
     if agent_name is not None and not agent_name.strip():
         raise UserFacingError("The DM agent name must not be empty.")
     await session.execute(
@@ -332,29 +353,42 @@ async def set_dm_agent_name(
 
 
 async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """The `direct_messages` feature for a workspace. Discord and Slack share the one
-    setting, so the platform here only has to be one that offers it."""
+    """The `direct_messages` feature for a workspace, at its own platform's default
+    (Teams starts on); off for a workspace that does not exist."""
     # Imported here: the feature modules import the stores.
     from daimon.core.features.snapshot import FeaturePlace, feature_in
 
-    place = FeaturePlace(tenant_id, "discord")
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
+    place = FeaturePlace(tenant_id, platform)
     return (await feature_in(session, None, place, "direct_messages")).on
 
 
-async def set_dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool) -> None:
-    """Turn `direct_messages` on or off for a workspace, as a feature value. For the CLI and
-    fixtures; the settings surfaces go through `workspace_settings`."""
+async def set_dm_enabled(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    enabled: bool,
+    account_id: uuid.UUID | None = None,
+) -> None:
+    """Turn `direct_messages` on or off for a workspace through the features writer, at the
+    workspace's own platform and with its change record. For the policy import and fixtures;
+    admins go through `workspace_settings.set_dms` or `daimon features set`."""
     # Imported here: the feature service reads these stores.
     from daimon.core.features.service import set_workspace_feature
 
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        raise LookupError(f"no workspace {tenant_id}")
     await set_workspace_feature(
         session,
         None,
         tenant_id=tenant_id,
-        platform="discord",
+        platform=platform,
         key="direct_messages",
         value="on" if enabled else "off",
-        account_id=None,
+        account_id=account_id,
         surface="cli",
     )
 

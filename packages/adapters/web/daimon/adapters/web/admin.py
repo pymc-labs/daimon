@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from daimon.adapters.web.admin_access import access_router
 from daimon.adapters.web.admin_audit import audit_router
+from daimon.adapters.web.admin_dm import dm_router
 from daimon.adapters.web.admin_feedback import feedback_router
 from daimon.adapters.web.admin_invites import invites_admin_router
 from daimon.adapters.web.admin_people import people_router
@@ -24,6 +25,7 @@ def admin_router(runtime: WebRuntime) -> APIRouter:
         audit_router,
         feedback_router,
         settings_router,
+        dm_router,
     ):
         router.include_router(build(runtime))
     return router

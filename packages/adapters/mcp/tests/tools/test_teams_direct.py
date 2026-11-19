@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import httpx
@@ -13,6 +14,8 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.direct_messages import set_dm_agent_name
+from daimon.core.stores.dm_access import set_grant
 from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.testing.factories import make_tenant
@@ -26,15 +29,26 @@ _TEAM = "19:team@thread.tacv2"
 
 class _Fake:
     def __init__(
-        self, roster: set[str], *, chat_status: int = 201, tenant: str | None = None
+        self,
+        roster: set[str],
+        *,
+        chat_status: int = 201,
+        tenant: str | None = None,
+        teams: dict[str, list[str]] | None = None,
     ) -> None:
         self.roster, self.chat_status, self.tenant = roster, chat_status, tenant
+        self.teams = teams or {}
         self.posts: list[tuple[str, dict[str, object]]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if request.url.host == "login.microsoftonline.com":
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         path = request.url.path
+        if request.url.host == "graph.microsoft.com":
+            group = path.split("/teams/", 1)[1].split("/", 1)[0]
+            if group not in self.teams:
+                return httpx.Response(403)
+            return httpx.Response(200, json={"value": [{"userId": u} for u in self.teams[group]]})
         if "/members/" in path:
             aad = path.rsplit("/", 1)[1]
             if aad in self.roster:
@@ -53,9 +67,20 @@ class _Fake:
 
 
 async def _call(
-    fake: _Fake, db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], **kw: str
+    fake: _Fake,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    granted_team: str | None = None,
+    **kw: str,
 ):
     tenant = await make_tenant(db_session)
+    if granted_team is not None:
+        await set_dm_agent_name(db_session, tenant_id=tenant.id, agent_name="ada")
+        await set_grant(
+            db_session, tenant_id=tenant.id, agent_name="ada", who="listed", user_ids=[],
+            group_ids=[granted_team], set_by=None, now=datetime(2026, 1, 1, tzinfo=UTC),
+        )  # fmt: skip
     await record_teams_installation(
         db_session, tenant_id=tenant.id, team_id=_TEAM, group_id=str(uuid.uuid4()), name="Lab"
     )
@@ -147,3 +172,24 @@ async def test_a_roster_entry_naming_our_own_tenant_is_reached_as_before(
 ) -> None:
     fake = _Fake({_CALLER, _RECIPIENT}, tenant="T")
     assert (await _call(fake, db_session, sessionmaker)).channel_id == "a:dm-1"
+
+
+@pytest.mark.parametrize(
+    ("teams", "sent"),
+    [({"group-1": [_RECIPIENT]}, True), ({"group-1": [_CALLER]}, False), ({}, False)],
+)
+async def test_teams_dm_when_the_grant_names_a_team_then_its_roster_decides(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    teams: dict[str, list[str]],
+    sent: bool,
+) -> None:
+    """A Teams DM follows the sender's grant by team; a roster Graph refuses denies."""
+    fake = _Fake({_CALLER, _RECIPIENT}, teams=teams)
+    if sent:
+        result = await _call(fake, db_session, sessionmaker, granted_team="group-1")
+        assert result.channel_id == "a:dm-1", "a team member is reached"
+        return
+    with pytest.raises(ToolError, match="may not send"):
+        await _call(fake, db_session, sessionmaker, granted_team="group-1")
+    assert not fake.posts, "no chat is opened for a person the grant leaves out"

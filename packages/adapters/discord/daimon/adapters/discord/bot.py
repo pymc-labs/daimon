@@ -107,7 +107,7 @@ from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.channel_listing import run_channel_listing
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings, env_dm_policy
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     check_wake_responder,
@@ -680,13 +680,14 @@ class DaimonBot(commands.Bot):
             self.http = http_client
             self._connection.http = http_client
         self._ingress_clock = clock
-        self.runtime = with_budget_notifier(
-            runtime, self.open_member_dm, self.is_closed, client=self
-        )
         self.membership_resolver = GatewayMembershipResolver(self)
         self.runtime = replace(
-            self.runtime,
-            turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
+            runtime,
+            turn_deps=replace(runtime.turn_deps, membership_resolver=self.membership_resolver),
+        )
+        # After the resolver: a notice's grant check reads the recipient's current roles.
+        self.runtime = with_budget_notifier(
+            self.runtime, self.open_member_dm, self.is_closed, client=self
         )
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
@@ -1206,8 +1207,8 @@ class DaimonBot(commands.Bot):
                         self.runtime.sessionmaker,
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
-                        dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
-                            row.tenant_id, DirectMessagePolicy()
+                        dm_policy=lambda row: env_dm_policy(
+                            self.runtime.settings.direct_message_policies, row.tenant_id
                         ),
                         client=self,
                         output_client=self.runtime.anthropic,
@@ -4088,9 +4089,10 @@ class DaimonBot(commands.Bot):
                 run_turn=run_turn,
                 open_dm=self.open_member_dm,
                 member_present=member_present,
-                dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
-                    tenant_id, DirectMessagePolicy()
+                dm_policy=lambda tenant_id: env_dm_policy(
+                    self.runtime.settings.direct_message_policies, tenant_id
                 ),
+                membership_resolver=self.membership_resolver,
             )
             return
         if watch.delivery != "new_thread":

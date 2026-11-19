@@ -750,7 +750,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message settings. |
 
 ## `wizard`
 
