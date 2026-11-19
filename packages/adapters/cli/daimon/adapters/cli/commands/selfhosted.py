@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import typer
 from daimon.core.config import HarnessAuthBinding, SelfhostedModelPrice
 from daimon.core.db import build_engine
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.stores.selfhosted_resources import (
     SelfHostedAgents,
     SelfHostedEnvironments,
@@ -249,7 +250,7 @@ def selfhosted_init_command(
     model: Annotated[
         str, typer.Option("--model", help="Azure model deployment name.")
     ] = "gpt-6.1-sol",
-    name: Annotated[str, typer.Option("--name")] = "default",
+    name: Annotated[str, typer.Option("--name")] = BUILTIN_AGENT_NAME,
     environment_name: Annotated[str, typer.Option("--environment-name")] = "default",
     auth_mode: Annotated[
         str, typer.Option("--auth-mode", help="bearer_env or entra.")

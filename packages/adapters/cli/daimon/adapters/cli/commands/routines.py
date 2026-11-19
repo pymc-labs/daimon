@@ -32,7 +32,7 @@ from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_
 from daimon.core.config import env_admits, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME, MA_METADATA_KEY_NAME
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.membership import MembershipResolver
@@ -79,7 +79,7 @@ _log = structlog.get_logger(__name__)
 
 routines_app = typer.Typer(help="Routines admin tasks.")
 
-_FALLBACK_NAME = "default"
+_FALLBACK_NAME = BUILTIN_AGENT_NAME
 
 
 @routines_app.command("backfill-agent-names")
