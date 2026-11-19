@@ -254,7 +254,6 @@ async def run_case(
         "chat-openai",
         point,
         mode,
-        "mux",
         provider_inputs_accepted=texts,
         leases_held_after_death=before.live_leases,
         operations_after_death=before.operations_by_status,
