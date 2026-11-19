@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   picture is answered. A forwarded message is passed as untrusted content, and a
   reply shows the message it answers. A forward is also passed in channels.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
-  messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
+  messages each direct message reply carries: 12 (the default; 100 on Teams), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. It applies to
   Discord, Slack and web direct messages. A higher setting costs more.
 - **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3

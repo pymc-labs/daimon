@@ -24,7 +24,7 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Teams, Web |
+| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |

@@ -1172,6 +1172,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "100": "100 messages",
         },
         default="12",
+        # Teams personal chats replayed up to 100 messages before this setting existed.
+        platform_defaults={"teams": "100"},
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),
