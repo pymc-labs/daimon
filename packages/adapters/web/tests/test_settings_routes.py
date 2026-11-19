@@ -34,6 +34,20 @@ def _linked(monkeypatch: pytest.MonkeyPatch, *, admin: bool) -> list[str]:
     return checked
 
 
+async def test_members_read_approvals_and_the_footer_as_not_editable(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        admin.as_member()
+        defaults = await admin.client.get("/api/channel-defaults")
+
+    assert defaults.status_code == 200, defaults.text
+    assert defaults.json()["approvals"]["editable"] is False
+    assert defaults.json()["cost_footer"]["editable"] is False
+
+
 @pytest.mark.parametrize("linked", [False, True], ids=["web_only_owner", "linked_non_admin"])
 async def test_the_web_actor_is_refused_an_approvals_change(
     web_client: WebClientFactory,
