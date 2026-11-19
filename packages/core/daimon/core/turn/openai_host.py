@@ -24,6 +24,7 @@ from daimon.core.mux_backend import (
     TurnRuntime,
 )
 from daimon.core.pricing import ProviderPrice
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -684,13 +685,18 @@ async def _prepare_with_runtime(
             channel_id=channel_id,
             agent_id=agent_id,
         )
+        if settled:  # an ended turn's footer shows the debit its late usage just took
+            LATE_TURN_COSTS.settle(
+                observation, price=runtime.price, infrastructure_usd=infrastructure, markup=markup
+            )
         turn_id = observation.turn_id
         # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
         if not observation.final and late is not None and turn_id is not None:
-            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id))
+            ended = observation.observed_at
+            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id, ended))
         return settled
 
-    async def reread(now: datetime, turn_id: str) -> bool:
+    async def reread(now: datetime, turn_id: str, ended: datetime) -> bool:
         """One late read of an ended root turn, under the thread's lease.
 
         True once the turn resource itself gave final usage, or the thread has no
@@ -716,6 +722,13 @@ async def _prepare_with_runtime(
                         scope, ref, turn_id
                     )
         known = [value for value in values if value.completeness != "unknown"]
+        if known:  # measures how long OpenAI takes to report a turn's usage
+            log.info(
+                "openai_late_usage.found",
+                turn_id=turn_id,
+                final=any(value.final for value in known),
+                after_s=round((now - ended).total_seconds(), 1),
+            )
         for value in known:
             await record(observation=value)
         return any(value.final for value in values) or not values

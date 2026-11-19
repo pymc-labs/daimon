@@ -28,8 +28,11 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-#: Waits before each re-read, doubling: about an hour in all.
-DELAYS_S = (60.0, 120.0, 240.0, 480.0, 960.0, 1920.0)
+#: Waits before each in-process re-read, doubling from 2 s: over an hour in all.
+DELAYS_S = (2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0)
+
+#: The scheduler's waits, slower, so it does not read the same turns twice as often.
+DURABLE_DELAYS_S = (60.0, 120.0, 240.0, 480.0, 960.0, 1920.0)
 
 #: How long one late read of a turn resource may take, lease included.
 READ_TIMEOUT_S = 20.0
@@ -119,7 +122,7 @@ class DurableRereads:
     def __init__(
         self,
         *,
-        delays_s: Sequence[float] = DELAYS_S,
+        delays_s: Sequence[float] = DURABLE_DELAYS_S,
         give_up_after: timedelta = GIVE_UP_AFTER,
         reads: int = PASS_READS,
         budget_s: float = PASS_BUDGET_S,
