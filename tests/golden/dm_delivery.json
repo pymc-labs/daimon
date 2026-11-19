@@ -441,20 +441,6 @@
       }
     },
     {
-      "operation": "add_reaction",
-      "payload": {
-        "args": [
-          "\ud83d\udc40"
-        ],
-        "kwargs": {},
-        "receiver": {
-          "id": "1"
-        }
-      },
-      "platform": "platform_client",
-      "result": null
-    },
-    {
       "operation": "request",
       "payload": {
         "body": null,
@@ -968,20 +954,6 @@
       }
     },
     {
-      "operation": "add_reaction",
-      "payload": {
-        "args": [
-          "\ud83d\udc40"
-        ],
-        "kwargs": {},
-        "receiver": {
-          "id": "2"
-        }
-      },
-      "platform": "platform_client",
-      "result": null
-    },
-    {
       "operation": "request",
       "payload": {
         "body": null,
@@ -1277,20 +1249,6 @@
         },
         "status": 200
       }
-    },
-    {
-      "operation": "add_reaction",
-      "payload": {
-        "args": [
-          "\ud83d\udc40"
-        ],
-        "kwargs": {},
-        "receiver": {
-          "id": "2"
-        }
-      },
-      "platform": "platform_client",
-      "result": null
     }
   ],
   "requests": null

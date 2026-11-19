@@ -292,6 +292,7 @@ async def test_an_effort_the_model_refuses_keeps_the_model_unchanged(
     await _registered_guild(db_session_factory, guild_id)
     _with_selection(monkeypatch)
     monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=False))
+    monkeypatch.setattr(model_command, "model_efforts", lambda _model: ("low",))
     picked = AsyncMock()
     monkeypatch.setattr(model_command, "pick_thread", picked)
     interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
