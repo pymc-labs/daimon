@@ -2104,11 +2104,11 @@ by the adapters.
 
 ### `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S`
 
-`float` · optional · default `11100.0`
+`float` · optional · default `3000.0`
 
 An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
-ceiling (daimon.core.turn.ceiling: 45 minutes, or up to 3 hours by the unattended run
-limit) is enforced inside headless_runner.run_turn and fires first, producing a
+ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
+enforced inside headless_runner.run_turn and fires first, producing a
 TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
 ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
 recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or

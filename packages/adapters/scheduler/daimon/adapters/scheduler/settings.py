@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from daimon.core.routine_move import RoutineFreshnessSettings
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import SettingsConfigDict
 
 # Headroom above the longest core turn ceiling for the pre-turn adapter work
@@ -62,7 +62,7 @@ class SchedulerSettings(RoutineFreshnessSettings):
         description=(
             "An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's "
             "deadline. The core turn ceiling (daimon.core.turn.ceiling: 45 "
-            "minutes, or up to 3 hours by the unattended run limit) "
+            "minutes, or less by the unattended run limit) "
             "is enforced inside headless_runner.run_turn and fires first, "
             "producing a TurnError(kind='ceiling'). This bound only catches a "
             "fire that hangs OUTSIDE the ceiling's two legs (routine row "
@@ -74,6 +74,13 @@ class SchedulerSettings(RoutineFreshnessSettings):
             "routine's catch_up_policy."
         ),
     )
+
+    @field_validator("dispatch_timeout_s")
+    @classmethod
+    def _above_turn_ceiling(cls, value: float) -> float:
+        if value < LONGEST_TURN_CEILING_S:
+            raise ValueError(f"must be at least LONGEST_TURN_CEILING_S ({LONGEST_TURN_CEILING_S}s)")
+        return value
 
     advisory_lock_key: int = Field(
         default=0x44_41_49_4D_4F_4E_53_43,
