@@ -13,6 +13,7 @@ from fastmcp.exceptions import ToolError
 
 ORIGIN = SimpleNamespace(responder_ma_agent_id="agent", platform="discord")
 DEFAULTS: dict[str, Any] = {
+    "source": "poll",
     "delivery": "thread",
     "lifetime_days": 7,
     "permanent": False,
@@ -60,6 +61,15 @@ async def test_skip_refuses_anything_but_the_defaults(
     _patch(monkeypatch, skipped=True)
     with pytest.raises(ToolError, match="without a card"):
         await _check(**change)
+
+
+async def test_skip_refuses_a_callback_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A callback watch makes a private link, so it keeps the card: skip refuses it."""
+    _patch(monkeypatch, skipped=True)
+    with pytest.raises(ToolError, match="needs the approval card"):
+        await _check(source="callback")
+    _patch(monkeypatch, skipped=False)
+    await _check(source="callback")
 
 
 async def test_ask_keeps_every_choice(monkeypatch: pytest.MonkeyPatch) -> None:

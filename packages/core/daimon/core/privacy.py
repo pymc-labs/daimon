@@ -32,9 +32,12 @@ from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import dm_access as dm_access_store
+from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import held_timers as held_timers_store
 from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
@@ -100,7 +103,12 @@ class PurgePreview(BaseModel):
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_carry_overs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    held_timers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_picks: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
@@ -153,7 +161,12 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.dm_carry_overs, "imported earlier conversation"),
+        (preview.held_timers, "imported timer"),
         (preview.tag_opt_outs, "never-tag setting"),
+        (preview.dm_picks, "private conversation agent choice"),
+        (preview.dm_rules, "private conversation routing rule"),
+        (preview.dm_grant_users, "private conversation access entry"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -542,12 +555,24 @@ async def collect_purge_preview(
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
+        dm_carry_overs_count = await dm_carry_overs_store.count_for_users(
+            session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+        )
+        held_timers_count = await held_timers_store.count_for_users(
+            session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+        )
         github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
         )
         tag_opt_outs_count = await tag_opt_outs_store.count_for_account(
             session, account_id=account_id
         )
+        dm_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
+        dm_picks_count = await dm_access_store.count_picks_for_account(
+            session, account_id=account_id
+        )
+        dm_rules_count = await dm_access_store.count_user_rules(session, keys=dm_keys)
+        dm_grant_users_count = await dm_access_store.count_grants_listing(session, keys=dm_keys)
         github_connect_click_intents_count = (
             await github_connect_store.count_click_intents_for_account(
                 session, account_id=account_id
@@ -584,7 +609,12 @@ async def collect_purge_preview(
         daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
+        dm_carry_overs=PurgePreviewRow(count=dm_carry_overs_count, example=None),
+        held_timers=PurgePreviewRow(count=held_timers_count, example=None),
         tag_opt_outs=PurgePreviewRow(count=tag_opt_outs_count, example=None),
+        dm_picks=PurgePreviewRow(count=dm_picks_count, example=None),
+        dm_rules=PurgePreviewRow(count=dm_rules_count, example=None),
+        dm_grant_users=PurgePreviewRow(count=dm_grant_users_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),

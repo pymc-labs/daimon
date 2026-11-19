@@ -1021,6 +1021,7 @@ async def _prepare_session_for_turn_locked(
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
             # A held place's memory is its channel's, shared thread or not.
             memory_hold=admission.hold,
+            model_effort=admission.model_effort,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())
@@ -1126,7 +1127,7 @@ async def _prepare_session_for_turn_locked(
                 or tightening_memory
                 or leaving_memory
             )
-            and turn_is_active(row, now=moment)
+            and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker)
         ):
             # A changed billing channel, responder or memory restriction
             # cannot run against the old session while replacement is deferred.
@@ -1141,7 +1142,7 @@ async def _prepare_session_for_turn_locked(
                 retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
             )
 
-        if fresh_start and turn_is_active(row, now=moment):
+        if fresh_start and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker):
             # A retired key may still be mounted in the old session. Never
             # hand that session back while its replacement waits for a turn.
             return PreparationBusy(
@@ -1149,7 +1150,9 @@ async def _prepare_session_for_turn_locked(
                 retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
             )
 
-        if not isinstance(decision, ReuseAsIs) and turn_is_active(row, now=moment):
+        if not isinstance(decision, ReuseAsIs) and await turn_is_active(
+            row, now=moment, sessionmaker=deps.sessionmaker
+        ):
             # Uniformly deferred: MA itself refuses `sessions.update` mid-turn,
             # and swapping a running session's `.env` or checkpointing it is a
             # race we have no reason to run.

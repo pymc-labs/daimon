@@ -14,7 +14,12 @@ import pytest
 from daimon.adapters.discord.commands import direct_messages as dm_module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.theme import COLOR_RED
+from daimon.core.authz import AgentRef
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.dm_access import DmAgent
+from daimon.core.stores import web_audit
+from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
@@ -72,6 +77,86 @@ async def test_dm_policy_replies_use_server_words(
         assert sent.kwargs["embed"].color.value == COLOR_RED
     assert sent.kwargs["ephemeral"] is True
     assert save.await_count == (1 if admin else 0)
+
+
+def _admin_interaction(runtime: MagicMock) -> MagicMock:
+    member = MagicMock()
+    member.id = 999
+    member.roles = []
+    guild = MagicMock()
+    guild.id = _GUILD
+    guild.owner_id = 999
+    guild.fetch_member = AsyncMock(return_value=member)
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.channel = MagicMock(spec=discord.TextChannel)
+    interaction.user.id = 999
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    return interaction
+
+
+@pytest.mark.parametrize("action", ["agent", "clear-agent"])
+async def test_dm_me_agent_goes_through_the_default_agent_writer_and_is_audited(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    action: str,
+) -> None:
+    """`/dm-me agent` sets the default `daimon dm default` and the web app set, with an audit row
+    naming the person who ran it, and refuses an agent the server does not have."""
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=str(_GUILD)
+    )
+    monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        dm_module,
+        "list_dm_agents",
+        AsyncMock(return_value=[DmAgent("private", "ag_private", AgentRef.of("private"))]),
+    )
+    runtime = MagicMock(sessionmaker=db_session_factory)
+    cog = DirectMessageCog(MagicMock(runtime=runtime))
+    call = cog.dm.callback.__wrapped__  # pyright: ignore[reportFunctionMemberAccess]
+
+    interaction = _admin_interaction(runtime)
+    await call(cog, interaction, "agent", "nobody")
+    refusal = interaction.followup.send.await_args.kwargs["embed"].description
+    assert "nobody" in refusal, f"an unknown agent is refused, as elsewhere: {refusal}"
+    async with db_session_factory() as session:
+        assert await get_dm_agent_name(session, tenant_id=result.tenant_id) is None
+
+    if action == "clear-agent":
+        interaction = _admin_interaction(runtime)
+        await call(cog, interaction, "agent", "private")
+    interaction = _admin_interaction(runtime)
+    await call(cog, interaction, action, "private" if action == "agent" else None)
+    async with db_session_factory() as session:
+        stored = await get_dm_agent_name(session, tenant_id=result.tenant_id)
+        rows = await web_audit.list_recent(
+            session, tenant_id=result.tenant_id, action="Changed DM default agent"
+        )
+    expected = "private" if action == "agent" else None
+    assert stored == expected, "the default agent is the one value cold DMs and dm default read"
+    assert rows[0].actor_account_id is not None, "the audit row names who ran the command"
+    assert rows[0].detail == (expected or "None")
+
+
+async def test_dm_me_enable_records_who_turned_dms_on(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    result = await provision_tenant(
+        db_session_factory, platform="discord", workspace_id=str(_GUILD)
+    )
+    monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
+    runtime = MagicMock(sessionmaker=db_session_factory)
+    cog = DirectMessageCog(MagicMock(runtime=runtime))
+    await cog.dm.callback.__wrapped__(  # pyright: ignore[reportFunctionMemberAccess]
+        cog, _admin_interaction(runtime), "enable"
+    )
+    async with db_session_factory() as session:
+        assert await dm_enabled(session, tenant_id=result.tenant_id), "DMs are on"
+        changes = await list_changes(session, tenant_id=result.tenant_id, channel_id=WORKSPACE_ID)
+    assert [(c.setting, c.surface) for c in changes] == [("direct_messages", "chat")], changes
+    assert changes[0].actor_account_id is not None, "the change names who ran the command"
 
 
 async def test_dm_from_somewhere_without_history_is_a_red_card() -> None:
@@ -201,6 +286,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
     )
     message = MagicMock()
+    message.add_reaction = message.remove_reaction = AsyncMock()
     message.author.bot = False
     message.author.id = 999
     message.channel = MagicMock(spec=discord.DMChannel)
@@ -275,6 +361,7 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
     )
     message = MagicMock()
+    message.add_reaction = message.remove_reaction = AsyncMock()
     message.author.bot = False
     message.author.id = 999
     message.channel = MagicMock(spec=discord.DMChannel)

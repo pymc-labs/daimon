@@ -7,7 +7,9 @@ what they may read and manage them for a deployment.
 Watches are off by default. Polling works for Discord `read_thread` and
 `read_channel`, and for read tools on MCP servers an operator lists. Signed
 page-event callbacks are accepted but not yet produced by any host, so
-`create_watch(source="page_event")` is refused.
+`create_watch(source="page_event")` is refused. A callback watch wakes on
+posts to a private link instead of polling; see
+[Callback watches](#callback-watches).
 
 ## How a watch works
 
@@ -57,7 +59,7 @@ owner, even with tool safety off.
 A server admin can set `watch_approval` to skip for the team or one agent.
 Creating and resuming then run without the card, but only as the default
 watch: it reports in the same thread for 7 days and reads Daimon's own tools,
-and any other choice is refused. Editing, rotating a key, long jobs and Fly
+and any other choice is refused, a callback watch included. Editing, rotating a key, long jobs and Fly
 launches keep asking, and a turn nobody is watching still cannot enroll a watch.
 
 An edit shows each change as old and new on its card. Queued reports from
@@ -65,9 +67,10 @@ before it are dropped, and the next poll saves a new baseline. Admins may
 show, pause or delete another owner's watch, and `list_watches(scope="all")`
 lists the whole server. Only the owner can resume or edit.
 
-A watch lasts 1 to 30 days, with at most 25 live watches per owner. An owner
-who is an admin can make up to 5 watches permanent with `permanent=true`. A
-permanent watch paused for 30 days expires.
+A watch lasts 1 to 30 days, with at most 25 live watches per owner. A permanent
+watch has no end date and expires after 30 days paused. An owner who is an admin
+can make up to 5 polled watches permanent with `permanent=true`; a callback watch
+is permanent only when whoever runs Daimon sets that (below).
 
 A watch pauses and tells its owner privately when:
 
@@ -151,6 +154,10 @@ image as the others, after migrations.
 3. Keep the executor private on port 8767, with no published port or proxy
    route. For MCP server watches it needs outbound HTTPS to the listed URLs.
 4. Put the sidecar behind a TLS proxy that exposes only the callback paths.
+   Callback watches need the route `POST /callbacks/watches/<watch id>/<token>`,
+   with a body limit of `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by
+   default). The lane `Caddyfile.sidecar` does both; give the same variable to
+   the `sidecar` and the proxy.
 5. Set [`DAIMON_WATCHES__ENABLED`](configuration.md#daimon_watches__enabled)
    to `true`, then turn on the database `global` gate. Watches fire only once the
    operator has done both, whatever the Watches feature says at any level.
@@ -187,6 +194,35 @@ restart never sends one twice. A notice Discord will never deliver, such as
 to a closed DM, is recorded as `refused` and not retried. Receipts are kept 30
 days.
 
+## Callback watches
+
+`create_watch(source="callback")` polls nothing. Daimon DMs the owner a private
+link, and each `POST` of UTF-8 text to it wakes the agent once, with that text
+as untrusted evidence. A post may be up to 4 KiB unless the deployment allows more
+(`DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`, up to 512 KiB). The link is never
+returned in the tool result or shown in a channel. A lost one cannot be shown
+again: delete the watch and make a new one.
+
+If the DM fails the watch is deleted. A callback watch reports to the owner's
+private conversation and lasts 30 days by default. The `callback_watch_lifetime`
+feature (server admins, `DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or
+90 days, or permanent with `0`; a permanent callback watch polls nothing, so it
+does not count toward the 5 above. The setting applies to new and imported
+watches, and `renew` restarts the clock.
+
+Set the public address of the sidecar first:
+
+```bash
+DAIMON_WATCHES__CALLBACK_BASE_URL=https://hooks.example.com
+```
+
+Only a SHA-256 of each token is stored and compared in constant time. Every
+refusal answers the same `403`; oversized bodies get `413` and a body with a NUL
+byte `400`. A retried post of the same body within five minutes wakes the agent
+once and still answers `202`. A callback watch cannot be made in a DM. Wakes share the
+per-watch and per-owner limits above, and a flood of bad links is rate limited
+per address and in the database. Keep the proxy from logging paths.
+
 ## Import watches from another system
 
 `daimon watches import` loads a reviewed JSON manifest of at most 1 MiB. It
@@ -195,7 +231,7 @@ rerunning it is idempotent.
 
 ```bash
 daimon watches import /private/watches.json
-daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT_CHANNEL_ID THREAD_ID
+daimon watches go-live --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAME
 ```
 
 Each entry carries `version: 1` fields for the source, tool, arguments,
@@ -205,5 +241,9 @@ signing keys, saved credentials, leases or unfinished wakes.
 
 `discord_read_messages` maps to `read_thread`, for thread ids only.
 `discord_read_channel_since` maps to `read_channel` and drops `since`. Other
-tools import as `source_unmapped`, cannot be resumed, and their owner gets a
-private notice. Confirm a watch only after checking every binding field.
+tools import as `source_unmapped`, and cannot be resumed. The owner is
+not messaged; the command output lists them. Run `go-live` only after checking every binding field.
+
+Callback entries (`source: "callback"`) carry `token_sha256`, the owner, channel
+and an optional `expires_at`; see
+[Move people in](people-migration.md#watches-and-reminders).

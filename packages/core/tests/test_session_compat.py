@@ -464,6 +464,7 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
     [
         ("ma_agent_id", "agent_other", "agent_identity"),
         ("model_id", "claude-haiku-4-5", "model"),
+        ("model_effort", "low", "model"),
         ("system_sha256", "other-system-hash", "system_prompt"),
         ("skills_sha256", "other-skills-hash", "skills"),
         ("environment_id", "env_other", "environment"),

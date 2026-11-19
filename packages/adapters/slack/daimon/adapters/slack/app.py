@@ -106,7 +106,9 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.direct_messages import (
+    DM_PICK_ACTION_ID,
     handle_direct_message,
+    handle_dm_agent_pick,
     handle_dm_command,
     is_direct_message_event,
 )
@@ -1594,6 +1596,8 @@ class SlackApp:
                 "thread_model_confirm": handle_thread_model_confirm,
             }.get(action_id, handle_thread_model_cancel)
             self._spawn(handler(self.runtime, payload))
+        elif action_id == DM_PICK_ACTION_ID:
+            self._spawn(handle_dm_agent_pick(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -2854,7 +2858,9 @@ class SlackApp:
             # run_prepared_turn fail immediately at its first await with a
             # ceiling TurnError. Bounding the interstitial itself is separate,
             # deferred work.
-            turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+            turn_deadline_at = turn_deadline(
+                now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s
+            )
 
             # --- Stage two: bind_session (find-or-create, mapping write,
             # recorder binding) -- bind_session(). As on Discord,
@@ -2986,6 +2992,7 @@ class SlackApp:
                         active_turn_message_id=lifecycle.status_ts,
                         active_turn_channel_id=channel,
                         now=datetime.now(UTC),
+                        deadline=turn_deadline_at,
                     )
                     await _at_session.commit()
                 _marker_mapping_ids.add(prepared.mapping_id)
@@ -3579,7 +3586,9 @@ class SlackApp:
             admitted_name=follow_admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        follow_deadline = turn_deadline(now=datetime.now(UTC))
+        follow_deadline = turn_deadline(
+            now=datetime.now(UTC), ceiling_s=follow_admission.turn_ceiling_s
+        )
         follow_prepared = await bind_session(
             self.runtime.turn_deps,
             follow_admission,
@@ -3686,6 +3695,7 @@ class SlackApp:
                     active_turn_message_id=follow_lifecycle.status_ts,
                     active_turn_channel_id=channel,
                     now=datetime.now(UTC),
+                    deadline=follow_deadline,
                 )
                 await _at_session.commit()
 
@@ -4013,12 +4023,14 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, waits for acked
+        Sets draining=True so new mentions are rejected, ends every direct
+        message burst's wait so it is answered now, waits for acked
         mention handlers and ``_processing`` to drain (or the grace window to
         elapse), then closes the WebSocket client. Stays within the
         deployment's 60s kill timeout.
         """
         self.draining = True
+        self.runtime.dm_bursts.stop()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),

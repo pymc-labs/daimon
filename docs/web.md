@@ -170,7 +170,7 @@ Admins change the workspace's rules under **Admin** > **Settings**. The same
 checks apply as in chat, and each change is recorded.
 
 - **Access**: who may start turns, direct messages, read-only memory in DMs
-  and typed mentions. Direct messages show only on Discord and Slack.
+  and typed mentions. Direct messages show on Discord, Slack and Teams.
 - **Providers**: which model providers the workspace may use.
 - **Web chat agent**: the agent a new web chat opens with. It is not the
   workspace's default agent in chat.

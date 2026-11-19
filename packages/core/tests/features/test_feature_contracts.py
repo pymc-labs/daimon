@@ -89,8 +89,10 @@ _NARROWED: dict[str, str] = {
     "support_feedback": "set where credits apply: the workspace, an agent or a channel",
     "support_own_channel": "operator-only: whether a workspace may pick its own channel",
     "private_channel_messages": "operator-only: read once at startup",
-    "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
+    "direct_messages": "a workspace or agent policy for DMs, which have no channel or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
+    "dm_history_depth": "DMs have no channel or thread; an agent and its workspace set the memory",
+    "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
     "mcp_connector_relay": "operator-only rollback switch",
@@ -99,9 +101,14 @@ _NARROWED: dict[str, str] = {
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
+    "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
+    "model_reactions": "a workspace or agent display choice, read when the turn starts",
+    "tool_server_names": "a workspace or agent display choice, read when the turn starts",
+    "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
+    "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 
@@ -718,3 +725,10 @@ def test_the_dependency_graph_has_no_cycle(monkeypatch: pytest.MonkeyPatch) -> N
     )
     with pytest.raises(ValueError, match="dependency cycle"):
         resolution_order()
+
+
+@pytest.mark.parametrize("key", ["turn_time_limit", "unattended_time_limit"])
+def test_time_limit_text_matches_its_longest_choice(key: str) -> None:
+    spec = FEATURES[key]
+    assert "45 minutes" in spec.values.values(), "the longest choice the text names"
+    assert "hours" not in spec.doc, "the text names no limit the choices lack"

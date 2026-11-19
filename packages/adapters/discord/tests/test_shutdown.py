@@ -13,7 +13,7 @@ import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import discord
 import pytest
@@ -104,6 +104,16 @@ async def test_drain_sets_flag_then_closes() -> None:
 
     assert bot.draining is True, "_drain_and_close must set draining=True"
     bot.close.assert_called_once(), "close() must be called exactly once"  # pyright: ignore[reportUnusedExpression]
+
+
+@pytest.mark.asyncio
+async def test_drain_tells_the_cogs_to_answer_what_they_hold() -> None:
+    """Held direct messages are answered inside the grace window, not dropped."""
+    bot = make_bot(_make_runtime())
+    bot.close = AsyncMock()  # type: ignore[method-assign]
+    bot.dispatch = MagicMock()  # type: ignore[method-assign]
+    await bot._drain_and_close()  # pyright: ignore[reportPrivateUsage]
+    assert call("drain") in bot.dispatch.call_args_list, "the DM cog's on_drain must fire"
 
 
 @pytest.mark.asyncio

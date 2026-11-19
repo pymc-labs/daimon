@@ -981,12 +981,17 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
         "tag_opt_outs": "tag_opt_outs",
+        "dm_picks": "dm_picks",
+        "dm_rules": "dm_rules",
+        "dm_grant_users": "dm_grant_users",
         "connector_tokens": "connector_tokens",
         "gemini_records": "gemini_records",
         "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
+        "dm_carry_overs": "dm_carry_overs",
+        "held_timers": "held_timers",
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
@@ -1045,6 +1050,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
         "tag_opt_outs": "account_id PK/FK -> accounts.id; tag_opt_outs.delete_for_account",
+        "dm_agent_picks": "account_id FK -> accounts.id; dm_access.delete_picks_for_account",
         "watches": "owner_account_id FK; explicit erasure also deletes evidence and pending wakes",
         "watch_notice_receipts": "owner_account_id FK cascade; watches.delete_for_account deletes receipts",
         "watch_credentials": "owner_account_id FK cascade; watches.delete_for_account deletes keys",
@@ -1215,6 +1221,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # shared by everyone there; `set_by` is attribution only, severed by
             # ON DELETE SET NULL. Deleting the row would change the place for others.
             "feature_values",
+            # An imported timer's note waits for an operator to confirm it and is emptied
+            # when settled; account_id is ON DELETE CASCADE, so erasing the account removes it.
+            "held_timers",
             # Support limits, menus and channels are tenant config; `set_by_account_id`
             # is attribution only, severed by ON DELETE SET NULL. A person's own
             # limit rows are deleted by platform user (`support_person_limits`).

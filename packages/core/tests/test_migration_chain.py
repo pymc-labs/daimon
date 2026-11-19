@@ -169,7 +169,11 @@ TAIL = (
     "0205_web_search_usage",
     "0206_support_plans",
     "0207_skill_manifest_bytes",
-    "0208_sandbox_tools_feature",
+    "0208_active_turn_deadline",
+    "0209_thread_model_effort",
+    "0210_dm_access",
+    "0211_callback_watch_imports",
+    "0212_sandbox_tools_feature",
 )
 HEAD = TAIL[-1]
 
@@ -221,6 +225,8 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
     ("thread_model_settings", "provider"),
+    ("thread_model_settings", "effort"),
+    ("thread_model_settings", "model"),
 }
 
 
@@ -270,7 +276,7 @@ CHAIN = [
 TOP = (PREVIEW_HEAD, *TAIL)
 
 
-# Heads with the routine sandbox columns and history; from 0208 on they are unmapped, kept
+# Heads with the routine sandbox columns and history; from 0212 on they are unmapped, kept
 # for the release still running during a deploy.
 SANDBOX_HEADS = (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, ADMINS_HEAD, *TOP)
 

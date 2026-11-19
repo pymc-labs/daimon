@@ -957,30 +957,6 @@ async def test_invoker_roles_refuse_unsupported_platform(
         )
 
 
-async def test_dm_policy_inspect_set_clear_preserves_enablement(db_session_factory):
-    rt = build_cli_runtime(db_session_factory)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="700000101"
-    )
-    initial = await tenants_mod.tenants_dm_policy(
-        rt=rt, platform="discord", external_id="700000101"
-    )
-    assert initial == {"enabled": False, "dm_agent_name": None}
-    configured = await tenants_mod.tenants_dm_policy(
-        rt=rt, platform="discord", external_id="700000101", agent="private", enabled=True
-    )
-    assert configured == {"enabled": True, "dm_agent_name": "private"}
-    cleared = await tenants_mod.tenants_dm_policy(
-        rt=rt, platform="discord", external_id="700000101", clear_agent=True
-    )
-    assert cleared == {"enabled": True, "dm_agent_name": None}
-    with pytest.raises(typer.BadParameter, match="mutually exclusive"):
-        await tenants_mod.tenants_dm_policy(
-            rt=rt, platform="discord", external_id="700000101", agent="private", clear_agent=True
-        )
-    assert result.tenant_id is not None
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_invoker_admin_bypass_set_get(db_session_factory, stub_anthropic, platform):  # type: ignore[no-untyped-def]

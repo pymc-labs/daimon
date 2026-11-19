@@ -59,8 +59,8 @@ from daimon.core.channel_backend import (
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
-    DirectMessagePolicy,
     Settings,
+    env_admits,
     get_repo_memory_settings,
     load_settings,
 )
@@ -70,6 +70,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
+from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -419,9 +420,7 @@ async def _build_fire(
         return (
             platform == "discord"
             and owner is not None
-            and settings.direct_message_policies.get(row.tenant_id, DirectMessagePolicy()).allows(
-                owner
-            )
+            and env_admits(settings.direct_message_policies, row.tenant_id, owner)
             and await dm_enabled(s, tenant_id=row.tenant_id)
         )
 
@@ -543,11 +542,29 @@ async def _build_fire(
                 expected_row=row,
             )
 
+    async def _owner_granted(row: RoutineRow, owner: str) -> bool:
+        """The routine agent's DM grant admits the owner, by their current server roles.
+
+        Read before the firing transaction, so the role lookup holds no connection.
+        """
+        async with sm() as s:
+            tenant = await get_tenant(s, row.tenant_id)
+        return tenant is not None and await sender_admits(
+            sm,
+            tenant_id=row.tenant_id,
+            agent_name=row.agent_name,
+            user_id=owner,
+            groups=roles_by_membership(
+                membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
+            ),
+        )
+
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
                 await _refuse(s, row, "This routine has no owner. Create it again.")
             return
+        granted = row.destination_kind != "dm" or await _owner_granted(row, row.created_by_user_id)
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
@@ -558,7 +575,9 @@ async def _build_fire(
                 await _refuse(s, row, "Daimon was removed from here.")
                 return
             platform = tenant.platform
-            if row.destination_kind == "dm" and not await _owner_dm_open(s, row, platform):
+            if row.destination_kind == "dm" and not (
+                granted and await _owner_dm_open(s, row, platform)
+            ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return
             # Headless routines have no self-hosted runtime yet. Refuse before

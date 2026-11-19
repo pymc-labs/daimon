@@ -153,6 +153,11 @@ OTHER_REFUSAL: dict[tuple[str, bool | None], tuple[int, str, str]] = {
     ),
 }
 
+_DM_ROUTING = (
+    "workspace level: DM routing names agents but changes none; a channel's own agent "
+    "answers only in its home"
+)
+
 #: Every other mutating route, with why it is not swept.
 EXEMPT: dict[str, str] = {
     "POST /auth/logout": ("signs the caller out"),
@@ -290,6 +295,10 @@ EXEMPT: dict[str, str] = {
     "PATCH /api/admin/settings": (
         "workspace level: no channel and no agent (SET_WORKSPACE_SETTINGS)"
     ),
+    "PATCH /api/admin/dm": _DM_ROUTING,
+    "POST /api/admin/dm/rules": _DM_ROUTING,
+    "PATCH /api/admin/dm/rules/{position}": _DM_ROUTING,
+    "DELETE /api/admin/dm/rules/{position}": _DM_ROUTING,
     "DELETE /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "PATCH /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "POST /{path:path}": "the app's page fallback: it serves the page and changes nothing",

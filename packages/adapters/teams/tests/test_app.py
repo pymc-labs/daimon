@@ -29,6 +29,7 @@ from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_B
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import DmHistoryCap, HistoryDepth
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.native_admins import GroupLookupFailed
@@ -121,12 +122,13 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
             await release.wait()
 
     with patch.object(TeamsApp, "_run_turn", _turn):
-        first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
+        first = asyncio.create_task(teams._orchestrate(make_inbound("one", kind="channel"), TENANT))
         await started.wait()
-        two, three = make_inbound("two"), make_inbound("three")
+        two, three = make_inbound("two", kind="channel"), make_inbound("three", kind="channel")
         await teams._orchestrate(two, TENANT)
         await teams._orchestrate(three, TENANT)
-        await teams._orchestrate(make_inbound("other", user=OTHER_AAD_OBJECT_ID), TENANT)
+        other = make_inbound("other", user=OTHER_AAD_OBJECT_ID, kind="channel")
+        await teams._orchestrate(other, TENANT)
         assert len(ran) == 1, "queued messages wait for the running turn"
         release.set()
         await first
@@ -139,6 +141,165 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     assert ran[1].message_ids == (two.activity_id, three.activity_id), (
         "the composed turn knows every message it answers, for media and history"
     )
+
+
+async def test_a_personal_chat_burst_waits_for_the_dm_wait_then_runs_as_one_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+    wait = AsyncMock(return_value=0.3)
+    monkeypatch.setattr(app_module, "debounce_seconds", wait)
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
+        while CONVERSATION_ID not in teams._processing:  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.01)
+        await teams._orchestrate(make_inbound("two"), TENANT)
+        assert [i.text for i in ran] == [], "the first message waits for the rest of the burst"
+        await first
+    assert [i.text for i in ran] == ["one\n\ntwo"], "one turn answers the burst"
+    assert wait.await_args.args[2:] == (TENANT, "teams"), "the Teams setting decides"
+
+
+async def test_a_personal_chat_burst_shows_one_eyes_and_merges_what_comes_during_its_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As on Discord and Slack: 👀 on each held message, no ⌛ and no queue notice."""
+    monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(app_module, "debounce_seconds", AsyncMock(return_value=0.2))
+    made: list[tuple[str, str, bool]] = []
+
+    async def react(target: reactions.ReactionTarget, reaction: str, *, add: bool) -> None:
+        made.append((target.activity_id, reaction, add))
+
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=FakeSender(),
+        commands={},
+        bot_token=bot_token,
+        react=react,
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound)
+        acknowledge = self._reactions.acknowledger(inbound)
+        assert acknowledge is not None
+        acknowledge("accepted")
+        if len(ran) == 1:
+            started.set()
+            await release.wait()
+        acknowledge("done")
+
+    one, two, three = make_inbound("one"), make_inbound("two"), make_inbound("three")
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch.object(TeamsApp, "_say", new=AsyncMock()) as say,
+    ):
+        running = asyncio.create_task(teams._orchestrate(one, TENANT))
+        while CONVERSATION_ID not in teams._processing:  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.01)
+        await teams._orchestrate(two, TENANT)
+        await started.wait()
+        await teams._orchestrate(three, TENANT)
+        assert CONVERSATION_ID not in teams._pending, "it joins the burst, not the chat's queue"
+        release.set()
+        await running
+    await teams.drain(timeout=5)
+    say.assert_not_awaited()
+    assert [i.text for i in ran] == ["one\n\ntwo", "three"], "the next turn takes the rest"
+
+    def on(message: TeamsInbound) -> list[tuple[str, bool]]:
+        return [(r, add) for key, r, add in made if key == message.activity_id]
+
+    eyes, check = reactions.EYES, reactions.CHECK
+    assert on(one) == [(eyes, True), (eyes, False)], "the first message waited: 👀 until answered"
+    for answered in (two, three):
+        assert on(answered) == [(eyes, True), (check, True), (eyes, False)], (
+            "one 👀 while held and answering, then ✅ in its place"
+        )
+
+
+@pytest.mark.parametrize("stopping", [False, True], ids=["refused or unpicked", "stopping"])
+async def test_a_personal_chat_burst_not_routed_is_settled_or_kept_for_the_next_boot(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    routed_personal_chat: AsyncMock,
+    stopping: bool,
+) -> None:
+    """One notice speaks for the burst: what joined it is settled unanswered, or, when the
+    process stops during the pick, held for the next boot."""
+    teams = _app(db_session_factory, FakeSender())
+    one, two = make_inbound("one"), make_inbound("two")
+
+    async def route(*_: object, **__: object) -> bool:
+        await teams._orchestrate(two, TENANT)  # pyright: ignore[reportPrivateUsage]
+        if stopping:
+            teams.draining = True
+            teams._dm_bursts.stop()  # pyright: ignore[reportPrivateUsage]
+        return False
+
+    routed_personal_chat.side_effect = route
+    with (
+        patch.object(TeamsApp, "_run_turn", new=AsyncMock()) as turn,
+        patch.object(TeamsApp, "_finish", new=AsyncMock(return_value=[])) as finish,
+        patch.object(TeamsApp, "_hold", new=AsyncMock()) as hold,
+    ):
+        await teams._orchestrate(one, TENANT)  # pyright: ignore[reportPrivateUsage]
+    turn.assert_not_awaited()
+    settled, untouched = (hold, finish) if stopping else (finish, hold)
+    settled.assert_awaited_once_with([one, two])
+    untouched.assert_not_awaited()
+
+
+async def test_a_personal_chat_message_queued_behind_other_work_waits_for_the_pick(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    routed_personal_chat: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message that queued while saved work held the chat opens a burst once the chat
+    frees, so the pick answers it with what was sent meanwhile, as a first message does."""
+    teams = _app(db_session_factory, FakeSender())
+    monkeypatch.setattr(app_module, "debounce_seconds", AsyncMock(return_value=0.05))
+    busy, free = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+
+    async def dispatch(*_: object) -> None:
+        busy.set()
+        await free.wait()
+
+    async def route(*_: object, burst: object = None, **__: object) -> bool:
+        assert burst is not None, "the queued message is held for the pick"
+        await teams._orchestrate(make_inbound("two"), TENANT)  # pyright: ignore[reportPrivateUsage]
+        return True
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+
+    routed_personal_chat.side_effect = route
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch.object(TeamsApp, "_dispatch_continuations", dispatch),
+    ):
+        held = asyncio.create_task(teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL))
+        await busy.wait()
+        await teams._orchestrate(make_inbound("one"), TENANT)  # pyright: ignore[reportPrivateUsage]
+        assert routed_personal_chat.await_count == 0 and not ran, "it queues behind the work"
+        free.set()
+        await asyncio.wait_for(held, 5)
+    assert routed_personal_chat.await_count == 1, "the queued message is routed once"
+    assert ran == ["one\n\ntwo"], "the pick answers it and what came meanwhile in one turn"
+
+
+@pytest.mark.parametrize(("kind", "replay"), [("dm", 12), ("channel", 100)])
+def test_a_personal_chat_reads_as_much_history_as_a_dm_conversation(kind: Any, replay: int) -> None:
+    admission = SimpleNamespace(history_depth=HistoryDepth(), dm_history=DmHistoryCap())
+    depth = app_module._history_depth(make_inbound(kind=kind), admission)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    assert depth.replay == replay
 
 
 async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
@@ -164,7 +325,7 @@ async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(
             started.set()
             await release.wait()
 
-    first, queued = make_inbound("one"), make_inbound("two")
+    first, queued = make_inbound("one", kind="channel"), make_inbound("two", kind="channel")
     with patch.object(TeamsApp, "_run_turn", _turn):
         running = asyncio.create_task(teams._orchestrate(first, TENANT))
         await started.wait()
@@ -253,10 +414,10 @@ def test_a_message_composed_with_a_later_form_keeps_its_reactions() -> None:
     assert forms.from_form, "only forms: nothing to react on"
 
 
-async def test_a_replayed_message_loses_a_predecessors_hourglass(
+async def test_a_replayed_message_loses_a_predecessors_marks(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The process that queued it may have exited before its ⌛ came off."""
+    """The process that queued or held it may have exited before its mark came off."""
     monkeypatch.setattr(reactions, "MIN_INTERVAL_S", 0.0)
     made: list[tuple[str, str, bool]] = []
 
@@ -279,7 +440,10 @@ async def test_a_replayed_message_loses_a_predecessors_hourglass(
         teams._replay([held])
         await settle(teams)
     await teams.drain(timeout=5)
-    assert made == [(held.activity_id, reactions.HOURGLASS, False)], "⌛ comes off on replay"
+    assert made == [
+        (held.activity_id, reactions.HOURGLASS, False),
+        (held.activity_id, reactions.EYES, False),
+    ], "⌛ and a personal chat's 👀 come off on replay"
 
 
 async def test_a_reaction_in_flight_does_not_hold_up_a_drain(

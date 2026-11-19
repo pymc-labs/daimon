@@ -198,7 +198,7 @@ async def test_create_preserves_override_tool_key_order_in_request_bytes(
 
 @pytest.mark.parametrize(
     "override_fields",
-    [{"model": 42}, {"model": False}, {"model": {"id": "claude-haiku-5-5"}}, {"unapproved": True}],
+    [{"model": 42}, {"model": False}, {"model": {"effort": "low"}}, {"unapproved": True}],
 )
 async def test_create_rejects_invalid_override_fields_before_io(
     override_fields: dict[str, JsonValue],

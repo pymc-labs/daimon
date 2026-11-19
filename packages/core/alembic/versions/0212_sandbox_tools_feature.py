@@ -22,8 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0208_sandbox_tools_feature"
-down_revision: str | None = "0207_skill_manifest_bytes"
+revision: str = "0212_sandbox_tools_feature"
+down_revision: str | None = "0211_callback_watch_imports"
 branch_labels: str | None = None
 depends_on: str | None = None
 

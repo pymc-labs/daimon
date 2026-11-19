@@ -1329,7 +1329,7 @@ async def erase_sandbox_setter(
 ) -> None:
     """Privacy erasure: replace a purged person's id in the old sandbox opt-in columns.
 
-    Migration 0208 keeps `routines.sandbox_tools_set_by` and `routine_sandbox_history` unmapped
+    Migration 0212 keeps `routines.sandbox_tools_set_by` and `routine_sandbox_history` unmapped
     for the release still running during a deploy, so they are reached by name, and only where
     they exist (a schema built from the models has neither). `set_by` holds an account id, a CLI
     principal id or, for a panel edit, a platform user id. `ids` match anywhere; each

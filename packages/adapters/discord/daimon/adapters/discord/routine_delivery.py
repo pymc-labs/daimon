@@ -43,6 +43,7 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.message_split import split_fenced
@@ -81,6 +82,28 @@ ChannelFetcher = Callable[[int], Awaitable[object]]
 #: `send`. Raises `discord.HTTPException` (or `LookupError`) when it cannot.
 DmOpener = Callable[[int, int], Awaitable[discord.abc.Messageable]]
 DmPolicyLookup = Callable[[RoutineRow], DirectMessagePolicy]
+
+
+async def _agent_admits(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    resolver: MembershipResolver | None,
+    row: RoutineRow,
+    user_id: str,
+) -> bool:
+    """The routine's agent grant admits the person, by their current server roles."""
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, row.tenant_id)
+    if tenant is None:
+        return False
+    return await sender_admits(
+        sessionmaker,
+        tenant_id=row.tenant_id,
+        agent_name=row.agent_name,
+        user_id=user_id,
+        groups=roles_by_membership(resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id),
+    )
+
+
 #: The identity a routine's result posts under: `(row, guild_id)` → identity.
 IdentityResolver = Callable[[RoutineRow, str], Awaitable[AgentIdentity]]
 AgentNamesResolver = Callable[[RoutineRow], Awaitable[tuple[str | None, ...]]]
@@ -236,7 +259,12 @@ def make_discord_routine_poster(
                     return DeliveryOutcome(
                         status="skipped", note="Routine DMs are disabled for this server."
                     )
-        if row.destination_kind == "dm" and not dm_policy(row).allows(row.created_by_user_id or ""):
+        if row.destination_kind == "dm" and not (
+            dm_policy(row).allows(row.created_by_user_id or "")
+            and await _agent_admits(
+                sessionmaker, membership_resolver, row, row.created_by_user_id or ""
+            )
+        ):
             return DeliveryOutcome(
                 status="skipped", note="The owner is not allowed to receive DMs."
             )
@@ -353,6 +381,7 @@ def make_discord_routine_poster(
             or not creator.isdigit()
             or not guild_id.isdigit()
             or not dm_policy(row).allows(creator)
+            or not await _agent_admits(sessionmaker, membership_resolver, row, creator)
         ):
             return DeliveryOutcome(status="skipped", note=reason)
         try:
@@ -410,7 +439,11 @@ def make_discord_routine_poster(
             if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
                 return False
             creator = row.created_by_user_id
-            if creator is None or not dm_policy(row).allows(creator):
+            if (
+                creator is None
+                or not dm_policy(row).allows(creator)
+                or not await _agent_admits(sessionmaker, membership_resolver, row, creator)
+            ):
                 return False
             current_policy = await clear_creator(
                 sessionmaker, row, platform="discord", membership_resolver=membership_resolver

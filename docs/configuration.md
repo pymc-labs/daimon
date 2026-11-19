@@ -108,7 +108,9 @@ JSON object.
 Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
 rejected). Default is members (live membership required). Set mode=disabled to disable
 DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
-Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
+Deprecated: checked with per-agent DM access on every path, the stricter wins; `daimon
+dm import-policies` copies it into stored access. Configure
+DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
 ### `DAIMON_TABLE_RENDERING`
 
@@ -765,9 +767,9 @@ turn_queue); continuation wakes keep their existing admission path.
 `int` · optional · default `86400`
 
 Minimum age in seconds before Discord can retire a card after definite recovery failure
-or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
-Recovery runs at startup and periodically, and deletes a known pending card when the bot
-has Manage Messages permission.
+or repeated failed recovery passes. Must be at least the longest turn time limit (180
+minutes) plus 15 minutes. Recovery runs at startup and periodically, and deletes a known
+pending card when the bot has Manage Messages permission.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
 
@@ -1898,6 +1900,26 @@ raised floor polls at the floor. Default (also used when the value is empty):
 read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
 60. Set [] to allow no polls.
 
+### `DAIMON_WATCHES__CALLBACK_BASE_URL`
+
+`str | None` · optional · default unset
+
+Public https address of the callback endpoint, with no path, query or trailing slash
+(for example https://hooks.example.com). Callback watches give their owner a secret link
+under it once; unset refuses new callback watches and leaves existing ones working.
+Route /callbacks/watches/ on the sidecar to it, and keep proxy access logs off that
+path, since the secret is part of it.
+
+### `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`
+
+`int` · optional · default `4096`
+
+Largest body, in bytes, that one post to a callback watch link may carry; a larger post
+is refused. Default 4096 (4 KiB); up to 524288 (512 KiB). Raise it for senders that post
+a whole record, for example 262144 for 256 KiB. The per-watch, per-owner and per-server
+evidence limits grow with it, and a wake that would carry more than 512 KiB of evidence
+drops its oldest posts. Signed page events keep their own 4 KiB limit.
+
 ### `DAIMON_WATCHES__CHAT_TOOLS`
 
 `list[str]` · optional · default unset
@@ -2121,12 +2143,13 @@ by the adapters.
 
 `float` · optional · default `3000.0`
 
-An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core ~45-minute
-ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn and fires
-first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
-OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
-the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
+ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
+enforced inside headless_runner.run_turn and fires first, producing a
+TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
+ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
+recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
+the core ceiling becomes unreachable for routines. Each routine has its own timeout;
 continuous scheduler ticks do not await in-flight routines. Missed slots follow the
 routine's catch_up_policy.
 

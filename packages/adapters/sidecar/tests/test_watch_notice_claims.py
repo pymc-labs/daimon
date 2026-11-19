@@ -56,6 +56,14 @@ async def test_archived_tenant_notice_does_not_stop_batch(
         expected = await watches.import_watch(
             db, definition.model_copy(update={"os_binding": binding}), now=now
         )
+        # An import is silent, so both rows expire to be due a notice.
+        await db.execute(
+            text(
+                "UPDATE watches SET status='expired', expires_at=:at, source_state='{}' "
+                "WHERE id IN (:a, :b)"
+            ),
+            {"at": now - timedelta(minutes=5), "a": archived.id, "b": expected.id},
+        )
         # Give the archived row priority under the claim's creation ordering.
         await db.execute(
             text("UPDATE watches SET created_at=:created WHERE id=:id"),
@@ -98,10 +106,12 @@ async def test_expired_notices_are_bounded_by_expiry_age(
             text("UPDATE watches SET status='expired', expires_at=:expiry WHERE id=:id"),
             {"expiry": now - age, "id": row.id},
         )
-        if not pending_import:
-            await db.execute(
-                text("UPDATE watches SET source_state='{}' WHERE id=:id"), {"id": row.id}
-            )
+        # An import itself is silent, so state the owner-visible notice by hand.
+        state = '{"notice_pending": true}' if pending_import else "{}"
+        await db.execute(
+            text("UPDATE watches SET source_state=CAST(:state AS jsonb) WHERE id=:id"),
+            {"state": state, "id": row.id},
+        )
         notice = await watches.claim_import_notice(db, now=now)
         assert (notice is not None) is expected
         if notice is not None:

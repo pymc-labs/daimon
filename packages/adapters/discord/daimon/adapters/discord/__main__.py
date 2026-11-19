@@ -145,6 +145,11 @@ async def main() -> None:
         traces_sample_rate=settings.sentry.traces_sample_rate,
         integrations=[AsyncioIntegration()],
     )
+    if settings.direct_message_policies:
+        log.warning(
+            "dm.env_policies_set",
+            hint="stored access now decides; run `daimon dm import-policies` to move these",
+        )
     async with build_runtime(settings) as runtime:
         intents = discord.Intents.default()
         intents.message_content = True

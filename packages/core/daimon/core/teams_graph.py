@@ -26,6 +26,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from typing import cast
 from urllib.parse import quote
 
 import httpx
@@ -185,6 +186,8 @@ class ChangeNotificationBatch(_Model):
 
 MAX_OWNER_PAGES = 5
 """Owner pages read before giving up; a team has at most 100 owners."""
+MAX_MEMBER_PAGES = 20
+"""Roster pages read before giving up; a longer roster leaves the team's members unknown."""
 
 
 def is_graph_url(url: httpx.URL) -> bool:
@@ -205,6 +208,40 @@ def skiptoken_of(next_link: str | None) -> str | None:
 def path_segment(value: str) -> str:
     # Ids go in one path segment each, so a `/` or `..` in one cannot move the request.
     return quote(value, safe="")
+
+
+def app_token(
+    http: httpx.AsyncClient, *, tenant_id: str, client_id: str, client_secret: str
+) -> GraphToken:
+    """An app-only Graph token by the client-credentials flow, fetched once per lookup.
+
+    For a short-lived reader (an admin page); long-running processes cache per scope.
+    """
+    fetched: list[str | None] = []
+
+    async def token() -> str | None:
+        if not fetched:
+            response = await http.post(
+                f"https://login.microsoftonline.com/{path_segment(tenant_id)}/oauth2/v2.0/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "client_credentials",
+                    "scope": GRAPH_SCOPE,
+                },
+                timeout=GRAPH_TIMEOUT_S,
+            )
+            response.raise_for_status()
+            body: object = response.json()
+            value = (
+                cast("dict[str, object]", body).get("access_token")
+                if isinstance(body, dict)
+                else None
+            )
+            fetched.append(value if isinstance(value, str) else None)
+        return fetched[0]
+
+    return token
 
 
 class TeamGroups:
@@ -299,22 +336,37 @@ class GraphClient:
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
         """
+        return await self._team_member_ids(group_id, owners=True, max_pages=MAX_OWNER_PAGES)
+
+    async def list_team_member_ids(self, group_id: str) -> frozenset[str]:
+        """The Entra object ids (lower-case) of everyone in a team, owners included.
+
+        Same consent as `list_team_owner_ids`; a roster longer than `MAX_MEMBER_PAGES`
+        raises `GraphUnavailable`, so a DM grant naming the team fails closed.
+        """
+        return await self._team_member_ids(group_id, owners=False, max_pages=MAX_MEMBER_PAGES)
+
+    async def _team_member_ids(
+        self, group_id: str, *, owners: bool, max_pages: int
+    ) -> frozenset[str]:
         url: str | None = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/members"
-        params: Mapping[str, str] | None = {"$filter": "roles/any(r:r eq 'owner')"}
-        owners: set[str] = set()
-        for _ in range(MAX_OWNER_PAGES):
+        params: Mapping[str, str] | None = (
+            {"$filter": "roles/any(r:r eq 'owner')"} if owners else None
+        )
+        found: set[str] = set()
+        for _ in range(max_pages):
             if url is None:
-                return frozenset(owners)
+                return frozenset(found)
             page = _parse(GraphMemberPage, await self.send("GET", url, params=params))
-            owners.update(
+            found.update(
                 member.user_id.lower()
                 for member in page.value
-                if member.user_id and "owner" in member.roles
+                if member.user_id and (not owners or "owner" in member.roles)
             )
             url, params = page.next_link, None
         if url is None:
-            return frozenset(owners)
-        raise GraphUnavailable("too many owner pages")
+            return frozenset(found)
+        raise GraphUnavailable("too many member pages")
 
     async def create_subscription(
         self,
