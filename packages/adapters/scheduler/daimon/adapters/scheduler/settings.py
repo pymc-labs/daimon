@@ -78,8 +78,8 @@ class SchedulerSettings(RoutineFreshnessSettings):
     @field_validator("dispatch_timeout_s")
     @classmethod
     def _above_turn_ceiling(cls, value: float) -> float:
-        if value < LONGEST_TURN_CEILING_S:
-            raise ValueError(f"must be at least LONGEST_TURN_CEILING_S ({LONGEST_TURN_CEILING_S}s)")
+        if value <= LONGEST_TURN_CEILING_S:
+            raise ValueError(f"must be above LONGEST_TURN_CEILING_S ({LONGEST_TURN_CEILING_S}s)")
         return value
 
     advisory_lock_key: int = Field(

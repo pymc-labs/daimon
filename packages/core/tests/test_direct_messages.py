@@ -127,11 +127,13 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
 class _FencePing:
     """The fence connection's session: counts pings, or fails them."""
 
-    def __init__(self, error: Exception | None = None) -> None:
-        self.error, self.pings = error, 0
+    def __init__(self, error: Exception | None = None, fails: int | None = None) -> None:
+        self.error, self.fails, self.pings = error, fails, 0
 
     async def execute(self, statement: object) -> None:
-        if self.error is not None:
+        if self.error is not None and (self.fails is None or self.fails > 0):
+            if self.fails is not None:
+                self.fails -= 1
             raise self.error
         assert str(statement) == "SELECT 1", "the ping is a plain query"
         self.pings += 1
@@ -169,4 +171,13 @@ async def test_the_fence_watcher_treats_a_dead_fence_connection_as_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fence = await _watch(monkeypatch, _FencePing(OSError("connection closed")), [True])
-    assert fence.lost.is_set(), "a failed ping on the fence connection means the hold is gone"
+    assert fence.lost.is_set(), "two failed pings in a row mean the hold is gone"
+
+
+async def test_the_fence_watcher_survives_one_failed_ping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FencePing(TimeoutError(), fails=1)
+    fence = await _watch(monkeypatch, db, [True, True, False])
+    assert db.pings == 2, "a ping after the failed one resets the count"
+    assert fence.lost.is_set(), "only the lock check ended the watch"

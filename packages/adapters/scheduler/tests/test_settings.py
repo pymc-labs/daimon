@@ -92,7 +92,8 @@ def test_usage_sweep_can_be_disabled_from_env(monkeypatch: pytest.MonkeyPatch) -
     assert SchedulerSettings().usage_sweep_enabled is False
 
 
-def test_dispatch_timeout_below_the_turn_ceiling_is_refused() -> None:
-    with pytest.raises(ValidationError):
-        SchedulerSettings(dispatch_timeout_s=LONGEST_TURN_CEILING_S - 1)
-    assert SchedulerSettings(dispatch_timeout_s=LONGEST_TURN_CEILING_S).dispatch_timeout_s
+def test_dispatch_timeout_at_or_below_the_turn_ceiling_is_refused() -> None:
+    for value in (LONGEST_TURN_CEILING_S - 1, LONGEST_TURN_CEILING_S):
+        with pytest.raises(ValidationError, match="must be above"):
+            SchedulerSettings(dispatch_timeout_s=value)
+    assert SchedulerSettings(dispatch_timeout_s=LONGEST_TURN_CEILING_S + 1)

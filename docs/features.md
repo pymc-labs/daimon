@@ -882,7 +882,7 @@ The longest one long job may run. The smallest setting wins.
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Routines and watches use the unattended run limit.
+The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
 
 | | |
 | --- | --- |
@@ -894,7 +894,7 @@ The longest one answer may take before it is stopped when someone is talking to 
 
 ## Unattended run time limit
 
-The longest a run nobody is watching may take before it is stopped: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Chats use the answer time limit.
+The longest a run nobody is watching may take before it is stopped: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter. The smallest setting wins. Chats use the answer time limit.
 
 | | |
 | --- | --- |

@@ -1267,6 +1267,7 @@ _FENCE_CHECK_S = 15.0
 
 async def _watch_fence(deps: TurnDeps, fence: OwnerDmFence, stop: asyncio.Timeout) -> None:
     """Stop the holder's turn once its fence is gone, so a waiting turn never runs beside it."""
+    failed_pings = 0
     while True:
         await asyncio.sleep(_FENCE_CHECK_S)
         if fence.db is not None:
@@ -1275,13 +1276,18 @@ async def _watch_fence(deps: TurnDeps, fence: OwnerDmFence, stop: asyncio.Timeou
             try:
                 async with asyncio.timeout(_FENCE_CHECK_S):
                     await fence.db.execute(text("SELECT 1"))
+                failed_pings = 0
             except Exception as err:
-                # Boundary: a driver reports a dropped connection in many types; any failure
-                # of the ping means the fence connection, and so the hold, is unusable.
-                _log.warning("dm.owner_fence_ping_failed", error_type=type(err).__name__)
-                fence.lost.set()
-                stop.reschedule(asyncio.get_running_loop().time())
-                return
+                # Boundary: a driver reports a dropped connection in many types. One slow or
+                # failed ping under load proves little; two in a row mean the hold is unusable.
+                failed_pings += 1
+                _log.warning(
+                    "dm.owner_fence_ping_failed", error_type=type(err).__name__, count=failed_pings
+                )
+                if failed_pings >= 2:
+                    fence.lost.set()
+                    stop.reschedule(asyncio.get_running_loop().time())
+                    return
         try:
             async with deps.sessionmaker() as session:
                 held = await fence_held(session, fence)
