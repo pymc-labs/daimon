@@ -350,7 +350,7 @@ async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_cha
             return made.model_copy(update={"ref": ref})
 
     environments = NativeTemplate()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     sm = chat.runtime.session_factory
     deps = replace(
         deps_for_pinned_mux(chat.runtime.client, sm),
@@ -690,7 +690,7 @@ def _wires(chat: Chat, monkeypatch) -> Wires:
             return made.model_copy(update={"ref": ref})
 
     environments = NativeTemplate()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
 
     async def close() -> None:
         gemini_client.close()
