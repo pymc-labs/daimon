@@ -1,8 +1,7 @@
-"""Adapter independence for the Teams package, checked here as well as by import-linter."""
+"""Teams stays in the import-linter adapter independence contract and CI."""
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import tomllib
 from pathlib import Path
@@ -35,27 +34,6 @@ def test_ci_runs_teams_tests() -> None:
         "the Teams leg must run the adapter suite"
     )
     assert teams[0]["shards"] == 1, "the Teams leg must not skip any of its tests"
-
-
-def _module_sources() -> dict[str, str]:
-    return {path.name: path.read_text() for path in sorted(PACKAGE_DIR.glob("*.py"))}
-
-
-def test_no_module_imports_another_adapter() -> None:
-    """No module imports another adapter's package."""
-    for name, source in _module_sources().items():
-        tree = ast.parse(source)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                module = node.module
-            elif isinstance(node, ast.Import):
-                module = ",".join(a.name for a in node.names)
-            else:
-                continue
-            if "daimon.adapters." in module:
-                assert module.startswith("daimon.adapters.teams"), (
-                    f"{name} imports {module} — adapters must not import each other"
-                )
 
 
 def test_no_other_adapter_modules_load_at_package_init() -> None:
