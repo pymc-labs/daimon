@@ -72,3 +72,31 @@ async def test_j1_a_gpt_root_switches_back_and_forth_without_posting_a_card(
     assert current is not None and current.backend == "openai", "written at once"
     posted.assert_not_awaited()
     assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
+async def test_back_to_claude_applies_without_a_confirmation_call(active_chat):
+    """Only a move to another provider previews first; back to Claude is one call."""
+    runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
+    _without_own_tools(payload)
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard"}
+    agent()
+    await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="openai",
+        model="gpt-6-luna",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+    )
+    agent()
+    back = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="anthropic",
+        origin_context_id=str(origin.id),
+    )
+    assert back.status == "changed", "moving back to Claude needs no card or second call"
+    now = await service.current(await _agent(runtime, auth, agent))
+    assert now is not None and now.backend in (None, "anthropic"), "the agent is on Claude"

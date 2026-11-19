@@ -2150,7 +2150,8 @@ async def _request_agent_backend_switch_impl(
             auth,
             origin,
             tool_name="request_agent_backend_switch",
-            moves=on_now != target_backend,
+            # Moving back to Claude sends nothing to another provider: no card, as for a thread.
+            moves=target_backend != DEFAULT_BACKEND and on_now != target_backend,
             confirming=expected_revision is not None,
         ):
             # The preview hands out the revision that asks.
