@@ -13,7 +13,6 @@ import httpx
 import pytest
 import structlog.testing
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
 from daimon.core import channel_rules
 from daimon.core.access_policy import AgentRule, ChannelReaders, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_fork import AgentCopy, fork_agent
@@ -47,6 +46,7 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -629,14 +629,11 @@ async def test_fork_agent_leaves_off_credentialed_servers_and_copies_its_own_ski
     state.agents[source.id] = source.model_dump(mode="json")
 
     def skill_row(skill_id: str, title: str) -> dict[str, Any]:
-        return SkillListResponse(
+        return skill_listed(
             id=skill_id,
-            type="custom",
             display_title=title,
-            latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
-            source="custom",
         ).model_dump(mode="json")
 
     skills = [
@@ -763,14 +760,11 @@ async def test_fork_agent_returns_the_copy_when_its_final_reread_fails(
     state.agents[source.id] = source.model_dump(mode="json")
     notes = bundle_from_markdown("---\nname: notes\ndescription: Take notes.\n---\nWrite.\n")
     skills = [
-        SkillListResponse(
+        skill_listed(
             id="skill_own",
-            type="custom",
             display_title=tenant_scoped_display_title(tenant_id=tenant.id, name="shared/notes"),
-            latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
-            source="custom",
         ).model_dump(mode="json")
     ]
 

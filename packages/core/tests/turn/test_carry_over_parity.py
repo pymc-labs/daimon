@@ -24,6 +24,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.carry_over import CarriedOver, carry_on_adoption
 from daimon.core.turn.prepare import ContinuityOutcome, ProviderPreparationRequest
 from daimon.core.turn.replace_binding import OldSession
+from daimon.core.turn.runtimes import hosted_backend
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ResourceRef
 from mux.contracts.resources import ProviderBinding, ResourceBinding
@@ -31,6 +32,7 @@ from mux.profiles import MANAGED_AGENTS, backend_selection
 from mux.state.memory import MemoryStateStore
 from mux.state.store import RELEASED_REF, released_successor
 
+from tests.turn.conformance_support import patch_hosted  # pyright: ignore[reportMissingTypeStubs]
 from tests.turn.test_binding_replacement_parity import (  # pyright: ignore[reportMissingTypeStubs]
     HOSTS,
     SCOPE,
@@ -113,7 +115,7 @@ async def _request(
     monkeypatch.setattr(carry_over, "managed_agents", ma_backend)
     monkeypatch.setattr(carry_over, "resource_ref", ma_ref)
     for profile in HOSTS:
-        monkeypatch.setitem(carry_over._READERS, profile, reader)  # pyright: ignore[reportPrivateUsage]
+        patch_hosted(monkeypatch, profile, reader=reader)
     request = SimpleNamespace(
         deps=SimpleNamespace(
             sessionmaker=sessionmaker,
@@ -340,8 +342,8 @@ def test_every_move_path_when_scanned_then_calls_the_core_helper() -> None:
         }
         helpers = {"carry_on_adoption", "carry_into_managed_agents"}
         assert called & helpers, f"{path.name} does not carry over"
-    readers = set(carry_over._READERS)  # pyright: ignore[reportPrivateUsage]
-    assert set(HOSTS) <= readers, f"no session reader for {set(HOSTS) - readers}"
+    missing = {profile for profile in HOSTS if not getattr(hosted_backend(profile), "reader", None)}
+    assert not missing, f"no session reader for {missing}"
 
 
 def test_claude_default_target_when_slot_resolved_then_uses_the_thread_channel() -> None:

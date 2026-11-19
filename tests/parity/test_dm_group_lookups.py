@@ -16,7 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = REPO_ROOT / "packages"
 
 OPENERS = frozenset({"create_dm", "conversations_open", "open_dm", "open_chat", "open_member_dm"})
-GRANT_CHECKS = frozenset({"sender_admits", "require_dm_grant", "permits_dm", "lookup_dm_groups"})
+GRANT_CHECKS = frozenset(
+    {"sender_admits", "sender_admission", "require_dm_grant", "permits_dm", "lookup_dm_groups"}
+)
 
 # Modules that open a DM without a grant check of their own, and why.
 NO_GRANT_CHECK: dict[str, str] = {

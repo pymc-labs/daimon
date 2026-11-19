@@ -1,4 +1,4 @@
-"""A tenant nobody configured may use every provider the deployment holds a key for."""
+"""A key makes a provider available; only a tenant admin turns it on."""
 
 from __future__ import annotations
 
@@ -30,15 +30,14 @@ def test_without_deployment_keys_only_anthropic_is_keyed() -> None:
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-def test_a_provider_counts_only_when_its_deployment_key_is_set(
+def test_a_provider_counts_as_keyed_only_when_its_deployment_key_is_set(
     monkeypatch: pytest.MonkeyPatch, blank: str
 ) -> None:
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", blank)
-    assert default_enabled_backends() == ("anthropic",), "a blank key is no key"
+    assert deployment_keyed_providers() == {"anthropic"}, "a blank key is no key"
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-    assert default_enabled_backends() == ("anthropic", "gemini")
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
-    assert default_enabled_backends() == ("anthropic", "openai", "gemini")
+    assert deployment_keyed_providers() == {"anthropic", "openai", "gemini"}
 
 
 async def test_another_tenants_runtime_row_never_turns_a_provider_on(
@@ -67,7 +66,7 @@ async def test_another_tenants_runtime_row_never_turns_a_provider_on(
     assert policy.enabled_backends == ("anthropic",)
 
 
-async def test_a_fresh_tenant_gets_the_keyed_providers(
+async def test_a_fresh_tenant_stays_on_anthropic_when_providers_are_keyed(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
@@ -76,36 +75,28 @@ async def test_a_fresh_tenant_gets_the_keyed_providers(
 
     policy = await load_access_policy(db_session, tenant_id=tenant.id)
 
-    assert policy.enabled_backends == ("anthropic", "openai", "gemini")
+    assert default_enabled_backends() == ("anthropic",), "keys never widen the default"
+    assert policy.enabled_backends == ("anthropic",)
     assert policy.backends_explicit is False
 
 
-async def test_an_unkeyed_provider_is_never_in_the_default(
+async def test_an_admin_opt_in_is_kept_and_unchosen_tenants_stay_on_anthropic(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
-    tenant = await make_tenant(db_session)
-
-    policy = await load_access_policy(db_session, tenant_id=tenant.id)
-
-    assert policy.enabled_backends == ("anthropic", "openai")
-
-
-async def test_an_admin_restriction_wins_over_the_default(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
-    tenant = await make_tenant(db_session)
-    chosen = TenantAccessPolicy(enabled_backends=("anthropic",))
+    opted_in = await make_tenant(db_session)
+    other = await make_tenant(db_session)
+    chosen = TenantAccessPolicy(enabled_backends=("anthropic", "gemini"))
     assert chosen.backends_explicit is True, "a given list is an admin choice"
 
-    await set_access_policy(db_session, tenant_id=tenant.id, policy=chosen)
+    await set_access_policy(db_session, tenant_id=opted_in.id, policy=chosen)
     db_session.expire_all()
 
-    policy = await load_access_policy(db_session, tenant_id=tenant.id)
-    assert policy.enabled_backends == ("anthropic",)
+    policy = await load_access_policy(db_session, tenant_id=opted_in.id)
+    assert policy.enabled_backends == ("anthropic", "gemini")
     assert policy.backends_explicit is True
+    unchosen = await load_access_policy(db_session, tenant_id=other.id)
+    assert unchosen.enabled_backends == ("anthropic",), "another tenant's opt-in is its own"
 
 
 async def test_editing_other_rules_never_freezes_the_default_into_the_row(
@@ -129,10 +120,9 @@ async def test_editing_other_rules_never_freezes_the_default_into_the_row(
     ).one()
     assert (stored.enabled_backends, stored.enabled_backends_explicit) == (["anthropic"], False)
 
-    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
     db_session.expire_all()
     later = await load_access_policy(db_session, tenant_id=tenant.id)
-    assert later.enabled_backends == ("anthropic", "openai", "gemini"), "it still follows keys"
+    assert later.backends_explicit is False, "it still follows the default"
     assert later.invoker_user_ids == ("u1",)
 
 

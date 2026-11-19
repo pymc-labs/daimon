@@ -18,7 +18,6 @@ from typing import cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
 from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands.skills import (
     _parse_repo_arg,  # pyright: ignore[reportPrivateUsage]
@@ -30,6 +29,7 @@ from daimon.core.config import GithubAppSettings, Settings
 from daimon.core.specs import SkillRepo
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing import make_tarball
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
@@ -143,15 +143,7 @@ async def test_sync_agent_impl_proceeds_without_pat_for_public_repo(
         r"/v1/skills",
         lambda _req, _m: httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="anything",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="anything").model_dump(mode="json"),
         ),
     )
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))

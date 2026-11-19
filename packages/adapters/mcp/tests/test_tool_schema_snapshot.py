@@ -69,6 +69,8 @@ _WEB_WORDS = {
     "web_fetch": "a public web page",
     "replace_channel_file": "Microsoft's Office for the web",
     "list_audit_log": "the stored `web` source value",
+    "list_monitored_activity": "web chat, one of the places admins monitor",
+    "get_monitored_conversation": "web chat, one of the places admins monitor",
 }
 
 

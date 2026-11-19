@@ -16,8 +16,8 @@ from daimon.core.continuity.page_events import sign_page_event
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import tenant_ledger, watches
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing import ma_environment
+from daimon.testing.builders import new_thread_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.watch_fixtures import install_poll_ports
@@ -49,10 +49,9 @@ async def enrolled_page_watch(
             reason="trial",
             idempotency_key=f"trial:{tenant.id}",
         )
-        mapping = await create_thread_session(
+        mapping = await new_thread_session(
             db,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="4242",
             channel_id="4241",
             account_id=principal.account_id,

@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.metadata import tenant_scoped_display_title
@@ -29,6 +29,7 @@ from daimon.core.skills.add import (
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_markdown
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
 from daimon.testing.archives import make_tarball
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -47,14 +48,8 @@ def _md(body: str = "Write them down.") -> str:
 
 
 def _skill(skill_id: str, title: str) -> dict[str, Any]:
-    return SkillListResponse(
-        id=skill_id,
-        type="custom",
-        display_title=title,
-        latest_version="1",
-        created_at=_TS,
-        updated_at=_TS,
-        source="custom",
+    return skill_listed(
+        id=skill_id, display_title=title, created_at=_TS, updated_at=_TS
     ).model_dump(mode="json")
 
 
@@ -126,6 +121,7 @@ async def _add(
     added_by: uuid.UUID | None = None,
     recheck: AgentRecheck | None = None,
     attach: bool = True,
+    agent_name: str = "agent",
 ):
     async def allow(_fresh: BetaManagedAgentsAgent) -> None:
         return None
@@ -135,7 +131,7 @@ async def _add(
         factory,
         tenant_id=tenant_id,
         agent=fake.agent,
-        agent_name="agent",
+        agent_name=agent_name,
         bundle=bundle_from_markdown(text or _md()),
         origin="pasted",
         added_by_account_id=added_by,
@@ -497,6 +493,20 @@ async def test_an_earlier_upload_is_adopted_only_when_no_other_agent_holds_it(
     fake.others = []
     adopted = await _add(fake, db_session_factory, tenant.id)
     assert (adopted.action, adopted.skill_id, fake.versions) == ("updated", "sk_old", ["sk_old"])
+
+
+async def test_a_builtin_skill_titled_under_its_old_name_is_versioned_not_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="notes", agent_name="daimon")
+    held = [{"type": "custom", "skill_id": "sk_old", "version": "1"}]
+    fake = _FakeMA(
+        agent=ma_agent(id="ag_1", name="default", tenant_id=tenant.id, skills=held),
+        skills=[_skill("sk_old", title)],
+    )
+    added = await _add(fake, db_session_factory, tenant.id, agent_name="default")
+    assert (added.action, added.skill_id) == ("updated", "sk_old"), "the renamed agent's own skill"
 
 
 async def test_a_skill_already_loading_under_that_name_is_refused_before_uploading(

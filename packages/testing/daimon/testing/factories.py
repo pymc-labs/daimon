@@ -11,6 +11,7 @@ ORM access for test setup.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -37,6 +38,8 @@ from daimon.core._models import (
     TenantLedger,
     UsageEvent,
 )
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.channel_budget_notice import BudgetAlert
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantConfigRow, TenantScopeRef
 from daimon.core.stores import (
@@ -52,6 +55,7 @@ from daimon.core.stores import (
 from daimon.core.stores import (
     wizard_session as wizard_session_store,
 )
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.direct_messages import (
     DirectMessageRow,
@@ -61,6 +65,7 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import (
     AccountRow,
     AgentMemoryStoreRow,
+    BudgetOnLimit,
     BudgetWindow,
     ChannelBudgetRow,
     CliPrincipalRow,
@@ -162,6 +167,15 @@ async def make_tenant(
     session.add(orm)
     await session.flush()
     return TenantRow.model_validate(orm)
+
+
+async def enable_all_providers(session: AsyncSession, *, tenant: TenantRow) -> None:
+    """Opt the tenant in to every provider, as an admin's allowlist choice does."""
+    await set_access_policy(
+        session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+    )
 
 
 async def make_account(
@@ -580,6 +594,8 @@ async def make_channel_budget(
     window: BudgetWindow = "monthly",
     starts_at: datetime | None = None,
     ends_at: datetime | None = None,
+    on_limit: BudgetOnLimit = "stop",
+    alert_channel_id: str | None = None,
 ) -> ChannelBudgetRow:
     """Upsert a channel_budgets row via `channel_budgets.set_channel_budget`."""
     tenant = tenant or await make_tenant(session)
@@ -593,6 +609,8 @@ async def make_channel_budget(
         starts_at=starts_at,
         ends_at=ends_at,
         set_by_account_id=None,
+        on_limit=on_limit,
+        alert_channel_id=alert_channel_id,
     )
 
 
@@ -820,3 +838,25 @@ async def make_github_removal_notice(
         )
     )
     await session.flush()
+
+
+def budget_alert(**given: object) -> BudgetAlert:
+    """An alert-only budget's first alert, for adapter delivery tests."""
+    alert = BudgetAlert(
+        tenant_id=uuid.uuid4(),
+        workspace_id="W1",
+        platform="slack",
+        channel_id="C1",
+        destination_id="C9",
+        slack_team_id="W1",
+        spent_line="$6.00",
+        limit_line="$5.00",
+        window_text="monthly",
+        level=1,
+        budget_id=uuid.uuid4(),
+        window_key="window",
+        prior_key=None,
+        prior_level=0,
+        channel_name="general",
+    )
+    return dataclasses.replace(alert, **given)

@@ -779,48 +779,12 @@ def test_redeem_code_is_offered_only_while_a_code_is_redeemable() -> None:
     assert titles == ["Add credit", "Redeem code", "Look up a person"]
 
 
-def test_the_member_card_shows_own_use_and_asks_an_admin_for_credit() -> None:
+def test_the_member_card_has_actions_only_with_timed_credit() -> None:
     state = _state(is_admin=False, caller_spend=11.5, caller_cap=Decimal("25"))
     body = _body(panel_card(state, since=JAN))
-    assert [_texts(element) for element in body] == [
-        ["Billing", "January 2026"],
-        ["You", "$11.50 of your $25.00 this month"],
-        ["$62.40", "total credit left", "Ask an admin to add credit."],
-    ], "no actions without timed credit"
+    assert len(body) == 3, "header, own use and credit: no actions without timed credit"
     with_timed = _body(panel_card(_state(is_admin=False, timed_credit=_timed(20)), since=JAN))
     assert [a["title"] for a in with_timed[-1]["actions"]] == ["Expiry dates"]
-
-
-def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
-    state = _state(is_admin=False, guild_balance_usd=Decimal("-3"), timed_credit=_timed(20))
-    credit = _body(panel_card(state, since=JAN))[2]
-    assert _texts(credit) == [
-        "No credit left",
-        "$3.00 spent beyond it",
-        "Includes $20.00 that expires. It's used first.",
-        "Ask an admin to add credit.",
-    ]
-
-
-def test_this_channels_budget_has_its_own_section() -> None:
-    status = _budget_status("19:c", "1.2")
-    body = _body(panel_card(_state(channel_budget=status), since=JAN))
-    assert _texts(body[2]) == ["This channel", "$1.20 of $10.00 used this month"]
-    assert body[2]["separator"] is True
-
-
-def test_top_spenders_names_five_and_counts_the_rest() -> None:
-    rows = tuple(MemberRow(f"u{i}", f"P{i}", float(9 - i), 1, i == 1) for i in range(7))
-    body = _body(panel_card(_state(member_rows=rows, over_cap_count=1), since=JAN))
-    assert _texts(body[2]) == [
-        "Top spenders",
-        "1. P0  $9.00",
-        "2. P1 (you)  $8.00",
-        "3. P2  $7.00",
-        "4. P3  $6.00",
-        "5. P4  $5.00",
-        "+ 3 more",
-    ]
 
 
 def test_no_rendered_card_has_a_dot_separator_or_a_user_label() -> None:

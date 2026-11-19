@@ -80,23 +80,4 @@ class TeamsOwnCards:
             if press is None or not press.closed:
                 return NOT_YOURS if press is None else press.text
             return host_calls.answered_call_card(press.text, approved=press.approved)
-        if (switch := switch_cards.parse_custom_id(custom_id)) is not None:
-            pressed = await switch_cards.press_switch_card(
-                deps=runtime.turn_deps,
-                sessionmaker=runtime.sessionmaker,
-                anthropic=runtime.anthropic,
-                turn_settings=runtime.settings.turn,
-                deployment_default=runtime.deployment_default,
-                tenant_id=actor.tenant_id,
-                card_id=switch[0],
-                action=switch[1],
-                clicker=actor.user_id,
-                current_admin=current_admin,
-                place_word="team",
-                now=now,
-                message_id=message_id,
-            )
-            if pressed is None or not pressed.closed:
-                return NOT_YOURS if pressed is None else pressed.text
-            return switch_cards.answered_switch_card(pressed)
-        return UNAVAILABLE
+        return switch_cards.expired_switch_card(custom_id) or UNAVAILABLE

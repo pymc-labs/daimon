@@ -14,7 +14,6 @@ import discord
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import FileMetadata
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.output_delivery import (
     MAX_ATTACHMENTS_PER_MESSAGE,
@@ -24,12 +23,13 @@ from daimon.adapters.discord.output_delivery import (
     upload_limit,
 )
 from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhooks
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.testing.builders import file_meta
+from daimon.testing.discord_builders import discord_runtime
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
@@ -49,14 +49,12 @@ def _client_with_file(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id="file_chart",
                     created_at=NOW,
                     filename=filename,
                     mime_type="image/png",
                     size_bytes=size_bytes,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         ),
@@ -330,14 +328,8 @@ async def test_oversize_file_kept_and_normal_file_attached_and_cleared() -> None
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
-                    id=file_id,
-                    created_at=NOW,
-                    filename=name,
-                    mime_type=mime,
-                    size_bytes=size,
-                    type="file",
-                    downloadable=True,
+                file_meta(
+                    id=file_id, created_at=NOW, filename=name, mime_type=mime, size_bytes=size
                 ).model_dump(mode="json")
                 for file_id, name, mime, size in (
                     ("file_big", "render.mp4", "video/mp4", 12 * _MIB),
@@ -449,12 +441,11 @@ async def test_tool_turn_sweeps_detached_and_same_session_sweeps_chain() -> None
     from daimon.core.scope import DeploymentDefault
     from daimon.testing.turn_fakes import deps_for
 
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=MagicMock(),
         anthropic=MagicMock(),
         sessionmaker=MagicMock(),
         notebook_rate_limiter=MagicMock(),
-        billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         turn_deps=deps_for(),
@@ -559,14 +550,12 @@ def _client_with_files(
         r"/v1/files",
         lambda request, match: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=file_id,
                     created_at=created_at,
                     filename=filename,
                     mime_type="application/pdf",
                     size_bytes=len(content),
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
                 for file_id, filename, content, created_at in files
             ]
@@ -1037,14 +1026,12 @@ def _per_session_client(files: dict[str, tuple[str, int]]) -> AsyncAnthropic:
             return list_response([])
         return list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=file_id,
                     created_at=NOW,
                     filename=filename,
                     mime_type="application/pdf",
                     size_bytes=size,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
             ]
         )

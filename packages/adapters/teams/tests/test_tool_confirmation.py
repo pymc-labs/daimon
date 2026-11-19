@@ -8,6 +8,7 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -62,6 +63,14 @@ from .conftest import (
     TeamsApiFake,
     make_card_action,
     shown_text,
+)
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
 )
 
 
@@ -205,13 +214,7 @@ async def test_always_ack_precedes_live_admin_check() -> None:
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     checked = asyncio.Event()
@@ -248,14 +251,7 @@ async def test_always_action_refuses_nonadmin_privately(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-                channel_id="home",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4(), channel_id="home"),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(
@@ -298,13 +294,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     posted = confirmation_module._PostedCard(
@@ -340,13 +330,7 @@ async def test_blocked_always_save_does_not_block_retirement(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     sender = FakeSender()
@@ -393,13 +377,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     sender = FakeSender()
@@ -836,13 +814,7 @@ async def test_always_click_carries_the_clicks_own_conversation_as_its_origin(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     cards._controls.cards[token] = confirmation_module._PostedCard(

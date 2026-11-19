@@ -34,6 +34,7 @@ from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.mux_backend import resource_scope
 from daimon.core.output_runtime import OutputRuntime
 from daimon.core.permissions import dm_source_limited, limited_ids
@@ -344,7 +345,7 @@ def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
     if dms_on:
         return (
             "I answer in channels first.\n"
-            f"Mention me in a channel, or run `{command}` in one to continue privately here."
+            f"Mention me in a channel, or run `{command}` in one to continue here."
         )
     if dms_on is None:
         return (
@@ -724,7 +725,20 @@ async def start_cold_dm(
 DmTurnCard = Callable[[Admission, asyncio.Event], TurnLifecycle]
 
 
+#: Shows the monitoring notice on a DM path that renders no card (`card_for`).
+TellMonitored = Callable[[MonitoringNotice], Awaitable[None]]
+
+
 class _CollectReply(TurnLifecycle):
+    def __init__(self, tell: TellMonitored | None = None) -> None:
+        self._tell = tell
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> bool:
+        if self._tell is None:
+            return False
+        await self._tell(notice)
+        return True
+
     async def on_render(self, state: TurnState) -> None:
         pass
 
@@ -800,8 +814,10 @@ async def _run_admitted_dm_turn(
     confirm_write: ConfirmationHook | None = None,
     card_for: DmTurnCard | None = None,
     request_text: str | None = None,
+    request_ref: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
+    tell: TellMonitored | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     reseed_prompt: Callable[[], Awaitable[str]] | None = None,
 ) -> _DmTurn:
@@ -814,8 +830,9 @@ async def _run_admitted_dm_turn(
     with it, the adapter's lifecycle shows progress and may deliver the answer
     itself. A recovery after a dead session renders nothing either way. Without
     `confirm_write` a write that needs approval is refused, as on any surface with
-    no card. `request_text` is the person's own words, for the turn's MCP context;
-    `platform_channel_id` and `platform_message_id` are recorded on the turn's origin.
+    no card. `request_text` is the person's own words, for the turn's MCP context, and
+    `request_ref` their message's id; `platform_channel_id` and `platform_message_id`
+    are recorded on the turn's origin.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -850,7 +867,7 @@ async def _run_admitted_dm_turn(
 
         cancel = asyncio.Event()
         lifecycle = (
-            card_for(prepared.admission, cancel) if card_for is not None else _CollectReply()
+            card_for(prepared.admission, cancel) if card_for is not None else _CollectReply(tell)
         )
         try:
             outcome = await run_prepared_turn(
@@ -861,7 +878,9 @@ async def _run_admitted_dm_turn(
                 thread_id=scope_id,
                 external_user_id=external_user_id,
                 user_message=user_message,
-                request_text=request_text,
+                request_text=None if watch_row is not None else request_text,
+                request_ref=request_ref,
+                continues=watch_row,
                 image_blocks=image_blocks,
                 lifecycle=lifecycle,
                 cancel=cancel,
@@ -904,6 +923,7 @@ async def reply_to_dm(
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     platform_channel_id: str | None = None,
+    tell: TellMonitored | None = None,
     groups: frozenset[str] | None = None,
 ) -> str | None:
     """Compatibility text API for adapters that do not consume a delivery grant."""
@@ -921,6 +941,7 @@ async def reply_to_dm(
         verified_membership=verified_membership,
         on_agent=on_agent,
         platform_channel_id=platform_channel_id,
+        tell=tell,
         groups=groups,
     )
     return reply.text if reply is not None else None
@@ -947,6 +968,7 @@ async def reply_to_dm_result(
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
     card_for: Callable[[DirectMessageRow], DmTurnCard] | None = None,
     platform_channel_id: str | None = None,
+    tell: TellMonitored | None = None,
     groups: frozenset[str] | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
@@ -973,6 +995,8 @@ async def reply_to_dm_result(
     sending the answer. A turn whose fence drops raises `DirectMessageClaimLost`.
     Off Discord, the bound agent's DM grant and locks are rechecked here with
     `groups` (`lookup_dm_groups`); Discord rechecks them in `require_dm_delivery`.
+    Without a card, `tell` shows the monitoring notice
+    (`daimon.core.monitoring.must_tell`).
     """
     async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True) as fence:
         now = datetime.now(UTC)
@@ -1125,8 +1149,10 @@ async def reply_to_dm_result(
                 confirm_write=(
                     confirmation_for(prepared.admission) if confirmation_for is not None else None
                 ),
+                tell=tell,
                 card_for=card_for(conversation) if card_for is not None else None,
                 request_text=text,
+                request_ref=message_id,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
                 image_blocks=image_blocks,

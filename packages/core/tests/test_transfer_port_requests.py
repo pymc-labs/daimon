@@ -3,33 +3,26 @@
 import contextlib
 import io
 import uuid
-from datetime import UTC, datetime
-from typing import Self, cast
+from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from anthropic import APIError, APIStatusError
-from anthropic.types.beta import FileMetadata
 from daimon.core import thread_handoff, workspace_transfer
 from daimon.core.session_ports_compat import session_scope
 from daimon.core.session_seal import session_facts
+from daimon.testing.builders import file_meta
+from daimon.testing.shared_helpers import NOW
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
+from .shared_fakes import SessionFactory
+
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
-
-
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
 
 
 @pytest.mark.parametrize("status", [200, 404])
@@ -87,14 +80,11 @@ async def test_rehost_keeps_default_upload_beta_and_bundle_queue_outcome(
 
     monkeypatch.setattr("httpx._multipart.os.urandom", pinned_entropy)
     content = b"dummy-gzip-bundle"
-    bundle = FileMetadata(
+    bundle = file_meta(
         id="file_output",
         filename="handoff.tar.gz",
         mime_type="application/gzip",
         size_bytes=len(content),
-        created_at=NOW,
-        type="file",
-        downloadable=True,
     )
     uploaded = bundle.model_copy(update={"id": "file_upload"})
     queued = AsyncMock()
@@ -178,14 +168,8 @@ async def test_partial_bundle_upload_preserves_rehost_result_and_cleanup(
     monkeypatch.setattr(workspace_transfer, "enqueue_pending_file_delete", queued)
     factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
     content = b"abc"
-    bundle = FileMetadata(
-        id="file_output",
-        filename="handoff.tar.gz",
-        mime_type="application/gzip",
-        size_bytes=3,
-        created_at=NOW,
-        type="file",
-        downloadable=True,
+    bundle = file_meta(
+        id="file_output", filename="handoff.tar.gz", mime_type="application/gzip", size_bytes=3
     )
     old, new = ScriptedTransport(), ScriptedTransport()
     for transport in (old, new):

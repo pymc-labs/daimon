@@ -7,11 +7,11 @@ import pytest
 from daimon.core._models import Routine
 from daimon.core.errors import StoreError
 from daimon.core.stores.routines import (
-    create_routine,
     get_routine,
     link_source_routine,
     update_routine,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import update
 
@@ -21,16 +21,13 @@ NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
 async def setup(session, *, tenant_id=None, source_id=None):
     if tenant_id is None:
         tenant_id = (await make_tenant(session)).id
-    return await create_routine(
+    return await new_routine(
         session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="owner",
         source_routine_id=source_id,
         agent_id="ag",
-        agent_name="daimon",
         cron_expr="0 * * * *",
-        timezone_="UTC",
-        trigger_message="run",
         enabled=False,
         next_fire_at=NOW,
     )
@@ -203,15 +200,12 @@ async def test_linked_routine_can_be_seeded(db_session, state):
 
     if state == "dm-pause":
         tenant = await make_tenant(db_session)
-        row = await create_routine(
+        row = await new_routine(
             db_session,
-            tenant_id=tenant.id,
+            tenant,
             created_by_user_id="123456789",
             agent_id="ag",
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
-            trigger_message="run",
             enabled=True,
             destination_kind="dm",
             destination_id="123456789",

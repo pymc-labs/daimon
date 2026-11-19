@@ -12,7 +12,7 @@ import httpx
 import pytest
 from anthropic import APIStatusError
 from daimon.adapters.cli import mux_compat
-from daimon.adapters.cli.commands import environments, skills_backfill
+from daimon.adapters.cli.commands import environments
 from daimon.core.defaults.metadata import build_metadata
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
@@ -21,7 +21,6 @@ from daimon.core.mux_compat import (
     create_skill,
     list_skill_versions,
     retrieve_agent,
-    update_agent,
     update_environment,
 )
 from daimon.core.specs import load_environment_spec
@@ -94,46 +93,6 @@ async def test_cli_archive_request_is_identical(resource):
         call = archive_agent if resource == "agent" else archive_environment
         await call(new, "id", scope=SCOPE)
     assert_equal(before, after)
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "skills": [
-                {"type": "custom", "skill_id": "new"},
-                {"type": "anthropic", "skill_id": "xlsx", "version": "latest"},
-            ]
-        },
-        {
-            "tools": [
-                {
-                    "type": "agent_toolset_20260401",
-                    "configs": [{"name": "bash", "enabled": True}],
-                    "default_config": {"permission_policy": {"type": "always_allow"}},
-                }
-            ]
-        },
-        {
-            "name": "renamed",
-            "metadata": {
-                "daimon_tenant": str(TENANT),
-                "daimon_account": "guild",
-                "daimon_reader_of": "original",
-            },
-        },
-    ],
-)
-async def test_cli_agent_backfill_and_rekey_payloads_are_identical(payload):
-    record = ma_agent(id="agent1", tenant_id=TENANT, version=4).model_dump(mode="json")
-    before, after = scripts(
-        ScriptedReply("POST", "/v1/agents/agent1", httpx.Response(200, json=record))
-    )
-    async with before.client() as old, after.client() as new:
-        expected = await old.beta.agents.update("agent1", version=3, **payload)
-        actual = await update_agent(new, "agent1", version=3, payload=payload, scope=SCOPE)
-    assert_equal(before, after)
-    assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("status", [200, 409])
@@ -316,116 +275,3 @@ async def test_cli_skill_upload_helper_preserves_multipart_bytes():
         transport.assert_consumed()
     assert multipart(after.requests[0]) == multipart(before.requests[0])
     assert actual.model_dump(mode="json") == expected.model_dump(mode="json")
-
-
-async def test_cli_seeded_backfill_upload_callsite_preserves_multipart(monkeypatch, tmp_path):
-    data = b"PK\x03\x04the actual seeded archive\x00\xff"
-    archive = tmp_path / "generated.zip"
-    archive.write_bytes(data)
-    monkeypatch.setattr(skills_backfill, "build_skill_zip", lambda _: SimpleNamespace(path=archive))
-    row = skills_backfill._BackfillRow(
-        tenant_id=str(TENANT),
-        agent_names="agent",
-        skill_id="old",
-        display_title="sample",
-        classification="RECREATE_SEEDED",
-        new_title=f"{TENANT}/sample",
-        new_skill_id="",
-    )
-    before, after = scripts(ScriptedReply("POST", "/v1/skills", httpx.Response(200, json=SKILL)))
-    async with before.client() as old, after.client() as new, httpx.AsyncClient() as http:
-        with archive.open("rb") as fh:
-            expected = await old.beta.skills.create(
-                display_title=row.new_title, files=[("SKILL.zip", fh, "application/zip")]
-            )
-        actual = await skills_backfill._create_new_skill(
-            client=new,
-            sessionmaker=None,
-            http_client=http,
-            console=Console(file=StringIO()),
-            row=row,
-            tenant_id=TENANT,
-        )
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert multipart(after.requests[0]) == multipart(before.requests[0])
-    assert multipart(after.requests[0])[-1] == ("files[]", "SKILL.zip", "application/zip", data)
-    assert actual == expected.id
-    assert not archive.exists()
-
-
-async def test_cli_synced_backfill_upload_callsite_preserves_multipart(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    data = b"PK\x03\x04the actual synced archive\x00\xff"
-    provenance = SimpleNamespace(
-        tenant_id=TENANT,
-        principal_id=TENANT,
-        agent_name="agent",
-        name="sample",
-        source_repo_url="https://github.com/example/sample",
-        source_repo_branch="main",
-        source_path="",
-        content_hash="hash",
-        anthropic_latest_version="1",
-    )
-
-    async def lookup(*args: object, **kwargs: object) -> list[SimpleNamespace]:
-        return [provenance]
-
-    class Fetcher:
-        def __init__(self, http_client: httpx.AsyncClient) -> None:
-            pass
-
-        async def fetch_tarball(self, *, credential: None, url: str, branch: str) -> bytes:
-            assert url == provenance.source_repo_url
-            assert branch == provenance.source_repo_branch
-            return b"source tarball"
-
-    async def bundle(
-        *, tarball_bytes: bytes, extract_root: Path, repo_name: str, split: bool
-    ) -> list[SimpleNamespace]:
-        assert tarball_bytes == b"source tarball"
-        assert extract_root.is_dir()
-        assert repo_name == "sample"
-        assert split is False
-        return [SimpleNamespace(prebuilt_zip=data)]
-
-    writes: list[dict[str, object]] = []
-
-    async def upsert(session: object, **kwargs: object) -> None:
-        writes.append(kwargs)
-
-    monkeypatch.setattr(skills_backfill, "list_user_skills_for_tenant", lookup)
-    monkeypatch.setattr(skills_backfill, "GitHubTarballFetcher", Fetcher)
-    monkeypatch.setattr(skills_backfill, "extract_and_bundle", bundle)
-    monkeypatch.setattr(skills_backfill, "upsert_user_skill", upsert)
-    row = skills_backfill._BackfillRow(
-        tenant_id=str(TENANT),
-        agent_names="agent",
-        skill_id="old",
-        display_title="agent/sample",
-        classification="RECREATE_SYNCED",
-        new_title=f"{TENANT}/agent/sample",
-        new_skill_id="",
-    )
-    before, after = scripts(ScriptedReply("POST", "/v1/skills", httpx.Response(200, json=SKILL)))
-    async with before.client() as old, after.client() as new, httpx.AsyncClient() as http:
-        expected = await old.beta.skills.create(
-            display_title=row.new_title, files=[("SKILL.zip", data, "application/zip")]
-        )
-        actual = await skills_backfill._create_new_skill(
-            client=new,
-            sessionmaker=db_context,
-            http_client=http,
-            console=Console(file=StringIO()),
-            row=row,
-            tenant_id=TENANT,
-        )
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert multipart(after.requests[0]) == multipart(before.requests[0])
-    assert multipart(after.requests[0])[-1] == ("files[]", "SKILL.zip", "application/zip", data)
-    assert actual == expected.id
-    assert len(writes) == 1
-    assert writes[0]["anthropic_id"] == expected.id

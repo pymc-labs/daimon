@@ -10,7 +10,7 @@ import uuid
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.vault import VaultCredentialSummary, _list_credentials_impl
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
 from daimon.testing.factories import make_account, make_tenant
@@ -23,6 +23,8 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 VAULT_ID = "vault_abc"
 ACCOUNT_ID = uuid.uuid4()
 TENANT_ID = uuid.uuid4()
@@ -30,8 +32,8 @@ AGENT_ID = uuid.uuid4()
 
 
 def _auth() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=ACCOUNT_ID, tenant_id=TENANT_ID, role=Role.ADMIN, agent_id=AGENT_ID
+    return auth_identity(
+        ACCOUNT_ID, TENANT_ID, is_admin=False, is_platform_admin=False, agent_id=AGENT_ID
     )
 
 
@@ -216,8 +218,8 @@ async def test_list_credentials_resolves_vault_provisioned_by_ensure_agent_mcp_v
         session_factory=committing_sessionmaker,
     )
 
-    auth = AuthIdentity(
-        account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, agent_id=agent_id
+    auth = auth_identity(
+        account_id, tenant_id, is_admin=False, is_platform_admin=False, agent_id=agent_id
     )
     result = await _list_credentials_impl(client, auth)
 

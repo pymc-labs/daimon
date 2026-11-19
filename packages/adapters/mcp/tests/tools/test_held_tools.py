@@ -57,6 +57,8 @@ from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 SHARED = "C-SYN-SHARED"
 ELSEWHERE = "C-SYN-ELSEWHERE"
 LIMITED = "C-SYN-LIMITED"
@@ -576,9 +578,7 @@ async def test_a_held_and_an_unheld_credential_of_one_account_do_not_narrow_or_w
 
 async def test_a_foreign_principal_is_not_a_held_one_for_its_other_credentials_alone() -> None:
     """The marker follows the principal; the hold follows the credential."""
-    held_member = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, hold=hold(client=False)
-    )
+    held_member = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER, hold=hold(client=False))
     assert held_member.client is False
     marked = dataclasses.replace(held_member, foreign_home_id="T-SYN")
     assert marked.client is True and marked.hold == held_member.hold

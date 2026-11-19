@@ -7,14 +7,20 @@ from dataclasses import MISSING, fields, replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 from daimon.adapters.discord import budget_notice
-from daimon.adapters.discord.budget_notice import discord_budget_notifier, with_budget_notifier
+from daimon.adapters.discord.budget_notice import (
+    discord_budget_alerter,
+    discord_budget_notifier,
+    with_budget_notifier,
+)
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.turn.deps import TurnDeps
+from daimon.testing.factories import budget_alert
 from daimon.testing.turn_fakes import deps_for
 
 _TENANT = uuid.uuid4()
@@ -155,3 +161,18 @@ async def test_the_default_agents_grant_reads_the_recipients_server_roles(
 
     assert await discord_budget_notifier(runtime, open_dm, lambda: False)(_notice()) == 1
     assert seen == {"1": frozenset({"R1"}), "2": frozenset(), "3": frozenset()}
+
+
+async def test_an_alert_posts_a_neutral_card_and_a_closed_channel_is_refused() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client)
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord")
+    assert await alerter(alert) == "sent"
+    assert channel.send.await_args.kwargs["embed"].color != COLOR_RED, "information, not an error"
+    channel.send.side_effect = discord.Forbidden(MagicMock(status=403), "no")
+    assert await alerter(alert) == "refused", "the next post would be refused too"
+    channel.send.side_effect = discord.HTTPException(MagicMock(status=500), "down")
+    assert await alerter(alert) == "failed", "a server error may pass on the next poll"

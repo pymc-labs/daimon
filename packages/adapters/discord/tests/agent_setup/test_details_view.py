@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -56,9 +57,15 @@ from daimon.core.stores.domain import AccountRow, McpTokenRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.shared_helpers import walk as _walk
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_details_container = partial(
+    build_details_container, expanded_detail=None, is_admin=True, attribution=None
+)
+
 
 _PUBLIC_URL = "https://mcp.example.com"
 _JWT_SECRET = "test-jwt-secret-32-bytes-padding!"
@@ -188,17 +195,6 @@ def _member_interaction(user_id: int = 42) -> MagicMock:
     return interaction
 
 
-def _walk(item: Any) -> list[Any]:
-    """Every component in the tree, the way discord.py counts them."""
-    found = [item]
-    for child in getattr(item, "children", []) or []:
-        found.extend(_walk(child))
-    accessory = getattr(item, "accessory", None)
-    if accessory is not None:
-        found.extend(_walk(accessory))
-    return found
-
-
 def _container_text(container: discord.ui.Container[Any]) -> str:
     return "\n".join(
         str(item.content) for item in _walk(container) if isinstance(item, discord.ui.TextDisplay)
@@ -216,9 +212,7 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
     details = _details()
     state = _state(details, account_id=account_id, is_admin=True)
     state.avatar_urls[details.name] = "https://mcp.example.com/avatars/token/abcdef123456.png"
-    container = build_details_container(
-        state, details, expanded_detail=None, is_admin=True, attribution=None, identity_enabled=True
-    )
+    container = _details_container(state, details, identity_enabled=True)
     assert any(isinstance(item, discord.ui.Thumbnail) for item in _walk(container))
     assert "Shown next to this agent's messages." in _container_text(container)
     labels = {item.label for item in _walk(container) if isinstance(item, discord.ui.Button)}
@@ -229,37 +223,15 @@ def test_avatar_row_shows_public_image_and_admin_controls(account_id: uuid.UUID)
         for item in _walk(container)
     )
 
-    member = build_details_container(
-        state,
-        details,
-        expanded_detail=None,
-        is_admin=False,
-        attribution=None,
-        identity_enabled=True,
-    )
+    member = _details_container(state, details, is_admin=False, identity_enabled=True)
     assert not any(
         isinstance(item, discord.ui.Button) and item.label in {"Change", "Use default", "Details"}
         for item in _walk(member)
     )
-    built_in = build_details_container(
-        state,
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-        is_builtin=True,
-        identity_enabled=True,
-    )
+    built_in = _details_container(state, details, is_builtin=True, identity_enabled=True)
     assert "**Picture**" not in _container_text(built_in)
 
-    disabled = build_details_container(
-        state,
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-        identity_enabled=False,
-    )
+    disabled = _details_container(state, details, identity_enabled=False)
     assert "**Picture**" not in _container_text(disabled)
     assert not any(isinstance(item, discord.ui.Thumbnail) for item in _walk(disabled))
     assert not any(
@@ -380,12 +352,8 @@ def test_details_shows_the_model_display_name_and_every_section_when_populated(
         skills=(SkillEntry(type="custom", skill_id="sk_1", title="Warehouse SQL", version="3"),),
         mcp_servers=(McpServerEntry(name="linear", url="https://linear.example/mcp"),),
     )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution="<@77>",
+    container = _details_container(
+        _state(details, account_id=account_id), details, attribution="<@77>"
     )
     text = _container_text(container)
 
@@ -414,13 +382,7 @@ def test_details_shows_concrete_empty_states_when_nothing_is_attached(
     account_id: uuid.UUID,
 ) -> None:
     details = _details()
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
     text = _container_text(container)
 
     assert "**Repository:**" not in text, "an absent repo is omitted"
@@ -453,12 +415,8 @@ def test_details_shows_the_unrouted_note_verbatim_in_the_readers_voice(
     )
     assert details.unrouted_note is not None, "an agent routed nowhere must carry the note"
 
-    container = build_details_container(
-        _state(details, account_id=account_id, is_admin=is_admin),
-        details,
-        expanded_detail=None,
-        is_admin=is_admin,
-        attribution=None,
+    container = _details_container(
+        _state(details, account_id=account_id, is_admin=is_admin), details, is_admin=is_admin
     )
     text = _container_text(container)
 
@@ -506,13 +464,7 @@ def test_repo_line_renders_the_recorded_access_state(
     details = _details(
         repo=RepoBinding(repo_url="acme/warehouse", default_branch="main", access=access)
     )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
     text = _container_text(container)
 
     assert expected in text, (
@@ -556,13 +508,7 @@ def test_each_detail_list_collapses_and_expands_at_the_shared_limits(
     account_id: uuid.UUID, name: DetailListName, count: int
 ) -> None:
     details = _details_with_list(name, count)
-    collapsed = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    collapsed = _details_container(_state(details, account_id=account_id), details)
     collapsed_text = _container_text(collapsed)
     heading = {"keys": "Keys", "skills": "Skills", "connections": "Connections"}[name]
     assert (f"**{heading}**" in collapsed_text) is (count > 0), (
@@ -577,12 +523,10 @@ def test_each_detail_list_collapses_and_expands_at_the_shared_limits(
             "the collapsed list reports every omitted row"
         )
 
-        expanded = build_details_container(
+        expanded = _details_container(
             _state(details, account_id=account_id, expanded_detail=name),
             details,
             expanded_detail=name,
-            is_admin=True,
-            attribution=None,
         )
         expanded_text = _container_text(expanded)
         expanded_labels = [
@@ -611,13 +555,7 @@ def test_details_renders_key_names_and_never_a_value(account_id: uuid.UUID) -> N
     }, "KeyEntry carries names and attribution only"
 
     details = _details(keys=keys)
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
     text = _container_text(container)
     for key in keys:
         assert key.name in text, f"{key.name} must be listed"
@@ -631,13 +569,7 @@ def test_truncated_skill_listing_says_so(account_id: uuid.UUID) -> None:
         skills=(SkillEntry(type="custom", skill_id="sk_1", title=None, version="1"),),
         skills_listing_truncated=True,
     )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
     text = _container_text(container)
     assert "sk_1" in text, "a skill with no resolved title falls back to its id"
     assert "-# Some skill names may be missing." in text, (
@@ -647,13 +579,7 @@ def test_truncated_skill_listing_says_so(account_id: uuid.UUID) -> None:
 
 def test_empty_truncated_skill_listing_keeps_its_warning(account_id: uuid.UUID) -> None:
     details = _details(skills=(), skills_listing_truncated=True)
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
 
     text = _container_text(container)
     assert "**Skills**" not in text, "the empty optional list remains omitted"
@@ -666,13 +592,7 @@ def test_connection_link_escapes_name_and_url_markup(account_id: uuid.UUID) -> N
     details = _details(
         mcp_servers=(McpServerEntry(name="search [private]", url="https://example.test/a_(b)"),)
     )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
 
     assert "[search \\[private\\]](https://example.test/a_%28b%29)" in _container_text(container), (
         "connection links must not let names or URLs break Discord markdown"
@@ -687,13 +607,7 @@ def test_many_routing_places_render_one_per_line_with_an_omission_count(
             AnsweringPlace(tier="channel", channel_id=str(10**17 + index)) for index in range(100)
         )
     )
-    container = build_details_container(
-        _state(details, account_id=account_id),
-        details,
-        expanded_detail=None,
-        is_admin=True,
-        attribution=None,
-    )
+    container = _details_container(_state(details, account_id=account_id), details)
     text = _container_text(container)
 
     assert "**Answers in:**\n<#100000000000000000>\n<#100000000000000001>" in text, (

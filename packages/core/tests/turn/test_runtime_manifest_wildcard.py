@@ -5,6 +5,7 @@ tenant without ever letting `tenant_id` or `profile` itself wildcard — see
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,6 +57,11 @@ def fake_request(
     )
 
 
+_fake_request = partial(
+    fake_request, tenant_id="tenant-a", platform="slack", channel_id="channel-1"
+)
+
+
 def write_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> None:
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(rows))
@@ -74,12 +80,7 @@ def test_wildcard_default_authorizes_every_channel_and_account_for_its_tenant(
         ("slack", "channel-1", "account-1"),
         ("discord", "channel-9", "account-9"),
     ):
-        request = fake_request(
-            tenant_id="tenant-a",
-            account_id=account_id,
-            platform=platform,
-            channel_id=channel_id,
-        )
+        request = _fake_request(account_id=account_id, platform=platform, channel_id=channel_id)
         plan = select_runtime_manifest(request, OpenAIDeployment)
         assert plan.platform == platform
         assert plan.channel_id == channel_id
@@ -98,9 +99,7 @@ def test_exact_row_wins_over_a_coexisting_wildcard_default(
             row(channel_id="channel-1", account_id="account-1", agent_id="agent-pinned"),
         ],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     plan = select_runtime_manifest(request, OpenAIDeployment)
     assert plan.agent_id == "agent-pinned"
 
@@ -113,9 +112,7 @@ def test_wildcard_never_crosses_tenant_boundary(
         monkeypatch,
         [row(tenant_id="tenant-a", platform="*", channel_id="*", account_id="*")],
     )
-    request = fake_request(
-        tenant_id="tenant-b", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(tenant_id="tenant-b", account_id="account-1")
     with pytest.raises(AdmissionDenied) as denied:
         select_runtime_manifest(request, OpenAIDeployment)
     assert denied.value.reason == "backend_unsupported"
@@ -132,9 +129,7 @@ def test_two_overlapping_wildcard_rows_refuse_as_ambiguous(
             row(platform="*", channel_id="*", account_id="*", agent_id="agent-two"),
         ],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     with pytest.raises(AdmissionDenied) as denied:
         select_runtime_manifest(request, OpenAIDeployment)
     assert denied.value.reason == "backend_unsupported"
@@ -151,13 +146,9 @@ def test_a_channel_row_for_every_account_wins_over_a_deployment_wide_default(
             row(channel_id="channel-1", account_id="*", agent_id="agent-channel"),
         ],
     )
-    pinned = fake_request(
-        tenant_id="tenant-a", account_id="account-7", platform="slack", channel_id="channel-1"
-    )
+    pinned = _fake_request(account_id="account-7")
     assert select_runtime_manifest(pinned, OpenAIDeployment).agent_id == "agent-channel"
-    other = fake_request(
-        tenant_id="tenant-a", account_id="account-7", platform="slack", channel_id="channel-2"
-    )
+    other = _fake_request(account_id="account-7", channel_id="channel-2")
     assert select_runtime_manifest(other, OpenAIDeployment).agent_id == "agent-default"
 
 
@@ -172,9 +163,7 @@ def test_equally_specific_overlapping_wildcard_rows_still_refuse(
             row(channel_id="*", account_id="account-1", agent_id="agent-account"),
         ],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     with pytest.raises(AdmissionDenied) as denied:
         select_runtime_manifest(request, OpenAIDeployment)
     assert denied.value.reason == "backend_unsupported"
@@ -191,9 +180,7 @@ def test_a_channel_row_and_an_account_row_refuse_instead_of_shadowing(
             row(platform="*", channel_id="*", account_id="account-1", agent_id="agent-account"),
         ],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     with pytest.raises(AdmissionDenied) as denied:
         select_runtime_manifest(request, OpenAIDeployment)
     assert denied.value.reason == "backend_unsupported"
@@ -210,9 +197,7 @@ def test_another_tenants_narrow_row_never_competes_with_this_tenants_default(
             row(platform="*", channel_id="*", account_id="*", agent_id="agent-default"),
         ],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     plan = select_runtime_manifest(request, OpenAIDeployment)
     assert (plan.agent_id, plan.tenant_id) == ("agent-default", "tenant-a")
 
@@ -247,9 +232,7 @@ def test_channel_and_agent_rows_serve_only_their_own_turn_origin(
         monkeypatch,
         [row(platform="*", channel_id="*", account_id="*", agent_id="agent-fixed"), sourced],
     )
-    request = fake_request(
-        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
-    )
+    request = _fake_request(account_id="account-1")
     assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-fixed"
     request.admission.backend_revision_origin = "agent"
     request.admission.agent = SimpleNamespace(id="agent_src", version=2)

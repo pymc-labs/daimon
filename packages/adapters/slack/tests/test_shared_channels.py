@@ -56,6 +56,7 @@ from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_hold import RequesterOrg
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import SecretStr
@@ -338,8 +339,8 @@ async def _run_mention(
 ) -> _Mention:
     """Run one mention through `_orchestrate` with the real `admit`, capturing its call."""
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         principal = await get_or_create_platform_principal(

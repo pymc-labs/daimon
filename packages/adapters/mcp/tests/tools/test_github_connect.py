@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
@@ -34,6 +33,8 @@ from daimon.testing.factories import make_account, make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 #: "1:1" as the chat, not inside a time such as "21:15".
 _ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
@@ -191,15 +192,12 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
     agent = SimpleNamespace(id="ma_agent", name="Agent", metadata={})
     monkeypatch.setattr(connect_tool, "require_turn_origin", AsyncMock(return_value=origin))
     monkeypatch.setattr(connect_tool, "resolve_setup_agent", AsyncMock(return_value=agent))
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         platform="teams",
         external_id="entra-tenant",
         platform_user_id="aad-admin",
-        is_admin=True,
-        is_platform_admin=True,
     )
     sent = await connect_tool._github_connect_impl(  # pyright: ignore[reportPrivateUsage]
         runtime, auth, origin_context_id=str(uuid.uuid4())

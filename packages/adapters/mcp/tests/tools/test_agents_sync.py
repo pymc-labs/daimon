@@ -18,19 +18,19 @@ import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import (
     _create_agent_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import SkillRepo
-from daimon.core.stores.domain import Role
 from daimon.testing import make_fernet
 from daimon.testing.factories import make_cli_principal
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,7 +70,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
     def on_agents_create(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id=agent_id,
                 name=agent_name,
                 model="claude-opus-4-5",
@@ -79,7 +79,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
                     "daimon_name": agent_name,
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     agents_list_call_count_2 = 0
@@ -94,7 +94,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
             return list_response([])
         return list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id=agent_id,
                     name=agent_name,
                     model="claude-opus-4-5",
@@ -103,7 +103,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
                         "daimon_name": agent_name,
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         )
 
@@ -111,7 +111,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
         """reconcile re-retrieves the created agent by id for _build_agent_info."""
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id=m.group(1),
                 name=agent_name,
                 model="claude-opus-4-5",
@@ -120,7 +120,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
                     "daimon_name": agent_name,
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     router = MARouter()
@@ -143,7 +143,7 @@ async def test_create_agent_impl_returns_sync_warnings_on_partial_failure(
         fernet=fernet,
         deployment_default=DeploymentDefault(),
     )
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
 
     from daimon.core.specs import AgentSpec
 

@@ -34,6 +34,7 @@ from daimon.core.config import (
     GithubAppSettings,
     McpContextSettings,
     McpSettings,
+    ProviderLimitsSettings,
     RepoMemorySettings,
     Settings,
     TurnSettings,
@@ -48,10 +49,13 @@ from daimon.core.ma_resolver import ResolverCache
 from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
+from daimon.core.provider_clients import ProviderClients
+from daimon.core.provider_key_gate import ProviderKeyGate
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.daily_model_cap import ProviderCeiling
 from daimon.core.turn.mcp_context import TurnContextFetch, build_turn_context_fetch
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
@@ -132,6 +136,9 @@ class TurnDeps:
     openai_daily_model_cap_usd: Decimal | None = None
     # `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, the same cap for Gemini models.
     gemini_daily_model_cap_usd: Decimal | None = None
+    # `DAIMON_PROVIDER_DAILY_CEILING_USD__*`: each provider's daily spend across every
+    # tenant. None (a bundle built by hand) checks nothing.
+    provider_ceiling: ProviderCeiling | None = None
     # `DAIMON_MCP_CONTEXT__ENABLED`: asks the agent's MCP servers about each chat
     # message (`daimon.core.turn.mcp_context`). None asks nothing.
     turn_context: TurnContextFetch | None = None
@@ -144,6 +151,10 @@ class TurnDeps:
     # read, and the ones the provider refused (`create_ma_session`).
     platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
     context_providers: ContextProviders = field(default_factory=ContextProviders)
+    # One SDK client per provider and key for the process; closed with the runtime.
+    provider_clients: ProviderClients = field(default_factory=ProviderClients)
+    # Rate-limit waits and turn caps per provider key; None (a bundle built by hand) gates nothing.
+    provider_gate: ProviderKeyGate | None = None
 
     def start_context_providers(self) -> None:
         """Schedule pre-connect/config refresh on the runtime's event loop."""
@@ -193,6 +204,7 @@ def build_turn_deps(
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     fernet = build_multifernet(crypto_keys) if crypto_keys else None
+    limits = cast(object, getattr(settings, "provider_limits", None))
     context = cast(object, settings.mcp_context)
     web = cast(object, settings.web)
     return TurnDeps(
@@ -214,6 +226,11 @@ def build_turn_deps(
             turn_settings.agent_backends if isinstance(turn_settings, TurnSettings) else False
         ),
         sessionmaker=sessionmaker,
+        provider_gate=(
+            ProviderKeyGate(sessionmaker, limits)
+            if isinstance(limits, ProviderLimitsSettings)
+            else None
+        ),
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         defaults_root=settings.defaults_root,
@@ -233,6 +250,7 @@ def build_turn_deps(
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
+        provider_ceiling=ProviderCeiling(settings.provider_daily_ceiling_usd.model_dump()),
         turn_context=(
             build_turn_context_fetch(
                 context,

@@ -8,31 +8,15 @@ import uuid
 import pytest
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
-from daimon.core.config import (
-    AnthropicSettings,
-    DatabaseSettings,
-    DiscordSettings,
-    Settings,
-)
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import FeatureActor, change_feature, change_refusal
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.domain import ChangeSurface
 from daimon.testing.factories import make_tenant
-from pydantic import PostgresDsn, SecretStr
+from daimon.testing.shared_helpers import settings as _settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 KEY = "completion_pings"
-
-
-def _settings() -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-        }
-    )
 
 
 def _actor(

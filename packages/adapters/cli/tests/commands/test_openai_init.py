@@ -7,6 +7,7 @@ import io
 import json
 import uuid
 import zipfile
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -17,6 +18,10 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.testing.isolated_sdk import build_async_openai
 
 TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
+_openai_init_command = partial(
+    openai_init_command, tenant_id=TENANT_ID, project="proj_123", model="gpt-6-luna"
+)
 
 
 def packed(skill_dir: Path) -> bytes:
@@ -113,13 +118,7 @@ def test_init_creates_agent_and_environment_and_writes_one_row(
         "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=manifest_path.parent / "no-defaults",
-    )
+    _openai_init_command(manifest=manifest_path, defaults_root=manifest_path.parent / "no-defaults")
 
     rows = json.loads(manifest_path.read_text())
     assert len(rows) == 1
@@ -146,12 +145,8 @@ def test_init_is_idempotent_and_does_not_reprovision(
     )
 
     for _ in range(2):
-        openai_init_command(
-            tenant_id=TENANT_ID,
-            project="proj_123",
-            model="gpt-6-luna",
-            manifest=manifest_path,
-            defaults_root=manifest_path.parent / "no-defaults",
+        _openai_init_command(
+            manifest=manifest_path, defaults_root=manifest_path.parent / "no-defaults"
         )
 
     rows = json.loads(manifest_path.read_text())
@@ -173,13 +168,7 @@ def test_init_seeds_every_default_skill_onto_a_persistent_workspace_agent(
         fake_transport_factory(calls, [alpha, beta]),
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=defaults_root,
-    )
+    _openai_init_command(manifest=manifest_path, defaults_root=defaults_root)
 
     rows = json.loads(manifest_path.read_text())
     deployment = OpenAIDeployment.model_validate(rows[0])
@@ -212,13 +201,7 @@ def test_init_leaves_out_a_skill_a_default_agent_limits_to_platforms(
         fake_transport_factory(calls, [beta]),
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=defaults_root,
-    )
+    _openai_init_command(manifest=manifest_path, defaults_root=defaults_root)
 
     deployment = OpenAIDeployment.model_validate(json.loads(manifest_path.read_text())[0])
     assert list(deployment.skill_ids) == ["skill-1"], "only the unlimited skill is attached"
@@ -238,13 +221,8 @@ def test_init_skip_default_skills_flag_creates_a_bare_agent(
         "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=defaults_root,
-        skip_default_skills=True,
+    _openai_init_command(
+        manifest=manifest_path, defaults_root=defaults_root, skip_default_skills=True
     )
 
     rows = json.loads(manifest_path.read_text())
@@ -269,20 +247,14 @@ def test_init_reuses_the_same_skill_idempotency_key_across_different_channels(
         fake_transport_factory(calls, [alpha, alpha]),
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
+    _openai_init_command(
         manifest=tmp_path / "manifest-a.json",
         defaults_root=defaults_root,
         platform="discord",
         channel_id="channel-a",
         account_id="account-a",
     )
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
+    _openai_init_command(
         manifest=tmp_path / "manifest-b.json",
         defaults_root=defaults_root,
         platform="discord",
@@ -308,18 +280,9 @@ def test_init_warns_when_reusing_a_row_with_a_different_api_key_env(
         "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory(calls)
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=manifest_path.parent / "no-defaults",
-    )
+    _openai_init_command(manifest=manifest_path, defaults_root=manifest_path.parent / "no-defaults")
     capsys.readouterr()
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
+    _openai_init_command(
         manifest=manifest_path,
         defaults_root=manifest_path.parent / "no-defaults",
         api_key_env="DAIMON_CHANNEL_OPENAI_KEY_2",
@@ -341,12 +304,6 @@ def test_init_manifest_write_leaves_no_temp_file_behind(
         "daimon.adapters.cli.commands.openai.configured_transport", fake_transport_factory([])
     )
 
-    openai_init_command(
-        tenant_id=TENANT_ID,
-        project="proj_123",
-        model="gpt-6-luna",
-        manifest=manifest_path,
-        defaults_root=manifest_path.parent / "no-defaults",
-    )
+    _openai_init_command(manifest=manifest_path, defaults_root=manifest_path.parent / "no-defaults")
 
     assert [p.name for p in manifest_path.parent.iterdir()] == [manifest_path.name]

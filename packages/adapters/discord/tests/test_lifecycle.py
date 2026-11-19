@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -59,6 +60,9 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
 from discord.http import HTTPClient, Route
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_tool_use_block = partial(ToolUseBlock, kind="tool_use", type="agent.tool_use")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1323,11 +1327,7 @@ async def test_terminal_failure_card_carries_the_termination_notice(
     await lc.on_render(TurnState())
     state = TurnState(
         termination=reason,
-        content=[
-            ToolUseBlock(
-                kind="tool_use", id="tu_1", type="agent.tool_use", name="fit_model", input={}
-            )
-        ],
+        content=[_tool_use_block(id="tu_1", name="fit_model", input={})],
     )
 
     await lc.on_terminal_failure(state, Exception("x" * 300))
@@ -1396,14 +1396,7 @@ async def test_terminal_failure_notice_fits_discord_limits_with_many_long_names(
             for i in range(45)
         ),
         content=[
-            ToolUseBlock(
-                kind="tool_use",
-                id=f"tu_{i}",
-                type="agent.tool_use",
-                name=f"{i:02d}" + "t" * 98,
-                input={},
-            )
-            for i in range(45)
+            _tool_use_block(id=f"tu_{i}", name=f"{i:02d}" + "t" * 98, input={}) for i in range(45)
         ],
     )
 
@@ -1803,8 +1796,7 @@ class TestStatusEmbedFromTurnState:
 
         await lc.on_render(TurnState(content=[TextBlock(kind="text", text="Checking.")]))
         lc._last_flush = time.monotonic() - 11.0  # pyright: ignore[reportPrivateUsage]  # backdating debounce is the established idiom in TestDebounce
-        mcp_call = ToolUseBlock(
-            kind="tool_use",
+        mcp_call = _tool_use_block(
             id="tu_1",
             type="agent.mcp_tool_use",
             name="search_issues",
@@ -1851,9 +1843,7 @@ class TestFilteredExtraction:
         state = TurnState(
             content=[
                 TextBlock(kind="text", text="I'll look that up. "),
-                ToolUseBlock(
-                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_1", name="bash", input={}),
                 TextBlock(kind="text", text="Here is the answer."),
             ]
         )
@@ -1896,9 +1886,7 @@ class TestZeroMessageBehavior:
         state = TurnState(
             content=[
                 TextBlock(kind="text", text="I'll run that."),
-                ToolUseBlock(
-                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_1", name="bash", input={}),
             ]
         )
         await lc.on_terminal_success(state)
@@ -2124,9 +2112,7 @@ async def test_a_long_answers_files_go_on_its_last_chunk() -> None:
 async def test_a_tool_only_turn_takes_its_files_on_the_done_card() -> None:
     lc, edits = _window_fixture()
     await lc.on_sse_event(_thinking_event())
-    tool = ToolUseBlock(
-        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
-    )
+    tool = _tool_use_block(id="tu_1", name="bash", input={}, status="complete")
     await lc.on_terminal_success(TurnState(content=[tool]))
 
     answer = lc.answer_message
@@ -2211,9 +2197,7 @@ async def test_a_tool_only_turn_still_closes_its_window() -> None:
     """A tool-only turn posts files too; its sweep needs the window for the dedup."""
     lc, _edits = _window_fixture()
     await lc.on_sse_event(_thinking_event())
-    tool = ToolUseBlock(
-        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}, status="complete"
-    )
+    tool = _tool_use_block(id="tu_1", name="bash", input={}, status="complete")
     await lc.on_terminal_success(TurnState(content=[tool]))
 
     assert lc.turn_window is not None
@@ -2250,9 +2234,7 @@ class TestWasAnswered:
         state = TurnState(
             content=[
                 TextBlock(kind="text", text="I'll run that."),
-                ToolUseBlock(
-                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_1", name="bash", input={}),
             ]
         )
         await lc.on_terminal_success(state)
@@ -2589,13 +2571,7 @@ class TestUnpromptedTurn:
         """Tools ran, nothing was said: a mention would keep the done embed, an
         unprompted turn deletes it, since nobody watched those tools run."""
         lc, sends, edits, deletes = _make_unprompted_lifecycle()
-        tool_only = TurnState(
-            content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                )
-            ]
-        )
+        tool_only = TurnState(content=[_tool_use_block(id="tu_1", name="bash", input={})])
 
         await lc.on_render(tool_only)
         await lc.on_terminal_success(tool_only)
@@ -2613,15 +2589,7 @@ class TestUnpromptedTurn:
         await lc.on_render(TurnState())
         assert sends == [], "thinking is not content"
 
-        await lc.on_render(
-            TurnState(
-                content=[
-                    ToolUseBlock(
-                        kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                    )
-                ]
-            )
-        )
+        await lc.on_render(TurnState(content=[_tool_use_block(id="tu_1", name="bash", input={})]))
 
         assert len(sends) == 1, "tool activity is visible work, so the embed goes up"
         assert "embeds" in sends[0], "the post carries the activity embed"
@@ -2679,11 +2647,7 @@ class TestDegradedTurnReply:
         lc, sends, _edits = _make_lifecycle()
         await lc.on_sse_event(_thinking_event())
         state = TurnState(
-            content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
-                )
-            ],
+            content=[_tool_use_block(id="tu_1", name="bash", input={})],
             mcp_failures=(self._failure(),),
         )
         await lc.on_terminal_success(state)
@@ -3146,9 +3110,7 @@ async def test_repeated_and_markup_sealed_blocks_do_not_post():
         state.content.extend(
             [
                 TextBlock(kind="text", text=text),
-                ToolUseBlock(
-                    kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id=str(index), name="bash", input={}),
             ]
         )
         await lc.on_render(state)
@@ -3166,9 +3128,7 @@ async def test_sealed_flood_caps_actual_messages_and_attaches_all_excess(failure
             state.content.extend(
                 [
                     TextBlock(kind="text", text=text),
-                    ToolUseBlock(
-                        kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
-                    ),
+                    _tool_use_block(id=str(index), name="bash", input={}),
                 ]
             )
             await lc.on_render(state)
@@ -3375,9 +3335,7 @@ async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, t
         state.content.extend(
             [
                 TextBlock(kind="text", text=f"Answer {index}. " + "x" * 600),
-                ToolUseBlock(
-                    kind="tool_use", id=str(index), type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id=str(index), name="bash", input={}),
             ]
         )
     state.content.append(TextBlock(kind="text", text="A compact table."))

@@ -41,7 +41,7 @@ from daimon.adapters.teams.admissions import (
 from daimon.adapters.teams.attachments import BotToken, prepare_attachments
 from daimon.adapters.teams.billing_panel import TeamChannels
 from daimon.adapters.teams.boot_sweep import retire_orphaned_turns
-from daimon.adapters.teams.budget_notice import with_budget_notifier
+from daimon.adapters.teams.budget_notice import teams_budget_alerter, with_budget_notifier
 from daimon.adapters.teams.card import CANCELLED_NOTICE, notice_card
 from daimon.adapters.teams.card_actions import replace_card, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
@@ -105,6 +105,7 @@ from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -297,6 +298,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "provider_hold_cap_reached": "turn.skipped.provider_hold_cap_reached",
     "provider_setup_pending": "turn.skipped.provider_setup_pending",
     "provider_daily_cap_reached": "turn.skipped.provider_daily_cap_reached",
+    "provider_daily_ceiling_reached": "turn.skipped.provider_daily_ceiling_reached",
     "provider_price_unavailable": "turn.skipped.provider_price_unavailable",
 }
 
@@ -437,6 +439,7 @@ class TeamsApp:
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime = with_budget_notifier(runtime, direct)
+        self._budget_alerter = None if direct is None else teams_budget_alerter(runtime, direct)
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -505,6 +508,7 @@ class TeamsApp:
         self._serving = asyncio.Event()
         self._wake_poller: asyncio.Task[None] | None = None
         self._delivery_poller: asyncio.Task[None] | None = None
+        self._budget_alert_poller: asyncio.Task[None] | None = None
         # When each busy conversation last got a message: a newer one supersedes
         # queued continuation work (Bot Framework cannot list a chat's history).
         self._last_message_at: dict[str, datetime] = {}
@@ -563,6 +567,17 @@ class TeamsApp:
                     )
                     self._delivery_poller = asyncio.create_task(
                         deliveries, name="teams.routine-delivery"
+                    )
+                if self._budget_alerter is not None:
+                    alerts = run_budget_alert_poller(
+                        self.runtime.sessionmaker,
+                        platform="teams",
+                        alerter=self._budget_alerter,
+                        settings=self.runtime.settings,
+                        should_stop=lambda: self.draining,
+                    )
+                    self._budget_alert_poller = asyncio.create_task(
+                        alerts, name="teams.budget-alerts"
                     )
                 if self._team_channels is not None:
                     listing = run_channel_listing(
@@ -879,6 +894,7 @@ class TeamsApp:
         pollers = (
             self._wake_poller,
             self._delivery_poller,
+            self._budget_alert_poller,
             self._reclaimer,
             self._renewals,
             self._channel_listing,
@@ -1802,7 +1818,7 @@ class TeamsApp:
                         handoff=handoff,
                         reraise=reraise,
                         attended=continuation is None or continuation_attended(continuation),
-                        continued=continuation is not None,
+                        continuation=continuation,
                     )
             except asyncio.CancelledError:
                 raise
@@ -1879,7 +1895,7 @@ class TeamsApp:
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
-        continued: bool = False,
+        continuation: TaskContinuationRow | None = None,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1962,6 +1978,8 @@ class TeamsApp:
             history_images=history.image_urls if history else (),
         )
         config = admission.config
+        # A queued turn's id names its row, not a message the person sent.
+        message_ref = None if inbound.from_form or continuation is not None else inbound.activity_id
         async with turn_origin(
             self.runtime.sessionmaker,
             attended=attended,
@@ -1979,8 +1997,7 @@ class TeamsApp:
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
             platform_channel_id=inbound.conversation_id,
-            # A queued turn's id names its row, not a message the person sent.
-            platform_message_id=None if inbound.from_form or continued else inbound.activity_id,
+            platform_message_id=message_ref,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
@@ -2027,7 +2044,12 @@ class TeamsApp:
                 watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
-                request_text=None if inbound.unprompted else inbound.text,
+                # Queued work carries on a question kept when it was asked, if any.
+                request_text=(
+                    None if inbound.unprompted or continuation is not None else inbound.text
+                ),
+                request_ref=message_ref,
+                continues=continuation,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

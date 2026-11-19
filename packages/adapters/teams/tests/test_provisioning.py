@@ -41,7 +41,7 @@ async def _provision(
             return_value="agent 'daimon': boom",
         ),
         patch(
-            "daimon.adapters.teams.provisioning.find_agent_by_daimon_tag",
+            "daimon.adapters.teams.provisioning.find_agent_or_builtin",
             AsyncMock(return_value=object()),
         ),
     ):

@@ -26,7 +26,13 @@ from daimon.adapters.mcp.tools.channel_budgets import (
     origin_budget_channel,
     origin_spend,
 )
-from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    McpSettings,
+    Settings,
+    SupportSettings,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import channel_budgets
@@ -60,7 +66,9 @@ def visible(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return calls
 
 
-def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
+def _runtime(
+    sessionmaker: async_sessionmaker[AsyncSession], *, support_channel: str | None = None
+) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
@@ -68,6 +76,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             mcp=McpSettings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp")),
+            support=SupportSettings(escalation_channel_id=support_channel),
         ),
         deployment_default=DeploymentDefault(),
     )
@@ -407,3 +416,104 @@ async def test_a_teams_clear_takes_the_threads_channel(
         f"{channel};messageid=17",
     )
     assert (cleared.channel_id, cleared.cleared) == (channel, True)
+
+
+async def test_an_alert_budget_keeps_its_alert_channel_and_never_blocks(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth(tenant, account_id, admin=True)
+    result = await _set_channel_budget_impl(
+        runtime,
+        auth,
+        channel_id=_PARENT,
+        limit_usd="5",
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        on_limit="alert",
+        alert_channel_id=_THREAD,
+    )
+    assert (result.on_limit, result.alert_channel_id) == ("alert", _PARENT), (
+        "the alert channel resolves to its parent channel like the budgeted one"
+    )
+    assert "alert only" in result.summary, "the summary names the mode"
+    with pytest.raises(ToolError, match="needs on_limit alert"):
+        await _set_channel_budget_impl(
+            runtime,
+            auth,
+            channel_id=_PARENT,
+            limit_usd="5",
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+            on_limit="stop",
+            alert_channel_id=_THREAD,
+        )
+
+
+async def test_set_when_on_limit_omitted_then_an_alert_budget_still_alerts(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker, support_channel=_PARENT)
+    auth = _auth(tenant, account_id, admin=True)
+    window = {"window": "monthly", "starts_at": None, "ends_at": None}
+    await _set_channel_budget_impl(
+        runtime, auth, channel_id=_PARENT, limit_usd="5", **window, on_limit="alert"
+    )
+    edited = await _set_channel_budget_impl(
+        runtime, auth, channel_id=_PARENT, limit_usd="8", **window
+    )
+    assert edited.on_limit == "alert", "editing only the limit keeps the alert mode"
+
+
+async def test_set_when_only_alert_channel_is_given_then_an_alert_budget_is_repointed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=True)
+    window = {"window": "monthly", "starts_at": None, "ends_at": None}
+    await _set_channel_budget_impl(
+        runtime,
+        auth,
+        channel_id=_PARENT,
+        limit_usd="5",
+        **window,
+        on_limit="alert",
+        alert_channel_id="333",
+    )
+    moved = await _set_channel_budget_impl(
+        runtime, auth, channel_id=_PARENT, limit_usd="5", **window, alert_channel_id=_THREAD
+    )
+    assert (moved.on_limit, moved.alert_channel_id) == ("alert", _PARENT), (
+        "a current alert budget takes a new alert channel without repeating on_limit"
+    )
+    with pytest.raises(ToolError, match="needs on_limit alert"):
+        await _set_channel_budget_impl(
+            runtime, auth, channel_id="444", limit_usd="5", **window, alert_channel_id=_THREAD
+        )
+
+
+async def test_set_when_an_alert_budget_has_nowhere_to_post_then_refused_and_not_saved(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=True)
+    with pytest.raises(ToolError, match="needs an alert channel"):
+        await _set_channel_budget_impl(
+            runtime,
+            auth,
+            channel_id=_PARENT,
+            limit_usd="5",
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+            on_limit="alert",
+        )
+    async with committing_sessionmaker() as session:
+        saved = await channel_budgets.get_channel_budget(
+            session, tenant_id=tenant.id, platform="discord", channel_id=_PARENT
+        )
+    assert saved is None, "nothing was saved"

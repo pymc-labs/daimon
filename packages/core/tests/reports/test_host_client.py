@@ -9,6 +9,7 @@ import json
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
+from functools import partial
 
 import httpx
 import pytest
@@ -26,6 +27,15 @@ _HOST_URL = HttpUrl("http://report-host:8002")
 _ADMIN_SECRET = SecretStr("supersecret")
 _SLUG = "q3-financials"
 _TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+
+_put_admin_report = partial(
+    put_admin_report,
+    slug=_SLUG,
+    tenant_id=_TENANT_ID,
+    agent_name="analyst",
+    cap_usd=Decimal("2.00"),
+    seam_token="seam-tok",
+)
 
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
@@ -49,16 +59,8 @@ async def test_put_admin_report_sends_correct_path_method_and_bearer() -> None:
         return httpx.Response(200, json={"slug": _SLUG, "links": []})
 
     async with _make_client(handler) as client:
-        await put_admin_report(
-            client=client,
-            settings=_settings(),
-            slug=_SLUG,
-            title="Q3 financials",
-            tenant_id=_TENANT_ID,
-            agent_name="analyst",
-            cap_usd=Decimal("2.00"),
-            seam_token="seam-tok",
-            recipients=[],
+        await _put_admin_report(
+            client=client, settings=_settings(), title="Q3 financials", recipients=[]
         )
 
     assert captured["url"] == f"http://report-host:8002/admin/reports/{_SLUG}"
@@ -74,15 +76,10 @@ async def test_put_admin_report_body_carries_expected_fields_with_string_cap() -
         return httpx.Response(200, json={"slug": _SLUG, "links": []})
 
     async with _make_client(handler) as client:
-        await put_admin_report(
+        await _put_admin_report(
             client=client,
             settings=_settings(),
-            slug=_SLUG,
             title="Q3 financials",
-            tenant_id=_TENANT_ID,
-            agent_name="analyst",
-            cap_usd=Decimal("2.00"),
-            seam_token="seam-tok",
             recipients=[
                 Recipient(name="Ada", label="ada-link"),
                 Recipient(name="Ben", label="ben-link"),
@@ -117,15 +114,10 @@ async def test_put_admin_report_parses_2xx_into_report_registered() -> None:
         )
 
     async with _make_client(handler) as client:
-        result = await put_admin_report(
+        result = await _put_admin_report(
             client=client,
             settings=_settings(),
-            slug=_SLUG,
             title="Q3 financials",
-            tenant_id=_TENANT_ID,
-            agent_name="analyst",
-            cap_usd=Decimal("2.00"),
-            seam_token="seam-tok",
             recipients=[Recipient(name="Ada", label="a"), Recipient(name="Ben", label="b")],
         )
 
@@ -141,17 +133,7 @@ async def test_put_admin_report_raises_on_non_2xx_with_status_in_message() -> No
 
     async with _make_client(handler) as client:
         with pytest.raises(ReportHostError, match="403"):
-            await put_admin_report(
-                client=client,
-                settings=_settings(),
-                slug=_SLUG,
-                title="t",
-                tenant_id=_TENANT_ID,
-                agent_name="analyst",
-                cap_usd=Decimal("2.00"),
-                seam_token="seam-tok",
-                recipients=[],
-            )
+            await _put_admin_report(client=client, settings=_settings(), title="t", recipients=[])
 
 
 async def test_put_admin_report_transport_error_raises_with_cause_preserved() -> None:
@@ -160,17 +142,7 @@ async def test_put_admin_report_transport_error_raises_with_cause_preserved() ->
 
     async with _make_client(handler) as client:
         with pytest.raises(ReportHostError) as excinfo:
-            await put_admin_report(
-                client=client,
-                settings=_settings(),
-                slug=_SLUG,
-                title="t",
-                tenant_id=_TENANT_ID,
-                agent_name="analyst",
-                cap_usd=Decimal("2.00"),
-                seam_token="seam-tok",
-                recipients=[],
-            )
+            await _put_admin_report(client=client, settings=_settings(), title="t", recipients=[])
     assert isinstance(excinfo.value.__cause__, httpx.ConnectError), (
         "the transport failure must be preserved as the exception cause"
     )
@@ -185,16 +157,8 @@ async def test_put_admin_report_unset_host_url_raises_before_any_request() -> No
 
     async with _make_client(handler) as client:
         with pytest.raises(ReportHostError, match="host_url"):
-            await put_admin_report(
-                client=client,
-                settings=_settings(host_url=None),
-                slug=_SLUG,
-                title="t",
-                tenant_id=_TENANT_ID,
-                agent_name="analyst",
-                cap_usd=Decimal("2.00"),
-                seam_token="seam-tok",
-                recipients=[],
+            await _put_admin_report(
+                client=client, settings=_settings(host_url=None), title="t", recipients=[]
             )
     assert seen == [], "an unconfigured host_url must never issue a request"
 
@@ -208,16 +172,8 @@ async def test_put_admin_report_unset_admin_secret_raises_before_any_request() -
 
     async with _make_client(handler) as client:
         with pytest.raises(ReportHostError, match="admin_secret"):
-            await put_admin_report(
-                client=client,
-                settings=_settings(admin_secret=None),
-                slug=_SLUG,
-                title="t",
-                tenant_id=_TENANT_ID,
-                agent_name="analyst",
-                cap_usd=Decimal("2.00"),
-                seam_token="seam-tok",
-                recipients=[],
+            await _put_admin_report(
+                client=client, settings=_settings(admin_secret=None), title="t", recipients=[]
             )
     assert seen == [], "an unconfigured admin_secret must never issue a request"
 
@@ -229,17 +185,7 @@ async def test_put_admin_report_response_missing_field_raises() -> None:
 
     async with _make_client(handler) as client:
         with pytest.raises(ReportHostError):
-            await put_admin_report(
-                client=client,
-                settings=_settings(),
-                slug=_SLUG,
-                title="t",
-                tenant_id=_TENANT_ID,
-                agent_name="analyst",
-                cap_usd=Decimal("2.00"),
-                seam_token="seam-tok",
-                recipients=[],
-            )
+            await _put_admin_report(client=client, settings=_settings(), title="t", recipients=[])
 
 
 async def test_delete_admin_report_sends_tenant_id_query_param_and_bearer() -> None:

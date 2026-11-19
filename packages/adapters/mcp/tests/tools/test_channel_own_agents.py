@@ -111,6 +111,8 @@ from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
+from ..harness import auth_identity
+
 ROOM = "111111111111111111"
 OTHER = "222222222222222222"
 NEW_ROOM = "333333333333333333"
@@ -598,9 +600,9 @@ async def test_the_setup_thread_configures_its_channels_own_agent(
 
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(runtime, builtin, "local")
-    agent_key = AuthIdentity(
-        account_id=world.account_id,
-        tenant_id=world.tenant_id,
+    agent_key = auth_identity(
+        world.account_id,
+        world.tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id="444444444444444444",
@@ -701,9 +703,9 @@ async def test_a_chat_turn_naming_no_verified_origin_creates_no_agent(
 
 def _key(world: _World, *, bound: str | None) -> AuthIdentity:
     """An agent key of C's own agent, minted in C (``bound``) or anywhere else."""
-    return AuthIdentity(
-        account_id=world.account_id,
-        tenant_id=world.tenant_id,
+    return auth_identity(
+        world.account_id,
+        world.tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id="444444444444444444",

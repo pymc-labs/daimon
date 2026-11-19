@@ -257,43 +257,6 @@ async def _clear_references(
     return len(channel_ids) + (1 if tenant_row_matches else 0)
 
 
-async def delete_propagation_row(
-    session: AsyncSession,
-    *,
-    scope: ChannelScopeRef | TenantScopeRef,
-) -> bool:
-    """Delete a channel_config / tenant_config row outright.
-
-    Returns True if a row was deleted, False if none existed (idempotent).
-    Used by /unpropagate when the row's mode is 'user_active' — clearing
-    agent_name on a user_active row is meaningless because the row's mode
-    IS the propagation. For mode='agent' rows /unpropagate continues to
-    call unset_fields, which auto-deletes the row when agent_name was its
-    only set field.
-    """
-    if isinstance(scope, ChannelScopeRef):
-        pk_filter = (ChannelConfig.tenant_id == scope.tenant_id) & (
-            ChannelConfig.channel_id == scope.channel_id
-        )
-        existing = (
-            await session.execute(select(ChannelConfig).where(pk_filter))
-        ).scalar_one_or_none()
-        if existing is None:
-            return False
-        await session.execute(delete(ChannelConfig).where(pk_filter))
-    else:
-        # TenantScopeRef
-        tenant_filter = TenantConfig.tenant_id == scope.tenant_id
-        existing = (
-            await session.execute(select(TenantConfig).where(tenant_filter))
-        ).scalar_one_or_none()
-        if existing is None:
-            return False
-        await session.execute(delete(TenantConfig).where(tenant_filter))
-    await session.flush()
-    return True
-
-
 async def propagate(
     session: AsyncSession,
     *,

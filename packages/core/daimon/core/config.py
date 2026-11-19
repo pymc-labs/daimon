@@ -1624,9 +1624,9 @@ class SelfHostedSettings(BaseModel):
 
 
 class GeminiSettings(BaseModel):
-    """Optional Gemini API credentials for media MCP tools.
+    """Gemini media-tool credentials and stored-conversation retention.
 
-    When unset, the media tools skip registration so the ``mcp`` process
+    When the key is unset, the media tools skip registration so the ``mcp`` process
     boots without them.
     """
 
@@ -1634,6 +1634,14 @@ class GeminiSettings(BaseModel):
         default=None,
         description=(
             "Gemini API key used by media-generation MCP tools. Tools are unregistered when unset."
+        ),
+    )
+    records_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a Gemini conversation may sit idle before the scheduler prunes its stored "
+            "history. A thread that comes back after that starts a new conversation."
         ),
     )
 
@@ -1812,6 +1820,36 @@ class SelfhostedBillingSettings(BaseModel):
         return self
 
 
+class ProviderDailyCeilingSettings(BaseModel):
+    """The most every tenant together may spend each UTC day on one model provider.
+
+    Each tenant's own daily model cap bounds one tenant; tenants are free to create,
+    so only this bounds the deployment's provider bill. The default, $200, lets ten
+    tenants each use up a $20 model cap in a day and holds the worst case near $6,000
+    a month per provider. Checked with the daily model cap as each turn starts, from
+    today's observed usage at list price, re-read at most once a minute per worker.
+    """
+
+    openai: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on OpenAI, in provider "
+            "USD at list price. Once reached, OpenAI turns are refused until midnight "
+            "UTC. 0 allows no OpenAI turns."
+        ),
+    )
+    gemini: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on Gemini, in provider "
+            "USD at list price. Once reached, Gemini turns are refused until midnight "
+            "UTC. 0 allows no Gemini turns."
+        ),
+    )
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -1823,8 +1861,8 @@ class BillingSettings(BaseModel):
     markup: Decimal = Field(
         default=Decimal("1.0"),
         description=(
-            "Multiplier applied to raw Anthropic usage cost before billing "
-            "the tenant. 1.0 = pass-through."
+            "Multiplier applied to raw provider usage cost (every provider) before "
+            "billing the tenant. 1.0 = pass-through."
         ),
     )
     selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
@@ -1843,11 +1881,11 @@ class BillingSettings(BaseModel):
         description=(
             "Most a tenant may spend each UTC day on any one Gemini model, in provider "
             "USD at list price, counted across every agent turn. A "
-            "Gemini agent turn has no token envelope and its usage reaches no ledger "
-            "debit, so this is the guard. Checked as each turn starts, for "
+            "Gemini agent turn has no token envelope and its usage is debited only "
+            "once measured, so this is the guard. Checked as each turn starts, for "
             "its first request's model and any Flash fallback of it, never mid-turn; "
-            "a model with no current tariff is refused, and an unpriced fallback never "
-            "runs. It resets at midnight UTC. 0 allows no Gemini turns."
+            "a model with no current tariff never runs on any request. It resets at "
+            "midnight UTC. 0 allows no Gemini turns."
         ),
     )
     openai_daily_model_cap_usd: Decimal = Field(
@@ -2898,6 +2936,41 @@ class LongJobsSettings(BaseModel):
     )
 
 
+class MonitoringSettings(BaseModel):
+    retention_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Days a monitored question, answer or tool call is kept before the scheduler "
+            "deletes it, default 90."
+        ),
+    )
+
+
+class ProviderLimitsSettings(BaseModel):
+    """How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`)."""
+
+    key_turns: int = Field(
+        default=16,
+        gt=0,
+        description=(
+            "Most turns running at once on one provider API key, across every replica. "
+            "A turn past the cap waits, then is refused as busy."
+        ),
+    )
+    tenant_turns: int = Field(
+        default=4,
+        gt=0,
+        description="Most of those turns one workspace may hold on one provider API key.",
+    )
+    wait_s: float = Field(
+        default=20.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Seconds a turn waits for a free slot before it is refused as busy.",
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -2939,6 +3012,7 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,
@@ -3049,8 +3123,12 @@ class Settings(BaseSettings):
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    provider_daily_ceiling_usd: ProviderDailyCeilingSettings = Field(
+        default_factory=ProviderDailyCeilingSettings
+    )
     support: SupportSettings = Field(default_factory=SupportSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
+    provider_limits: ProviderLimitsSettings = Field(default_factory=ProviderLimitsSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     outbound: OutboundSettings = Field(default_factory=OutboundSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)

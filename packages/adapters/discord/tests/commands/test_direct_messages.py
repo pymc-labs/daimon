@@ -22,6 +22,7 @@ from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_queue import TurnQueue
+from daimon.testing.builders import provision_workspace
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -104,9 +105,7 @@ async def test_dm_me_agent_goes_through_the_default_agent_writer_and_is_audited(
 ) -> None:
     """`/dm-me agent` sets the default `daimon dm default` and the web app set, with an audit row
     naming the person who ran it, and refuses an agent the server does not have."""
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=str(_GUILD)
-    )
+    result = await provision_workspace(db_session_factory, str(_GUILD))
     monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(
         dm_module,
@@ -143,9 +142,7 @@ async def test_dm_me_agent_goes_through_the_default_agent_writer_and_is_audited(
 async def test_dm_me_enable_records_who_turned_dms_on(
     monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=str(_GUILD)
-    )
+    result = await provision_workspace(db_session_factory, str(_GUILD))
     monkeypatch.setattr(dm_module, "is_member_daimon_admin", AsyncMock(return_value=True))
     runtime = MagicMock(sessionmaker=db_session_factory)
     cog = DirectMessageCog(MagicMock(runtime=runtime))

@@ -26,6 +26,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 
 async def test_mcp_refuses_stale_admin_claim_after_revoke(
     db_session: AsyncSession,
@@ -122,14 +124,13 @@ async def test_granted_admin_cannot_write_delegations_over_mcp(
     )
     runtime = MagicMock(spec=McpRuntime, session_factory=db_session_factory)
     runtime.settings = MagicMock(discord=DiscordSettings(bot_token=SecretStr("test")))
-    auth = AuthIdentity(
-        account_id=principal.account_id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        principal.account_id,
+        tenant.id,
+        is_platform_admin=False,
         platform="discord",
         platform_user_id="delegate",
         token_kind="cli",
-        role=Role.ADMIN,
-        is_admin=True,
     )
     with pytest.raises(ToolError, match="Only platform admins"):
         await change_admin(runtime, auth, subject_id="new-admin", revoke=revoke)
@@ -141,13 +142,7 @@ async def test_granted_admin_cannot_write_delegations_over_mcp(
 async def test_delegated_admin_is_refused_at_money_gates(token_kind: McpTokenKind | None) -> None:
     import uuid
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        token_kind=token_kind,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False, token_kind=token_kind)
     runtime = MagicMock(spec=McpRuntime, session_factory=MagicMock())
     with pytest.raises(ToolError, match="admin"):
         await require_budget_write(runtime, auth, "channel")
@@ -173,13 +168,12 @@ async def test_in_flight_delegation_recheck_does_not_reuse_an_admin_snapshot(
         is_platform_admin=True,
     )
     await change_grant(db_session, **key)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant.id,
+        is_platform_admin=False,
         platform="discord",
         platform_user_id="member",
-        role=Role.ADMIN,
-        is_admin=True,
         verified_role_ids=("role",),
     )
     assert await current_admin(db_session, auth, action=DelegatedAction.AGENT_SETTINGS)

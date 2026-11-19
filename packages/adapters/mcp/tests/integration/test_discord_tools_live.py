@@ -44,6 +44,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _TEST_GUILD_ID = os.environ.get("DAIMON_TEST_GUILD_ID", "")
 _TEST_CHANNEL_ID = os.environ.get("DAIMON_TEST_CHANNEL_ID", "")
 # Public thread (type 11) in the test guild — #151 repro anchor.
@@ -114,9 +116,9 @@ async def _bot_user_id(token: str) -> str:
 
 def _make_auth(platform_user_id: str) -> AuthIdentity:
     """Mint a synthetic AuthIdentity for the bot acting as caller."""
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="discord",
         external_id=_TEST_GUILD_ID,

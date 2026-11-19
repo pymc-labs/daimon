@@ -51,8 +51,8 @@ def test_j9_the_channel_backends_switch_stops_backend_selection(no_flags):
     assert not backend_selection_enabled(settings.turn)
 
 
-def test_j9_a_new_tenant_has_every_keyed_provider_and_its_code_default_rows(monkeypatch):
-    """No rows: Anthropic plus each keyed provider, each with its code-default rows."""
+def test_j9_a_new_tenant_is_on_anthropic_and_keyed_providers_have_code_default_rows(monkeypatch):
+    """No rows: Anthropic only until an admin opts in; each keyed provider has code-default rows."""
     from daimon.core.turn.runtime_defaults import default_rows
 
     tenant = str(uuid.uuid4())
@@ -62,15 +62,15 @@ def test_j9_a_new_tenant_has_every_keyed_provider_and_its_code_default_rows(monk
     assert default_rows(tenant) == []
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
-    assert set(default_enabled_backends()) == {"anthropic", "openai", "gemini"}
+    assert default_enabled_backends() == ("anthropic",), "keys never enable a provider"
     rows = default_rows(tenant)
     assert {row["profile"] for row in rows} == {"gemini.inline_reuse"}
     assert all(row["tenant_id"] == tenant for row in rows)
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
-async def test_j9_a_never_seen_tenant_switches_with_zero_setup(fresh_chat, backend):
-    """J1/J2's first step on a tenant created just now: the copy's switch applies."""
+async def test_j9_a_never_seen_tenant_switches_once_it_opted_in(fresh_chat, backend):
+    """J1/J2's first step on a tenant created just now and opted in: the copy's switch applies."""
     copy = await _fork_agent_impl(
         fresh_chat.runtime,
         fresh_chat.auth,
@@ -91,6 +91,7 @@ async def test_j9_a_never_seen_tenant_switches_with_zero_setup(fresh_chat, backe
         agent_name=copy.name,
         target_backend=backend,
         origin_context_id=str(fresh_chat.origin.id),
+        expected_revision=0,
     )
-    assert switched.status == "changed", "applied on the first call, nothing to confirm"
+    assert switched.status == "changed", "applied once the call carries the previewed revision"
     assert switched.target_backend == backend, switched

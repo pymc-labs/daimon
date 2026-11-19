@@ -60,6 +60,8 @@ from mcp.types import TextContent
 from pydantic import HttpUrl, PostgresDsn, PrivateAttr, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 _SECRET = "s" * 32
 _URL = "https://mcp.example.com/mcp"
 _USER = "user-1"
@@ -89,9 +91,9 @@ class Rig:
     extra: tuple[str, ...] = ()
 
     def identity(self, **changes: Any) -> AuthIdentity:
-        base = AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        base = auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform="discord",
             chat_agent_id=self.agent_id,
@@ -119,8 +121,8 @@ class Rig:
         def list_agents() -> str:
             return self._record("list_agents", {})
 
-        def set_thread_model(model: str, digest: str | None = None) -> str:
-            return self._record("set_thread_model", {"model": model, "digest": digest})
+        def set_thread_model(model: str, revision: int | None = None) -> str:
+            return self._record("set_thread_model", {"model": model, "revision": revision})
 
         for fn in (delete_allowance, revoke_web_link, approve_reach, list_agents, set_thread_model):
             server.tool(fn)
@@ -578,34 +580,27 @@ async def test_dispatch_runs_an_ungated_tool_through_the_proxy(rig: Rig) -> None
     assert await _cards(rig) == [], "a read records no card"
 
 
-@pytest.mark.parametrize("digest", [None, "d1"], ids=["plain", "old-confirm"])
-async def test_a_thread_model_pick_runs_without_a_card(rig: Rig, digest: str | None) -> None:
-    """A pick applies at once; an older caller's digest is ignored and never cards."""
+async def test_a_thread_model_pick_runs_and_only_its_move_cards(rig: Rig) -> None:
+    """A pick or a move's preview runs at once; the move's confirming call waits on the card."""
     _attach(rig)
-    args: dict[str, Any] = {"model": "openai:gpt-5"}
-    if digest is not None:
-        args["digest"] = digest
 
-    await _call(rig, rig.identity(), "set_thread_model", args)
-
+    await _call(rig, rig.identity(), "set_thread_model", {"model": "openai:gpt-5"})
     assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the pick ran"
     assert await _cards(rig) == [], "a pick records no card"
 
+    await _call(rig, rig.identity(), "set_thread_model", {"model": "openai:gpt-5", "revision": 0})
+    assert len(rig.ran) == 1, "the move waits for the card"
+    assert (await _card(rig)).tool_name == "set_thread_model", "the move is carded"
 
-@pytest.mark.parametrize("digest", [None, "d1"], ids=["preview", "confirm"])
-async def test_a_thread_model_pick_runs_uncarded_with_the_gate_off(
-    rig: Rig, digest: str | None
-) -> None:
-    """With the gate off the tool itself refuses another provider; its provider's picks run."""
+
+async def test_a_thread_model_pick_is_refused_with_the_gate_off(rig: Rig) -> None:
+    """With the gate off a move can't be carded, so the tool is refused, as each gated tool."""
     _attach(rig, host_call_gate="off")
-    args: dict[str, Any] = {"model": "openai:gpt-5"}
-    if digest is not None:
-        args["digest"] = digest
 
-    await _call(rig, rig.identity(), "set_thread_model", args)
+    with pytest.raises(ToolError, match=host_calls.REFUSED_TEXT):
+        await _call(rig, rig.identity(), "set_thread_model", {"model": "openai:gpt-5"})
 
-    assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the tool decides"
-    assert await _cards(rig) == [], "no card with the gate off"
+    assert rig.ran == [] and await _cards(rig) == [], "nothing runs or cards with the gate off"
 
 
 # --- the one-shot credential runs only its own call --------------------------------

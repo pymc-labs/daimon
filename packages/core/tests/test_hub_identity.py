@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 
 from daimon.core.hub_identity import reached_workspaces, resolve_hub_tenants
 from daimon.core.stores import workspace_members as members_store
@@ -13,6 +14,8 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+_resolve_hub_tenants = partial(resolve_hub_tenants, platform="discord", platform_user_id="u1")
+
 
 async def test_returns_only_workspaces_with_a_ready_tenant(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
@@ -21,10 +24,8 @@ async def test_returns_only_workspaces_with_a_ready_tenant(
     await make_tenant(db_session, platform="slack", workspace_id="g-other-platform")
     await db_session.commit()
 
-    tenants = await resolve_hub_tenants(
+    tenants = await _resolve_hub_tenants(
         db_session_factory,
-        platform="discord",
-        platform_user_id="u1",
         workspaces=[
             ("g-installed", "Installed"),
             ("g-missing", "Missing"),
@@ -42,12 +43,8 @@ async def test_provisions_an_account_on_first_contact_and_reuses_it_after(
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
 
-    first = await resolve_hub_tenants(
-        db_session_factory, platform="discord", platform_user_id="u1", workspaces=[("g1", "G")]
-    )
-    second = await resolve_hub_tenants(
-        db_session_factory, platform="discord", platform_user_id="u1", workspaces=[("g1", "G")]
-    )
+    first = await _resolve_hub_tenants(db_session_factory, workspaces=[("g1", "G")])
+    second = await _resolve_hub_tenants(db_session_factory, workspaces=[("g1", "G")])
 
     assert first[0].account_id == second[0].account_id, "second login must reuse the account"
     principal = await find_platform_principal(
@@ -86,11 +83,8 @@ async def test_skips_archived_and_non_ready_tenants(
         db_session_factory, tenant_id=archived.id, status="ready", archive=True
     )
 
-    tenants = await resolve_hub_tenants(
-        db_session_factory,
-        platform="discord",
-        platform_user_id="u1",
-        workspaces=[("g-pending", "P"), ("g-archived", "A")],
+    tenants = await _resolve_hub_tenants(
+        db_session_factory, workspaces=[("g-pending", "P"), ("g-archived", "A")]
     )
     assert tenants == [], (
         f"neither a non-ready nor an archived tenant may be offered, got {tenants!r}"
@@ -113,11 +107,8 @@ async def test_a_loaded_member_list_decides_where_a_discord_account_reaches(
     )
     await db_session.commit()
 
-    tenants = await resolve_hub_tenants(
-        db_session_factory,
-        platform="discord",
-        platform_user_id="u1",
-        workspaces=[("g-left", "Left"), ("g-fresh", "Fresh")],
+    tenants = await _resolve_hub_tenants(
+        db_session_factory, workspaces=[("g-left", "Left"), ("g-fresh", "Fresh")]
     )
 
     assert {t.tenant_id: t.workspace_name for t in tenants} == {

@@ -31,6 +31,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
+    enable_all_providers,
     make_account,
     make_ledger_entry,
     make_platform_principal,
@@ -141,6 +142,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     admin = request.param == "admin"
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
+        await enable_all_providers(session, tenant=tenant)
         account = await make_account(session, tenant=tenant)
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="123"
@@ -257,6 +259,7 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
         agent_name=copy.name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed"
     # The thread is the copy's now, so the switch moves this very conversation.

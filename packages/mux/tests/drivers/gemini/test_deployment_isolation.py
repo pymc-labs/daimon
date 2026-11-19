@@ -229,3 +229,33 @@ async def test_stream_owns_both_http_clients_until_exact_close(
                 await task
     assert body.closed
     owned.require_closed()
+
+
+async def test_shared_clients_serve_calls_and_streams_with_one_client_and_tls_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calls and a stream on one `GeminiClients` build one client and one TLS context.
+
+    Nothing closes it before `aclose`, and a stream closes only its response.
+    """
+    body = Body(False)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("stream") == "true":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=body)
+        return httpx.Response(200, json={"id": "native", "status": "completed", "steps": []})
+
+    owned = owned_clients(monkeypatch, reply)
+    clients = deployment.GeminiClients()
+    transport = deployment.configured_transport(api_key="offline-selected", clients=clients)
+    await transport.get("native")
+    await transport.cancel("native")
+    source = await transport.open_stream("native")
+    assert [item async for item in source]
+    await transport.get("native")
+    assert body.closed, "the stream closed its own response"
+    assert (len(owned.synchronous), len(owned.asynchronous)) == (1, 1), "one client pair"
+    assert len(owned.contexts) == 2, "one TLS context for the pair, none per call"
+    assert not owned.asynchronous[0].is_closed, "a call never closes the shared client"
+    await clients.aclose()
+    owned.require_closed()

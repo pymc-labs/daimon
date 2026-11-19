@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 
 import httpx
@@ -49,6 +50,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 NOW = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
 _JWT_SECRET = b"jwt-shared-secret-well-over-the-32-byte-minimum"
 _MAX_BUNDLE_BYTES = 25 * 1024 * 1024
+
+_publish_report = partial(
+    publish_report,
+    jwt_secret=_JWT_SECRET,
+    max_bundle_bytes=_MAX_BUNDLE_BYTES,
+    slug="q3",
+    cap_usd=Decimal("2.00"),
+    agent="alpha",
+    now=NOW,
+)
 
 
 def _settings() -> ReportHostSettings:
@@ -188,22 +199,16 @@ async def test_publish_report_registers_with_host_and_returns_upload_url_and_lin
             200, json={"slug": "q3", "links": [{"name": "Ada", "link": "https://r.example/ada"}]}
         )
 
-    result = await publish_report(
+    result = await _publish_report(
         anthropic=anthropic,
         session_factory=db_session_factory,
         http_client=_host_client(host_handler),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="Q3 financials",
         recipients=[Recipient(name="Ada", label="ada-1")],
-        cap_usd=Decimal("2.00"),
-        agent="alpha",
-        now=NOW,
     )
 
     assert len(host_calls) == 1, "exactly one host registration must be issued"
@@ -227,22 +232,16 @@ async def test_publish_report_leaves_a_live_token_row_findable_by_label(
     def host_handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"slug": "q3", "links": []})
 
-    await publish_report(
+    await _publish_report(
         anthropic=anthropic,
         session_factory=db_session_factory,
         http_client=_host_client(host_handler),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="Q3 financials",
         recipients=[],
-        cap_usd=Decimal("2.00"),
-        agent="alpha",
-        now=NOW,
     )
 
     async with db_session_factory() as session:
@@ -270,22 +269,17 @@ async def test_publish_report_omitting_agent_resolves_the_tenants_configured_age
         host_calls.append(req)
         return httpx.Response(200, json={"slug": "q3", "links": []})
 
-    await publish_report(
+    await _publish_report(
         anthropic=anthropic,
         session_factory=db_session_factory,
         http_client=_host_client(host_handler),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(agent_name="alpha"),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="Q3 financials",
         recipients=[],
-        cap_usd=Decimal("2.00"),
         agent=None,
-        now=NOW,
     )
 
     body = json.loads(host_calls[0].content)
@@ -309,22 +303,17 @@ async def test_publish_report_unknown_agent_raises_before_any_token_or_host_call
         return httpx.Response(200, json={"slug": "q3", "links": []})
 
     with pytest.raises(DaimonError):
-        await publish_report(
+        await _publish_report(
             anthropic=anthropic,
             session_factory=db_session_factory,
             http_client=_host_client(host_handler),
             report_host_settings=_settings(),
-            jwt_secret=_JWT_SECRET,
-            max_bundle_bytes=_MAX_BUNDLE_BYTES,
             default=DeploymentDefault(),
             tenant_id=tenant_id,
             account_id=account_id,
-            slug="q3",
             title="Q3",
             recipients=[],
-            cap_usd=Decimal("2.00"),
             agent="ghost",
-            now=NOW,
         )
 
     assert host_calls == [], "an unknown source agent must never reach the host"
@@ -347,22 +336,17 @@ async def test_publish_report_invalid_slug_raises_before_any_ma_call(
     anthropic = build_fake_anthropic(counting_handler)
 
     with pytest.raises(InvalidSlugError):
-        await publish_report(
+        await _publish_report(
             anthropic=anthropic,
             session_factory=db_session_factory,
             http_client=_host_client(lambda _req: httpx.Response(200, json={})),
             report_host_settings=_settings(),
-            jwt_secret=_JWT_SECRET,
-            max_bundle_bytes=_MAX_BUNDLE_BYTES,
             default=DeploymentDefault(),
             tenant_id=tenant_id,
             account_id=account_id,
             slug="Not A Valid Slug!",
             title="t",
             recipients=[],
-            cap_usd=Decimal("2.00"),
-            agent="alpha",
-            now=NOW,
         )
 
     assert call_count == 0, "an invalid slug must fail before any MA call is issued"
@@ -382,22 +366,16 @@ async def test_publish_report_unconfigured_host_settings_raises_before_any_ma_ca
     anthropic = build_fake_anthropic(counting_handler)
 
     with pytest.raises(HostNotConfiguredError):
-        await publish_report(
+        await _publish_report(
             anthropic=anthropic,
             session_factory=db_session_factory,
             http_client=_host_client(lambda _req: httpx.Response(200, json={})),
             report_host_settings=ReportHostSettings(host_url=None, admin_secret=None),
-            jwt_secret=_JWT_SECRET,
-            max_bundle_bytes=_MAX_BUNDLE_BYTES,
             default=DeploymentDefault(),
             tenant_id=tenant_id,
             account_id=account_id,
-            slug="q3",
             title="t",
             recipients=[],
-            cap_usd=Decimal("2.00"),
-            agent="alpha",
-            now=NOW,
         )
 
     assert call_count == 0, "unconfigured report-host settings must fail before any MA call"
@@ -417,22 +395,16 @@ async def test_publish_report_failed_host_registration_leaves_zero_live_tokens(
         return httpx.Response(500, text="boom")
 
     with pytest.raises(ReportHostError):
-        await publish_report(
+        await _publish_report(
             anthropic=anthropic,
             session_factory=db_session_factory,
             http_client=_host_client(failing_host_handler),
             report_host_settings=_settings(),
-            jwt_secret=_JWT_SECRET,
-            max_bundle_bytes=_MAX_BUNDLE_BYTES,
             default=DeploymentDefault(),
             tenant_id=tenant_id,
             account_id=account_id,
-            slug="q3",
             title="t",
             recipients=[],
-            cap_usd=Decimal("2.00"),
-            agent="alpha",
-            now=NOW,
         )
 
     async with db_session_factory() as session:
@@ -453,22 +425,16 @@ async def test_failed_republish_keeps_previous_report_token_live(
     def successful_host(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"slug": "q3", "links": []})
 
-    await publish_report(
+    await _publish_report(
         anthropic=build_fake_anthropic(router.dispatch),
         session_factory=db_session_factory,
         http_client=_host_client(successful_host),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="first",
         recipients=[],
-        cap_usd=Decimal("2.00"),
-        agent="alpha",
-        now=NOW,
     )
     async with db_session_factory() as session:
         first_rows = await list_live_tokens_by_label(
@@ -489,22 +455,16 @@ async def test_failed_republish_keeps_previous_report_token_live(
         return httpx.Response(500, text="temporary failure")
 
     with pytest.raises(ReportHostError):
-        await publish_report(
+        await _publish_report(
             anthropic=build_fake_anthropic(second_router.dispatch),
             session_factory=db_session_factory,
             http_client=_host_client(failing_host),
             report_host_settings=_settings(),
-            jwt_secret=_JWT_SECRET,
-            max_bundle_bytes=_MAX_BUNDLE_BYTES,
             default=DeploymentDefault(),
             tenant_id=tenant_id,
             account_id=account_id,
-            slug="q3",
             title="second",
             recipients=[],
-            cap_usd=Decimal("2.00"),
-            agent="alpha",
-            now=NOW,
         )
 
     async with db_session_factory() as session:
@@ -533,22 +493,16 @@ async def test_republish_reuses_reader_variant_and_mints_a_second_token(
     def host_handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"slug": "q3", "links": []})
 
-    await publish_report(
+    await _publish_report(
         anthropic=anthropic,
         session_factory=db_session_factory,
         http_client=_host_client(host_handler),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="t",
         recipients=[],
-        cap_usd=Decimal("2.00"),
-        agent="alpha",
-        now=NOW,
     )
 
     reader_variant = _reader_agent_dict(
@@ -559,22 +513,16 @@ async def test_republish_reuses_reader_variant_and_mints_a_second_token(
     router2 = _ma_router([source, reader_variant], tenant_id=tenant_id)
     anthropic2 = build_fake_anthropic(router2.dispatch)
 
-    await publish_report(
+    await _publish_report(
         anthropic=anthropic2,
         session_factory=db_session_factory,
         http_client=_host_client(host_handler),
         report_host_settings=_settings(),
-        jwt_secret=_JWT_SECRET,
-        max_bundle_bytes=_MAX_BUNDLE_BYTES,
         default=DeploymentDefault(),
         tenant_id=tenant_id,
         account_id=account_id,
-        slug="q3",
         title="t",
         recipients=[],
-        cap_usd=Decimal("2.00"),
-        agent="alpha",
-        now=NOW,
     )
 
     async with db_session_factory() as session:

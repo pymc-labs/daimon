@@ -167,9 +167,12 @@ async def test_a_request_asked_in_a_channel_links_back_to_it(
     assert "3 requests left" in card
     assert support.RECEIVED.format(remaining=2) in reply
     [posted] = _posts_to(teams_api_fake, OPS)
-    # A Teams message drops single line breaks, so every line is a paragraph.
-    head, link, *note = json.loads(posted)["text"].split("\n\n")
+    [card] = json.loads(posted)["attachments"]
+    head, status, link, _warning, *note = [
+        b["text"] for b in card["content"]["body"] if b["type"] == "TextBlock"
+    ]
     assert head.startswith("**🙋 Human support requested** by ") and AAD_OBJECT_ID in head
+    assert status == "Pending: 1 credit", "waits for Accept"
     assert link.startswith("[Open the message](https://teams.microsoft.com/l/message/"), "short"
     assert note == ["the routine broke", "at 9am"], "the note's lines stay apart"
     [row] = await _rows(db_session_factory)
@@ -306,7 +309,7 @@ async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
     assert_card_renders(form)
     assert "3 requests left" in json.dumps(form), "the support form, in a dialog"
     assert send["data"]["message"] == "m-7", "the form carries the answer it was opened on"
-    assert sent["task"]["value"] == support.RECEIVED.format(remaining=2)
+    assert sent["task"]["value"].startswith(support.RECEIVED.format(remaining=2))
     [posted] = _posts_to(teams_api_fake, OPS)
     assert "wrong totals" in posted and IN_DIRECT_CHAT in posted, "the note, and where it was"
     [row] = await _rows(db_session_factory)

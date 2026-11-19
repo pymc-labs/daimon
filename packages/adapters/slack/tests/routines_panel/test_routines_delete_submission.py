@@ -17,7 +17,8 @@ import pytest
 import yarl
 from daimon.adapters.slack.routines_panel.submit import run_routines_delete_submission
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.routines import get_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
@@ -58,14 +59,13 @@ async def test_run_routines_delete_by_creator_removes_row_and_refreshes_panel(
     """A creator's confirm submit deletes the row and refreshes the panel view."""
     tenant_id = await _seed_tenant(db_session_factory)
     async with db_session_factory() as session:
-        routine = await create_routine(
+        routine = await new_routine(
             session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id=_USER_ID,
             agent_id="agent-x",
             agent_name="Test Agent",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message="deletable routine",
             enabled=True,
         )
@@ -101,14 +101,13 @@ async def test_run_routines_delete_by_non_admin_non_creator_leaves_row(
     """A non-admin non-creator confirm submit must NOT delete the row (fail-closed)."""
     tenant_id = await _seed_tenant(db_session_factory, team_id="T_DEL_GATE_SUB")
     async with db_session_factory() as session:
-        routine = await create_routine(
+        routine = await new_routine(
             session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id="U_ORIGINAL",
             agent_id="agent-y",
             agent_name="Test Agent",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message="gated routine",
             enabled=True,
         )
@@ -140,14 +139,13 @@ async def test_run_routines_delete_cross_tenant_routine_id_is_refused(
     tenant_a = await _seed_tenant(db_session_factory, team_id="T_DEL_A")
     await _seed_tenant(db_session_factory, team_id="T_DEL_B")
     async with db_session_factory() as session:
-        routine_a = await create_routine(
+        routine_a = await new_routine(
             session,
-            tenant_id=tenant_a,
+            tenant_a,
             created_by_user_id=_USER_ID,
             agent_id="agent-a",
             agent_name="Agent A",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message="tenant A routine",
             enabled=True,
         )

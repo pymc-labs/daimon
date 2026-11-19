@@ -14,7 +14,16 @@ from daimon.core.agent_reach import load_target_facts
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import CONNECT_GITHUB_EMOJI, resolve_connect_card
-from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
+from daimon.core.github_panel import safe_github_error, sync_connect_admin
+from daimon.core.github_request_decisions import (
+    DECLINED,
+    WAITING,
+    ConnectOrigin,
+    added_text,
+    approve_connected,
+    approve_with_connect,
+    decline,
+)
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
@@ -22,15 +31,10 @@ from daimon.core.stores.github_access_requests import (
     dismiss_delivery,
     get_delivery,
     lookup_request,
-    set_status,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.github_personal_links import mint_link
-from daimon.core.stores.github_request_actions import (
-    approve_connected_request,
-    approve_connection_request,
-)
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.tenants import get_tenant
 
@@ -398,14 +402,7 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         await reply("You cannot change this agent's GitHub repos.")
         return True
     if action == "decline":
-        async with runtime.sessionmaker.begin() as session:
-            declined = await set_status(
-                session,
-                tenant_id=request.tenant_id,
-                request_id=request_id,
-                expected=request.status,
-                status="declined",
-            )
+        declined = await decline(runtime.sessionmaker, tenant_id=request.tenant_id, request=request)
         await edit_card(
             embed=github_embed(
                 "Declined." if declined else "This request is unavailable.", state="danger"
@@ -416,28 +413,25 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 interaction.client,
                 runtime,
                 request_id,
-                text="An admin declined GitHub access for this request.",
-                can_cancel=True,
+                text=DECLINED.text,
+                can_cancel=DECLINED.can_cancel,
                 skip_account_id=principal.account_id,
             )
         return True
     if action == "approve":
         try:
-            async with runtime.sessionmaker.begin() as session:
-                approved = await approve_connected_request(
-                    session,
-                    tenant_id=request.tenant_id,
-                    request_id=request_id,
-                    account_id=principal.account_id,
-                )
+            approved = await approve_connected(
+                runtime.sessionmaker,
+                tenant_id=request.tenant_id,
+                request_id=request_id,
+                account_id=principal.account_id,
+            )
         except ValueError as error:
             await reply(safe_github_error(error))
             return True
         await edit_card(
             embed=github_embed(
-                f"✓ Added. {request.agent_name} is continuing."
-                if approved
-                else "This request is unavailable.",
+                added_text(request.agent_name) if approved else "This request is unavailable.",
                 state="success" if approved else "info",
             ),
         )
@@ -446,46 +440,36 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
                 interaction.client,
                 runtime,
                 request_id,
-                text=f"✓ Added. {request.agent_name} is continuing.",
+                text=added_text(request.agent_name),
                 can_cancel=False,
                 skip_account_id=principal.account_id,
             )
         return True
     try:
-        async with runtime.sessionmaker.begin() as session:
-            await sync_connect_admin(
-                session,
-                tenant_id=request.tenant_id,
-                platform="discord",
-                platform_user_id=str(member.id),
-                is_platform_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
-            )
-            url = await connect_link(
-                session,
-                settings=runtime.settings,
-                tenant_id=request.tenant_id,
-                platform="discord",
-                platform_user_id=str(member.id),
-                verified_tenant_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+        url, _ = await approve_with_connect(
+            runtime.sessionmaker,
+            settings=runtime.settings,
+            tenant_id=request.tenant_id,
+            platform="discord",
+            admin_user_id=str(member.id),
+            is_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+            request_id=request_id,
+            account_id=principal.account_id,
+            origin=ConnectOrigin(
                 workspace_label=guild.name,
                 requester_label=member.display_name,
-                origin_parent_channel_id=request.parent_channel_id,
-                origin_thread_id=request.thread_id,
-                origin_followup_token=f"{interaction.application_id}:{interaction.token}",
-                origin_followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
-            )
-            await approve_connection_request(
-                session,
-                tenant_id=request.tenant_id,
-                request_id=request_id,
-                account_id=principal.account_id,
-            )
+                parent_channel_id=request.parent_channel_id,
+                thread_id=request.thread_id,
+                followup_token=f"{interaction.application_id}:{interaction.token}",
+                followup_expires_at=datetime.now(UTC) + timedelta(minutes=15),
+            ),
+        )
     except ValueError as error:
         await reply(safe_github_error(error))
         return True
     from daimon.adapters.discord.agent_setup.github_home import connect_button_view
 
-    await edit_card(embed=github_embed("Waiting for GitHub confirmation.", state="waiting"))
+    await edit_card(embed=github_embed(WAITING.text, state="waiting"))
     card = await resolve_connect_card(
         runtime.sessionmaker,
         runtime.settings,
@@ -501,8 +485,8 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         interaction.client,
         runtime,
         request_id,
-        text="Waiting for GitHub confirmation.",
-        can_cancel=True,
+        text=WAITING.text,
+        can_cancel=WAITING.can_cancel,
         skip_account_id=principal.account_id,
     )
     return True

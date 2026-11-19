@@ -67,20 +67,6 @@ async def load_watch_credential(
     return None if token is None else bytes(token)
 
 
-async def has_watch_credential(
-    session: AsyncSession, *, tenant_id: uuid.UUID, owner_account_id: uuid.UUID, server_url: str
-) -> bool:
-    return (
-        await session.scalar(
-            select(WatchCredential.id).where(
-                WatchCredential.tenant_id == tenant_id,
-                WatchCredential.owner_account_id == owner_account_id,
-                WatchCredential.server_url == ascii_mcp_url(server_url),
-            )
-        )
-    ) is not None
-
-
 async def forget_watch_credential(
     session: AsyncSession, *, tenant_id: uuid.UUID, owner_account_id: uuid.UUID, server_url: str
 ) -> int:

@@ -16,7 +16,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import FileMetadata
 from daimon.adapters.teams.attachments import InboundFile
 from daimon.adapters.teams.identity import (
     DENIED,
@@ -29,6 +28,7 @@ from daimon.core import output_delivery
 from daimon.core._models import MessageFeedback
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.testing.builders import file_meta
 from daimon.testing.ma_models import ma_agent
 from microsoft_teams.api import MessageActivity
 from mux.contracts.ids import Scope
@@ -369,14 +369,8 @@ async def _consent(
     monkeypatch.setattr(output_delivery, "_POLL_DELAYS_S", (0.0,))  # One listing settles.
     uploads: list[httpx.Request] = []
     deletes: list[str] = []
-    listing = FileMetadata(
-        id="file_1",
-        created_at="2026-09-01T00:00:00Z",
-        filename="file_example.txt",
-        mime_type="text/plain",
-        size_bytes=4,
-        type="file",
-        downloadable=True,
+    listing = file_meta(
+        id="file_1", created_at="2026-09-01T00:00:00Z", filename="file_example.txt", size_bytes=4
     )
 
     def on_delete(request: httpx.Request, match: re.Match[str]) -> httpx.Response:

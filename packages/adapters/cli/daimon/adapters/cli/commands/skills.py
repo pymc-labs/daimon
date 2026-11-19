@@ -660,7 +660,3 @@ async def add_skill(
         "unchanged": f"{agent_name!r} already had this {preview.name!r}",
     }[added.action]
     console.print(f"[green]✓ {done}[/green]")
-
-
-# Register backfill command on skills_app (defined above, so no circular import).
-import daimon.adapters.cli.commands.skills_backfill as _reg  # noqa: E402, F401  # pyright: ignore[reportUnusedImport]

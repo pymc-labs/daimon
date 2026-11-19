@@ -4,7 +4,7 @@ import gzip
 import hashlib
 import io
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -280,11 +280,8 @@ class MountedFiles:
         )
 
 
-def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> MountedFiles:
-    """Read the mounts from a session's saved request, so older sessions are covered too."""
-    paths: set[str] = set()
-    files: dict[str, str] = {}
-    directories: list[str] = []
+def _mounts(environment: JsonValue) -> Iterator[tuple[dict[str, JsonValue], str]]:
+    """Each source of a saved request with its path in the snapshot."""
     sources = environment.get("sources") if isinstance(environment, dict) else None
     for source in sources if isinstance(sources, list) else ():
         target = source.get("target") if isinstance(source, dict) else None
@@ -296,6 +293,24 @@ def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> 
             if not path.startswith("/workspace/"):
                 continue
             path = path.removeprefix("/workspace/")
+        yield source, path
+
+
+def mounted_skill_ids(environment: JsonValue) -> set[str]:
+    """The skills a saved request mounts: the rows `mounted_files` reads."""
+    return {
+        PurePosixPath(path).parts[2]
+        for _, path in _mounts(environment)
+        if path.startswith(SKILLS_ROOT + "/") and len(PurePosixPath(path).parts) > 2
+    }
+
+
+def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> MountedFiles:
+    """Read the mounts from a session's saved request, so older sessions are covered too."""
+    paths: set[str] = set()
+    files: dict[str, str] = {}
+    directories: list[str] = []
+    for source, path in _mounts(environment):
         parts: list[str] = list(PurePosixPath(path).parts)
         content = source.get("content")
         skill = path.startswith(SKILLS_ROOT + "/") and len(parts) > 2

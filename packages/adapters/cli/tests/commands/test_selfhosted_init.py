@@ -28,6 +28,23 @@ REQUIRED = [
 ]
 
 
+async def test_init_when_an_install_named_its_agent_daimon_then_default_reuses_it(
+    db_session, db_session_factory
+):
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    kwargs = dict(
+        tenant_id=tenant.id,
+        model="gpt-6-luna",
+        system="Help.",
+        environment_name="default",
+        harness=HarnessConfig(harness_url="http://localhost:8080", auth_ref="HARNESS_TOKEN"),
+    )
+    before = await selfhosted.initialize(db_session_factory, name="daimon", **kwargs)
+    after = await selfhosted.initialize(db_session_factory, name="default", **kwargs)
+    assert after == before, "a re-run with the built-in name keeps the install's agent"
+
+
 async def test_init_reuses_matching_records_and_refuses_drift(db_session, db_session_factory):
     tenant = await make_tenant(db_session)
     await db_session.commit()

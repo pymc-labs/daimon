@@ -17,7 +17,6 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import anthropic
@@ -34,10 +33,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
     BetaManagedAgentsUserMessageEvent,
 )
 from daimon.core._models import ThreadSession
-from daimon.core.config import McpSettings
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import usage_events
 from daimon.core.stores.domain import ThreadSessionRow
@@ -45,7 +42,6 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
 )
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import run as run_module
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
@@ -54,9 +50,10 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recor
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.db import build_test_engine
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.ids import Scope
 from mux.errors import UnsupportedCapability
 from mux.testing.drivers.anthropic.ma import (
@@ -131,22 +128,7 @@ def _deps(
     sessionmaker: async_sessionmaker[AsyncSession],
     router: MARouter,
 ) -> TurnDeps:
-    return TurnDeps(
-        anthropic=build_fake_anthropic(router.dispatch),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal("1.0"),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    return plain_turn_deps(build_fake_anthropic(router.dispatch), sessionmaker)
 
 
 def _prepared_turn(
@@ -367,20 +349,7 @@ async def test_happy_path_runs_once_and_returns_recovered_false(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-1",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-1")
 
     assert outcome.recovered is False, "a clean run must not recover"
     assert outcome.ma_session_id == "sess_1", "must report the original session id"
@@ -435,19 +404,8 @@ async def test_a_failed_memory_state_record_never_fails_a_completed_turn(
     )
 
     lifecycle = RecordingLifecycle()
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-memory-record",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
+    outcome = await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-memory-record", lifecycle=lifecycle
     )
 
     assert attempts == [outcome.ma_session_id]
@@ -489,20 +447,7 @@ async def test_every_log_line_of_a_turn_names_its_backend(
     with structlog.testing.capture_logs(
         processors=[structlog.contextvars.merge_contextvars]
     ) as logs:
-        await run_prepared_turn(
-            deps,
-            prepared,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="thread-1",
-            external_user_id="user-1",
-            user_message="hello",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
-        )
+        await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-1")
 
     turn_lines = [entry for entry in logs if entry["event"] in {"turn.started", "turn.completed"}]
     assert {entry["event"] for entry in turn_lines} == {"turn.started", "turn.completed"}
@@ -571,19 +516,8 @@ async def test_reattaching_to_a_session_debits_calls_no_worker_streamed(
     )
 
     with structlog.testing.capture_logs() as logs:
-        outcome = await run_prepared_turn(
-            deps,
-            prepared,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="thread-gap",
-            external_user_id="user-1",
-            user_message="hello again",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
+        outcome = await run_prepared(
+            deps, prepared, tenant_id=tenant.id, thread_id="thread-gap", user_message="hello again"
         )
 
     assert outcome.state.error is None
@@ -653,19 +587,11 @@ async def test_a_slow_billing_catch_up_neither_fails_nor_holds_the_turn(
 
     started = time.monotonic()
     with structlog.testing.capture_logs() as logs:
-        outcome = await run_prepared_turn(
+        outcome = await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-slow-catch-up",
-            external_user_id="user-1",
-            user_message="hello",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
             deadline=(datetime.now(UTC) - timedelta(seconds=5)) if ceiling else None,
         )
 
@@ -718,20 +644,7 @@ async def test_a_turn_is_registered_as_running_for_exactly_the_call(
     monkeypatch.setattr(run_module, "run_prepared_turn_impl", _observing_impl)
     assert deps.running_turns.count() == 0
 
-    await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-running",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-running")
 
     assert seen == [{asyncio.current_task()}], "the calling task is registered while the turn runs"
     assert deps.running_turns.count() == 0, "and unregistered once it returns"
@@ -783,20 +696,7 @@ async def test_a_dead_session_replacement_is_sealed_when_its_seal_cannot_be_read
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-2",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-2")
 
     assert outcome.recovered is True
     metadata = session_bodies[0]["metadata"]
@@ -838,20 +738,7 @@ async def test_dead_session_recovers_once_and_rebinds_recorder(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-2",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-2")
 
     assert outcome.termination is TerminationReason.COMPLETED, "the recovered run is what ended"
     assert outcome.recovered is True, "a dead-session signature must trigger exactly one recovery"
@@ -928,19 +815,12 @@ async def test_render_failure_during_recovery_does_not_prevent_recovery(
     def _raising_recovery_lifecycle(_cancel: asyncio.Event) -> TurnLifecycle:
         return recovery_lc
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-render-fail",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
         recovery_lifecycle=_raising_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert outcome.recovered is True, (
@@ -1060,20 +940,7 @@ async def test_dead_session_recorder_rebind_targets_new_session_id(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-3",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-3")
 
     assert outcome.recovered is True
     async with db_session_factory() as s:
@@ -1196,19 +1063,8 @@ async def test_recovery_rebinds_the_recorder_to_the_recreated_sessions_model(
     with structlog.testing.capture_logs(
         processors=[structlog.contextvars.merge_contextvars]
     ) as logs:
-        outcome = await run_prepared_turn(
-            deps,
-            prepared,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id="thread-recovery-model",
-            external_user_id="user-1",
-            user_message="hello",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
+        outcome = await run_prepared(
+            deps, prepared, tenant_id=tenant.id, thread_id="thread-recovery-model"
         )
 
     assert outcome.recovered is True, "the dead session must be recovered exactly once"
@@ -1265,20 +1121,7 @@ async def test_dead_session_without_mapping_id_does_not_recover(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-4",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-4")
 
     assert outcome.recovered is False, "a 404 with mapping_id=None must not trigger recovery"
     assert outcome.state.error is not None
@@ -1332,20 +1175,7 @@ async def test_non_404_upstream_error_does_not_recover(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-5",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-5")
 
     assert outcome.recovered is False, "a 400 must not trigger recovery"
     assert outcome.state.error is not None
@@ -1444,20 +1274,7 @@ async def test_second_consecutive_dead_session_does_not_loop(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-6",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-6")
 
     assert outcome.recovered is True, "one recovery attempt must fire on the first 404"
     assert outcome.state.error is not None, "the second TurnState (also a 404) is returned as-is"
@@ -1552,19 +1369,12 @@ async def test_recovered_turn_never_shows_the_user_a_failure(
     )
 
     caller_lifecycle = RecordingLifecycle()
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-quiet-recovery",
-        external_user_id="user-1",
-        user_message="hello",
         lifecycle=caller_lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert outcome.recovered is True, "the dead session must still recover"
@@ -1614,19 +1424,12 @@ async def test_a_failed_recovery_tells_the_caller_recovery_failed(
     caller_lifecycle = RecordingLifecycle()
 
     with pytest.raises(RuntimeError, match="replacement failed"):
-        await run_prepared_turn(
+        await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-recovery-fails",
-            external_user_id="user-1",
-            user_message="hello",
             lifecycle=caller_lifecycle,
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
 
     assert len(caller_lifecycle.terminal_failures) == 1
@@ -1677,19 +1480,12 @@ async def test_unrecovered_failure_is_still_delivered_to_the_caller(
     )
 
     caller_lifecycle = RecordingLifecycle()
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-real-failure",
-        external_user_id="user-1",
-        user_message="hello",
         lifecycle=caller_lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert outcome.recovered is False, "a plain 400 must not recover"
@@ -1732,19 +1528,12 @@ async def test_ceiling_breach_on_first_attempt_returns_ceiling_error_and_marks_m
 
     caller_lifecycle = RecordingLifecycle()
     past_deadline = datetime.now(UTC) - timedelta(seconds=5)
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-ceiling-first",
-        external_user_id="user-1",
-        user_message="hello",
         lifecycle=caller_lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         deadline=past_deadline,
     )
 
@@ -1831,19 +1620,12 @@ async def test_ceiling_breach_during_recovery_marks_the_new_mapping_dead_not_the
     deadline = datetime.now(UTC) + timedelta(seconds=2.0)
 
     caller_lifecycle = RecordingLifecycle()
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-ceiling-recovery",
-        external_user_id="user-1",
-        user_message="hello",
         lifecycle=caller_lifecycle,
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         deadline=deadline,
     )
 
@@ -1903,19 +1685,11 @@ async def test_ceiling_breach_never_triggers_dead_session_recovery(
     )
 
     past_deadline = datetime.now(UTC) - timedelta(seconds=5)
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-ceiling-no-loop",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         deadline=past_deadline,
     )
 
@@ -1956,19 +1730,8 @@ async def test_run_prepared_turn_default_deadline_none_still_succeeds_on_the_hap
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-ceiling-default-none",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
+    outcome = await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-ceiling-default-none"
     )
 
     assert outcome.recovered is False
@@ -2074,19 +1837,13 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
     monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
 
     caller_lifecycle = RecordingLifecycle()
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-cancel-before-recovery",
-        external_user_id="user-1",
-        user_message="hello",
         lifecycle=caller_lifecycle,
         cancel=cancel,
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert call_count == 1, "recovery must never call run_turn a second time"
@@ -2198,19 +1955,13 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
     caller_lifecycle = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        outcome = await run_prepared_turn(
+        outcome = await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-cancel-during-recovery",
-            external_user_id="user-1",
-            user_message="hello",
             lifecycle=caller_lifecycle,
             cancel=original_cancel,
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
 
     assert call_count == 2, "the recovery must have actually run a second attempt"
@@ -2260,19 +2011,8 @@ async def test_recovery_happy_path_unaffected_by_the_cancel_mirror_and_leaks_no_
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-recovery-happy-path-mirror",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
+    outcome = await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-recovery-happy-path-mirror"
     )
 
     assert outcome.recovered is True
@@ -2346,19 +2086,12 @@ async def test_a_replacement_sends_its_framing_with_the_first_user_message(
         continuity=continuity,
     )
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-framing",
-        external_user_id="user-1",
         user_message="carry on please",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert outcome.state.error is None
@@ -2417,20 +2150,7 @@ async def test_an_ordinary_turn_sends_exactly_the_user_message(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-plain",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-plain")
 
     _, batch = sent[0]
     assert [event["type"] for event in batch] == ["user.message"], (
@@ -2488,20 +2208,13 @@ async def test_a_chat_turn_sends_mcp_context_in_front_of_the_message(
         session_account_id=account.id,
     )
 
-    await run_prepared_turn(
+    await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-context",
-        external_user_id="user-1",
         user_message="<turn_controls>{}</turn_controls>\nwhat about acme?",
         request_text="what about acme?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
 
     assert asked == ["what about acme?"], "only the person's words are sent to the servers"
@@ -2558,19 +2271,8 @@ async def test_recovery_reports_a_replacement_after_loss_and_keeps_the_framing_p
         continuity=continuity,
     )
 
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-loss",
-        external_user_id="user-1",
-        user_message="carry on please",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
+    outcome = await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-loss", user_message="carry on please"
     )
 
     assert outcome.recovered is True
@@ -2668,19 +2370,12 @@ async def _recover_from_archived_session(
         session_account_id=account.id,
     )
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id=thread_id,
-        external_user_id="user-1",
         user_message="what was the marker?",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
     return outcome, sent, row
 
@@ -2935,19 +2630,13 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
             mapping_id=row.id,
             session_account_id=account.id,
         )
-        return await run_prepared_turn(
+        return await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-double-recovery",
             external_user_id=user,
             user_message=f"hello from {user}",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
         )
 
     try:
@@ -3271,19 +2960,11 @@ async def test_a_ceiling_during_recovery_setup_leaves_no_orphan_live_replacement
             mapping_id=row.id,
             session_account_id=account.id,
         )
-        outcome = await run_prepared_turn(
+        outcome = await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="thread-ceiling-in-setup",
-            external_user_id="user-1",
-            user_message="hello",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            render_interval_s=0.001,
             deadline=datetime.now(UTC) + timedelta(seconds=RECOVERY_CEILING_S),
         )
         async with sessionmaker() as s:
@@ -3645,20 +3326,8 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         prompts.append(prompt)
         return "approved"
 
-    await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-hook-threading",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-        confirm_write=card,
+    await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-hook-threading", confirm_write=card
     )
 
     (posture,) = postures
@@ -3756,19 +3425,11 @@ async def test_a_prepared_turn_reads_trusted_server_annotations_with_the_agent_t
         prompts.append(prompt)
         return "denied"
 
-    await run_prepared_turn(
+    await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-annotations",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         confirm_write=card,
         attended=attended,
     )
@@ -3847,20 +3508,8 @@ async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safe
         prompts.append(prompt)
         return "approved"
 
-    await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-unattended",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-        attended=False,
+    await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-unattended", attended=False
     )
 
     (posture,) = postures
@@ -4158,22 +3807,16 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     async def unused_provider_action(prompt: Any) -> None:
         raise AssertionError("unattended turns must never invoke a human provider-action hook")
 
-    turn = run_prepared_turn(
+    turn = run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
         platform=platform,
         thread_id="wake-gate",
-        external_user_id="user-1",
         user_message="wake up",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
         origin="chat",
         attended=continuation_attended(queued),
         provider_action=unused_provider_action,
-        render_interval_s=0.001,
     )
     if runtime == "mux-without-read":
         # A Managed Agents session that cannot be read cannot be checked or
@@ -4289,21 +3932,15 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     )
 
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await run_prepared_turn(
+        await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="ungated",
             external_user_id="user",
             user_message="wake up",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
             origin=origin,
             attended=False,
-            render_interval_s=0.001,
         )
 
     assert not [r for r in requests if r.startswith("POST")], requests
@@ -4606,19 +4243,12 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
         return TurnState()
 
     monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
-    await run_prepared_turn(
+    await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-coordinator",
-        external_user_id="user-1",
         user_message="wake up",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         attended=False,
         origin=origin,
     )
@@ -4725,19 +4355,12 @@ async def test_unattended_prepared_turn_makes_every_mcp_call_pause(
         return TurnState()
 
     monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
-    await run_prepared_turn(
+    await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-mcp",
-        external_user_id="user-1",
         user_message="wake up",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         attended=False,
         origin=origin,
     )
@@ -4815,19 +4438,11 @@ async def test_a_card_posted_inside_the_turn_never_shows_a_time_past_its_deadlin
 
     monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
     deadline = datetime.now(UTC) + timedelta(minutes=30)
-    await run_prepared_turn(
+    await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-card-deadline",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
         confirm_write=card,
         deadline=deadline,
     )
@@ -5004,22 +4619,16 @@ async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_g
             admitted = with_invocation(
                 prepared.admission, tenant.id, human=name == "waiter", external_user_id="user-1"
             )
-            return await run_prepared_turn(
+            return await run_prepared(
                 deps,
                 dataclasses.replace(prepared, admission=admitted),
                 tenant_id=tenant.id,
-                platform="discord",
                 thread_id="thread-1",
-                external_user_id="user-1",
                 user_message=name,
-                lifecycle=RecordingLifecycle(),
                 cancel=stop if name == "waiter" else asyncio.Event(),
-                reseed_user_message=_reseed,
-                recovery_lifecycle=_recovery_lifecycle,
                 attended=name == "waiter",
                 origin="chat",
                 operation_key=name,
-                render_interval_s=0.001,
                 before_send=before_send,
             )
 
@@ -5177,7 +4786,7 @@ async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
         session_account_id=account.id,
     )
     try:
-        result = await run_prepared_turn(
+        result = await run_prepared(
             deps,
             prepared,
             tenant_id=tenant.id,
@@ -5187,10 +4796,7 @@ async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
             user_message="Read and report",
             attended=False,
             job_row=wake,
-            reseed_user_message=_reseed,
-            recovery_lifecycle=_recovery_lifecycle,
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
+            render_interval_s=2.0,
         )
         assert result.state.error is None
         [sent] = at_send
@@ -5260,20 +4866,7 @@ async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
         mapping_id=row.id,
         session_account_id=account.id,
     )
-    outcome = await run_prepared_turn(
-        deps,
-        prepared,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="thread-1",
-        external_user_id="user-1",
-        user_message="hello",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        reseed_user_message=_reseed,
-        recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
-    )
+    outcome = await run_prepared(deps, prepared, tenant_id=tenant.id, thread_id="thread-1")
     assert len(accepted_posts) == 1, "lost acknowledgement must never repeat the accepted POST"
     assert accepted_posts[0].extensions["timeout"]["read"] == 600.0
     assert client.max_retries == 8, "turn mutation policy must not change the shared client"

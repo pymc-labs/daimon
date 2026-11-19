@@ -12,10 +12,10 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
 
 import httpx
 import structlog
+from daimon.core import ui
 from daimon.core.allowance_limits import monthly_limit
 from daimon.core.billing import month_start as month_start
 from daimon.core.channel_budget import (
@@ -50,8 +50,6 @@ TOPUP_AMOUNTS = (10, 25, 50, 100)
 MEMBER_CAP = 25
 # Channel budgets the admin view lists, most used first.
 CHANNEL_BUDGETS_SHOWN = 5
-# Per-turn cost assumed while a tenant has no usage history yet.
-_FALLBACK_TURN_COST_USD = 0.10
 # Rows the admin panel names under Top spenders; the rest are counted.
 TOP_SPENDERS_SHOWN = 5
 # Timed credits "Expiry dates" lists, soonest first; the rest are counted.
@@ -72,6 +70,8 @@ LOOK_UP = "Look up a person"
 CHANNEL_BUDGET = "This channel"
 TOP_SPENDERS = "Top spenders"
 CHANNEL_BUDGETS = "Channel budgets"
+OVER_CAP = "⚠️ Over your monthly limit"
+EXPIRY_ID = "billing-expiry"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -324,7 +324,7 @@ def expiry_rows(
     return rows
 
 
-Tone = Literal["alert", "warning"]
+Tone = ui.Tone
 
 
 def panel_tone(
@@ -348,8 +348,13 @@ def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
     """The invoking channel's budget in words, e.g. `$1.20 of $5.00 used this month`.
 
     A budget that has not started shows its limit and when it starts; a fixed
-    one that has ended says so.
+    one that has ended says so. An alert-only budget says it never stops the channel.
     """
+    phrase = _window_phrase(status, now=now)
+    return f"{phrase} (alerts only)" if status.budget.on_limit == "alert" else phrase
+
+
+def _window_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
     budget = status.budget
     spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} used"
     if budget.window == "monthly":
@@ -420,16 +425,89 @@ def more_spenders(row_count: int, over_cap_count: int) -> int:
     return max(0, row_count - TOP_SPENDERS_SHOWN) + over_cap_count
 
 
+@dataclasses.dataclass(frozen=True)
+class BillingMarks:
+    """How one platform writes what the billing panel names, and its deliberate differences."""
+
+    person: Callable[[MemberRow], str]
+    channel: Callable[[str], str]
+    date: Callable[[datetime], str]
+    you: str = " (you)"
+    # Discord's accent shows the caller over their cap, so it needs no words for it.
+    accent: bool = False
+    # Discord's panel points at its lookup picker under the spenders.
+    more_spenders: str = ""
+    # Teams lists the expiry dates in a hidden section; the others open a view of them.
+    expiry_inline: bool = False
+
+
+def billing_screen(
+    state: BillingPanelState, *, since: datetime, now: datetime, marks: BillingMarks
+) -> ui.Panel:
+    """The billing panel: a member's own use, the credit, the channel's budget, and for
+    an admin the top spenders and channel budgets. Pure."""
+    subtitle = (
+        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
+        if state.is_admin
+        else (month_label(since),)
+    )
+    sections: list[ui.Section] = []
+    if not state.is_admin:
+        over = spend_over_cap(state.caller_spend, state.caller_cap) and not marks.accent
+        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
+        flag = OVER_CAP if over else None
+        sections.append(dataclasses.replace(ui.titled(YOU, own), flag=flag))
+    figure, words = credit_headline(state.guild_balance_usd)
+    notes = [note] if (note := timed_credit_note(state.timed_credit)) else []
+    notes += [] if state.is_admin else [ASK_ADMIN]
+    credit: list[ui.Block] = [ui.Figure(figure, words)]
+    sections.append(ui.Section((*credit, ui.Muted(tuple(notes))) if notes else tuple(credit)))
+    if state.channel_budget is not None:
+        sections.append(
+            ui.titled(CHANNEL_BUDGET, channel_budget_phrase(state.channel_budget, now=now))
+        )
+    if state.is_admin:
+        rows = [
+            spender_line(
+                rank, marks.person(row), cost=row.cost_usd, is_caller=row.is_caller, you=marks.you
+            )
+            for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
+        ] or [NOTHING_USED]
+        overflow = more_spenders(len(state.member_rows), state.over_cap_count)
+        more = f"+ {overflow} more{marks.more_spenders}" if overflow else None
+        sections.append(ui.titled(TOP_SPENDERS, *rows, more=more))
+    if state.is_admin and state.channel_budgets:
+        lines = [
+            channel_budget_line(status, label=marks.channel(status.budget.channel_id), now=now)
+            for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
+        ]
+        extra = more_channel_budgets(state)
+        sections.append(
+            ui.titled(CHANNEL_BUDGETS, *lines, more=f"+ {extra} more" if extra else None)
+        )
+    if marks.expiry_inline and state.timed_credit:
+        rows = expiry_rows(state.timed_credit, when=marks.date)
+        expiry = ui.titled(EXPIRY_INTRO, *rows)
+        sections.append(dataclasses.replace(expiry, element_id=EXPIRY_ID, hidden=True))
+    tone = panel_tone(
+        balance=state.guild_balance_usd,
+        caller_spend=state.caller_spend,
+        caller_cap=state.caller_cap,
+        credits=state.timed_credit,
+        now=now,
+    )
+    return ui.Panel(TITLE, tuple(sections), subtitle=tuple(subtitle), tone=tone)
+
+
+def expiry_screen(credits: Sequence[ActiveTimedCredit], *, marks: BillingMarks) -> ui.Panel:
+    """The "Expiry dates" view: `Unused credit expires:` and `$20.00 on Oct 12` rows."""
+    rows = expiry_rows(credits, when=marks.date)
+    return ui.Panel(EXPIRY_DATES, (ui.Section((ui.Text((EXPIRY_INTRO, *rows)),)),))
+
+
 def turns_phrase(turns: int) -> str:
     """What a top-up buys, under its amount: `about 1,250 answers`."""
     return f"about {turns:,} answers"
-
-
-def estimate_turns(amount_usd: float, *, guild_spend: float, guild_turns: int) -> int:
-    """Turns `amount_usd` buys at the tenant's average turn cost, or $0.10 without history."""
-    has_history = guild_spend > 0 and guild_turns > 0
-    cost_per_turn = guild_spend / guild_turns if has_history else _FALLBACK_TURN_COST_USD
-    return int(amount_usd / cost_per_turn)
 
 
 async def create_checkout(

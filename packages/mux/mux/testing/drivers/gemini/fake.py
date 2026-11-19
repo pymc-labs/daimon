@@ -9,29 +9,51 @@ from copy import deepcopy
 
 from pydantic import JsonValue
 
-from mux.drivers.gemini.storage import Records
+from mux.drivers.gemini.storage import (
+    ALL,
+    Keys,
+    Records,
+    changes,
+    records_of,
+    rows_of,
+    scoped,
+    view,
+)
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ProviderError
 
 
 class MemoryStorage:
-    """Test-only transactional storage; retained data survives a driver restart."""
+    """Test-only transactional storage; retained data survives a driver restart.
+
+    One blob, seen through the same strict `view` as row storage, so a driver test
+    catches a transaction that touches a row its keys do not name.
+    """
 
     def __init__(self) -> None:
         self._records = Records()
         self._lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
+    async def transaction(
+        self, keys: Keys = ALL, *, after_dispatch: bool = False
+    ) -> AsyncIterator[Records]:
         async with self._lock:
-            snapshot = deepcopy(self._records)
-            yield snapshot
-            self._records = snapshot
+            rows = rows_of(self._records)
+            loaded, resolved = scoped(rows, keys)
+            records = view(loaded, resolved)
+            yield records
+            written = changes(records, loaded, resolved)
+            for key in written.deletes:
+                del rows[key]
+            rows.update(written.upserts)
+            self._records = records_of(rows)
 
     @asynccontextmanager
-    async def read(self) -> AsyncIterator[Records]:
+    async def read(self, keys: Keys = ALL) -> AsyncIterator[Records]:
         """The last committed records, without waiting for a writer; never saved."""
-        yield deepcopy(self._records)
+        loaded, resolved = scoped(rows_of(deepcopy(self._records)), keys)
+        yield view(loaded, resolved, copy_rows=False)
 
 
 class FakeTransport:

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -14,15 +13,6 @@ import discord
 import mux.profiles as profiles
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsAgentMessageEvent,
-    BetaManagedAgentsEventParams,
-    BetaManagedAgentsSessionEndTurn,
-    BetaManagedAgentsSessionEvent,
-    BetaManagedAgentsSessionStatusIdleEvent,
-    BetaManagedAgentsStreamSessionEvents,
-    BetaManagedAgentsTextBlock,
-)
 from daimon.adapters.discord import lifecycle as discord_lifecycle
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.tool_confirmation import build_confirmation_view
@@ -32,17 +22,17 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_card,
 )
 from daimon.core.turn import driver
-from daimon.core.turn.io import TurnEvent, TurnStream
+from daimon.core.turn.io import TurnEvent
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_totals import ProviderUsageTotals
+from daimon.testing.shared_helpers import Codec, native_events
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ResourceRef
-from mux.contracts.receipts import StopObservation
 from mux.contracts.usage import UsageObservation
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
@@ -255,62 +245,6 @@ async def test_actual_terminal_callbacks_retire_provider_progress_card(
     if outcome in {"completed", "interrupted"}:
         assert "Actual answer" in rendered
     assert "speculative draft" not in rendered
-
-
-class Stream:
-    def __init__(self, events: Sequence[TurnEvent]) -> None:
-        self.events = iter(events)
-
-    def __aiter__(self) -> Stream:
-        return self
-
-    async def __anext__(self) -> TurnEvent:
-        try:
-            return next(self.events)
-        except StopIteration:
-            raise StopAsyncIteration from None
-
-    async def close(self) -> None:
-        pass
-
-
-class Codec:
-    def __init__(self, events: Sequence[TurnEvent]) -> None:
-        self.events = events
-
-    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-        return Stream(self.events)
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        pass
-
-    async def replay(self, *, timeout_s: float = 30) -> list[BetaManagedAgentsSessionEvent]:
-        return []
-
-    async def status(self) -> str:
-        return "idle"
-
-    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
-        return None
-
-    async def archive(self) -> None:
-        pass
-
-
-def native_events() -> tuple[BetaManagedAgentsStreamSessionEvents, ...]:
-    text = BetaManagedAgentsAgentMessageEvent(
-        id="native-message",
-        type="agent.message",
-        content=[BetaManagedAgentsTextBlock(type="text", text="Actual answer")],
-        processed_at=NOW,
-    )
-    done = BetaManagedAgentsSessionStatusIdleEvent(
-        id="native-done",
-        type="session.status_idle",
-        stop_reason=BetaManagedAgentsSessionEndTurn(type="end_turn"),
-        processed_at=NOW,
-    )
-    return text, done
 
 
 class HookLifecycle(RecordingLifecycle):

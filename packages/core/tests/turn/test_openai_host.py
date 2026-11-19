@@ -446,10 +446,12 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     from daimon.core.turn.prepare import bind_session_impl
     from daimon.core.turn.run import run_prepared_turn
 
+    # The thread's channel differs from the one whose budget its spend counts against.
+    budgeted = replace(request.admission, budget_channel_id="C-budget")
     for index in (1, 2):
         prepared = await bind_session_impl(
             request.deps,
-            request.admission,
+            budgeted,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",
@@ -486,6 +488,7 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     assert {x["observation"].turn_id for x in observations} == {"turn-1", "turn-2"}
     assert all(x["infrastructure_usd"] is None for x in observations)
     assert all(x["model_id"] == "gpt-6-luna" for x in observations)
+    assert {x["channel_id"] for x in observations} == {"C-budget"}, "debits the budget channel"
     rows = await store.read_events(SESSION_ID)
     assert sum(e.type == "session.turn_ended" for e in rows) == 2
     assert sum(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests) == 2
@@ -1383,8 +1386,8 @@ async def test_final_host_outcome_preserves_observed_root(
 
 @pytest.mark.parametrize("append_mode", ["record", "record_many"])
 async def test_native_command_pair_survives_live_and_recovery_journal(composed, append_mode):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, _, store, _, runtime = composed
@@ -1460,8 +1463,8 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
 
 @pytest.mark.parametrize("recorded_id", ["native-answer-event", "openai:item:retained-answer"])
 async def test_recovery_after_upgrade_keeps_recorded_message_identity(composed, recorded_id):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, wire, store, _, runtime = composed

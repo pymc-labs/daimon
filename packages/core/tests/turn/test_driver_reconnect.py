@@ -59,16 +59,7 @@ async def test_run_turn_passes_default_stream_read_timeout_to_events_stream() ->
         [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
     ]
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, now=_now)
 
     assert len(fa.beta.sessions.events.stream_timeouts) == 1
     timeout = fa.beta.sessions.events.stream_timeouts[0]
@@ -83,17 +74,7 @@ async def test_run_turn_forwards_explicit_stream_read_timeout_verbatim() -> None
         [YieldEvent(make_status_idle(event_id="sevt_1", stop_reason=make_end_turn()))]
     ]
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        stream_read_timeout_s=7.5,
-    )
+    await run_turn_on_leg(fa, now=_now, stream_read_timeout_s=7.5)
 
     assert len(fa.beta.sessions.events.stream_timeouts) == 1
     timeout = fa.beta.sessions.events.stream_timeouts[0]
@@ -121,16 +102,7 @@ async def test_clean_close_while_running_reconnects_and_finalizes_on_replayed_te
     fa.beta.sessions.retrieve_statuses = ["running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 2
     assert fa.beta.sessions.retrieve_calls == ["sess_1"]
@@ -155,16 +127,7 @@ async def test_clean_close_while_idle_finalizes_without_reopening_stream() -> No
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 1, "idle finalize must not reopen the stream"
     assert final.content == [TextBlock(kind="text", text="hello")]
@@ -187,16 +150,7 @@ async def test_read_timeout_while_running_reconnects_with_read_timeout_reason() 
     fa.beta.sessions.retrieve_statuses = ["running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 2
     assert lc.reconnects == ["read_timeout"]
@@ -214,16 +168,7 @@ async def test_read_timeout_while_terminated_finalizes_without_reopening() -> No
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 1
     assert final.stop_reason is not None
@@ -245,16 +190,7 @@ async def test_rescheduling_status_behaves_like_running() -> None:
     fa.beta.sessions.retrieve_statuses = ["rescheduling"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 2
     assert lc.reconnects == ["clean_close"]
@@ -284,16 +220,7 @@ async def test_three_consecutive_eventless_cycles_have_no_attempt_cap() -> None:
     fa.beta.sessions.retrieve_statuses = ["running", "running", "running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.events.stream_calls == 4
     assert lc.reconnects == ["clean_close", "clean_close", "clean_close"]
@@ -317,16 +244,7 @@ async def test_a_status_read_that_keeps_failing_with_a_5xx_ends_as_lost_not_upst
     )
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert final.error is not None
     assert final.termination == TerminationReason.CONNECTION_LOST
@@ -346,16 +264,7 @@ async def test_replay_after_eventless_cycle_does_not_duplicate_already_folded_co
     fa.beta.sessions.events.replay_events = [pre]
     fa.beta.sessions.retrieve_statuses = ["running"]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, now=_now)
 
     assert final.content == [TextBlock(kind="text", text="hello ")], (
         "redelivered event must dedup, not duplicate"
@@ -379,16 +288,7 @@ async def test_incomplete_replay_does_not_erase_already_folded_content() -> None
     fa.beta.sessions.retrieve_statuses = ["running"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert any(render.content == [TextBlock(kind="text", text="hello ")] for render in lc.renders)
     assert final.content == [TextBlock(kind="text", text="hello world")]
@@ -430,15 +330,7 @@ async def test_terminated_replay_keeps_answer_after_current_turn_idle(
     fa.beta.sessions.retrieve_statuses = ["terminated"]
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="current request",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        tool_confirmation=tool_confirmation,
+        fa, user_message="current request", now=_now, tool_confirmation=tool_confirmation
     )
 
     assert final.content == [TextBlock(kind="text", text="current answer")]
@@ -462,16 +354,7 @@ async def test_eventless_cycle_closes_the_abandoned_stream() -> None:
     fa.beta.sessions.events.replay_events = []
     fa.beta.sessions.retrieve_statuses = ["running"]
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, now=_now)
 
     assert fa.beta.sessions.events.streams[0].closed is True
 
@@ -491,16 +374,7 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     fa.beta.sessions.events.replay_events = []
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert final.error is not None
     assert final.error.kind == "connection_lost"
@@ -536,16 +410,7 @@ async def test_a_dropped_status_read_after_a_clean_close_is_retried_not_lost() -
     fa.beta.sessions.retrieve_statuses = [_dropped(), "running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.retrieve_calls == ["sess_1", "sess_1"]
     assert final.stop_reason is not None
@@ -565,16 +430,7 @@ async def test_a_dropped_replay_after_a_quiet_idle_stream_is_retried_not_lost() 
     fa.beta.sessions.retrieve_statuses = ["idle"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert final.content == [TextBlock(kind="text", text="hello")]
     assert final.stop_reason is not None
@@ -589,16 +445,7 @@ async def test_status_reads_that_keep_dropping_still_end_the_turn_as_lost() -> N
     fa.beta.sessions.retrieve_statuses = [_dropped(), _dropped(), _dropped()]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.retrieve_calls == ["sess_1"] * 3
     assert final.termination == TerminationReason.CONNECTION_LOST
@@ -617,16 +464,7 @@ async def test_a_read_error_mid_stream_reconnects() -> None:
     fa.beta.sessions.events.replay_events = [pre, mid]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert lc.reconnects == ["connection_dropped"]
     assert final.content == [TextBlock(kind="text", text="hello world")]
@@ -648,16 +486,7 @@ async def test_a_503_on_the_status_read_after_a_clean_close_is_retried() -> None
     fa.beta.sessions.retrieve_statuses = [unavailable, "running"]
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert final.stop_reason is not None
     assert final.stop_reason.type == "end_turn"
@@ -674,16 +503,7 @@ async def test_a_4xx_on_the_status_read_is_not_retried() -> None:
     )
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert fa.beta.sessions.retrieve_calls == ["sess_1"]
     assert final.error is not None
@@ -789,17 +609,7 @@ async def test_stop_while_a_failed_status_read_waits_interrupts_the_running_turn
     async with asyncio.timeout(3):  # far less than one retry pause
         await asyncio.gather(
             press_stop(),
-            run_turn_on_leg(
-                anthropic=_cast(fa),
-                session_id="sess_1",
-                user_message="hi",
-                lifecycle=lc,
-                cancel=cancel,
-                render_interval_s=0.001,
-                interrupt_timeout_s=5.0,
-                now=_now,
-                billing=_EXEMPT,
-            ),
+            run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, interrupt_timeout_s=5.0, now=_now),
         )
 
     assert fa.beta.sessions.retrieve_calls == ["sess_1"], "no read after Stop"
@@ -818,16 +628,7 @@ async def test_a_raw_transport_error_that_outlasts_the_retries_ends_the_turn_as_
     fa.beta.sessions.retrieve_raises = httpx.ReadTimeout("slow", request=request)
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert len(fa.beta.sessions.retrieve_calls) == 3
     assert final.termination == TerminationReason.CONNECTION_LOST

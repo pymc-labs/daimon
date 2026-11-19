@@ -280,13 +280,6 @@ async def unlink_verified_identity(
     return unlinked
 
 
-async def list_linked_accounts(session: AsyncSession, *, github_user_id: int) -> list[AccountLink]:
-    rows = await session.scalars(
-        select(AccountGitHubLink).where(AccountGitHubLink.github_user_id == github_user_id)
-    )
-    return [AccountLink.model_validate(row) for row in rows]
-
-
 async def count_users_orphaned_by_account_delete(
     session: AsyncSession, *, account_id: uuid.UUID
 ) -> int:

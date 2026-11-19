@@ -15,12 +15,12 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.report import Action
 from daimon.core.errors import DaimonError
 from daimon.core.skills.fetch import FetchResult
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.testing.archives import make_tarball
+from daimon.testing.builders import skill_listed
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
@@ -44,15 +44,7 @@ async def test_successful_sync() -> None:
         r"/v1/skills",
         lambda req, _m: httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_123",
-                type="custom",
-                display_title="test-skill",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_123", display_title="test-skill").model_dump(mode="json"),
         ),
     )
 

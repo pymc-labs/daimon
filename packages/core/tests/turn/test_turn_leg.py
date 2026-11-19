@@ -108,11 +108,10 @@ def test_channel_backend_admission_gate(
     selected = leg if leg is not None else turn_leg()
     reached_runtime_lookup: list[str] = []
 
-    def runtime_unavailable(profile: str, **_: object) -> bool:
+    def runtime_unavailable(profile: str) -> None:
         reached_runtime_lookup.append(profile)
-        return False
 
-    monkeypatch.setattr(runtime_module, "ensure_channel_runtime", runtime_unavailable)
+    monkeypatch.setattr(runtime_module, "hosted_backend", runtime_unavailable)
 
     with pytest.raises(AdmissionDenied) as refused:
         runtime_module.build_channel_runtime(_request(selected))

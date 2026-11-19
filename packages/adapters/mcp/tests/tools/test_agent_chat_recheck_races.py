@@ -3,15 +3,6 @@
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.tools.agent_chat import register_agent_chat_tools
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_agent_uuid
@@ -25,6 +16,7 @@ from fastmcp.server.transforms import Visibility
 from mux.testing.drivers.anthropic.ma import session_response
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 
+from ..harness import production_identity_middleware
 from .test_agent_chat import _runtime
 
 
@@ -95,17 +87,7 @@ async def test_pin_changed_during_recheck_agent_lookup_prevents_send(
         "client_id": "test",
     }
     mcp = FastMCP(name="sol-review", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=db_session_factory,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(db_session_factory))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     register_agent_chat_tools(
         mcp, _runtime(client, session_factory=db_session_factory), billing_config=None

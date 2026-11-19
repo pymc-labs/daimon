@@ -27,6 +27,7 @@ from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.provider_actions import BoundProviderActions, ProviderActionApproval
+from daimon.core.turn.runtimes import hosted_backend
 from mux.contracts.actions import InputEvent, NativeInput, UserMessage, UserToolConfirmation
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import ContentPart, Event, ImagePart, TextPart
@@ -93,16 +94,6 @@ class TurnCodecRequest:
 
 
 TurnCodecFactory = Callable[[TurnCodecRequest], TurnIO]
-_TURN_CODECS: dict[str, TurnCodecFactory] = {}
-
-
-def register_turn_codec(profile: str, factory: TurnCodecFactory, *, fallback: bool = False) -> None:
-    """Provider modules register their host compatibility codec at startup."""
-    if profile in _TURN_CODECS:
-        if fallback:
-            return
-        raise ValueError(f"turn codec already registered: {profile}")
-    _TURN_CODECS[profile] = factory
 
 
 async def _native_error_edge[T](call: Awaitable[T]) -> T:
@@ -560,9 +551,6 @@ def _anthropic_turn_codec(request: TurnCodecRequest) -> TurnIO:
     )
 
 
-register_turn_codec("anthropic.managed_agents", _anthropic_turn_codec)
-
-
 def turn_io(
     client: anthropic.AsyncAnthropic,
     session_id: str,
@@ -593,12 +581,14 @@ def turn_io(
         # Every caller passes an admitted tenant and account; a host-wide scope
         # would skip the session ownership check below.
         raise ScopeViolation(session_id, "a turn requires a real tenant and account scope")
-    codec = _TURN_CODECS.get(selected_profile)
-    if codec is None:
-        from daimon.core.turn.runtimes import ensure_channel_runtime
-
-        if ensure_channel_runtime(selected_profile, ready=lambda: selected_profile in _TURN_CODECS):
-            codec = _TURN_CODECS.get(selected_profile)
+    hosted = hosted_backend(selected_profile)
+    codec = (
+        _anthropic_turn_codec
+        if selected_profile == "anthropic.managed_agents"
+        else hosted.codec
+        if hosted is not None
+        else None
+    )
     if codec is None:
         raise UnsupportedCapability(("host_turn_codec",), selected_profile)
     if backend_request is not None and (

@@ -969,8 +969,7 @@ are offline actual SDK HTTP requests with owned Postgres readback.
 
 `mux.testing.conformance` owns the backend-neutral conformance runner,
 normalized recorder and live-probe BudgetGuard. Provider SDK/script adapters live
-under `mux.testing.drivers`; platform conformance callbacks live under
-`daimon.testing.adapters`. These are test-only dependencies and are never
+under `mux.testing.drivers`. These are test-only dependencies and are never
 imported by runtime packages. The former `mux.conformance` namespace is removed.
 
 The conformance kit, its tests, saved receipts, replay tapes and reference docs

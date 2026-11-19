@@ -21,6 +21,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionPrompt,
     ProviderActionRequester,
 )
+from daimon.testing.shared_helpers import Clock
 from mux import profiles
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
 from mux.contracts.ids import ResourceRef, Scope
@@ -76,14 +77,6 @@ def prompt(*, authentication: bool = False, submit: bool = False) -> ProviderAct
         )
     )
     return ProviderActionPrompt(action, context, surface)
-
-
-class Clock:
-    now_at = NOW
-
-    @classmethod
-    def now(cls, *args: object) -> datetime:
-        return cls.now_at
 
 
 @pytest.fixture(autouse=True)

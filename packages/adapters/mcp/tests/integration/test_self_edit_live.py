@@ -26,7 +26,6 @@ import uuid
 
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.self_edit import (
     REDACTED_VALUE,
@@ -46,6 +45,8 @@ from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_tenant
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -95,12 +96,7 @@ async def test_self_edit_live_round_trip(
         settings=_live_settings(api_key),
         deployment_default=DeploymentDefault(),
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        agent_id=uuid.uuid4(),
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER, agent_id=uuid.uuid4())
 
     try:
         written = await _self_write_file_impl(

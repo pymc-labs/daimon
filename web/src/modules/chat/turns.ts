@@ -5,9 +5,10 @@ import { useSyncExternalStore } from "react"
 
 import { api, ApiError, qs, stream, upload } from "@/lib/api"
 import type { CreditMeter, Me } from "@/lib/types"
-import type { Card, CardAnswer, Msg, SessionDetail, StreamEvent } from "./types"
+import type { Card, CardAnswer, Msg, Notice, SessionDetail, StreamEvent } from "./types"
 
-type Thread = { messages: Msg[]; busy: boolean; reconnecting: boolean; next?: number; loadingEarlier: boolean }
+/** `monitoring` is set when admins began reading this chat after the page opened. */
+type Thread = { messages: Msg[]; busy: boolean; reconnecting: boolean; next?: number; loadingEarlier: boolean; monitoring?: Notice }
 const threads = new Map<string, Thread>()
 const ctrls = new Map<string, AbortController>()
 const subs = new Set<() => void>()
@@ -82,6 +83,7 @@ function apply(sid: string, e: StreamEvent) {
   else if (e.type === "text") patchLast(sid, (m) => ({ ...m, content: e.text }))
   else if (e.type === "card") patchLast(sid, (m) => ({ ...m, card: e.card }))
   else if (e.type === "done") patchLast(sid, () => e.message)
+  else if (e.type === "monitoring") set(sid, (t) => ({ ...t, monitoring: e.notice }))
   else if (e.type === "settled") {
     // A card answered with no follow-up: the card's message is updated, and the placeholder goes.
     set(sid, (t) => ({ ...t, messages: t.messages.slice(0, -1).map((m) => (m.id === e.message?.id ? e.message : m)) }))

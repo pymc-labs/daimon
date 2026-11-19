@@ -255,16 +255,6 @@ RoutineDestinationKind = Literal["channel", "thread", "dm"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 
-class UnattendedRequester(BaseModel):
-    """Whose rights a routine or queued wake fires with: their stored role and role ids."""
-
-    model_config = ConfigDict(frozen=True)
-
-    platform_user_id: str
-    is_admin: bool = False
-    role_ids: tuple[str, ...] = ()
-
-
 @dataclass(frozen=True)
 class SandboxPin:
     """The agent version and environment revision an admin's routine opt-in covers."""
@@ -461,30 +451,6 @@ class TaskContinuationRow(BaseModel):
     attempts: int = 0
 
 
-class GitHubOauthStateRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    state: uuid.UUID
-    platform: str
-    platform_user_id: str
-    scopes: tuple[str, ...]
-    created_at: datetime
-    consumed_at: datetime | None
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID | None = None
-
-
-class GitHubCredentialRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    principal_id: uuid.UUID
-    github_login: str
-    encrypted_token: bytes
-    scopes: tuple[str, ...]
-    created_at: datetime
-    updated_at: datetime
-
-
 class AgentMcpCredentialRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -628,13 +594,6 @@ class SlackTurnContextRow(BaseModel):
     started_at: datetime
 
 
-class AgentGithubBindingRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    agent_id: uuid.UUID
-    principal_id: uuid.UUID
-
-
 class AgentGoogleBindingRow(BaseModel):
     """Pydantic row for AgentGoogleBinding.
 
@@ -671,6 +630,10 @@ class UsageEventRow(BaseModel):
     agent_id: str | None = None
 
 
+BudgetOnLimit = Literal["stop", "alert"]
+"""What a channel budget does at its limit: refuse new turns, or only alert."""
+
+
 class ChannelBudgetRow(BaseModel):
     """One channel's spend limit. `window` bounds which debits count (see `ChannelBudget`)."""
 
@@ -688,6 +651,10 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
+    alert_window_key: str | None = None
+    alert_level: int = 0
 
 
 ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]
@@ -966,29 +933,6 @@ class AgentRepoBindingRow(BaseModel):
     updated_at: datetime
 
 
-class AgentSkillRepoCredentialRow(BaseModel):
-    """Pydantic row for AgentSkillRepoCredential — a per-repo skill-import token.
-
-    Separate from `AgentRepoBindingRow` for the reason its ORM docstring
-    gives: one working repo per agent, any number of skill repos, and
-    enrolling one must never move the other.
-    """
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    repo_url: str
-    default_branch: str
-    path: str
-    ma_secret_ref: str
-    proof_kind: RepoProofKind | None = None
-    proof_at: datetime | None = None
-    proof_account_id: uuid.UUID | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class AgentMemoryStoreRow(BaseModel):
     """Pydantic row for AgentMemoryStore (agent memory feature)."""
 
@@ -996,19 +940,6 @@ class AgentMemoryStoreRow(BaseModel):
 
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
-    memory_store_id: str
-    created_at: datetime
-
-
-class AgentChannelMemoryStoreRow(BaseModel):
-    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    platform: str
-    channel_id: str
     memory_store_id: str
     created_at: datetime
 
@@ -1523,7 +1454,7 @@ class TenantBackendPolicy(_Facts):
     tenant_id: uuid.UUID
     revision: str
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
-    # False: the tenant follows the deployment's keyed providers. A snapshot from
+    # False: the tenant follows the deployment default (Anthropic). A snapshot from
     # before this field reads as an admin's choice, as it was then.
     explicit: bool = True
 
@@ -2020,6 +1951,47 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
+MonitoredKind = Literal["question", "answer", "tool", "notice"]
+
+
+class MonitoredEventRow(BaseModel):
+    """A kept question, answer, MCP tool call or shown notice (`stores.monitoring`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    turn_ref: str | None
+    kind: MonitoredKind
+    content: str | None
+    tool_name: str | None
+    outcome: str | None
+    created_at: datetime
+
+
+class MonitoredConversationRow(BaseModel):
+    """One person's kept conversation with an agent: its question and tool counts and
+    span. MCP tool calls have no conversation, so a day of them is one (`conversation` is
+    None and `day` the UTC date); `cursor_id` pages the list (`stores.monitoring`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    day: str
+    questions: int
+    tools: int
+    first_at: datetime
+    last_at: datetime
+    cursor_id: uuid.UUID
 
 
 class PendingCarryOverRow(BaseModel):

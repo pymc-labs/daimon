@@ -107,14 +107,6 @@ journal lease, and an adapter that omits unverified cost. An accounting posture
 does not enable a profile. Aggregates require disjoint transitive coverage,
 including absent descendants; their coverage sets remain fixed across revisions.
 
-The host's offline `daimon.core.usage_delegation` API accounts complete,
-explicitly attributed OpenAI root/child turn inventories atomically. It retains
-native child IDs/meters, refuses reassignment or omitted known work, and charges
-measured shared infrastructure once. Unverified membership/disjointness, models,
-prices or measurements cannot establish actual spend. A native collector must
-prove the scope before delegation is enabled; this API does not register a
-profile or lift the delegation-disabled host restriction.
-
 The host's `daimon.core.selfhosted_usage` consumes selfhosted incremental
 model-request observations through the transactional usage outbox and credit
 ledger. Before model I/O, runtime admission must persist the deployment,
@@ -493,8 +485,8 @@ checks have separate regression proofs; they do not promote a partial scenario
 to a matrix pass. This report is partial evidence, not an all-pass certificate.
 
 Host profile dispatch is in `daimon.core.mux_backend` and `daimon.core.turn`.
-Provider codecs register `register_turn_preparation`, `register_turn_backend`
-and `register_turn_codec`. Preparation returns a real authorized native session;
+Each provider module exports one `HostedBackend` (preparation, backend
+factory, codec, runtime), listed in `daimon.core.turn.runtimes`. Preparation returns a real authorized native session;
 factories preserve its identity and codecs own provider stream ordering,
 replay/cancel truth and compatibility display records. Transport and durable
 journal/usage dependencies are injected in `TurnRuntime`; mux still imports no
@@ -767,8 +759,8 @@ C06/C07 cancellation and usage oracles through actual SDK request/response bytes
 It retains C08/C09 refusals, declares other component envelopes PENDING and leaves
 the standard offline matrix unchanged. No live settlement or host factory is
 installed. See [SDK conformance component](docs/drivers/gemini/CONFORMANCE-SDK.md).
-The host can register a deployment constructor through
-`daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
+The host's deployment constructor is the `runtime` of the profile's
+`HostedBackend` in `daimon.core.turn.runtimes`. The factory
 receives `ProviderPreparationRequest` only when the selected provider preparer
 looks up its runtime for an explicit admitted channel revision. It must return
 the provider's public runtime with authorized native resources and durable state;
@@ -918,11 +910,6 @@ the tenant/account scope authorized by the mapping lookup. Its native snapshot
 keeps the SDK's partial metadata and exception behavior without projecting a
 generic session binding. The host still commits the stamp before preparation
 locks the mapping and leaves unreadable stamps for the next bind to retry.
-Gemini native credential offers have a separate, default-off operator adapter
-and MCP registration edge. They verify the authorized resource scope, durable
-caller/binding/catalog identity and native target readback before posting shared
-cards. Production native origin/registry wiring and timed expiry remain pending;
-see `docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
 
 ### Tool-only post history checks
 

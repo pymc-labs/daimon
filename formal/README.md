@@ -89,8 +89,8 @@ has been found", so a verdict-only check would pass it as clean. TLC runs with
 one worker, so the counts are deterministic; when you change a model on
 purpose, copy the new count from the `check.sh` output into `expected.tsv`. The
 [`formal-models`](../.github/workflows/formal-models.yml) workflow runs it on
-pull requests that touch `formal/` or a source file a model describes. When
-you change that code, update the matching model action; when you close a gap,
+pull requests that touch `formal/`; it does not read the code, so it will not
+re-run when the code a model describes changes. When you change that code, update the matching model action; when you close a gap,
 add a safe configuration expected `clean` and keep the unsafe one expected
 `violates:…`. Add every new configuration, with its state count, to
 `expected.tsv`.

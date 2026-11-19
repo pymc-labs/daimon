@@ -26,7 +26,6 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.post_transport import DiscordPostTransport
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.thread_gone import (
     ThreadStopped,
     ThreadStops,
@@ -36,7 +35,6 @@ from daimon.adapters.discord.thread_gone import (
 from daimon.core.config import McpSettings, ThreadNamingSettings
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.thread_sessions import list_live_thread_sessions
@@ -44,7 +42,7 @@ from daimon.core.stores.turn_outcomes import list_for_tenant as list_outcomes
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.turn_router import build_turn_router, turn_events
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -53,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
 
 _GUILD_ID = 123456
 _THREAD_ID = 9999
@@ -65,20 +64,6 @@ def _http(code: int, *, status: int = 400, cls: type[discord.HTTPException] | No
     """A Discord API error carrying `code`; production saw 10003 as a 400 and as a 404."""
     response = Mock(status=status, reason="Discord")
     return (cls or discord.HTTPException)(response, {"code": code, "message": f"code {code}"})
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 class _SSE(httpx.AsyncByteStream):
@@ -221,13 +206,10 @@ async def _world(
     settings.discord = discord_settings
     settings.thread_naming = ThreadNamingSettings(enabled=False)
     resolver_cache = new_resolver_cache()
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
-        deployment_default=DeploymentDefault(),
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
             settings,
@@ -641,15 +623,8 @@ async def test_thread_delete_event_with_no_turn_running_still_retires_the_sessio
     )
     await db_session.commit()
     bot = make_bot(
-        DiscordRuntime(
-            settings=MagicMock(),
-            anthropic=AsyncMock(),
-            sessionmaker=db_session_factory,
-            notebook_rate_limiter=RateLimiter(max_requests=999),
-            billing_config=None,
-            deployment_default=DeploymentDefault(),
-            resolver_cache=new_resolver_cache(),
-            turn_deps=deps_for(),
+        discord_runtime(
+            settings=MagicMock(), anthropic=AsyncMock(), sessionmaker=db_session_factory
         )
     )
     payload = types.SimpleNamespace(thread_id=_THREAD_ID, parent_id=_PARENT_ID, guild_id=_GUILD_ID)

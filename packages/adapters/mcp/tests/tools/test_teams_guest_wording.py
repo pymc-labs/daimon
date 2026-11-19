@@ -33,6 +33,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 #: "1:1" as the chat, not inside a time such as "21:15".
 _ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
@@ -54,9 +56,9 @@ _REASONS = typing.get_args(NoCardReason)
 
 
 def _auth() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="teams",
         external_id="entra",
@@ -145,9 +147,9 @@ async def _running_turn(
                 now=now,
                 sender_foreign=foreign,
             )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="teams",
         external_id="entra",

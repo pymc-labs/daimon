@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import json
 from typing import Any
@@ -12,6 +11,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.testing.shared_helpers import drain as _drain
 from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -43,12 +43,6 @@ def _app() -> SlackApp:
             turn_deps=deps_for(),
         )
     )
-
-
-async def _drain(app: SlackApp) -> None:
-    pending = list(app._bg_tasks)  # pyright: ignore[reportPrivateUsage]
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def test_redeem_submission_acks_first_then_redeems_in_the_background() -> None:

@@ -34,6 +34,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
+from .shared_fakes import until_lock_wait as _until_lock_wait
+
 _AGENT = ma_agent(id="ag_acme", name="acme")
 
 
@@ -146,22 +148,6 @@ async def _seed_policy(
 
 async def _pid(session: AsyncSession) -> int:
     return int((await session.execute(text("SELECT pg_backend_pid()"))).scalar_one())
-
-
-async def _until_lock_wait(engine: AsyncEngine, pid: int) -> None:
-    async with engine.connect() as probe:
-        for _ in range(200):
-            waiting = (
-                await probe.execute(
-                    text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
-                    {"pid": pid},
-                )
-            ).scalar_one_or_none()
-            if waiting == "Lock":
-                return
-            await probe.rollback()
-            await asyncio.sleep(0.025)
-    raise AssertionError(f"backend {pid} never waited on a lock")
 
 
 @pytest.mark.parametrize("policy_row", [False, True], ids=["open-default", "stored-row"])

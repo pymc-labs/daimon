@@ -25,6 +25,8 @@ from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
 _TEAM = "19:team@thread.tacv2"
@@ -115,12 +117,8 @@ async def _setup(db_session: AsyncSession) -> tuple[AuthIdentity, str]:
         now=now,
     )
     await store_upload_content(db_session, upload_token=token, data=b"png-bytes", now=now)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="teams",
-        platform_user_id=_CALLER,
+    auth = auth_identity(
+        uuid.uuid4(), tenant.id, role=Role.USER, platform="teams", platform_user_id=_CALLER
     )
     return auth, row.id
 

@@ -24,8 +24,9 @@ from mux.contracts.ids import ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
 
+from ..shared_fakes import terminal
 from .conformance_support import ACCOUNT, REVISION, TENANT, admission, record_usage
-from .test_conformance import SCOPE, session, terminal
+from .test_conformance import SCOPE, session
 
 
 @pytest.mark.parametrize("journal_mode", ["matched", "omitted", "changed-payload"])

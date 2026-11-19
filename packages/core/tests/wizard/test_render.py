@@ -8,10 +8,11 @@ from daimon.core.wizard.state import (
     NAV_CUSTOM_ID_PATTERN,
     SELECT_CUSTOM_ID_PATTERN,
     SUBMIT_CUSTOM_ID_PATTERN,
-    WizardState,
     WizardStatus,
     build_custom_id,
 )
+
+from ..shared_fakes import _state
 
 _CHOICE_STEP = Step(
     key="color",
@@ -63,20 +64,6 @@ _SEVEN_OPTION_STEP = Step(
     options=[Option(label=f"Flavor {i}", value=f"f{i}") for i in range(7)],
 )
 _SEVEN_OPTION_SPEC = WizardSpec(prompt="Flavor form", steps=[_SEVEN_OPTION_STEP])
-
-
-def _state(
-    *,
-    current_step: int = 0,
-    answers: dict[str, list[str]] | None = None,
-    status: WizardStatus = WizardStatus.OPEN,
-) -> WizardState:
-    return WizardState(
-        short_id="abcd1234",
-        current_step=current_step,
-        answers=answers if answers is not None else {},
-        status=status,
-    )
 
 
 def _all_actions(screen_button_rows: tuple[tuple[ScreenButton, ...], ...]) -> list[str]:

@@ -19,6 +19,7 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.support_rows import SupportLimitRow
 from daimon.core.support import (
     LIMIT_GONE,
+    OWN_REQUEST,
     LimitSpec,
     MenuSpec,
     SupportScope,
@@ -254,6 +255,8 @@ def settle_outcome_text(outcome: ledger.SettleOutcome, *, correction: bool = Fal
         return LIMIT_GONE
     if outcome.status == "not_here":
         return NOT_HERE
+    if outcome.status == "own_request":
+        return OWN_REQUEST
     return "Changed meanwhile. Check the request and try again."
 
 

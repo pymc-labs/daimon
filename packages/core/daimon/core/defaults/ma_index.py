@@ -24,10 +24,10 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from daimon.core.defaults.metadata import (
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
-    SEEDED_AGENT_RENAME,
     find_conflicting_skill_body,
     find_mount_collision,
     is_renamed_seeded_agent,
@@ -124,9 +124,11 @@ async def find_seeded_agents(
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[list[BetaManagedAgentsAgent], BetaManagedAgentsAgent | None]:
     """From one live listing: the tenant's `daimon` matches (canonical first) and the
-    seeded agent renamed to `default`, if any (`SEEDED_AGENT_RENAME`)."""
+    seeded agent renamed to `default`, if any (`LEGACY_BUILTIN_AGENT_NAME`)."""
     agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
-    matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=SEEDED_AGENT_RENAME[0])
+    matches = match_agents_by_daimon_tag(
+        agents, tenant_id=tenant_id, name=LEGACY_BUILTIN_AGENT_NAME
+    )
     return matches, pick_renamed_seeded_agent(agents)
 
 
@@ -141,10 +143,10 @@ async def find_agent_by_daimon_tag(
     """Read-only adapter for the resolver: canonical match only, no side effects.
 
     A miss on the seeded name falls back to the tenant's seeded agent renamed in
-    place (`SEEDED_AGENT_RENAME`); never to a workspace's own agent of that name.
+    place (`LEGACY_BUILTIN_AGENT_NAME`); never to a workspace's own agent of that name.
     """
     renamed = None
-    if name == SEEDED_AGENT_RENAME[0] and not include_archived:
+    if name == LEGACY_BUILTIN_AGENT_NAME and not include_archived:
         matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id, records=records)
     else:
         matches = await find_agents_by_daimon_tag(
@@ -184,7 +186,7 @@ async def find_renamed_seeded_agent(
     tenant_id: uuid.UUID,
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
-    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None.
+    """The tenant's live seeded agent renamed to `default` (`LEGACY_BUILTIN_AGENT_NAME`), or None.
 
     `records` adds the Daimon-owned records, for an install with no Anthropic key.
     """

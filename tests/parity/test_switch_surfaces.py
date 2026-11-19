@@ -53,7 +53,6 @@ ALLOWED: Final = {
     "core/daimon/core/channel_backend.py": "The provider store: previews and writes",
     "core/daimon/core/model_switch.py": "Home of pick_or_refusal",
     "core/daimon/core/thread_model_switch.py": "Home of pick_thread",
-    "core/daimon/core/switch_cards.py": "Applies an older card's press like a pick",
 }
 
 #: Each shared helper, its module, and the write it makes in the same call.

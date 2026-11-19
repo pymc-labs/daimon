@@ -5,13 +5,13 @@ from __future__ import annotations
 import re
 
 import httpx
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.mcp_identity import generate_signing_key
 from daimon.core.server_skills.node import active_adder
 from daimon.core.stores import server_skills as server_skills_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import workspace_members as members_store
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import (
     make_account,
     make_held_update,
@@ -39,14 +39,11 @@ class _Node(_Server):
 
 
 def _created(_r: httpx.Request, _m: object) -> httpx.Response:
-    body = SkillListResponse(
+    body = skill_listed(
         id="sk_new",
-        type="custom",
         display_title="x",
-        latest_version="1",
         created_at="2030-01-01T00:00:00Z",
         updated_at="2030-01-01T00:00:00Z",
-        source="custom",
     )
     return httpx.Response(200, json=body.model_dump(mode="json"))
 

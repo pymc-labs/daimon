@@ -34,11 +34,6 @@ MODEL_SETTING_DROPS: Final[frozenset[str]] = frozenset(
 )
 
 
-def finer_parts(whole: str, drops: frozenset[str] | set[str]) -> frozenset[str]:
-    """The parts of `whole` that `drops` names."""
-    return frozenset(d for d in drops if FINER_DROPS.get(d) == whole)
-
-
 def kept_environment(profile_id: str, environment: EnvironmentSpec) -> EnvironmentSpec | None:
     """What `profile_id`'s sandbox recreates of `environment`; None for its default one."""
     kept = carried_environment(get_profile(profile_id), environment)

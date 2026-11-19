@@ -68,8 +68,8 @@ from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
 from daimon.core.rule_views import RoutineOrigin
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.errors import ScopeViolation
@@ -1112,13 +1112,8 @@ async def test_run_turn_mounts_env_resource_when_agent_has_secrets(
 ) -> None:
     tenant_id = headless_identity.tenant_id
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant_id, agent_id=agent_uuid, key="API_KEY", content="secret"
     )
     await db_session.commit()
 
@@ -1176,13 +1171,8 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     agent_uuid = uuid.uuid4()
     account_id = headless_identity.account_id
     public_url = "https://mcp.example.local/mcp"
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
+    await new_agent_file(
+        db_session, tenant_id, agent_id=agent_uuid, key="API_KEY", content="secret"
     )
     await db_session.commit()
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 import httpx
@@ -35,6 +36,11 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import shown_text
+
+_dispatch_pending_continuations = partial(
+    dispatch_pending_continuations, channel="C_CONT_DISPATCH", active_turn=False
+)
+
 
 _TARGET_AGENT_ID = "agent_continuation_target"
 
@@ -112,14 +118,12 @@ async def test_dispatch_runs_the_follow_up_exactly_once_and_settles_delivered(
     anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
     calls, run_follow_up = _recorder()
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -136,14 +140,12 @@ async def test_dispatch_runs_the_follow_up_exactly_once_and_settles_delivered(
 
     # A second dispatch call (e.g. the next turn's completion path, or a race)
     # must not run the follow-up again: the row is no longer pending.
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -185,14 +187,13 @@ async def test_dispatch_skips_silently_when_no_work_was_requested(
     anthropic = build_fake_anthropic(_fake_target_agent_handler(str(tenant.id)))
     calls, run_follow_up = _recorder()
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=tenant.id,
         channel="C_CONT_DISPATCH_2",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
         now=lambda: datetime.now(UTC),
     )
@@ -287,14 +288,12 @@ async def test_a_handoff_survives_any_number_of_busy_binds_as_on_main(
 
     for tail in range(6):
         at = now + timedelta(minutes=tail)
-        await dispatch_pending_continuations(
+        await _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=_busy_five_times,
             now=lambda at=at: at,
         )
@@ -335,14 +334,12 @@ async def test_process_death_before_the_fence_is_retried_after_lease_expiry(
     def _dispatch(
         run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
     ) -> Any:
-        return dispatch_pending_continuations(
+        return _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=run_follow_up,
             now=lambda: at,
         )
@@ -399,14 +396,12 @@ async def test_process_death_after_the_fence_settles_interrupted_and_never_rerun
     def _dispatch(
         run_follow_up: Callable[[TaskContinuationRow, str], Awaitable[None]], at: datetime
     ) -> Any:
-        return dispatch_pending_continuations(
+        return _dispatch_pending_continuations(
             db_session_factory,
             anthropic,
             fake_slack_web_client.client,
             tenant_id=request.tenant_id,
-            channel="C_CONT_DISPATCH",
             thread_id=thread_id,
-            active_turn=False,
             run_follow_up=run_follow_up,
             now=lambda: at,
         )
@@ -449,14 +444,12 @@ async def test_a_timer_refused_for_a_changed_responder_posts_why_and_settles_ski
     async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
         raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=request.tenant_id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=_rerouted,
     )
 
@@ -515,12 +508,11 @@ async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
     async def _rerouted(row: TaskContinuationRow, seed: str) -> None:
         raise ResponderChanged(target_name="receiving-agent", current_name="other-agent")
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=request.tenant_id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
         active_turn=path == "turn_running",
         run_follow_up=_rerouted,
@@ -560,14 +552,12 @@ async def test_a_timer_wake_runs_without_reading_the_threads_history(
     monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_history)
     calls, run_follow_up = _recorder()
 
-    await dispatch_pending_continuations(
+    await _dispatch_pending_continuations(
         db_session_factory,
         anthropic,
         fake_slack_web_client.client,
         tenant_id=request.tenant_id,
-        channel="C_CONT_DISPATCH",
         thread_id=thread_id,
-        active_turn=False,
         run_follow_up=run_follow_up,
     )
 

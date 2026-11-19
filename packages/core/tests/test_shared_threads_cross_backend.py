@@ -34,19 +34,16 @@ from daimon.core.channel_backend import (
     check_backend,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ResolvedConfig
 from daimon.core.shared_threads import shared_owner, shared_slot
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn import openai_host
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision
@@ -58,6 +55,8 @@ from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .turn.conformance_support import patch_hosted
 
 OPENAI = "openai.persistent_workspace"
 GEMINI = "gemini.inline_reuse"
@@ -138,12 +137,9 @@ class _Provider:
 @pytest.fixture
 def providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _Provider]:
     """Both profiles registered and runnable, as G1/G2's registration lines make them."""
-    # The real OpenAI host registers lazily; register it first so the stand-in
-    # replaces it for this test instead of colliding with a later registration.
-    openai_host.register_host()
     registered = {profile: _Provider(profile) for profile in CONFIGS}
     for profile, provider in registered.items():
-        monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, provider)  # pyright: ignore[reportPrivateUsage]
+        patch_hosted(monkeypatch, profile, prepare=provider)
     # The stand-ins' own admission policy, isolated from the real hosts' release
     # policy (which admits a channel's own OpenAI deployment per caller only): exactly the
     # stand-in revisions are admitted, everything else goes to the real check.
@@ -162,22 +158,12 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnDeps:
     def no_anthropic(request: Any) -> Any:
         raise AssertionError(f"an explicit provider turn reached Anthropic: {request.url.path}")
 
-    return TurnDeps(
-        anthropic=build_fake_anthropic(no_anthropic),
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
+    return plain_turn_deps(
+        build_fake_anthropic(no_anthropic),
+        sessionmaker,
         defaults_root=Path("/unused"),
-        mcp=McpSettings(),
-        billing_config=None,
         markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
         channel_backends=True,
-        tool_safety=OPEN_TOOL_SAFETY,
     )
 
 
@@ -417,17 +403,17 @@ async def test_a_shared_selfhosted_thread_reaches_its_host_as_the_thread_owner(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """Both callers of a shared self-hosted thread reach its host as the thread's owner."""
-    from daimon.core.turn.runtimes import ensure_channel_runtime
+    from daimon.core.turn.runtimes import hosted_backend
 
-    assert ensure_channel_runtime(SELFHOSTED)
-    assert SELFHOSTED in preparation._PROVIDER_PREPARATIONS  # pyright: ignore[reportPrivateUsage]
+    backend = hosted_backend(SELFHOSTED)
+    assert backend is not None and backend.prepare is not None
     seen: list[ProviderPreparationRequest] = []
 
     async def spy(request: ProviderPreparationRequest) -> PreparedTurn:
         seen.append(request)
         raise AdmissionDenied(reason="backend_unsupported")
 
-    monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, SELFHOSTED, spy)  # pyright: ignore[reportPrivateUsage]
+    patch_hosted(monkeypatch, SELFHOSTED, prepare=spy)
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
     world = await _world(db_session)
     revision = await set_channel_backend(

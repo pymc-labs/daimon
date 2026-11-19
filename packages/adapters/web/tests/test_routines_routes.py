@@ -26,7 +26,8 @@ from daimon.core.stores import web_roles as roles_store_alias
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import AgentSandboxPin, WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.routines import create_routine, list_routines_for_tenant
+from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
@@ -86,14 +87,13 @@ async def _seed(
     factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *, owner: str, message: str
 ) -> uuid.UUID:
     async with factory.begin() as session:
-        row = await create_routine(
+        row = await new_routine(
             session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id=owner,
             agent_id=AGENT_ID,
             agent_name=DEFAULT_AGENT_NAME,
             cron_expr="0 9 * * *",
-            timezone_="UTC",
             trigger_message=message,
             next_fire_at=datetime(2030, 1, 1, tzinfo=UTC),
         )

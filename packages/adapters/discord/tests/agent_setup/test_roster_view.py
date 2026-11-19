@@ -34,7 +34,6 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_details import AgentDetails
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent, order_roster
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -46,6 +45,7 @@ from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_labe
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -105,12 +105,10 @@ def _runtime(
         }
     )
     cache = new_resolver_cache()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=build_turn_deps(
@@ -606,7 +604,7 @@ async def test_setup_targets_the_answering_agent_and_binds_it_without_a_billed_t
         tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
         account = await make_account(session, tenant=tenant)
     responder = ma_agent(
-        id="agent_daimon", name="daimon", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
+        id="agent_daimon", name="default", tenant_id=tenant.id, metadata={"daimon_managed": "true"}
     )
     target = ma_agent(id="agent_specialist", name="specialist", tenant_id=tenant.id)
 

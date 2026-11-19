@@ -6,26 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import _request_agent_backend_switch_impl
 from daimon.core.stores.domain import Role
 from daimon.testing.db import db_nullpool_engine  # noqa: F401
 from fastmcp.exceptions import ToolError
 
+from ..harness import auth_identity
+
 
 async def test_a_missing_active_origin_never_resolves_or_switches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auth = AuthIdentity(
-        tenant_id=uuid4(),
-        account_id=uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="123",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        uuid4(), uuid4(), platform="discord", platform_user_id="123", chat_session_id="test-session"
     )
     runtime = MagicMock()
     origin = AsyncMock(return_value=None)
@@ -181,12 +175,9 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             settings,
             DeploymentDefault(agent_name="Daimon", environment_name="default"),
         )
-        auth = AuthIdentity(
-            tenant_id=tenant.id,
-            account_id=account.id,
-            role=Role.ADMIN,
-            is_admin=True,
-            is_platform_admin=True,
+        auth = auth_identity(
+            account.id,
+            tenant.id,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
@@ -282,7 +273,7 @@ async def test_a_chat_switch_applies_on_the_first_call_like_a_model_change(
         "origin_context_id": str(origin.id),
     }
     agent()
-    changed = await _request_agent_backend_switch_impl(runtime, auth, **switch)
+    changed = await _request_agent_backend_switch_impl(runtime, auth, **switch, expected_revision=0)
     assert changed.status == "changed" and changed.expected_revision == 1, "one call applies"
     assert "unknown" in changed.cost_line.lower(), changed.cost_line
     drops = changed.declared_drops
@@ -318,6 +309,7 @@ async def test_the_switch_says_what_is_off_and_asks_nothing(active_chat):
         agent_name="Researcher",
         target_backend="openai",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.declared_drops, "the fixture's agent loses something on OpenAI"
     assert "Off on OpenAI:" in changed.summary, changed.summary
@@ -352,6 +344,7 @@ async def test_a_switch_without_this_threads_session_refuses_before_capturing_th
             agent_name="Researcher",
             target_backend="gemini",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
     assert not trace.replies and not trace.violations, "every scripted reply was used"
     assert all(r.path != "/v1/agents/agent_owned" for r in trace.requests), (
@@ -376,22 +369,48 @@ async def test_registration_uses_only_the_existing_backend_flags(channel_backend
 
 
 @pytest.mark.parametrize("target", ["openai", "gemini"])
-async def test_a_session_that_never_gated_the_switch_still_switches(active_chat, target):
-    """The switch asks nobody, so a session that never put it on always_ask switches too."""
-    runtime, auth, origin, _, trace, payload, frozen, _, agent, _ = active_chat
+async def test_a_session_that_never_gated_the_switch_cannot_confirm_it(active_chat, target):
+    """A move to another provider needs the card; a session that holds no ask can't show one."""
+    runtime, auth, origin, service, trace, payload, frozen, _, agent, _ = active_chat
     frozen["agent"]["tools"][0]["configs"] = []
     _without_own_tools(payload)
     agent()
-    changed = await _request_agent_backend_switch_impl(
+    with pytest.raises(ToolError, match="cannot verify the confirmation card") as refused:
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            agent_name="Researcher",
+            target_backend=target,
+            origin_context_id=str(origin.id),
+            expected_revision=0,
+        )
+    assert "Nothing changed" in str(refused.value)
+    assert "Start a new conversation" in str(refused.value), "the person is told what fixes it"
+    agent()
+    assert await service.current(await load_backend_agent_for(runtime, auth)) is None, (
+        "nothing was written"
+    )
+    assert not trace.violations
+
+
+async def test_a_move_to_another_provider_previews_before_it_asks(active_chat):
+    """Without expected_revision the call changes nothing and hands out the revision that asks."""
+    runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
+    _without_own_tools(payload)
+    agent()
+    shown = await _request_agent_backend_switch_impl(
         runtime,
         auth,
         agent_name="Researcher",
-        target_backend=target,
+        target_backend="openai",
         origin_context_id=str(origin.id),
     )
-    assert changed.status == "changed", "an ungated session switches"
-    assert not trace.replies and not trace.violations, "every scripted reply was used"
-    assert all(request.method == "GET" for request in trace.requests), "the switch only reads"
+    assert shown.status == "preview" and shown.expected_revision == 0, shown
+    assert "sends its conversations" in shown.summary, shown.summary
+    agent()
+    assert await service.current(await load_backend_agent_for(runtime, auth)) is None, (
+        "the preview wrote nothing"
+    )
 
 
 async def test_a_private_session_context_refuses_the_switch(active_chat):
@@ -415,6 +434,7 @@ async def test_a_private_session_context_refuses_the_switch(active_chat):
             agent_name="Researcher",
             target_backend="openai",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
     assert not trace.replies and not trace.violations
 
@@ -442,11 +462,13 @@ async def test_a_thread_opened_by_a_channel_mention_switches(active_chat, stamp)
     }
     agent()
     if stamp == "channel_only":
-        changed = await _request_agent_backend_switch_impl(runtime, auth, **switch)
+        changed = await _request_agent_backend_switch_impl(
+            runtime, auth, **switch, expected_revision=0
+        )
         assert changed.status == "changed", "the thread's own session switches"
     else:
         with pytest.raises(ToolError, match="Ask this agent in a server channel or thread"):
-            await _request_agent_backend_switch_impl(runtime, auth, **switch)
+            await _request_agent_backend_switch_impl(runtime, auth, **switch, expected_revision=0)
     assert not trace.replies and not trace.violations, "every scripted reply was used"
 
 
@@ -463,6 +485,7 @@ async def test_a_native_no_drop_switch_writes_on_the_first_call(active_chat):
         agent_name="Researcher",
         target_backend="anthropic",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "one call applies"
     assert changed.declared_drops == (), "nothing is declared"
@@ -492,6 +515,7 @@ async def test_a_provider_turn_switch_applies_only_when_someone_started_the_run(
             agent_name="Researcher",
             target_backend="anthropic",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
 
     if not attended:
@@ -547,6 +571,7 @@ async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then
             agent_name="Researcher",
             target_backend="anthropic",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
     assert "Nothing changed." in str(refused.value), "the refusal says nothing changed"
     assert "I " not in str(refused.value), (
@@ -573,6 +598,7 @@ async def test_chat_switch_to_a_named_model_applies_that_model(active_chat):
         target_backend="gemini",
         model="gemini-4-argon",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed" and changed.model == "gemini-4-argon", "that model"
     assert changed.models == selectable_models("gemini"), "the list is the selectable list"
@@ -600,9 +626,11 @@ async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(ac
         "origin_context_id": str(origin.id),
     }
 
-    async def confirm(**stated):
+    async def confirm(revision=None, **stated):
         agent()
-        done = await _request_agent_backend_switch_impl(runtime, auth, **base, **stated)
+        done = await _request_agent_backend_switch_impl(
+            runtime, auth, **base, **stated, expected_revision=revision
+        )
         assert done.status == "changed"
         agent()
         source = await load_backend_agent(
@@ -613,14 +641,18 @@ async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(ac
         )
         return await service.current(source)
 
-    first = await confirm(effort="high")
+    first = await confirm(0, effort="high")
     assert first.effort == "high", "the call states the effort"
     second = await confirm(thread_mode="per_caller")
     assert second.effort == "high", "stating other settings keeps the effort the agent has"
     agent()
     with pytest.raises(ToolError, match="isn't an effort") as refused:
         await _request_agent_backend_switch_impl(
-            runtime, auth, **{**base, "target_backend": "gemini"}, effort="high"
+            runtime,
+            auth,
+            **{**base, "target_backend": "gemini"},
+            effort="high",
+            expected_revision=0,
         )
     assert "Nothing changed" in str(refused.value), "a Gemini agent takes no effort"
 
@@ -650,6 +682,7 @@ async def test_the_agents_owner_may_request_a_switch_and_a_member_may_not(active
             agent_name="Researcher",
             target_backend="openai",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
     async with runtime.session_factory.begin() as session:
         await agent_owners.set_owner(
@@ -666,6 +699,7 @@ async def test_the_agents_owner_may_request_a_switch_and_a_member_may_not(active
         agent_name="Researcher",
         target_backend="openai",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed" and changed.expected_revision == 1, "the owner switches"
 
@@ -682,7 +716,9 @@ async def test_chat_states_the_agents_thread_mode_and_requirements(active_chat):
         "required_capabilities": ("tool_loop",),
     }
     agent()
-    changed = await _request_agent_backend_switch_impl(runtime, auth, **options)
+    changed = await _request_agent_backend_switch_impl(
+        runtime, auth, **options, expected_revision=0
+    )
     assert changed.status == "changed", "the stated settings apply with the switch"
     assert changed.agent_settings == (
         "shares threads where the channel allows it; requires tool_loop"
@@ -719,6 +755,7 @@ async def test_an_owner_may_not_ask_to_share_threads(active_chat):
             target_backend="anthropic",
             origin_context_id=str(origin.id),
             thread_mode="shared",
+            expected_revision=0,
         )
 
 
@@ -744,6 +781,7 @@ async def test_the_switch_says_when_this_channel_pins_its_own_provider(active_ch
         agent_name="Researcher",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.channel_pin == (
         "This channel pins OpenAI (gpt-6-luna), so this agent keeps answering on that here"
@@ -759,6 +797,7 @@ async def test_the_switch_says_when_this_channel_pins_its_own_provider(active_ch
         agent_name="Researcher",
         target_backend="openai",
         origin_context_id=str(origin.id),
+        expected_revision=1,
     )
     assert cleared.channel_pin is None and "pins" not in cleared.summary
     assert "channel_pin" not in cleared.model_dump()
@@ -790,6 +829,7 @@ async def test_a_copy_switches_from_a_thread_another_agent_answers(active_chat, 
         agent_name="Researcher-copy",
         target_backend=target,
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed"
     agent()
@@ -809,15 +849,7 @@ async def test_a_copy_switches_from_a_thread_another_agent_answers(active_chat, 
 
 
 def _admin_auth():
-    return AuthIdentity(
-        tenant_id=uuid4(),
-        account_id=uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="123",
-    )
+    return auth_identity(uuid4(), uuid4(), platform="discord", platform_user_id="123")
 
 
 @pytest.mark.parametrize(
@@ -965,6 +997,7 @@ async def test_a_member_who_doesnt_own_the_copy_is_refused_before_the_fallback(a
             agent_name="Researcher-copy",
             target_backend="gemini",
             origin_context_id=str(origin.id),
+            expected_revision=0,
         )
     # Refused at the editor check: the copy's own source was never captured.
     assert not any(r.path == "/v1/agents/agent_copy" for r in trace.requests[reads:])
@@ -983,6 +1016,7 @@ async def test_a_member_who_doesnt_own_the_copy_is_refused_before_the_fallback(a
         agent_name="Researcher-copy",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed" and changed.agent_name == "Researcher-copy", "applied"
 
@@ -1021,6 +1055,7 @@ async def test_switching_the_agent_answering_here_moves_this_conversation(active
         agent_name="Researcher",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert "This conversation moves to Gemini from the next message" in changed.summary
     assert "keeps its earlier messages" in changed.summary, changed.summary
@@ -1049,6 +1084,7 @@ async def test_switching_a_copy_leaves_this_conversation_and_says_so(active_chat
         agent_name="Researcher-copy",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert "isn't the one answering here" in changed.summary
     assert await _release_rows(runtime, auth) == []
@@ -1091,6 +1127,7 @@ async def test_a_switch_of_the_copy_this_thread_was_handed_to_moves_it(active_ch
         agent_name="Researcher-copy",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     rows = await _release_rows(runtime, auth)
     if kind == "handoff":
@@ -1118,6 +1155,7 @@ async def test_a_switch_to_gpt_never_creates_the_tenants_environment(active_chat
         agent_name="Researcher",
         target_backend="openai",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "the switch applies"
 
@@ -1180,7 +1218,7 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
     for who in (member, auth):
         agent()
         with pytest.raises(ToolError) as refused:
-            await _request_agent_backend_switch_impl(runtime, who, **switch)
+            await _request_agent_backend_switch_impl(runtime, who, **switch, expected_revision=0)
         assert str(refused.value).startswith(
             "Switching Researcher changes it for everyone on this server. "
             "To try Gemini just here, I can make a copy of me on Gemini. Nothing changed."
@@ -1188,7 +1226,9 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
     # "For everyone" still needs the owner or an admin.
     agent()
     with pytest.raises(ToolError, match="needs its owner or a server admin"):
-        await _request_agent_backend_switch_impl(runtime, member, **switch, for_everyone=True)
+        await _request_agent_backend_switch_impl(
+            runtime, member, **switch, for_everyone=True, expected_revision=0
+        )
     assert await _release_rows(runtime, auth) == []
     agent()
     changed = await _request_agent_backend_switch_impl(
@@ -1196,6 +1236,7 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
         auth,
         **switch,
         for_everyone=True,
+        expected_revision=0,
     )
     assert changed.status == "changed"
     assert (
@@ -1214,6 +1255,7 @@ async def test_a_non_default_agent_switches_without_saying_for_everyone(active_c
         agent_name="Researcher",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "the switch applies"
 
@@ -1247,6 +1289,7 @@ async def test_a_no_drop_switch_of_the_agent_everyone_uses_when_for_everyone_the
             runtime,
             auth,
             **to_gpt,
+            expected_revision=0,
         )
         agent()
         moved = await service.current(await load_backend_agent_for(runtime, auth))
@@ -1257,12 +1300,19 @@ async def test_a_no_drop_switch_of_the_agent_everyone_uses_when_for_everyone_the
         "target_backend": "anthropic",
         "origin_context_id": str(origin.id),
     }
+    revision = 1 if on == "openai" else 0
     agent()
     with pytest.raises(ToolError, match="changes it for everyone on this server"):
-        await _request_agent_backend_switch_impl(runtime, auth, **to_claude)
+        await _request_agent_backend_switch_impl(
+            runtime, auth, **to_claude, expected_revision=revision
+        )
     agent()
     changed = await _request_agent_backend_switch_impl(
-        runtime, auth, **to_claude, for_everyone=True
+        runtime,
+        auth,
+        **to_claude,
+        for_everyone=True,
+        expected_revision=revision,
     )
     assert changed.status == "changed", "nothing stops working, so no card either way"
     agent()
@@ -1290,6 +1340,7 @@ async def test_a_switch_applies_without_posting_a_card(active_chat, monkeypatch,
         agent_name="Researcher",
         target_backend="gemini",
         origin_context_id=str(origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "the first call applies"
     post.assert_not_awaited()

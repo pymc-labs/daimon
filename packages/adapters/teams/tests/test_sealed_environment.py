@@ -10,17 +10,10 @@ from daimon.adapters.teams import channel_settings as cs
 from daimon.adapters.teams.card_actions import Actor
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.testing.shared_helpers import Session as _Session
 
 CHANNEL = "19:abc@thread.tacv2"
 SEALED = TenantAccessPolicy(channel_rules={CHANNEL: ChannelRule(readers="own", writers="own")})
-
-
-class _Session:
-    async def __aenter__(self) -> _Session:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None
 
 
 @pytest.mark.asyncio

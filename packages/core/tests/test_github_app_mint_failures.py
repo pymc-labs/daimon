@@ -6,6 +6,7 @@ import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
@@ -56,17 +57,25 @@ from daimon.core.stores.github_issued_tokens import (
     session_installations_needing_rotation,
     session_token_needs_rotation,
 )
-from daimon.core.stores.thread_sessions import create_thread_session, get_thread_session_by_id
+from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.prepare import (
     _delivered_app_snapshot_state,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.turn.termination import TerminationReason
+from daimon.testing.builders import new_thread_session
 from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_upsert_github_app = partial(
+    github_app_installations.upsert_github_app,
+    account_type="Organization",
+    repository_selection="selected",
+    suspended_at=None,
+)
 
 
 def _fake_jwt(*_args: Any, **_kwargs: Any) -> str:
@@ -99,14 +108,8 @@ async def _two_groups(
                 )
             )
         await session.flush()
-        await github_app_installations.upsert_github_app(
-            session,
-            installation_id=771,
-            account_id=1,
-            account_login="example",
-            account_type="Organization",
-            repository_selection="selected",
-            suspended_at=None,
+        await _upsert_github_app(
+            session, installation_id=771, account_id=1, account_login="example"
         )
         for repo_id, access in ((101, "read"), (102, "write")):
             await github_access.stage_grant(
@@ -147,14 +150,11 @@ async def _seed_multi_installation_grants(
             )
         await session.flush()
         for installation_id in {installation_id for installation_id, _, _ in repos}:
-            await github_app_installations.upsert_github_app(
+            await _upsert_github_app(
                 session,
                 installation_id=installation_id,
                 account_id=installation_id,
                 account_login=f"owner{installation_id}",
-                account_type="Organization",
-                repository_selection="selected",
-                suspended_at=None,
             )
         for _, repo_id, working in repos:
             session.add(
@@ -295,14 +295,8 @@ async def test_grant_added_after_create_delivery_does_not_change_snapshot_mode(
             )
         )
         await session.flush()
-        await github_app_installations.upsert_github_app(
-            session,
-            installation_id=772,
-            account_id=772,
-            account_login="owner772",
-            account_type="Organization",
-            repository_selection="selected",
-            suspended_at=None,
+        await _upsert_github_app(
+            session, installation_id=772, account_id=772, account_login="owner772"
         )
         session.add(
             AgentGitHubGrant(
@@ -848,14 +842,11 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
             )
         await session.flush()
         for installation_id, owner in ((771, "a"), (772, "b")):
-            await github_app_installations.upsert_github_app(
+            await _upsert_github_app(
                 session,
                 installation_id=installation_id,
                 account_id=installation_id,
                 account_login=owner,
-                account_type="Organization",
-                repository_selection="selected",
-                suspended_at=None,
             )
         # Seed B directly to exercise the existing multi-installation session.
         for repo_id in (101, 102):
@@ -928,12 +919,10 @@ async def test_new_repo_in_b_remints_only_b_and_preserves_a(
             session_id="live-session",
         )
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="two-installations",
-            account_id=uuid.uuid4(),
             ma_session_id="live-session",
             effective_config=SessionSnapshot.model_validate(
                 {
@@ -1209,12 +1198,10 @@ async def test_contraction_of_501_repo_installation_enters_legacy_mode_once(
             session_id="live-501",
         )
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="contraction-501",
-            account_id=uuid.uuid4(),
             ma_session_id="live-501",
             effective_config=SessionSnapshot.model_validate(
                 {
@@ -1685,12 +1672,10 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
     read_url = "https://github.com/example/read"
     write_url = "https://github.com/example/write"
     async with db_session_factory.begin() as session:
-        mapped = await create_thread_session(
+        mapped = await new_thread_session(
             session,
             tenant_id=tenant_id,
-            platform="discord",
             thread_id="rotation-refusal",
-            account_id=uuid.uuid4(),
             ma_session_id="live-session",
             effective_config=SessionSnapshot.model_validate(
                 {
@@ -1807,14 +1792,8 @@ async def test_rotation_keeps_successful_group_when_other_group_returns_404(
             )
         )
         await session.flush()
-        await github_app_installations.upsert_github_app(
-            session,
-            installation_id=771,
-            account_id=1,
-            account_login="example",
-            account_type="Organization",
-            repository_selection="selected",
-            suspended_at=None,
+        await _upsert_github_app(
+            session, installation_id=771, account_id=1, account_login="example"
         )
         await github_access.stage_grant(
             session,
@@ -2063,14 +2042,8 @@ async def test_refusal_does_not_hide_a_healthy_installation_map_expansion(
             )
         )
         await session.flush()
-        await github_app_installations.upsert_github_app(
-            session,
-            installation_id=772,
-            account_id=772,
-            account_login="owner772",
-            account_type="Organization",
-            repository_selection="selected",
-            suspended_at=None,
+        await _upsert_github_app(
+            session, installation_id=772, account_id=772, account_login="owner772"
         )
         session.add(
             AgentGitHubGrant(

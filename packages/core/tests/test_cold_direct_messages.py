@@ -7,6 +7,7 @@ import importlib.util
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -49,6 +50,8 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+_start_cold_dm = partial(start_cold_dm, route_key="555", external_user_id="999")
+
 
 async def seed(factory):
     async with factory.begin() as session:
@@ -76,13 +79,8 @@ async def test_cold_start_serializes_absent_route_and_pins_scope_only(db_engine,
     tenant, admission, deps = await seed(db_session_factory)
 
     async def start():
-        return await start_cold_dm(
-            deps,
-            admission,
-            tenant_id=tenant.id,
-            workspace_id=tenant.external_id,
-            route_key="555",
-            external_user_id="999",
+        return await _start_cold_dm(
+            deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
         )
 
     rows = await asyncio.gather(start(), start())
@@ -107,25 +105,18 @@ async def test_cold_start_serializes_absent_route_and_pins_scope_only(db_engine,
 
 async def test_switch_retires_session_and_stale_switch_cannot_replace_scope(db_session_factory):
     tenant, admission, deps = await seed(db_session_factory)
-    old = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    old = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     async with db_session_factory.begin() as session:
         mapping = await make_thread_session(
             session, tenant=tenant, thread_id=old.scope_id, ma_session_id="old_private_session"
         )
-    new = await start_cold_dm(
+    new = await _start_cold_dm(
         deps,
         admission,
         tenant_id=tenant.id,
         workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
         expected_scope_id=old.scope_id,
     )
     assert new.scope_id != old.scope_id and new.history == []
@@ -133,13 +124,11 @@ async def test_switch_retires_session_and_stale_switch_cannot_replace_scope(db_s
         retired = await get_thread_session_by_id(session, id=mapping.id)
     assert retired.status == "dead"
     assert (
-        await start_cold_dm(
+        await _start_cold_dm(
             deps,
             admission,
             tenant_id=tenant.id,
             workspace_id=tenant.external_id,
-            route_key="555",
-            external_user_id="999",
             expected_scope_id=old.scope_id,
         )
         is None
@@ -150,13 +139,8 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
     db_session_factory,
 ):
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     now = datetime.now(UTC)
     async with db_session_factory.begin() as session:
@@ -327,13 +311,8 @@ async def test_cold_provenance_does_not_inherit_unrelated_channel_seals(db_sessi
     from daimon.core.direct_messages import _source_is_sealed
 
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     policy = TenantAccessPolicy(channel_rules={"123": ChannelRule(readers="inside")})
     assert not _source_is_sealed(policy, row)
@@ -348,13 +327,8 @@ async def test_changed_account_never_reuses_private_session(db_session_factory, 
     from daimon.core.direct_messages import DirectMessageAccessRevoked, reply_to_dm
 
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     async with db_session_factory.begin() as session:
         replacement = await make_account(session, tenant=tenant)
@@ -455,13 +429,8 @@ async def test_dm_turn_uses_the_adapters_confirmation_hook(
     from daimon.core.direct_messages import reply_to_dm_result
 
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
     monkeypatch.setattr(
@@ -516,13 +485,8 @@ async def test_dm_turn_renders_through_the_adapters_card(
     from daimon.core.direct_messages import reply_to_dm_result
 
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
     monkeypatch.setattr(
@@ -602,13 +566,8 @@ async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
     from mux.contracts.ids import Scope
 
     tenant, admission, deps = await seed(db_session_factory)
-    row = await start_cold_dm(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        workspace_id=tenant.external_id,
-        route_key="555",
-        external_user_id="999",
+    row = await _start_cold_dm(
+        deps, admission, tenant_id=tenant.id, workspace_id=tenant.external_id
     )
     admission = replace(
         admission,

@@ -91,7 +91,7 @@ describe("agents", () => {
 
 describe("filterChannels", () => {
   const rows = [
-    channel("1", "clv-models", { ...inCategory("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false }, agent: { value: "clv", source: "channel" } }),
+    channel("1", "clv-models", { ...inCategory("Projects"), budget: { limit_usd: "25.00", window: "monthly", starts_at: null, ends_at: null, spent_usd: 1, remaining_usd: 24, percent_used: 4, active: true, exceeded: false, on_limit: "stop", alert_channel_id: null }, agent: { value: "clv", source: "channel" } }),
     channel("2", "board", { tags: ["locked"], platform: "slack" }),
     channel("3", "general"),
   ]
@@ -139,7 +139,7 @@ describe("accessAsk", () => {
 
 describe("budget stops", () => {
   const withBudget = (spent: number, window: "monthly" | "total") => ({
-    budget: { limit_usd: "10.00", window, starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: 0, percent_used: 0, active: true, exceeded: false },
+    budget: { limit_usd: "10.00", window, starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: 0, percent_used: 0, active: true, exceeded: false, on_limit: "stop" as const, alert_channel_id: null },
     spend: { month_usd: 4, last_30_days_usd: 9 },
   })
   it("compares with the budget's spend while its window holds, else this month's", () => {

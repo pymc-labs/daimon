@@ -7,3 +7,4 @@ whose package init reaches back into the stores.
 MA_METADATA_KEY_TENANT = "daimon_tenant"
 MA_METADATA_KEY_NAME = "daimon_name"
 MA_METADATA_KEY_ACCOUNT = "daimon_account"
+MA_METADATA_KEY_MANAGED = "daimon_managed"

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -19,9 +18,8 @@ from daimon.core.stores.access_policy import (
 from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.config import BackendConfig
 from pydantic import ValidationError
 
@@ -87,7 +85,7 @@ async def _run_pinned_turn(host, thread_id: str, turn_io_used: TurnIOSpy) -> Non
     async def reseed_user_message() -> str:
         return "compatibility question"
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=TENANT,
@@ -95,8 +93,6 @@ async def _run_pinned_turn(host, thread_id: str, turn_io_used: TurnIOSpy) -> Non
         thread_id=thread_id,
         external_user_id="caller",
         user_message="compatibility question",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
         reseed_user_message=reseed_user_message,
         recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         render_interval_s=0.01,
@@ -136,6 +132,12 @@ async def test_backends_off_keeps_managed_agents_execution_with_saved_native_cho
         monkeypatch.setenv(f"DAIMON_CHANNEL_{provider.upper()}_KEY", "synthetic-key")
     async with host.sessions.begin() as db:
         await clear_access_policy(db, tenant_id=TENANT)
+        if keys:  # a key only makes a provider available; the admin opts in
+            await set_access_policy(
+                db,
+                tenant_id=TENANT,
+                policy=TenantAccessPolicy(enabled_backends=("anthropic", *keys)),
+            )
     if selector == "channel":
         first = (
             BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
@@ -173,9 +175,8 @@ async def test_backends_off_keeps_managed_agents_execution_with_saved_native_cho
 
     async with host.sessions() as db:
         policy = await load_access_policy(db, tenant_id=TENANT)
-    expected = ("anthropic", *keys)
-    assert policy.enabled_backends == expected, "default policy should reflect deployment keys"
-    assert not policy.backends_explicit, "the default should remain a read-time choice"
+    assert policy.enabled_backends == ("anthropic", *keys), "the opt-in is the allowlist"
+    assert policy.backends_explicit == bool(keys), "with no opt-in, the default stays Anthropic"
 
     await _run_pinned_turn(host, f"thread-{selector}", turn_io_used)
 
@@ -201,9 +202,7 @@ async def test_explicit_restricted_policy_and_tenant_default_stay_separate(
         default = await load_access_policy(db, tenant_id=other_tenant)
     assert restricted.enabled_backends == ("anthropic",), "explicit restriction should persist"
     assert restricted.backends_explicit, "the restriction should not follow new keys"
-    assert default.enabled_backends == ("anthropic", "openai"), (
-        "the other tenant should follow keys"
-    )
+    assert default.enabled_backends == ("anthropic",), "a key alone opts no tenant in"
     assert not default.backends_explicit, "another tenant should remain on the default"
     async with host.sessions.begin() as db:
         await set_access_policy(

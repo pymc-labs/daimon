@@ -19,6 +19,7 @@ from daimon.core.posted_controls.slack_blocks import (
     card_notification_text,
 )
 
+from ..shared_fakes import control_card as _control_card
 from .test_cards import AGENT, EXPIRES, KINDS, REQUESTER, STATES, TOKEN, build
 
 EXPIRES_UNIX = int(EXPIRES.timestamp())
@@ -175,27 +176,4 @@ def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> No
     assert ids == [b.custom_id for b in card.buttons], "each button routes by its custom id"
     assert [e.get("style") for e in actions["elements"]] == [None, "primary"], (
         "only the rightmost button, the card's own action, is filled"
-    )
-
-
-def _control_card(kind: str, requester: str):
-    """A posted control card with Cancel and the filled action rightmost, as posted cards are."""
-    import datetime as dt
-    import uuid
-
-    from daimon.core.posted_controls import FOOTER_TEMPLATE, CardButton, PostedCard
-
-    card_id = uuid.uuid4()
-    return PostedCard(
-        kind=kind,  # pyright: ignore[reportArgumentType]
-        state="requested",
-        headline="Change the model?",
-        facts=("Researcher moves to OpenAI.",),
-        buttons=(
-            CardButton(label="Cancel", style="secondary", custom_id=f"bsw:{card_id}:cancel"),
-            CardButton(label="Switch", style="primary", custom_id=f"bsw:{card_id}:confirm"),
-        ),
-        footer=FOOTER_TEMPLATE,
-        requester_platform_user_id=requester,
-        expires_at_unix=int((dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)).timestamp()),
     )

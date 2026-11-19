@@ -13,12 +13,12 @@ from asyncpg import CannotConnectNowError  # pyright: ignore[reportMissingTypeSt
 from daimon.adapters.discord.runtime import hold_worker_owner
 from daimon.core.stores.discord_message_admissions import claim_message
 from daimon.core.stores.thread_sessions import (
-    create_thread_session,
     list_orphaned_turns,
     lock_orphaned_turn,
     mark_turn_active,
 )
 from daimon.core.stores.worker_ownership import owner_is_alive
+from daimon.testing.builders import new_thread_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -329,6 +329,9 @@ async def test_runtime_owner_leaves_the_turn_pool_capacity_available(
     )
     async with build_runtime(settings) as runtime:
         engine = runtime.sessionmaker.kw["bind"]
+        # The context-provider warmup borrows a turn-pool connection at startup;
+        # stop it so only a misplaced owner connection could still be checked out.
+        await runtime.turn_deps.context_providers.aclose()
         assert engine.pool.checkedout() == 0, "the owner connection must not consume a turn slot"
         async with runtime.sessionmaker() as session:
             assert await owner_is_alive(session, runtime.owner_key)
@@ -382,10 +385,9 @@ async def test_connection_loss_cannot_recover_live_card(
     lost = asyncio.Event()
     async with factory() as session:
         tenant = await make_tenant(session)
-        row = await create_thread_session(
+        row = await new_thread_session(
             session,
             tenant_id=tenant.id,
-            platform="discord",
             thread_id="owner-connection-loss",
             account_id=uuid4(),
             ma_session_id="owner-connection-loss",

@@ -13,10 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import cast
 
-from anthropic import AsyncAnthropic
-from daimon.core.turn.posture import BillingExempt
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
@@ -28,15 +25,10 @@ from daimon.testing.turn_fakes import (
 from .conftest import make_end_turn, make_status_idle
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
-_EXEMPT = BillingExempt(reason="cli-operator-run")
 
 
 def _now() -> datetime:
     return _FROZEN_NOW
-
-
-def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
-    return cast(AsyncAnthropic, fa)
 
 
 def _assert_no_leaked_turn_tasks() -> None:
@@ -78,16 +70,7 @@ async def test_cancel_during_stream_open_interrupts_before_any_event() -> None:
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        final = await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lc,
-            cancel=cancel,
-            render_interval_s=0.001,
-            now=_now,
-            billing=_EXEMPT,
-        )
+        final = await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, now=_now)
 
     assert final.error is not None
     assert final.error.kind == "interrupted"
@@ -123,16 +106,7 @@ async def test_cancel_during_send_initial_interrupts_and_closes_the_opened_strea
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        final = await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lc,
-            cancel=cancel,
-            render_interval_s=0.001,
-            now=_now,
-            billing=_EXEMPT,
-        )
+        final = await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, now=_now)
 
     assert final.error is not None
     assert final.error.kind == "interrupted"
@@ -156,16 +130,7 @@ async def test_cancel_already_set_before_run_turn_stays_pre_stream() -> None:
     cancel.set()
 
     lc = RecordingLifecycle()
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=cancel,
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, now=_now)
 
     assert final.error is not None
     assert final.error.kind == "interrupted"
@@ -198,16 +163,7 @@ async def test_cancel_during_stream_open_leaves_no_waiter_task_pending() -> None
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lc,
-            cancel=cancel,
-            render_interval_s=0.001,
-            now=_now,
-            billing=_EXEMPT,
-        )
+        await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, now=_now)
 
     _assert_no_leaked_turn_tasks()
 
@@ -234,15 +190,7 @@ async def test_interrupt_mid_consume_still_posts_user_interrupt_regression() -> 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lc,
-            cancel=cancel,
-            render_interval_s=0.001,
-            interrupt_timeout_s=5.0,
-            now=_now,
-            billing=_EXEMPT,
+            fa, lifecycle=lc, cancel=cancel, interrupt_timeout_s=5.0, now=_now
         )
 
     types = [ev["type"] for _sid, payload in fa.beta.sessions.events.sent_events for ev in payload]

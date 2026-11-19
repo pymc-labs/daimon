@@ -18,6 +18,8 @@ from daimon.adapters.mcp.tools._channel_target import (
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 
+from ..harness import auth_identity
+
 TEAMS_CHANNEL = "19:c@thread.tacv2"
 
 
@@ -57,9 +59,9 @@ async def test_a_discord_id_that_is_not_a_snowflake_is_refused_before_any_lookup
 
 
 def _auth(platform: str) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform=platform,
         external_id="T1",

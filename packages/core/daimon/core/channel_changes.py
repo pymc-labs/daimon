@@ -47,7 +47,12 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import channel_budgets as budget_store
 from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.channel_changes import WriteHook, record_change, write_channel_default
-from daimon.core.stores.domain import BudgetWindow, ChangeSurface, ChannelBudgetRow
+from daimon.core.stores.domain import (
+    BudgetOnLimit,
+    BudgetWindow,
+    ChangeSurface,
+    ChannelBudgetRow,
+)
 from daimon.core.stores.scoped_config_read import get_scope
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -101,20 +106,32 @@ class BudgetValue:
     window: BudgetWindow
     starts_at: datetime | None = None
     ends_at: datetime | None = None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
 
     @classmethod
     def of(cls, row: ChannelBudgetRow | None) -> BudgetValue | None:
         if row is None:
             return None
-        return cls(row.limit_usd, row.window, row.starts_at, row.ends_at)
+        return cls(
+            row.limit_usd,
+            row.window,
+            row.starts_at,
+            row.ends_at,
+            row.on_limit,
+            row.alert_channel_id,
+        )
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {
+        fields: dict[str, JsonValue] = {
             "limit_usd": f"{self.limit_usd:.2f}",
             "window": self.window,
             "starts_at": self.starts_at.isoformat() if self.starts_at else None,
             "ends_at": self.ends_at.isoformat() if self.ends_at else None,
         }
+        if self.on_limit == "alert":  # a stop budget reads as it always has
+            fields |= {"on_limit": "alert", "alert_channel_id": self.alert_channel_id}
+        return fields
 
 
 def _budget_json(value: BudgetValue | None) -> JsonValue:
@@ -494,6 +511,8 @@ async def set_budget(
             starts_at=spec.starts_at,
             ends_at=spec.ends_at,
             set_by_account_id=actor.account_id,
+            on_limit=spec.on_limit,
+            alert_channel_id=spec.alert_channel_id,
         )
         await _record_budget(
             session,

@@ -6,11 +6,11 @@ from typing import Any
 
 import httpx
 import pytest_asyncio
-from anthropic.types.beta import SkillListResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.core.defaults.reconcile_skills import reconcile_skill
 from daimon.core.defaults.report import Action
 from daimon.core.stores.seeded_skills import load_seeded_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -33,15 +33,7 @@ def _write_skill(tmp_path: Path, name: str = "brainstorming", body: str = "body\
 
 
 def _existing_skill_row(id_: str, name: str, version: str = "1") -> dict[str, Any]:
-    return SkillListResponse(
-        id=id_,
-        type="custom",
-        display_title=name,
-        latest_version=version,
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
-    ).model_dump(mode="json")
+    return skill_listed(id=id_, display_title=name, latest_version=version).model_dump(mode="json")
 
 
 def _router_with_skills(skills: list[dict[str, Any]]) -> MARouter:
@@ -66,15 +58,7 @@ async def test_reconcile_skill_creates_when_not_on_ma(
         create_called = True
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_new",
-                type="custom",
-                display_title="brainstorming",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_new", display_title="brainstorming").model_dump(mode="json"),
         )
 
     router.add("POST", r"/v1/skills", on_create)
@@ -212,23 +196,14 @@ async def test_reconcile_skill_deletes_duplicates_keeping_newest(
     on next apply.
     """
     skill_dir = _write_skill(tmp_path)
-    older = SkillListResponse(
+    older = skill_listed(
         id="sk_old",
-        type="custom",
         display_title=f"{str(tenant_id)[:8]}-brainstorming",
-        latest_version="1",
         created_at="2026-04-20T00:00:00Z",
         updated_at="2026-04-20T00:00:00Z",
-        source="custom",
     ).model_dump(mode="json")
-    newer = SkillListResponse(
-        id="sk_new",
-        type="custom",
-        display_title=f"{str(tenant_id)[:8]}-brainstorming",
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source="custom",
+    newer = skill_listed(
+        id="sk_new", display_title=f"{str(tenant_id)[:8]}-brainstorming"
     ).model_dump(mode="json")
     router = _router_with_skills([older, newer])
 
@@ -363,15 +338,7 @@ async def test_reconcile_skill_creates_with_same_prefixed_title(
                 captured_display_title.append(prefixed)
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_created",
-                type="custom",
-                display_title=prefixed,
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_created", display_title=prefixed).model_dump(mode="json"),
         )
 
     router.add("POST", r"/v1/skills", on_create)

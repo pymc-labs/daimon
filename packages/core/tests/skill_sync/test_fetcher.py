@@ -112,8 +112,26 @@ async def test_fetch_tarball_raises_unreachable_on_404_unauth() -> None:
         await fetcher.fetch_tarball(credential=None, url="o/private-repo", branch="main")
 
 
-async def test_fetch_tarball_normalizes_url_with_https_prefix() -> None:
-    """`https://github.com/o/r` is normalized to `o/r` in the API URL."""
+@pytest.mark.parametrize(
+    "url, message",
+    [
+        pytest.param(
+            "https://github.com/o/r",
+            "https:// prefix must be stripped before constructing API URL",
+            id="with_https_prefix",
+        ),
+        pytest.param(
+            "https://github.com/o/r.git",
+            ".git suffix must be stripped before constructing API URL",
+            id="with_git_suffix",
+        ),
+        pytest.param(
+            "o/r", "short-form owner/repo must produce a valid API URL", id="with_short_form"
+        ),
+    ],
+)
+async def test_fetch_tarball_normalizes_url(url: str, message: str) -> None:
+    """`https://` and `.git` are stripped; short-form `o/r` is accepted as-is."""
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -122,61 +140,16 @@ async def test_fetch_tarball_normalizes_url_with_https_prefix() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     fetcher = GitHubTarballFetcher(client)
-    await fetcher.fetch_tarball(credential="t", url="https://github.com/o/r", branch="main")
-    assert "/repos/o/r/tarball/" in str(captured[0].url), (
-        "https:// prefix must be stripped before constructing API URL"
-    )
+    await fetcher.fetch_tarball(credential="t", url=url, branch="main")
+    assert "/repos/o/r/tarball/" in str(captured[0].url), message
 
 
-async def test_fetch_tarball_normalizes_url_with_git_suffix() -> None:
-    """`https://github.com/o/r.git` is normalized — `.git` suffix is removed."""
-    captured: list[httpx.Request] = []
+@pytest.mark.parametrize("status", [pytest.param(401, id="on_401"), pytest.param(403, id="on_403")])
+async def test_fetch_tarball_raises_GitHubAuthError(status: int) -> None:
+    """401 and 403 responses map to GitHubAuthError (403: insufficient scopes)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, content=b"")
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    fetcher = GitHubTarballFetcher(client)
-    await fetcher.fetch_tarball(credential="t", url="https://github.com/o/r.git", branch="main")
-    assert "/repos/o/r/tarball/" in str(captured[0].url), (
-        ".git suffix must be stripped before constructing API URL"
-    )
-
-
-async def test_fetch_tarball_normalizes_url_with_short_form() -> None:
-    """Short-form `o/r` (no scheme/host) is accepted as-is."""
-    captured: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, content=b"")
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    fetcher = GitHubTarballFetcher(client)
-    await fetcher.fetch_tarball(credential="t", url="o/r", branch="main")
-    assert "/repos/o/r/tarball/" in str(captured[0].url), (
-        "short-form owner/repo must produce a valid API URL"
-    )
-
-
-async def test_fetch_tarball_raises_GitHubAuthError_on_401() -> None:
-    """401 response maps to GitHubAuthError."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, content=b"")
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    fetcher = GitHubTarballFetcher(client)
-    with pytest.raises(GitHubAuthError):
-        await fetcher.fetch_tarball(credential="t", url="o/r", branch="main")
-
-
-async def test_fetch_tarball_raises_GitHubAuthError_on_403() -> None:
-    """403 response maps to GitHubAuthError (insufficient scopes)."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, content=b"")
+        return httpx.Response(status, content=b"")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     fetcher = GitHubTarballFetcher(client)

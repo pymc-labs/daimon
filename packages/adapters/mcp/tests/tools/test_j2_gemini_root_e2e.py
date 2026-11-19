@@ -39,6 +39,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
+    enable_all_providers,
     make_account,
     make_ledger_entry,
     make_platform_principal,
@@ -175,6 +176,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     admin = request.param == "admin"
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
+        await enable_all_providers(session, tenant=tenant)
         account = await make_account(session, tenant=tenant)
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="123"
@@ -308,6 +310,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
             target_backend="gemini",
             model="argon",
             origin_context_id=str(chat.origin.id),
+            expected_revision=0,
         )
     assert "Nothing changed" in str(offered.value)
     # 2. "yes": a NEW copy, owned by whoever asked.
@@ -339,6 +342,7 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         model="argon",
         origin_context_id=str(chat.origin.id),
         handoff_summary=summary,
+        expected_revision=0,
     )
     # A readable catalogue keeps Daimon's MCP on Gemini, the switch tool included;
     # an unreadable one declares the drop.
@@ -481,7 +485,7 @@ async def _to_argon(chat: Chat, name: str, **call):
         target_backend="gemini",
         model="argon",
         origin_context_id=str(chat.origin.id),
-        **call,
+        **{"expected_revision": 0, **call},
     )
 
 

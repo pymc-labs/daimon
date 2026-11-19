@@ -1,8 +1,9 @@
 """Routing for ask-a-human requests: where a request goes, and where it settles.
 
-A workspace's own channel (`support_channels`) wins when the `support_own_channel`
-feature allows it; otherwise the deployment's channel for the platform. Both are
-read at request time, never cached.
+When the `support_own_channel` feature allows it, the menu's own channel wins, then
+the workspace's (`support_channels`); otherwise the deployment's channel for the
+platform. All are read at request time, never cached; a request keeps the channel
+it was sent to.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.native_admins import GroupMembers, ServerAdminIds
-from daimon.core.stores.support import get_support_channel
-from daimon.core.stores.support_rows import SupportEscalationRow
+from daimon.core.stores.support import get_support_channel, menu_for_place
+from daimon.core.stores.support_rows import SupportEscalationRow, SupportMenuRow
+from daimon.core.support import SupportPlace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 MAX_RECIPIENTS: Final = 10
@@ -85,6 +87,40 @@ async def support_destination(
     return SupportDestination(platform=platform, channel_id=channel, own=False, slack_team_id=team)
 
 
+def menu_destination(
+    menu: SupportMenuRow | None, *, platform: str, settings: Settings
+) -> SupportDestination | None:
+    """The channel a menu names for its requests, while the workspace may pick its own."""
+    if menu is None or menu.channel is None or not own_channel_allowed(settings):
+        return None
+    c = menu.channel
+    return SupportDestination(
+        platform=platform,
+        channel_id=c.id,
+        own=True,
+        slack_team_id=c.team_id if platform == "slack" else None,
+        teams_team_id=c.team_id if platform == "teams" else None,
+        teams_service_url=c.service_url if platform == "teams" else None,
+    )
+
+
+async def request_destination(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    place: SupportPlace,
+    settings: Settings,
+) -> SupportDestination | None:
+    """Where a request from `place` goes: its menu's channel, else `support_destination`."""
+    menu = await menu_for_place(session, tenant_id=tenant_id, place=place)
+    return menu_destination(menu, platform=platform, settings=settings) or (
+        await support_destination(
+            session, tenant_id=tenant_id, platform=platform, settings=settings
+        )
+    )
+
+
 async def feedback_destination(
     session: AsyncSession, settings: Settings, place: FeaturePlace
 ) -> SupportDestination | None:
@@ -146,7 +182,9 @@ __all__ = [
     "feedback_destination",
     "in_channel",
     "log_undelivered",
+    "menu_destination",
     "own_channel_allowed",
+    "request_destination",
     "settle_channel_ok",
     "support_destination",
     "support_recipient_tiers",

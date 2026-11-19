@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,7 +35,6 @@ from daimon.core.continuity.continuation import (
 from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import host_call_cards as host_cards
 from daimon.core.stores import tenant_ledger
@@ -50,27 +50,24 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
+
+_resolved_config = partial(
+    ResolvedConfig,
+    agent_name="test-agent",
+    agent_name_tier="tenant",
+    environment_name="test-env",
+    environment_name_tier="tenant",
+)
+
 
 _THREAD_ID = 4242
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _make_guild(
@@ -149,12 +146,10 @@ def _make_runtime(
     anthropic.beta.agents.list = MagicMock(return_value=_AsyncIter([]))
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
@@ -346,12 +341,7 @@ def _make_prepared_turn(*, account_id: uuid.UUID) -> PreparedTurn:
             account_id=account_id,
             agent=ma_agent(),
             environment=ma_environment(),
-            config=ResolvedConfig(
-                agent_name="test-agent",
-                agent_name_tier="tenant",
-                environment_name="test-env",
-                environment_name_tier="tenant",
-            ),
+            config=_resolved_config(),
         ),
         ma_session_id="sess_test",
         mapping_id=None,
@@ -441,12 +431,7 @@ async def _run_continuation(
         patch("daimon.adapters.discord.bot.bind_session", new_callable=AsyncMock) as bind,
         patch("daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock) as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_test"
         resolve_env.return_value = "env_test"
         bind.return_value = _make_prepared_turn(account_id=account.id)
@@ -503,6 +488,9 @@ async def _run_continuation(
         str(thread.id),
     )
     assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
+    # The answer is kept with the question the work was queued under, never the seed.
+    assert run_turn.await_args.kwargs["continues"] == row
+    assert run_turn.await_args.kwargs.get("request_text") is None
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message, tenant.id
@@ -801,12 +789,7 @@ async def test_a_wake_denied_by_admission_settles_skipped_and_never_runs(
         p_bind as bind,
         p_run as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_target"
         resolve_env.return_value = "env_test"
         await bot.dispatch_continuations_in_thread(
@@ -838,12 +821,7 @@ async def test_the_wake_poller_opens_the_thread_and_runs_the_wake_once(
         p_bind as bind,
         p_run as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_target"
         resolve_env.return_value = "env_test"
         bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())
@@ -886,12 +864,7 @@ async def test_a_fired_timer_resumes_the_thread_with_its_note(
         p_bind as bind,
         p_run as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_target"
         resolve_env.return_value = "env_test"
         bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())
@@ -975,12 +948,7 @@ async def test_a_timer_never_runs_as_an_agent_it_was_not_set_with(
             bot_module, "run_prepared_turn", side_effect=bot_module.run_prepared_turn
         ) as run_turn,
     ):
-        config.return_value = ResolvedConfig(
-            agent_name="other-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        config.return_value = _resolved_config(agent_name="other-agent")
         resolve.return_value = "ag_other"
         env.return_value = "env_test"
         await poll_wakes_once(
@@ -1049,12 +1017,7 @@ async def test_continuation_turn_admin_cards_read_no_agent_source(
         patch("daimon.adapters.discord.bot.bind_session", new_callable=AsyncMock) as bind,
         patch("daimon.adapters.discord.bot.run_prepared_turn", new_callable=AsyncMock) as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_test"
         resolve_env.return_value = "env_test"
         bind.return_value = _make_prepared_turn(account_id=account.id)
@@ -1156,12 +1119,7 @@ async def _run_wake(
         p_bind as bind,
         p_run as run_turn,
     ):
-        resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        resolve_config.return_value = _resolved_config()
         resolve_agent.return_value = "ag_target"
         resolve_env.return_value = "env_test"
         bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())

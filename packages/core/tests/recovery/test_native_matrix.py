@@ -21,11 +21,10 @@ from daimon.core.turn.openai_host import OpenAIHostRuntime
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
-from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import extract_final_response
 from daimon.testing.factories import make_tenant
 from daimon.testing.recovery import KillableSessionmaker, ledger, record
-from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_fakes import RecordingLifecycle, run_prepared
 from mux.contracts.ids import ResourceRef, Revision
 from mux.contracts.resources import SessionSpec
 from mux.drivers.openai.session_controls import SessionControls
@@ -152,7 +151,7 @@ class NativeProcess:
             async def reseed() -> str:
                 return text_
 
-            return await run_prepared_turn(
+            return await run_prepared(
                 deps,
                 prepared,
                 tenant_id=TENANT,
@@ -161,7 +160,6 @@ class NativeProcess:
                 external_user_id="caller",
                 user_message=text_,
                 lifecycle=lifecycle,
-                cancel=asyncio.Event(),
                 reseed_user_message=reseed,
                 recovery_lifecycle=lambda cancel: RecordingLifecycle(),
                 render_interval_s=0.01,

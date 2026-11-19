@@ -10,7 +10,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.adapters.mcp.tools._session_gate import CARD_UNVERIFIED, session_card_gap
 from daimon.adapters.mcp.tools.setup_target import get_chat_origin
 from daimon.core.agent_configuration import (
     ConfigurationReference,
@@ -58,7 +58,7 @@ async def _require_chat(
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
     if await session_card_gap(runtime, auth, origin, tool_name=tool) is not None:
-        raise ToolError("This conversation cannot verify the confirmation card. Nothing changed.")
+        raise ToolError(CARD_UNVERIFIED)
 
 
 def _actor(auth: AuthIdentity) -> BackendActor:
@@ -93,8 +93,9 @@ async def _request_provider_allowlist_impl(
         summary = (
             "Allowed providers will be: " + (", ".join(providers) or "none") + ". "
             "This applies across this server. Saving makes this list the server's own choice; "
-            "until an admin saves one, the server uses every provider this Daimon install has "
-            "a key for. "
+            "until an admin saves one, the server uses Anthropic only. "
+            "Enabling a provider sends this server's conversations, and the connector data "
+            "they use, to that provider. "
             "Call request_provider_allowlist again with the same providers, expected_revision "
             "and preview_digest; the admin must Confirm on the card. Nothing changed yet."
         )
@@ -283,8 +284,8 @@ def register_provider_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Preview and confirm the server's allowed model providers. Admin-only.
 
         providers is the complete replacement list, not an addition. A server no
-        admin configured uses every provider this Daimon install holds a key for;
-        saving a list makes it the server's own choice, which always wins.
+        admin configured uses Anthropic only; adding another provider is the admin's
+        opt-in to send this server's conversations to that company.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.

@@ -22,7 +22,6 @@ from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
     TurnRuntime,
-    register_turn_backend,
 )
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ReplaceSession
@@ -31,14 +30,13 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import (
     carry_on_adoption,
-    register_session_reader,
     replaced_session,
 )
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import SpendGuard
-from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
-from daimon.core.turn.openai_codec import PROFILE, PROFILES
-from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.hosted_codec import OPENAI
+from daimon.core.turn.hosted_io import OpenAITurnIO
+from daimon.core.turn.io import TurnCodecRequest, TurnIO
 from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
@@ -50,7 +48,6 @@ from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
     ProviderPreparationRequest,
-    register_turn_preparation,
 )
 from daimon.core.turn.replace_binding import (
     BindingFacts,
@@ -61,6 +58,7 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
+from daimon.core.turn.runtimes import HostedBackend
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.digest import digest_body
@@ -79,6 +77,10 @@ from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
+
+PROFILE = OPENAI.profile
+PROFILES = OPENAI.profiles
+
 
 log = structlog.get_logger(__name__)
 
@@ -382,8 +384,10 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     runtime = runtime_for(
         request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
     )
+    from daimon.core.turn.provider_gate import gated_turn
+
     try:
-        return await _prepare_with_runtime(request, runtime)
+        return await gated_turn(request, lambda gated: _prepare_with_runtime(gated, runtime))
     except BaseException:
         # A per-turn MCP credential minted before the turn existed (a template's
         # session create) is revoked now, not left to its TTL.
@@ -429,6 +433,8 @@ async def _prepare_with_runtime(
         )
     request = replace(request, admission=current)
     await _check_daily_model_cap(request, runtime, revision)
+    if request.gate is not None:
+        await request.gate.enter(runtime.provider_key)
     # Resolve a host-authorized native plan before creating a private transport.
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
@@ -651,9 +657,10 @@ async def _prepare_with_runtime(
 
     scope, tenant_id, binding_id = request.scope, request.tenant_id, binding.id
     sessionmaker, markup = request.deps.sessionmaker, request.deps.markup
+    # Debited to the channel whose budget the turn counts against, as on Anthropic.
     user_id, channel_id, agent_id = (
         request.external_user_id,
-        revision.channel.channel_id,
+        current.budget_channel_id,
         current.agent.id,
     )
     late, read_timeout_s = runtime.late_usage, runtime.late_read_timeout_s
@@ -754,13 +761,5 @@ def _old_session(
     return OldSession(binding=binding, ref=ref, backend=driver(host, revision, scope, binding))
 
 
-def register_host() -> None:
-    """Fill missing host callbacks while preserving explicit application overrides."""
-    for profile in PROFILES:
-        register_session_reader(profile, _old_session)
-        register_turn_backend(profile, _backend, fallback=True)
-        register_turn_codec(profile, _codec, fallback=True)
-        register_turn_preparation(profile, prepare_openai, fallback=True)
-
-
-register_host()
+#: The host half of the backend; the deployment module adds its runtime.
+HOST = HostedBackend(backend=_backend, codec=_codec, prepare=prepare_openai, reader=_old_session)

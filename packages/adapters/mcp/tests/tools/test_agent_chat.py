@@ -37,15 +37,6 @@ from anthropic.types.beta.sessions import (
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.hosted_artifacts import ChartUrl, HostedChartDelivery
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.adapters.mcp.tools.agent_chat import (
@@ -100,7 +91,7 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -125,6 +116,8 @@ from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from ..harness import auth_identity, production_identity_middleware
 
 _BUNDLE_SECRET = "test-bundle-handle-secret"
 _TENANT_ID = uuid.uuid4()
@@ -238,6 +231,7 @@ def _runtime(
 ) -> McpRuntime:
     settings = MagicMock()
     settings.tool_safety = OPEN_TOOL_SAFETY
+    settings.features = {}  # monitoring reads the deployment feature map
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None
@@ -250,12 +244,7 @@ def _runtime(
 
 
 def _auth(agent_id: uuid.UUID | None = _AGENT_UUID) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=_ACCOUNT_ID,
-        tenant_id=_TENANT_ID,
-        role=Role.USER,
-        agent_id=agent_id,
-    )
+    return auth_identity(_ACCOUNT_ID, _TENANT_ID, role=Role.USER, agent_id=agent_id)
 
 
 def _session_json(
@@ -376,17 +365,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools(sessionmak
         name="narrowing-test",
         auth=StaticTokenVerifier(tokens={token: token_claims}),
     )
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=mock_sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(mock_sessionmaker))
     # Baselines: hide admin and agent-chat by default
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
@@ -438,17 +417,7 @@ def _full_stack_mcp(token: str, claims: dict[str, str], sessionmaker) -> FastMCP
     """
     mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="full-stack-181", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=mock_sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(mock_sessionmaker))
     mcp.add_transform(Visibility(False, tags={"admin"}))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     mcp.add_transform(
@@ -721,16 +690,7 @@ async def test_start_turn_then_poll_get_session_and_read_transcript(
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add(
@@ -817,13 +777,7 @@ async def test_list_events_never_returns_a_turn_origin_id() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add(
@@ -1520,16 +1474,7 @@ def _start_client() -> AsyncAnthropic:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add(
@@ -1638,16 +1583,7 @@ async def test_get_session_raises_session_not_found_for_cross_tenant_handle() ->
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     # The session belongs to ag_other_tenant — cross-tenant handle
@@ -1689,22 +1625,8 @@ def _sibling_tenant_agents_router() -> MARouter:
         r"/v1/agents",
         lambda _r, _m: list_response(
             [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json"),
-                ma_agent(
-                    id="ag_sibling",
-                    name="sibling-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "sibling-agent",
-                    },
-                ).model_dump(mode="json"),
+                ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID),
+                ma_agent_payload(id="ag_sibling", name="sibling-agent", tenant_id=_TENANT_ID),
             ]
         ),
     )
@@ -1844,16 +1766,7 @@ async def test_list_sessions_lists_only_the_callers_agent_sessions() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add("GET", r"/v1/sessions", on_sessions_list)
@@ -1882,16 +1795,7 @@ def _describe_agent_router() -> MARouter:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     return router
@@ -1961,17 +1865,7 @@ async def test_list_events_admits_thread_status_events_through_fastmcp(sessionma
 
     mock_sessionmaker = sessionmaker
     mcp = FastMCP(name="list-events-schema", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=mock_sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(mock_sessionmaker))
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=mock_sessionmaker)
     register_agent_chat_tools(mcp, runtime, billing_config=None)
@@ -2041,15 +1935,7 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
         name="admission-over-balance",
         auth=StaticTokenVerifier(tokens={token: claims}),
     )
-    identity = IdentityMiddleware(
-        subject_resolver=production_subject_resolver,
-        tenant_resolver=production_tenant_resolver,
-        role_resolver=production_role_resolver,
-        agent_id_resolver=production_agent_id_resolver,
-        is_admin_resolver=production_is_admin_resolver,
-        internal_resolver=production_internal_resolver,
-        sessionmaker=db_session_factory,
-    )
+    identity = production_identity_middleware(db_session_factory)
     mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory)
@@ -2103,16 +1989,7 @@ def _agent_and_env_router(*extra_envs: dict[str, Any]) -> MARouter:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload, *extra_envs]))
@@ -2140,7 +2017,7 @@ def _isolated_agent_and_env_router(*, ma_agent_id: str = _MA_AGENT_ID) -> MARout
         r"/v1/agents",
         lambda _r, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id=ma_agent_id,
                     name="reader-agent",
                     metadata={
@@ -2148,7 +2025,7 @@ def _isolated_agent_and_env_router(*, ma_agent_id: str = _MA_AGENT_ID) -> MARout
                         "daimon_name": "reader-agent",
                         "daimon_isolated": "true",
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -2275,9 +2152,9 @@ async def test_start_turn_stamps_billing_exempt_only_for_a_caller_without_platfo
     router.add("POST", r"/v1/sessions/([^/]+)/events", _boundary_send_response)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
-    auth = AuthIdentity(
-        account_id=_ACCOUNT_ID,
-        tenant_id=_TENANT_ID,
+    auth = auth_identity(
+        _ACCOUNT_ID,
+        _TENANT_ID,
         role=Role.USER,
         agent_id=_AGENT_UUID,
         platform_user_id=platform_user_id,
@@ -2365,9 +2242,9 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place(
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     router.add("GET", r"/v1/sessions/([^/]+)", on_retrieve)
     client = build_fake_anthropic(router.dispatch)
-    billed_caller = AuthIdentity(
-        account_id=_ACCOUNT_ID,
-        tenant_id=_TENANT_ID,
+    billed_caller = auth_identity(
+        _ACCOUNT_ID,
+        _TENANT_ID,
         role=Role.USER,
         agent_id=_AGENT_UUID,
         platform_user_id="discord-user-7",
@@ -3450,9 +3327,9 @@ async def test_describe_agent_reports_platform_and_workspace_id(
     """describe_agent surfaces the auth claim's platform and external_id as workspace_id."""
     client = build_fake_anthropic(_describe_agent_router().dispatch)
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=_TENANT_ID,
+    auth = auth_identity(
+        uuid.uuid4(),
+        _TENANT_ID,
         role=Role.USER,
         agent_id=_AGENT_UUID,
         platform="discord",
@@ -3476,16 +3353,7 @@ async def test_ask_with_handle_continues_instead_of_starting(
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={
-                        "daimon_tenant": str(_TENANT_ID),
-                        "daimon_name": "test-agent",
-                    },
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add(
@@ -3614,13 +3482,7 @@ async def test_list_sessions_omits_other_accounts_sessions_of_the_same_agent() -
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add(
@@ -3731,15 +3593,7 @@ async def test_turn_tools_refuse_an_invoker_outside_the_allowlist_before_creatin
         "client_id": "test",
     }
     mcp = FastMCP(name="admission-invoker", auth=StaticTokenVerifier(tokens={token: claims}))
-    identity = IdentityMiddleware(
-        subject_resolver=production_subject_resolver,
-        tenant_resolver=production_tenant_resolver,
-        role_resolver=production_role_resolver,
-        agent_id_resolver=production_agent_id_resolver,
-        is_admin_resolver=production_is_admin_resolver,
-        internal_resolver=production_internal_resolver,
-        sessionmaker=db_session_factory,
-    )
+    identity = production_identity_middleware(db_session_factory)
     mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(
@@ -3800,13 +3654,7 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="acme-project",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "acme-project"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="acme-project", tenant_id=tenant_id)]
         ),
     )
     sends: list[str] = []
@@ -3828,15 +3676,7 @@ async def test_turn_tools_refuse_a_pinned_agent_before_creating_session(
         "client_id": "test",
     }
     mcp = FastMCP(name="admission-pin", auth=StaticTokenVerifier(tokens={token: claims}))
-    identity = IdentityMiddleware(
-        subject_resolver=production_subject_resolver,
-        tenant_resolver=production_tenant_resolver,
-        role_resolver=production_role_resolver,
-        agent_id_resolver=production_agent_id_resolver,
-        is_admin_resolver=production_is_admin_resolver,
-        internal_resolver=production_internal_resolver,
-        sessionmaker=db_session_factory,
-    )
+    identity = production_identity_middleware(db_session_factory)
     mcp.add_middleware(identity)
     mcp.add_transform(Visibility(False, tags={"agent-chat"}))
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory)
@@ -4089,13 +3929,7 @@ async def test_start_turn_decides_again_inside_session_create(db_session_factory
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id=_MA_AGENT_ID,
-                    name="test-agent",
-                    metadata={"daimon_tenant": str(_TENANT_ID), "daimon_name": "test-agent"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=_MA_AGENT_ID, name="test-agent", tenant_id=_TENANT_ID)]
         ),
     )
     router.add("GET", r"/v1/environments", lambda _r, _m: list_response([env_payload]))

@@ -6,13 +6,10 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
-from daimon.core.config import McpSettings
 from daimon.core.errors import SessionRetired
-from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.scope import ResolvedConfig
 from daimon.core.shared_threads import (
     SharedThread,
     record_shared_binding,
@@ -21,11 +18,11 @@ from daimon.core.shared_threads import (
 )
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.persistence import TurnPersistence
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -42,22 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 def deps(factory: async_sessionmaker[AsyncSession]) -> TurnDeps:
-    return TurnDeps(
-        anthropic=build_fake_anthropic(make_fake_ma_handler()),
-        sessionmaker=factory,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=Decimal(1),
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    return plain_turn_deps(build_fake_anthropic(make_fake_ma_handler()), factory, markup=Decimal(1))
 
 
 def admission(account_id: uuid.UUID, tenant_id: uuid.UUID) -> Admission:

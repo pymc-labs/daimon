@@ -11,15 +11,17 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Place
 from daimon.core.stores.domain import Role
 
+from ..harness import auth_identity
+
 _POLICY = TenantAccessPolicy(
     agent_channel_pins={"acme": ("c-1",), "beta": ("c-2",)}, sealed_channel_ids=("c-2",)
 )
 
 
 def _caller(*, agent_key: bool, bound: str | None) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -23,6 +24,20 @@ from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import McpOAuthGrantRow
 from daimon.core.stores.platform_names import KnownName
+
+_assemble_here_card = partial(
+    assemble_here_card,
+    agent_name="helper",
+    channel=None,
+    tenant=None,
+    configuration_target_name=None,
+)
+
+
+_here_card = partial(
+    HereCard, who_may_answer="", reads_kept_inside=False, effective_readers="any", text=""
+)
+
 
 TENANT = uuid.uuid4()
 SETTER = uuid.uuid4()
@@ -68,23 +83,19 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
     ],
 )
 def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
-    card = HereCard(
+    card = _here_card(
         channel_rule=ChannelRule(),
-        who_may_answer="",
-        reads_kept_inside=False,
         agent_name=None if state == "no_agent" else "ResearchBot",
         tier="thread" if state == "thread" else "channel",
         bot_can_view=state != "no_view",
         effective_writers="none" if state == "no_replies" else "any",
         agent_can_answer_here=state != "blocked",
-        effective_readers="any",
         publishing_needs_approval=False,
         bot_can_read_history=True,
         credentials=(
             CredentialStatus(name="SECRET_NAME", kind="MCP token", configured=True),
             CredentialStatus(name="ghp_fake_value", kind="GitHub", configured=True),
         ),
-        text="",
     )
     text = render_here_card_text(card)
     assert text.splitlines() == expected_lines
@@ -106,29 +117,23 @@ def test_mcp_plain_text_states(state: str, expected_lines: list[str]) -> None:
     ],
 )
 def test_teams_sublines_name_its_setup_command(state: str, subline: str) -> None:
-    card = HereCard(
+    card = _here_card(
         channel_rule=ChannelRule(),
-        who_may_answer="",
-        reads_kept_inside=False,
         agent_name=None if state == "no_agent" else "ResearchBot",
         tier="channel",
         bot_can_view=True,
         effective_writers="none" if state == "no_replies" else "any",
         agent_can_answer_here=state != "blocked",
-        effective_readers="any",
         publishing_needs_approval=False,
         bot_can_read_history=True,
         platform="teams",
-        text="",
     )
     assert render_here_card_text(card).splitlines()[1] == subline
 
 
 def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
-    card = HereCard(
+    card = _here_card(
         channel_rule=ChannelRule(),
-        who_may_answer="",
-        reads_kept_inside=False,
         agent_name="ResearchBot",
         tier="channel",
         bot_can_view=True,
@@ -137,7 +142,6 @@ def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
         effective_readers="unknown",
         publishing_needs_approval=None,
         bot_can_read_history=None,
-        text="",
     )
     shown = here_card_module.render_here_card(card)
     assert (shown.reading, shown.publishing, shown.extras) == (None, None, ())
@@ -145,37 +149,29 @@ def test_unknown_reading_publishing_and_history_drop_their_lines() -> None:
 
 
 def test_card_title_fits_discord_and_slack_limits() -> None:
-    card = HereCard(
+    card = _here_card(
         channel_rule=ChannelRule(),
-        who_may_answer="",
-        reads_kept_inside=False,
         agent_name="X" * 1000,
         tier="thread",
         bot_can_view=True,
         effective_writers="any",
         agent_can_answer_here=True,
-        effective_readers="any",
         publishing_needs_approval=None,
         bot_can_read_history=None,
-        text="",
     )
     assert len(here_card_module.render_here_card(card).title) <= 150
 
 
 def test_status_uses_first_applicable_blocker() -> None:
-    card = HereCard(
+    card = _here_card(
         channel_rule=ChannelRule(),
-        who_may_answer="",
-        reads_kept_inside=False,
         agent_name=None,
         tier=None,
         bot_can_view=False,
         effective_writers="none",
         agent_can_answer_here=None,
-        effective_readers="any",
         publishing_needs_approval=None,
         bot_can_read_history=False,
-        text="",
     )
     assert here_card_module.render_here_card(card).title == "Daimon can't see this channel"
     assert (
@@ -204,9 +200,8 @@ def _details(name: str, keys: tuple[KeyEntry, ...] = ()) -> AgentDetails:
     [("thread", None), ("channel", SETTER), ("tenant", SETTER), ("deployment", None)],
 )
 def test_winning_tier_and_attribution(tier: str, expected_setter: uuid.UUID | None) -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="one",
-        agent_name="helper",
         tier=tier,
         channel=ChannelConfigRow(
             tenant_id=TENANT,
@@ -239,13 +234,9 @@ def test_winning_tier_and_attribution(tier: str, expected_setter: uuid.UUID | No
 
 def test_own_readers_and_invisible_credentials_are_omitted() -> None:
     details = _details("hidden", (KeyEntry(name="SECRET_NAME", updated_at=NOW),))
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="private",
-        agent_name="helper",
         tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(
             channel_rules={"private": ChannelRule(readers="own", writers="own")},
             agent_rules={"helper": AgentRule(runs_in=("private", "outside"))},
@@ -262,15 +253,8 @@ def test_own_readers_and_invisible_credentials_are_omitted() -> None:
 
 def test_key_names_only_and_session_status_unknown() -> None:
     details = _details("helper", (KeyEntry(name="API_KEY", updated_at=NOW),))
-    card = assemble_here_card(
-        channel_id="one",
-        agent_name="helper",
-        tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
-        policy=TenantAccessPolicy(),
-        details=details,
+    card = _assemble_here_card(
+        channel_id="one", tier="channel", policy=TenantAccessPolicy(), details=details
     )
     assert card.credentials[0].name == "API_KEY"
     assert card.credentials[0].usable_in_session is None
@@ -281,13 +265,9 @@ def test_key_names_only_and_session_status_unknown() -> None:
 
 
 def test_discord_card_reports_history_separately_from_view() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="one",
-        agent_name="helper",
         tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(),
         details=None,
         bot_can_view=True,
@@ -299,13 +279,9 @@ def test_discord_card_reports_history_separately_from_view() -> None:
 
 
 def test_channel_and_agent_rules_show_derived_limits() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="home",
-        agent_name="helper",
         tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(
             channel_rules={"home": ChannelRule(readers="own", writers="own")},
             agent_rules={"helper": AgentRule(runs_in=("home",))},
@@ -328,15 +304,11 @@ def test_channel_and_agent_rules_show_derived_limits() -> None:
 
 
 def test_stricter_thread_and_category_rules_are_shown() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="123",
         thread_id="456",
         category_id="category",
-        agent_name="helper",
         tier="thread",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(
             channel_rules={"456": ChannelRule(readers="inside")},
             category_rules={"category": ChannelRule(writers="none")},
@@ -355,13 +327,9 @@ def test_stricter_thread_and_category_rules_are_shown() -> None:
 
 
 def test_agent_alias_rules_intersect() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="home",
-        agent_name="helper",
         tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(
             agent_rules={
                 "helper": AgentRule(runs_in=("home", "second")),
@@ -377,11 +345,9 @@ def test_agent_alias_rules_intersect() -> None:
 
 def test_thread_setter_and_configuration_target_share_routing_line() -> None:
     details = _details("helper")
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="one",
-        agent_name="helper",
         tier="thread",
-        channel=None,
         tenant=TenantConfigRow(tenant_id=TENANT, agent_name="helper"),
         configuration_target_name="configured-agent",
         thread_set_by_account_id=SETTER,
@@ -400,13 +366,9 @@ def test_thread_setter_and_configuration_target_share_routing_line() -> None:
 
 
 def test_card_shows_only_visible_runs_in_places() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="home",
-        agent_name="helper",
         tier="deployment",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(
             channel_rules={"isolated": ChannelRule(readers="own", writers="own")},
             agent_rules={"helper": AgentRule(runs_in=("home", "allowed"))},
@@ -419,13 +381,9 @@ def test_card_shows_only_visible_runs_in_places() -> None:
 
 
 def test_large_server_card_stays_under_discord_limit() -> None:
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="home",
-        agent_name="helper",
         tier="deployment",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(),
         details=_details("helper"),
         visible_channel_ids={"home", *(f"channel-{i}" for i in range(300))},
@@ -441,13 +399,9 @@ def test_only_callers_personal_grant_is_named() -> None:
     details = _details("helper").model_copy(
         update={"mcp_servers": (McpServerEntry(name="notes", url="https://example.test/mcp"),)}
     )
-    card = assemble_here_card(
+    card = _assemble_here_card(
         channel_id="home",
-        agent_name="helper",
         tier="channel",
-        channel=None,
-        tenant=None,
-        configuration_target_name=None,
         policy=TenantAccessPolicy(),
         details=details,
         caller_account_id=caller,
@@ -671,17 +625,13 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
 
 @pytest.mark.parametrize("has_agent", [False, True])
 def test_outsider_warning_and_approval_note_are_both_visible(has_agent: bool) -> None:
-    card = HereCard(
+    card = _here_card(
         agent_name="ResearchBot" if has_agent else None,
         tier="channel" if has_agent else None,
         channel_rule=ChannelRule(),
-        effective_readers="any",
         effective_writers="any",
-        who_may_answer="",
-        reads_kept_inside=False,
         outsiders_can_view=True,
         approval_gate_note="Approvals: Ask (set by the server).",
-        text="",
     )
     text = render_here_card_text(card)
     assert "outside your organisation" in text

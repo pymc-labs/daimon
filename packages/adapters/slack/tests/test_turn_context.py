@@ -17,13 +17,13 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import TurnError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.slack_turn_contexts import get_slack_turn_channels
 from daimon.core.stores.turn_origins import get_active_origin
 from daimon.core.turn.state import TextBlock, TurnState
+from daimon.testing.builders import provision_workspace
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -53,8 +53,8 @@ async def test_turn_context_row_lives_exactly_during_run_turn(
     event_ts = thread_ts
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         principal = await get_or_create_platform_principal(
@@ -178,8 +178,8 @@ async def test_turn_context_row_deleted_when_run_turn_raises(
     event_ts = thread_ts
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
 
-    await provision_tenant(
-        db_session_factory, platform="slack", workspace_id=team_id, signup_credit=Decimal("10")
+    await provision_workspace(
+        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
     )
     async with db_session_factory() as s:
         principal = await get_or_create_platform_principal(

@@ -234,6 +234,9 @@ EXEMPT: dict[str, str] = {
     "PATCH /api/chat/sessions/{session_id}": (
         "a person's own chat session: running an agent is the content side (RUN_AGENT, READ_SESSION)"
     ),
+    "POST /api/chat/sessions/{session_id}/monitoring/dismiss": (
+        "a person's own chat session: running an agent is the content side (RUN_AGENT, READ_SESSION)"
+    ),
     "POST /api/chat/sessions/{session_id}/switch-back": (
         "a person's own chat session: running an agent is the content side (RUN_AGENT, READ_SESSION)"
     ),

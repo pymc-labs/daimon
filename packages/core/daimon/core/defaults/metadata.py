@@ -10,6 +10,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_ACCOUNT as MA_METADATA_KEY_ACCOUNT
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_MANAGED as MA_METADATA_KEY_MANAGED
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME as MA_METADATA_KEY_NAME
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_TENANT as MA_METADATA_KEY_TENANT
 
@@ -40,7 +41,8 @@ MA_METADATA_KEY_SEALED = "daimon_sealed"
 
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
-MA_METADATA_KEY_MANAGED = "daimon_managed"
+# The seeded built-in agent (`defaults/agents/default.yaml`); it answers setup conversations.
+BUILTIN_AGENT_NAME = "default"
 # Set by an outside release pipeline that publishes the agent: the release's name,
 # when it was cut (ISO 8601 with offset) and its https page. Daimon only reads them.
 MA_METADATA_KEY_SOURCE_RELEASE = "source_release"
@@ -90,25 +92,26 @@ MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
 MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
 
 
-# The seeded agent's name, then the name a later release renames it to in place
-# (the same agent, its `daimon_name` rewritten). Code from before that release
-# must treat the renamed agent as the seeded one through a rolling deploy or a
-# rollback: never sweep it, recreate `daimon` beside it, or miss it when asked
-# for `daimon`. Never remove before every deployment has run the rename.
-SEEDED_AGENT_RENAME: Final = ("daimon", "default")
+# The seeded agent's former name: apply renames it to `BUILTIN_AGENT_NAME` in place
+# (the same agent, its `daimon_name` rewritten). Releases from before the rename
+# treat a managed `default` as the seeded agent, so a rollback keeps working; this
+# code still answers `daimon` with it. Never remove before every deployment has run the rename.
+LEGACY_BUILTIN_AGENT_NAME: Final = "daimon"
+# Names that mark the built-in agent only when it is managed: a workspace may own one.
+BUILTIN_AGENT_NAMES: Final = frozenset({BUILTIN_AGENT_NAME, LEGACY_BUILTIN_AGENT_NAME})
 
 
 def is_renamed_seeded_agent(metadata: Mapping[str, str]) -> bool:
     """True for a defaults-managed agent named `default`: the seeded agent after its rename."""
     name = unicodedata.normalize("NFKC", metadata.get(MA_METADATA_KEY_NAME, "")).casefold()
-    return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == SEEDED_AGENT_RENAME[1]
+    return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == BUILTIN_AGENT_NAME
 
 
 def is_renamed_seeded_record(name: str, metadata: Mapping[str, str] | None) -> bool:
     """`is_renamed_seeded_agent` for a Daimon record, whose name is its own field.
 
-    A record's stored `daimon_name` is not rewritten by the rename; the record's
-    `name` is, so that is the name judged here.
+    Releases before the rename rewrote only the record's `name`, not its stored
+    `daimon_name`, so the record's `name` is the one judged here.
     """
     return is_renamed_seeded_agent({**(metadata or {}), MA_METADATA_KEY_NAME: name})
 

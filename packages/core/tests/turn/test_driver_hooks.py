@@ -7,10 +7,8 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
-from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.turn_fakes import (
     BlockForever,
@@ -27,15 +25,10 @@ from daimon.testing.turn_fakes import (
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
-_EXEMPT = BillingExempt(reason="cli-operator-run")
 
 
 def _now() -> datetime:
     return _FROZEN_NOW
-
-
-def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
-    return cast(AsyncAnthropic, fa)
 
 
 @pytest.mark.asyncio
@@ -63,16 +56,7 @@ async def test_driver_calls_on_sse_event_for_each_upstream_event() -> None:
     ]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert len(lc.sse_events) == 3, (
         "driver must call on_sse_event once per upstream event (2 agent_messages + 1 status_idle)"
@@ -90,16 +74,7 @@ async def test_driver_does_not_forward_redelivered_event_to_lifecycle() -> None:
     fa.beta.sessions.events.replay_events = [message]
     lifecycle = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lifecycle,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lifecycle, now=_now)
 
     assert [event.id for event in lifecycle.sse_events] == ["sevt_1", "sevt_2"], (
         "replayed live events must not update adapter activity twice"
@@ -123,16 +98,7 @@ async def test_driver_calls_on_reconnect_on_connection_drop() -> None:
     fa.beta.sessions.events.replay_events = [pre, mid]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert lc.reconnects == ["connection_dropped"], (
         "driver must call on_reconnect with 'connection_dropped' after APIConnectionError"
@@ -159,16 +125,7 @@ async def test_driver_reconnects_when_sse_body_drops_mid_stream() -> None:
     fa.beta.sessions.events.replay_events = [pre, mid]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert lc.reconnects == ["connection_dropped"], (
         "driver must reconnect after a raw httpx.RemoteProtocolError mid-stream"
@@ -183,16 +140,7 @@ async def test_driver_calls_on_rate_limited_with_until_before_sleep() -> None:
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert len(lc.rate_limits) == 1, "driver must call on_rate_limited once on RateLimitError"
     assert lc.rate_limits[0] == _FROZEN_NOW + timedelta(seconds=30), (
@@ -218,17 +166,7 @@ async def test_driver_calls_on_interrupt_sent_when_sigint() -> None:
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        await run_turn_on_leg(
-            anthropic=_cast(fa),
-            session_id="sess_1",
-            user_message="hi",
-            lifecycle=lc,
-            cancel=cancel,
-            render_interval_s=0.001,
-            interrupt_timeout_s=5.0,
-            now=_now,
-            billing=_EXEMPT,
-        )
+        await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, interrupt_timeout_s=5.0, now=_now)
 
     assert lc.interrupts == ["cancel_event"], (
         "driver must call on_interrupt_sent with 'cancel_event' after posting user.interrupt"
@@ -315,16 +253,7 @@ async def test_render_failure_survives_and_retries_same_delta() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=3)
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.005,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, render_interval_s=0.005, now=_now)
 
     assert len(lc.terminal_success) == 1, (
         "the turn must still complete after several render failures"
@@ -355,16 +284,7 @@ async def test_render_failure_on_every_call_still_completes_the_turn() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=None)
 
-    state = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    state = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert state.error is None, "a render failure must never fail the turn"
     assert len(lc.terminal_success) == 1, (
@@ -383,16 +303,7 @@ async def test_terminal_render_failure_does_not_block_terminal_failure_hook() ->
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=1.0)]]
     lc = _RaisingRenderLifecycle(fail_count=None)
 
-    state = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    state = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert state.error is not None, "the underlying upstream failure must still surface"
     assert len(lc.terminal_failures) == 1, (
@@ -421,16 +332,7 @@ async def test_cancelled_error_from_on_render_is_not_swallowed() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=1, exc_factory=asyncio.CancelledError)
 
-    state = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.005,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    state = await run_turn_on_leg(fa, lifecycle=lc, render_interval_s=0.005, now=_now)
 
     assert state.error is None, "the turn must still complete despite the render task dying"
     assert lc.render_calls == 2, (

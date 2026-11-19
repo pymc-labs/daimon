@@ -44,10 +44,10 @@ from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn_hold import TurnHold
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import (
@@ -491,14 +491,7 @@ async def test_create_session_mounts_env_resource_when_agent_has_secrets(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="API_KEY", content="secret")
     await db_session.commit()
 
     agent = _make_agent(anthropic_id="ag_secrets")
@@ -811,14 +804,7 @@ async def test_create_session_composes_resources_alongside_vault_ids(
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
     account_id = uuid.UUID("00000000-0000-0000-0000-000000000055")
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="API_KEY",
-        content="secret",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="API_KEY", content="secret")
     await db_session.commit()
 
     agent = _make_agent(anthropic_id="ag_both")
@@ -2677,13 +2663,8 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
         account = await make_account(db, tenant=tenant)
         agent = ma_agent(id="agent-resources", tenant_id=str(tenant.id), name="source")
         identity = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
-        await put_agent_file(
-            db,
-            tenant_id=tenant.id,
-            agent_id=identity,
-            key="SOURCE_KEY",
-            content="private-env-value",
-            set_by_account_id=None,
+        await new_agent_file(
+            db, tenant, agent_id=identity, key="SOURCE_KEY", content="private-env-value"
         )
         credential = await credentials.upsert_credential(
             db,

@@ -29,6 +29,8 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 
 @pytest.mark.parametrize("platform", ["slack", "discord"])
 @pytest.mark.parametrize("caller", ["member", "admin", "bound-key", "unbound-key"])
@@ -102,12 +104,12 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
         deployment_default=DeploymentDefault(agent_name="shared"),
     )
     executing = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_shared")
-    auth = AuthIdentity(
-        tenant_id=tenant.id,
-        account_id=account.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
-        platform=platform,
         is_admin=caller == "admin",
+        platform=platform,
         chat_agent_id=executing,
         chat_session_id="test-session",
     )
@@ -319,12 +321,12 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
         settings=MagicMock(),
         deployment_default=DeploymentDefault(agent_name="shadowed-deployment"),
     )
-    auth = AuthIdentity(
-        tenant_id=tenant.id,
-        account_id=account.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
-        platform=platform,
         is_admin=admin,
+        platform=platform,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_setup"),
         chat_session_id="test-session",
     )

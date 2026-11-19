@@ -244,8 +244,8 @@ async def test_sealed_multi_cleanup_heals_and_real_driver_codec_finishes(tmp_pat
     import httpx
     from daimon.core.errors import TurnError
     from daimon.core.turn import render_termination_notice
-    from daimon.core.turn.selfhosted_codec import display_batch
-    from daimon.core.turn.selfhosted_io import root_failed
+    from daimon.core.turn.hosted_codec import SELFHOSTED, display_batch
+    from daimon.core.turn.hosted_io import root_failed
     from daimon.core.turn.state import TurnState
     from daimon.core.turn.termination import termination_reason
     from daimon_harness.runtime import TurnContext
@@ -321,7 +321,7 @@ async def test_sealed_multi_cleanup_heals_and_real_driver_codec_finishes(tmp_pat
             displayed = [
                 value
                 for event in events
-                for value in display_batch(event, session_id=session.ref.id)
+                for value in display_batch(event, session_id=session.ref.id, codec=SELFHOSTED)
             ]
             # Core shows the platform error card, never a message in the reply.
             assert not [

@@ -24,7 +24,7 @@ _WORKER_EXTRA = "WORKER BRIEF: only edit the docs folder, and report each file y
 
 
 def _worker_system() -> str:
-    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "default.yaml").read_text())
     return apply_credential_guidance(spec["system"]) + "\n\n" + _WORKER_EXTRA
 
 

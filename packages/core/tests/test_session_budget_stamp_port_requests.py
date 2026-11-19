@@ -1,9 +1,8 @@
 """Budget-stamp extraction keeps actual SDK requests and partial-record semantics."""
 
-import contextlib
 import uuid
 from datetime import UTC, datetime
-from typing import Self, cast
+from typing import cast
 from unittest.mock import ANY, AsyncMock, Mock
 
 import anthropic
@@ -22,17 +21,11 @@ from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTr
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .shared_fakes import SessionFactory
+
 TENANT, ACCOUNT = uuid.UUID(int=901), uuid.UUID(int=902)
 SESSION = "sess_budget_stamp"
 PATH = f"/v1/sessions/{SESSION}"
-
-
-class SessionFactory:
-    def __call__(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
-
-    def begin(self) -> contextlib.nullcontext[Self]:
-        return contextlib.nullcontext(self)
 
 
 def mapping(*, stamp: str | None = "") -> ThreadSessionRow:

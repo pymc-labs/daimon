@@ -52,6 +52,7 @@ from daimon.core.stores.task_continuations import (
     settle_wake_row,
     start_wake_row,
 )
+from daimon.core.turn.errors import AdmissionDenied
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,6 +75,7 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
+    "is_transient_denial",
     "keep_wake",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
@@ -335,6 +337,17 @@ async def release_wake(
             retry_at=retry_at,
             refund=refund,
         )
+
+
+def is_transient_denial(denied: AdmissionDenied) -> bool:
+    """True when a refusal clears by itself: the provider key is busy or cooling.
+
+    Such a wake is offered again like a busy thread, not settled as skipped.
+    """
+    return denied.reason == "backend_unsupported" and denied.cause in (
+        "provider_busy",
+        "provider_cooling",
+    )
 
 
 def busy_retry_at(

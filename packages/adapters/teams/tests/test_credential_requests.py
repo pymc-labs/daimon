@@ -262,7 +262,7 @@ async def test_an_env_value_is_saved_once_and_resumes_the_work(
     assert SECRET not in json.dumps([r.body for r in fake.requests]) + repr(logs)
     assert logs == [
         {
-            "event": "teams.credential.env",
+            "event": "teams.credential.env.submit",
             "key": "API_KEY",
             "state": "applied",
             "log_level": "info",
@@ -373,7 +373,7 @@ async def test_a_member_cannot_replace_a_key_on_a_managed_agent(
     dispatch.assert_not_awaited()
     assert logs == [
         {
-            "event": "teams.credential.env",
+            "event": "teams.credential.env.submit",
             "key": "API_KEY",
             "state": "refused",
             "log_level": "info",
@@ -781,7 +781,8 @@ async def test_a_pasted_env_file_saves_every_key_once_and_resumes_the_work(
             "log_level": "info",
         },
         {
-            "event": "teams.credential.env_file_saved",
+            "event": "teams.credential.env_file.submit",
+            "key_count": 2,
             "keys": ["ALPHA_KEY", "BETA_TOKEN"],
             "log_level": "info",
         },
@@ -810,7 +811,7 @@ async def test_a_pasted_env_file_holding_a_stored_key_writes_nothing(
     dispatch.assert_not_awaited()
     assert logs == [
         {
-            "event": "teams.credential.env_file_refused",
+            "event": "teams.credential.env_file_collision",
             "key_count": 2,
             "collision_count": 1,
             "log_level": "info",
@@ -889,7 +890,7 @@ async def test_a_stale_replacement_leaves_the_stored_value_alone_and_renders_sup
     dispatch.assert_not_awaited()
     assert logs == [
         {
-            "event": "teams.credential.env",
+            "event": "teams.credential.env.submit",
             "key": "API_KEY",
             "state": "superseded",
             "log_level": "info",
@@ -936,7 +937,7 @@ async def test_a_pasted_env_file_with_a_key_appearing_mid_write_rolls_back_the_w
     dispatch.assert_not_awaited()
     assert logs == [
         {
-            "event": "teams.credential.env_file_refused",
+            "event": "teams.credential.env_file_collision",
             "key_count": 2,
             "collision_count": 1,
             "log_level": "info",

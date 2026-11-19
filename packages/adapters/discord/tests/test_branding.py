@@ -35,21 +35,7 @@ from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from pydantic import SecretStr
 
-
-class _AsyncIter:
-    """Async iterator adapter for a mocked ``thread.history()``."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
+from .shared_fakes import AsyncIter as _AsyncIter
 
 
 def _make_message(*, msg_id: int, content: str) -> discord.Message:

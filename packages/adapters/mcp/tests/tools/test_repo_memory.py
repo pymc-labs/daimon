@@ -27,6 +27,8 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 
+from ..harness import auth_identity
+
 
 def setup_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -51,9 +53,9 @@ def setup_call(
         created_at=datetime.now(UTC),
         expires_at=datetime.now(UTC),
     )
-    auth = AuthIdentity(
-        tenant_id=tenant,
-        account_id=account,
+    auth = auth_identity(
+        account,
+        tenant,
         role=Role.USER,
         platform="discord",
         chat_session_id="signed-session",

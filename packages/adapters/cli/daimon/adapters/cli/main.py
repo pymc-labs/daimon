@@ -27,6 +27,7 @@ from daimon.adapters.cli.commands.help import help_app
 from daimon.adapters.cli.commands.leads import leads_app
 from daimon.adapters.cli.commands.mcp import mcp_app
 from daimon.adapters.cli.commands.memory import memory_app
+from daimon.adapters.cli.commands.monitoring import monitoring_app
 from daimon.adapters.cli.commands.notebook import notebook_app
 from daimon.adapters.cli.commands.openai import PROVIDER_NAME, openai_app
 from daimon.adapters.cli.commands.promo import promo_app
@@ -56,6 +57,7 @@ app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit")
+app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")
 app.add_typer(crypto_app, name="crypto")

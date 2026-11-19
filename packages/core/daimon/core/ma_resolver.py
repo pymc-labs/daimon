@@ -25,6 +25,7 @@ from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.skill_list_response import SkillListResponse
 from cachetools import TTLCache
+from daimon.core.defaults.builtin_agent import route_builtin_agent
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
@@ -32,10 +33,12 @@ from daimon.core.defaults.ma_index import (
     pick_renamed_seeded_agent,
 )
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
-    SEEDED_AGENT_RENAME,
+    is_renamed_seeded_agent,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
@@ -350,10 +353,9 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
 
 
 async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind) -> dict[str, str]:
-    renamed: BetaManagedAgentsAgent | None = None
+    agents: list[BetaManagedAgentsAgent] | None = None
     if kind == "agent":
-        resources = await list_agents_by_tenant(client, tenant_id=tenant_id)
-        renamed = pick_renamed_seeded_agent(resources)
+        resources = agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
     else:
         resources = await list_environments_by_tenant(client, tenant_id=tenant_id)
     canonical: dict[str, tuple[str, object, str | None]] = {}
@@ -385,10 +387,26 @@ async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind
                 duplicate_accounts=accounts,
             )
     found = {name: resource_id for name, (resource_id, _, _) in canonical.items()}
-    if renamed is not None:
-        # `daimon` answers with the seeded agent renamed in place (`SEEDED_AGENT_RENAME`).
-        found.setdefault(SEEDED_AGENT_RENAME[0], renamed.id)
+    if agents is not None:
+        _route_builtin(found, agents, tenant_id)
     return found
+
+
+def _route_builtin(
+    found: dict[str, str], agents: list[BetaManagedAgentsAgent], tenant_id: uuid.UUID
+) -> None:
+    """Point the built-in name at the seeded agent, or at the old one on a miss.
+
+    A workspace's own `default` keeps the name unless the seeded one holds it too.
+    `daimon` still answers with the seeded agent once renamed, for a reference
+    a rollback wrote under the old name (`LEGACY_BUILTIN_AGENT_NAME`).
+    """
+    seeded = route_builtin_agent(agents, tenant_id=tenant_id, surface="ma_resolver")
+    if seeded and (BUILTIN_AGENT_NAME not in found or is_renamed_seeded_agent(seeded[0].metadata)):
+        found[BUILTIN_AGENT_NAME] = seeded[0].id
+    renamed = pick_renamed_seeded_agent(agents)
+    if renamed is not None:
+        found.setdefault(LEGACY_BUILTIN_AGENT_NAME, renamed.id)
 
 
 async def _lookup_tags(

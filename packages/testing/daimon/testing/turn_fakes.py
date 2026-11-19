@@ -40,6 +40,9 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn import run_turn
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
+from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.prepare import PreparedTurn
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.state import TurnState
 from daimon.testing.turn_leg import LEG_SCOPE, MUX_LEG, turn_leg
 from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
@@ -383,10 +386,25 @@ class FakeAnthropic:
         return self
 
 
-async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
-    """`run_turn` with the test's authorized scope, for direct driver tests."""
+async def run_turn_on_leg(
+    fake: FakeAnthropic | None = None,
+    **kwargs: Any,  # noqa: ANN401 - forwards run_turn's keywords
+) -> TurnState:
+    """`run_turn` with the test's authorized scope, for direct driver tests.
 
+    Fills the scope and the keywords almost every test repeats; a test passes
+    only what its scenario varies. `fake` is the `FakeAnthropic` to drive.
+    """
+
+    if fake is not None:
+        kwargs["anthropic"] = cast(AsyncAnthropic, fake)
     kwargs.setdefault("scope", LEG_SCOPE)
+    kwargs.setdefault("session_id", "sess_1")
+    kwargs.setdefault("user_message", "hi")
+    kwargs.setdefault("lifecycle", RecordingLifecycle())
+    kwargs.setdefault("cancel", asyncio.Event())
+    kwargs.setdefault("render_interval_s", 0.001)
+    kwargs.setdefault("billing", BillingExempt(reason="cli-operator-run"))
     return await run_turn(**kwargs)
 
 
@@ -510,3 +528,30 @@ def deps_for_pinned_mux(
     tests that should hold on both paths use `deps_for`.
     """
     return deps_for(client, sm, leg=MUX_LEG)
+
+
+async def reseed_user_message() -> str:
+    """The full-history reseed `run_prepared_turn` asks for when it recovers."""
+    return "full history reseed"
+
+
+def recovery_lifecycle(_cancel: asyncio.Event) -> RecordingLifecycle:
+    """The lifecycle a recovery attempt reports to."""
+    return RecordingLifecycle()
+
+
+async def run_prepared(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    **kwargs: Any,  # noqa: ANN401 - forwards run_prepared_turn's keywords
+) -> RunOutcome:
+    """`run_prepared_turn` with the keywords almost every test repeats filled in."""
+    kwargs.setdefault("platform", "discord")
+    kwargs.setdefault("external_user_id", "user-1")
+    kwargs.setdefault("user_message", "hello")
+    kwargs.setdefault("lifecycle", RecordingLifecycle())
+    kwargs.setdefault("cancel", asyncio.Event())
+    kwargs.setdefault("reseed_user_message", reseed_user_message)
+    kwargs.setdefault("recovery_lifecycle", recovery_lifecycle)
+    kwargs.setdefault("render_interval_s", 0.001)
+    return await run_prepared_turn(deps, prepared, **kwargs)

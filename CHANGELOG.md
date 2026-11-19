@@ -12,6 +12,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `legacy` now fails at startup, so remove the variable. `daimon run` always
   runs as the local CLI operator and refuses a session another tenant owns.
   `daimon-mux` 0.3.0 drops `LegacyTurnTransport`.
+- **Admins can monitor an agent, and people are told.** Two features, Monitor
+  direct messages and Monitor coding tools, are off by default and set per
+  workspace or agent. While one is on, Daimon keeps what people ask that agent
+  and what it answers, from the switch on and never before it. For other tool
+  calls from coding tools it keeps only the name, time and outcome. Only
+  workspace admins turn it on and read it, never an agent's owner, on the agent
+  page, in a Monitoring tab in admin, or with the `list_monitored_activity` and
+  `get_monitored_conversation` tools. Operators see counts and times with
+  `daimon monitoring list`. People see a neutral notice once per agent, at their first direct
+  message, in web chat (where they can dismiss it), in the MCP descriptions and
+  in their first tool result.
+  The privacy panel says what admins can read. Rows are deleted with the
+  person's account and after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
+
+- **Late GPT usage survives a restart.** OpenAI can report a turn's usage long
+  after the turn ends. Daimon re-read it only for about an hour, in the process
+  that ran the turn, so a restart or a later answer left the turn unbilled. The
+  scheduler now re-reads such turns from their pending usage for a day, then
+  logs that it gave up.
+
+- **Refusals on GPT and Gemini say what actually happened.** A spent daily
+  Gemini quota no longer says to try again in a minute; it says the quota
+  refills daily and to use another model. A provider that can't run a
+  conversation no longer claims to be "unavailable right now".
+- **A channel's tool limits are no longer ignored on GPT and Gemini.** A tool
+  switched off for a channel or thread still ran there when the agent was on
+  GPT or Gemini. The reply is now refused, saying those providers can't apply
+  the limit, until the tool is turned back on or the agent is on Claude.
+- **Failure alerts name the provider.** `turn.user_failure` carries a
+  `provider` field, and its `backend` is set as soon as admission reads the
+  channel's or agent's choice, so a turn that fails while being admitted no
+  longer logs `unknown`.
+- **Images work in Gemini conversations.** A message with a picture failed
+  with no reason given. The picture now goes to Gemini with the message.
+- **Routines no longer run on Claude when their agent or channel is on GPT or
+  Gemini.** The scheduler quietly ran them on Claude. A routine whose agent,
+  channel or thread is on another provider now stops with a message saying
+  routines run only on Anthropic.
+- **A provider key no longer turns that provider on for every server.** A
+  server that never chose its allowed providers now uses Anthropic only, even
+  when the deployment holds an OpenAI or Gemini key. An admin opts in with
+  the allowed-providers setting in chat, on the web or from the CLI, and the
+  card says that the provider then receives the server's conversations and
+  the connector data they use. A server that already saved a list keeps it. The
+  web admin page still offers every keyed provider. Connector relay to another
+  provider (`mcp_connector_relay`) is now off until an operator turns it on.
+- **Moving an agent or a conversation to another provider asks first.**
+  Prompt text can no longer switch an agent, the server's default agent for
+  everyone, or one conversation's model to OpenAI or Gemini on its own. The
+  first request returns a preview that changes nothing, the second posts a
+  card in the thread naming the provider and who it moves, and the move runs
+  only when the person approves it. Everyone in the thread sees the card. A
+  model change within the same provider applies at once, as before.
+- **Privacy names every provider that stores your conversations, and Delete
+  reaches OpenAI.** The privacy panel on Discord, Slack and Teams, the web
+  Delete dialog and the privacy policy name OpenAI and Google (Gemini) on
+  servers where an admin enabled them. Deleting your account now also asks OpenAI to delete the
+  conversations stored there, and logs any it could not. Google offers no
+  delete for stored Gemini conversations, so the policy says Google keeps
+  them for its own retention period.
+- **Each Gemini reply has a spend limit.** The daily model cap is checked only
+  as a turn starts, so one long Gemini reply could spend without bound. A
+  Gemini runtime row now takes `spend_limit_usd_cents`, enforced as for OpenAI:
+  the reply is stopped once its priced usage passes the limit, and the agent is
+  told next time. Built-in rows set 50 cents.
+
+- **A daily spend ceiling per provider for the whole install.** Each tenant's
+  daily model cap bounded one tenant, but tenants are free to create, so
+  nothing bounded what the install spent on OpenAI or Gemini in a day. GPT and
+  Gemini turns are now refused once every tenant together has spent the
+  provider's ceiling today, at list price: $200 each by default, set with
+  `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and `__GEMINI`. It
+  resets at midnight UTC. The web app says so in the same words as chat, for
+  this ceiling and for a workspace's daily model cap.
+
+- **Usage settled late counts against the person and the right channel.** Usage
+  that stayed pending and was settled later by the scheduler named no person
+  and fell back to the thread's channel, so it never counted against the
+  asker's spend allowance or the turn's budget channel. Each usage row now
+  keeps both from when it was recorded; rows recorded before this settle as
+  before.
+
+- **Gemini never runs a model it can't price.** When Gemini 3.8 Flash was busy
+  partway through a reply, the next request could fall back to the
+  `gemini-flash-latest` alias, which has no tariff, so its tokens were neither
+  billed nor counted against the daily model cap. A model with no current tariff
+  now never runs on any request: a busy Flash skips the alias and falls back to
+  Flash-Lite.
+
+- **GPT spend counts against the right channel budget.** A GPT reply was debited
+  to the channel it ran in, not the channel whose budget the turn counts
+  against, so a direct message or an agent with its own budget channel charged
+  the wrong one. It now uses the same budget channel as a Claude reply.
+
+- **GPT replies are charged.** Usage of an OpenAI persistent workspace waited
+  for a container cost no meter reports, so it stayed pending and never reached
+  the ledger, and signup credit never ran down. It now settles at its token cost
+  with no container charge, and usage already pending is drained on the
+  scheduler's next passes, each row once.
+
+- **Long GPT-6 Luna replies are billed.** A Luna reply whose prompt passed 272k
+  input tokens had no price, so it never reached the ledger. OpenAI reports a
+  reply as the total of its requests, so a reply past 272k now settles at the
+  base rates; only a single request known to pass 272k takes the long-context
+  rates. GPT-6 Astra and GPT-6.2 Astra and Sol replies are no longer billed
+  wholly at long-context rates once their total passes 272k.
+
+- **A busy or rate-limited provider key now says so and recovers.** One GPT or
+  Gemini API key serves at most 16 turns at once across every replica and 4 per
+  workspace (`DAIMON_PROVIDER_LIMITS__KEY_TURNS`, `__TENANT_TURNS`). A turn past
+  a cap waits up to 20 seconds (`__WAIT_S`) for a slot, then is refused as busy
+  instead of piling more requests on the key. When a provider answers 429 with a
+  wait (the `Retry-After` header, or Gemini's retry delay), that key and model
+  rest for that long, defaulting to 30 seconds and at most ten minutes. Turns on
+  it are refused at once with a "try again shortly" message that names the
+  provider, so a rate limit no longer turns into a retry storm. A timer, watch
+  report or follow-up that meets either refusal is offered again shortly
+  instead of being dropped. Requires the new `provider_key_cooldowns` and
+  `provider_key_leases` tables.
+- **GPT and Gemini calls share one connection per key, and long GPT histories
+  load.** Each process now builds one provider client per key and reuses its
+  connections, instead of opening and closing a client, with its own TLS
+  context, for every call. Reading a GPT conversation's history from OpenAI
+  happens once per read rather than once per page, in pages of a thousand
+  events, so a conversation past 5,000 events no longer fails to resume.
+- **Idle Gemini conversations are pruned.** After 30 days without activity
+  (`DAIMON_GEMINI__RECORDS_RETENTION_DAYS`), the scheduler removes a Gemini
+  conversation's stored history; a thread that comes back is told to start a
+  new thread, in the same words on every platform.
+- **Busy Gemini threads no longer slow the others in an account.** Each
+  conversation, agent, environment, skill and file is saved as its own row,
+  and a turn saves only what changed. The first start moves stored state over;
+  older releases refuse it after that, so roll forward rather than back.
+- **Gemini and vault-cleanup work stall other turns less.** Reading and saving
+  a Gemini conversation's stored state now runs on a small worker pool, which
+  roughly halves the longest event-loop pause on a 9 MB state. The scheduler's
+  idle relay vault sweep reads only session vault ids and waits ten minutes
+  after a restart before its first run.
+- **The built-in agent is named `default`.** It was `daimon`; its prompt, bot
+  name and picture stay, and its reader variant is `default-reader`. On upgrade,
+  `daimon defaults apply` renames each workspace's seeded agent and its managed
+  self-hosted record in place, keyless or not, so sessions, threads, routines,
+  defaults, tool and access rules keep working; audit history and settled
+  queued wakes keep the old name and `daimon` stays taken by the renamed agent.
+  A workspace with its own `default` keeps it, and requests for `default` reach that agent: apply reports
+  the rename as deferred, exits zero and tries again next time. Another
+  workspace's rename error is reported without failing apply. A workspace's own
+  unmanaged `daimon` record is not renamed. Copies such as `daimon-copy` keep
+  their names, the `init` commands default to `default`, and `selfhosted init`
+  reuses an existing `daimon` record. On Discord, a reply from the built-in
+  agent carries no agent label, as on Slack and Teams. Rolling back to an
+  earlier release after the rename labels its Discord replies `-# default`.
 - **Sandbox tools in routines is a setting with levels.** The
   `routine_sandbox_tools` setting is off by default and set for the workspace,
   an agent or one routine; a routine's own value wins over its agent's, and a
@@ -49,6 +201,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run once: the owner must be able to post there, the channel must be in the
   server, and the tenant's access rules must allow it. A thread's permissions
   come from its parent channel. `--dry-run` runs every check and saves nothing.
+- **Support requests wait for Accept, and a menu picks its channel.** A fixed
+  or steps request is no longer charged at submit: it holds its price until
+  someone presses Accept on its post (Discord, Slack, Teams) or Decline to
+  release it; range and quoted requests settle as before. `daimon support
+  requests settle` without an amount, `support_requests_settle` with `accept`
+  and Accept in Admin > Support do the same. A support menu may name its own
+  request channel (`channel` in its YAML, the MCP menu tools and the menu
+  editor), checked like `support channel set`; it beats the workspace's channel,
+  and each request keeps the channel it was sent to. Requests charged before
+  this release keep their charge.
+- **Channel budgets can alert instead of stopping replies.** A budget set to
+  `alert` (`daimon channels budget set --on-limit alert`, the channel budget MCP
+  tools, or the channel's budget editor in the web app) never refuses a turn.
+  When the window's spend reaches the limit, and again at each further full
+  multiple of it, Daimon posts one alert naming the channel, the spend, the limit
+  and the window, to the budget's alert channel or, when none is set, the
+  workspace's support channel. Each multiple alerts once per window, across
+  workers and restarts, and a failed post never delays a turn. The alert channel
+  must be a channel of the same workspace. Applying `channel_budget_alerts`
+  adds columns to `channel_budgets`; downgrading drops them.
+
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
@@ -176,6 +349,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
   with no model, written by a new pod, makes old pods fail turns in that conversation
   until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+  To roll back to an earlier image, downgrade `thread_model_effort` first: it drops
+  those picks, and an old pod fails every turn in a conversation that keeps one.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.
@@ -250,8 +425,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can't run, such as some skills, MCP servers or tools, is off there and said once
   as information; it comes back on a switch back. Creating an agent on an OpenAI
   or Gemini model sets its provider. Who may switch, the provider allowlist,
-  prices and daily caps are unchanged, and a switch button posted earlier applies
-  the switch when pressed.
+  prices and daily caps are unchanged. A switch button posted earlier closes as
+  expired when pressed; ask for the switch again.
 - **An agent with a signed-identity MCP server stays in its channel and keeps no
   memory.** Its channel turns run held: they post only in their channel and its
   threads, send no DMs and have no admin tools. It keeps no long-term memory, and
@@ -3219,6 +3394,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that binding: its token is now read-only. To let the agent push, rebind the
   repository with a personal access token (the repo credential form in Discord
   or Slack).
+
+- **The one-off backfill commands are removed.** `daimon agents backfill-toolset`,
+  `daimon agents rekey-guild-ownership`, `daimon routines backfill-agent-names`
+  and `daimon skills backfill-tenant-titles` are gone; they were for migrating
+  older deployments and nothing calls them.
 
 ## [0.2.0] - 2026-09-21
 

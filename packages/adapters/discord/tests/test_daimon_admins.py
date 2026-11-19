@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -12,6 +13,15 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.daimon_admins import change_grant, list_admins
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_change_grant = partial(
+    change_grant,
+    platform="discord",
+    subject_kind="user",
+    actor_user_id="owner",
+    is_platform_admin=True,
+)
+
 
 GUILD = 123456789012345678
 USER = 223456789012345678
@@ -79,15 +89,7 @@ async def test_delegated_admin_cannot_submit_grant_modal(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER))
     await db_session.commit()
     click = interaction(db_session_factory)
     view = MagicMock(allowed_user_id=USER)
@@ -107,15 +109,7 @@ async def test_granted_admin_is_refused_at_billing_gate(
     from daimon.adapters.discord.checks import refuse_if_not_platform_admin
 
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER))
     await db_session.commit()
     click = interaction(db_session_factory)
     assert await is_guild_admin(click, action=DelegatedAction.AGENT_SETTINGS)
@@ -139,15 +133,7 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
     principal = await make_platform_principal(
         db_session, tenant=tenant, platform="discord", external_id=str(USER)
     )
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER))
     await db_session.commit()
     click = interaction(db_session_factory)
     click.guild.id = GUILD
@@ -256,16 +242,7 @@ async def test_explicit_action_admits_delegate_without_promoting_account(
         ].writers == "none"
     account = await get_account(db_session, principal.account_id)
     assert account is not None and account.role.value == "user"
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-        revoke=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER), revoke=True)
     await db_session.commit()
     assert not await is_guild_admin(click, action=action)
     subject = await load_live_subject(
@@ -302,15 +279,7 @@ async def test_delegate_github_connect_button_refuses_at_adapter(
     from daimon.adapters.discord import github_connect_button as button_module
 
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER))
     await db_session.commit()
     bind = AsyncMock()
     monkeypatch.setattr(button_module, "bind_discord_connect_click", bind)
@@ -344,15 +313,7 @@ async def test_delegate_cannot_open_operator_token_panel(
     from daimon.adapters.discord.agent_setup.routing_view import RoutingView
 
     tenant = await make_tenant(db_session, workspace_id=str(GUILD))
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id=str(USER),
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id=str(USER))
     await db_session.commit()
     click = interaction(db_session_factory)
     assert await is_guild_admin(click, action=DelegatedAction.ROUTING)

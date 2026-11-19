@@ -1,11 +1,11 @@
-import { Check, CircleAlert, KeyRound, ShieldCheck, ShieldQuestion, ShieldX, UserRound, type LucideIcon } from "lucide-react"
+import { Check, CircleAlert, Eye, KeyRound, ShieldCheck, ShieldQuestion, ShieldX, UserRound, X, type LucideIcon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import type { Card, CardAnswer } from "./types"
+import type { Card, CardAnswer, Notice } from "./types"
 
 type Props = { card: Card; busy: boolean; onAnswer: (a: CardAnswer) => void; onSwitchBack?: () => Promise<string> }
 
@@ -122,10 +122,26 @@ function Refusal({ card, onSwitchBack }: { card: Extract<Card, { kind: "refusal"
   )
 }
 
+/** Admins can read this chat: shown above the composer, apart from any reply, until the person closes it. */
+function MonitoringNotice({ notice, onDismiss }: { notice: Notice; onDismiss?: () => void }) {
+  return (
+    <div className={frame}>
+      <div className="flex gap-3">
+        <Icon icon={Eye} />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium">{notice.line}</div>
+          <p className="mt-2.5 flex items-center gap-1.5 text-sm font-medium"><UserRound className="size-4 text-muted-foreground" />{notice.help}</p>
+        </div>
+        {onDismiss && <Button variant="ghost" size="icon-sm" className="-mr-1.5 -mt-1.5 shrink-0" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
+      </div>
+    </div>
+  )
+}
+
 export function CardView(p: Props) {
   const c = p.card
   return c.kind === "approval" ? <Approval {...p} card={c} />
     : c.kind === "credential" ? <Credential {...p} card={c} />
       : <Refusal card={c} onSwitchBack={p.onSwitchBack} />
 }
-export { Refusal }
+export { MonitoringNotice, Refusal }

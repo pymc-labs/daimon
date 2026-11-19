@@ -13,6 +13,8 @@ from daimon.adapters.mcp.tools import fly
 from daimon.core.stores.domain import Role, TurnOriginRow
 from fastmcp.exceptions import ToolError
 
+from ..harness import auth_identity
+
 
 @pytest.mark.parametrize(
     "mode",
@@ -103,12 +105,8 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
         yield None
 
     runtime = SimpleNamespace(session_factory=db, client=None)
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        role=Role.USER,
-        platform="discord",
-        chat_session_id="chat",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", chat_session_id="chat"
     )
     origin = SimpleNamespace(
         platform="discord",
@@ -181,12 +179,8 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
         yield None
 
     runtime = SimpleNamespace(session_factory=db, client=None)
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        role=Role.USER,
-        platform="discord",
-        chat_session_id="chat",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", chat_session_id="chat"
     )
     origin = SimpleNamespace(
         platform="discord",

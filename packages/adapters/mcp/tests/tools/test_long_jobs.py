@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import long_jobs as tools
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
@@ -27,6 +26,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, lis
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from ..harness import auth_identity
 
 
 @pytest.mark.parametrize(
@@ -54,14 +55,13 @@ async def test_start_binds_approved_provider_identity_before_any_launch(
             set_by=None,
             surface="chat",
         )
-    auth = AuthIdentity(
-        tenant_id=tenant.id,
-        account_id=owner.id,
-        platform="discord",
+    auth = auth_identity(
+        owner.id,
+        tenant.id,
         role=Role.USER,
+        platform="discord",
         platform_user_id="user",
         chat_session_id="chat",
-        # A provider turn's parent session has no seal metadata; its credential has.
         seal_ids=frozenset({"provider-seal"}) if mode == "provider_sealed" else frozenset(),
     )
     origin_id = str(uuid.uuid4())
@@ -183,12 +183,8 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
 ):
     from unittest.mock import MagicMock
 
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        platform="discord",  # The verified origin, not the token platform, controls delivery.
-        role=Role.USER,
-        platform_user_id="user",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", platform_user_id="user"
     )
     origin = SimpleNamespace(attended=True, platform=platform, helper_of=None)
     monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
@@ -241,12 +237,8 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
 async def test_start_refuses_a_daimon_owned_agent_before_any_read(monkeypatch):
     from unittest.mock import MagicMock
 
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        platform="discord",
-        role=Role.USER,
-        platform_user_id="user",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="discord", platform_user_id="user"
     )
     origin = SimpleNamespace(
         attended=True, platform="discord", helper_of=None, responder_ma_agent_id="dm_agent_1"

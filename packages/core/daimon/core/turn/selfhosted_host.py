@@ -15,7 +15,6 @@ from daimon.core.mux_backend import (
     TurnBackendRequest,
     TurnRuntime,
     owner_turn_scope,
-    register_turn_backend,
 )
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ChangeReason, ReplaceSession, UpdateInPlace
@@ -24,17 +23,17 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import (
     carry_on_adoption,
-    register_session_reader,
     replaced_session,
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
-from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
+from daimon.core.turn.hosted_codec import SELFHOSTED
+from daimon.core.turn.hosted_io import SelfHostedTurnIO
+from daimon.core.turn.io import TurnCodecRequest, TurnIO
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
     ProviderPreparationRequest,
-    register_turn_preparation,
 )
 from daimon.core.turn.replace_binding import (
     BindingFacts,
@@ -46,8 +45,7 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
-from daimon.core.turn.selfhosted_codec import PROFILE
-from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+from daimon.core.turn.runtimes import HostedBackend
 from daimon.core.turn.selfhosted_state import invocation_baseline, skipped_skill_notice
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
@@ -61,6 +59,8 @@ from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, Unsuppor
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
+
+PROFILE = SELFHOSTED.profile
 
 
 @dataclass(frozen=True)
@@ -616,11 +616,7 @@ def _old_session(
     )
 
 
-def register_host() -> None:
-    register_session_reader(PROFILE, _old_session)
-    register_turn_backend(PROFILE, _backend, fallback=True)
-    register_turn_codec(PROFILE, _codec, fallback=True)
-    register_turn_preparation(PROFILE, prepare_selfhosted, fallback=True)
-
-
-register_host()
+#: The host half of the backend; the deployment module adds its runtime.
+HOST = HostedBackend(
+    backend=_backend, codec=_codec, prepare=prepare_selfhosted, reader=_old_session
+)

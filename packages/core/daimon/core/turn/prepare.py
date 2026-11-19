@@ -96,7 +96,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
-from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
+from daimon.core.turn.runtimes import hosted_backend, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
@@ -111,6 +111,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
+    from daimon.core.turn.provider_gate import GateHold
 
 log = structlog.get_logger(__name__)
 
@@ -251,26 +252,14 @@ class ProviderPreparationRequest:
     # The tenant's hosted OpenAI environment, created or reused for this turn by
     # `openai_environment.tenant_environment`; the code-default GPT row uses it.
     openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
+    # Set by `provider_gate.gated_turn`: where preparation enters its provider key's gate.
+    gate: GateHold | None = field(default=None, kw_only=True, compare=False, repr=False)
     # A channel-less preview: every platform the agent answers on. Per-platform
     # features resolve as the strictest across them; empty reads `platform` alone.
     answers_on: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
-_PROVIDER_PREPARATIONS: dict[str, ProviderPreparation] = {}
-
-
-def register_turn_preparation(
-    profile: str, prepare: ProviderPreparation, *, fallback: bool = False
-) -> None:
-    """Register provider-native binding; missing hooks never use Anthropic IDs."""
-    if profile == "anthropic.managed_agents":
-        raise ValueError(f"turn preparation already registered: {profile}")
-    if profile in _PROVIDER_PREPARATIONS:
-        if fallback:
-            return
-        raise ValueError(f"turn preparation already registered: {profile}")
-    _PROVIDER_PREPARATIONS[profile] = prepare
 
 
 def _admitted_profile(admission: Admission) -> str:
@@ -1190,11 +1179,8 @@ async def bind_session_impl(
         ):
             raise AdmissionDenied(reason="backend_unsupported")
 
-        prepare = _PROVIDER_PREPARATIONS.get(profile)
-        if prepare is None and ensure_channel_runtime(
-            profile, ready=lambda: profile in _PROVIDER_PREPARATIONS
-        ):
-            prepare = _PROVIDER_PREPARATIONS.get(profile)
+        hosted = hosted_backend(profile)
+        prepare = hosted.prepare if hosted is not None else None
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
         if admission.shared_owner is not None and admission.backend_revision_origin == "agent":

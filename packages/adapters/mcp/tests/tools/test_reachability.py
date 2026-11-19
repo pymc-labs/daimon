@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_agent
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
@@ -17,6 +16,8 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 def _runtime(session_factory: async_sessionmaker[AsyncSession] | MagicMock) -> McpRuntime:
@@ -31,9 +32,7 @@ def _runtime(session_factory: async_sessionmaker[AsyncSession] | MagicMock) -> M
 async def test_admin_short_circuits_without_touching_session_factory() -> None:
     """An admin caller returns immediately — the DB is never read."""
     session_factory = MagicMock()
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), is_platform_admin=False)
     result = await require_admin_for_reachable_agent(
         _runtime(session_factory), auth, agent_name="daimon"
     )
@@ -55,9 +54,7 @@ async def test_non_admin_reachable_agent_raises(
             mode="agent",
         )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'daimon' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory), auth, agent_name="daimon"
@@ -71,9 +68,7 @@ async def test_non_admin_unreachable_agent_is_refused(
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord")
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'my-agent' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory),
@@ -89,9 +84,7 @@ async def test_non_admin_is_gated_when_no_agent_is_resolved(
     """With no stable id to find routines and sessions by, a member's edit fails closed."""
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord")
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'my-agent' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory), auth, agent_name="my-agent"

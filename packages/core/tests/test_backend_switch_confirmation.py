@@ -1,11 +1,11 @@
 """Backend controls on the confirmation gate.
 
-Admin settings cards still ask; a switch never does. A switch card posted
-before switches applied at once still answers its press.
+Admin settings cards ask, and so does a move to another provider, an agent's or one
+conversation's, once it carries its revision. A switch card posted before switches
+applied at once still answers its press.
 """
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
 from daimon.core.confirmation import prompt_for_tool_call
@@ -35,35 +35,72 @@ def _call(**changes: object) -> ToolCall:
     )
 
 
+#: Each tool that moves conversations to another provider: a preview call, its
+#: confirming call, and the card's title for that move.
+_MOVES = {
+    "request_agent_backend_switch": (
+        {"agent_name": "Researcher", "target_backend": "openai"},
+        {"expected_revision": 0},
+        "Move Researcher to OpenAI?",
+    ),
+    "set_thread_model": (
+        {"origin_context_id": "o", "model": "openai:gpt-6-luna"},
+        {"revision": 0},
+        "Move this conversation to OpenAI?",
+    ),
+}
+
+
+def test_every_provider_move_tool_is_listed_here_and_asked() -> None:
+    """A new tool that moves conversations joins this contract and the shared helper's type."""
+    from daimon.core.tool_safety import PROVIDER_MOVE_TOOLS, backend_switch_tools
+
+    assert set(_MOVES) == PROVIDER_MOVE_TOOLS, "every move tool is checked here"
+    assert backend_switch_tools(enabled=True) >= PROVIDER_MOVE_TOOLS, "a session asks on each"
+
+
 @pytest.mark.parametrize(
     "policy",
     [ToolSafetyPolicy(), ToolSafetyPolicy(enabled=True, unattended_writes=("*",))],
     ids=["safety-off", "safety-on"],
 )
 @pytest.mark.parametrize("attended", [False, True])
-@pytest.mark.parametrize("tool", ["request_agent_backend_switch", "set_thread_model"])
-def test_a_switch_is_never_gated_whoever_is_watching(tool, attended, policy) -> None:
-    """A switch runs like a model change: even an old caller's digest asks for no card."""
-    from daimon.core.tool_safety import backend_switch_tools, confirmation_gated_tools
+@pytest.mark.parametrize("tool", sorted(_MOVES))
+def test_a_provider_move_asks_only_once_it_carries_the_revision(attended, policy, tool) -> None:
+    """The preview carries no revision and changes nothing; the confirming call needs the card."""
+    from daimon.core.tool_safety import backend_switch_tools
 
+    preview, confirming, title = _MOVES[tool]
+
+    def verdict(data):
+        call = ToolCall(
+            tool_use_id="switch",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name=tool,
+            input={**preview, **data},
+        )
+        return decide_tool_call(
+            policy,
+            call,
+            attended=attended,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=backend_switch_tools(enabled=True),
+        ).outcome
+
+    assert verdict({}) == "allow", "the preview changes nothing"
+    assert verdict(confirming) == ("ask" if attended else "deny"), (
+        "the confirming call waits for the card, and an unattended run is refused"
+    )
     call = ToolCall(
         tool_use_id="switch",
         server_name=DAIMON_SERVER_NAME,
         tool_name=tool,
-        input={"agent_name": "Researcher", "preview_digest": "a" * 64, "digest": "a" * 64},
+        input={**preview, **confirming},
     )
-    verdict = decide_tool_call(
-        policy,
-        call,
-        attended=attended,
-        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-        confirmed_tools=backend_switch_tools(enabled=True),
-    )
-    assert verdict.outcome == "allow", f"{tool} runs without a card: {verdict}"
-    assert tool not in confirmation_gated_tools(), f"{tool} is no fixed gate"
-
-
-_DEPS = SimpleNamespace()
+    card = prompt_for_tool_call(call, requester_platform_user_id="1", now=datetime.now(UTC))
+    assert card.title == title, card.title
+    assert "OpenAI receives" in (card.consequence or ""), "the card says who gets the data"
+    assert "connector data" in (card.consequence or ""), card.consequence
 
 
 @pytest.fixture
@@ -590,253 +627,35 @@ async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
     assert result.allow is False and result.deny_message == said
 
 
-async def _switch_card(
-    owned_preview,
-    *,
-    expires_in: float = 600,
-    requester: str = "requester",
-    client: bool = False,
-    **reference: object,
-):
-    """A switch card's row as Daimon stored it before switches applied at once."""
-    import uuid
-    from datetime import timedelta
-
-    from daimon.core._models import BackendSwitchCard
-
-    service, agent, actor, sessions, *_ = owned_preview
-    revision = (await service.preview(agent, "openai")).setting_revision
-    card = BackendSwitchCard(
-        id=uuid.uuid4(),
-        tenant_id=agent.tenant_id,
-        account_id=actor.account_id,
-        platform="discord",
-        channel_id="parent-1",
-        thread_id="thread-1",
-        setup_thread=False,
-        requester_platform_user_id=requester,
-        client=client,
-        answering_agent_name="Researcher",
-        reference={
-            "agent": "Researcher",
-            "target_backend": "openai",
-            "expected_revision": revision,
-            "preview_digest": "a" * 64,
-            **reference,
-        },
-        status="pending",
-        message_id="posted-1",
-        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
-    )
-    async with sessions.begin() as session:
-        session.add(card)
-    return card
-
-
-def _press(owned_preview, card_id, *, action="confirm", clicker="requester", admin=True):
-    from unittest.mock import AsyncMock
-
-    from daimon.core.config import TurnSettings
-    from daimon.core.scope import DeploymentDefault
-    from daimon.core.switch_cards import press_switch_card
-
-    _, agent, _, sessions, client, *_ = owned_preview
-    return press_switch_card(
-        deps=_DEPS,
-        sessionmaker=sessions,
-        anthropic=client,
-        turn_settings=TurnSettings(channel_backends=True),
-        deployment_default=DeploymentDefault(agent_name="daimon"),
-        tenant_id=agent.tenant_id,
-        card_id=card_id,
-        action=action,
-        clicker=clicker,
-        current_admin=admin if callable(admin) else AsyncMock(return_value=admin),
-        place_word="server",
-        now=datetime.now(UTC),
-        message_id="posted-1",
-    )
-
-
-async def _card_status(owned_preview, card_id):
-    from daimon.core.stores.backend_switch_cards import get_card
-
-    _, agent, _, sessions, *_ = owned_preview
-    async with sessions() as session:
-        card = await get_card(session, tenant_id=agent.tenant_id, card_id=card_id)
-    assert card is not None
-    return card.status
-
-
-async def test_only_the_requester_can_press_a_self_posted_switch_card(owned_preview):
-    """Anyone else's press is ignored and leaves the card usable by its requester."""
-    service, agent, *_ = owned_preview
-    card = await _switch_card(owned_preview)
-    assert await _press(owned_preview, card.id, clicker="someone-else") is None
-    assert await _press(owned_preview, card.id, action="cancel", clicker="someone-else") is None
-    assert await _card_status(owned_preview, card.id) == "pending"
-    assert await service.current(agent) is None
-
-
-async def test_confirming_a_self_posted_card_switches_once(owned_preview):
-    from daimon.core.switch_cards import answered_switch_card
-
-    service, agent, _, _, _, trace, _, reply = owned_preview
-    card = await _switch_card(owned_preview)
-    trace.queue(reply())
-    trace.queue(reply())
-    press = await _press(owned_preview, card.id)
-    assert press is not None and press.applied and press.closed, press
-    assert press.text.startswith("Researcher now uses OpenAI.")
-    current = await service.current(agent)
-    assert current is not None and current.backend == "openai"
-    assert await _card_status(owned_preview, card.id) == "applied"
-    assert answered_switch_card(press).state == "applied"
-    # A second press answers with what happened; nothing is applied twice.
-    again = await _press(owned_preview, card.id)
-    assert again is not None and not again.applied and again.text == press.text
-    assert (await service.current(agent)).local == current.local
-
-
-async def test_cancelling_a_self_posted_card_changes_nothing(owned_preview):
-    service, agent, *_ = owned_preview
-    card = await _switch_card(owned_preview)
-    press = await _press(owned_preview, card.id, action="cancel")
-    assert press is not None and press.text == "Cancelled. Nothing changed."
-    assert await _card_status(owned_preview, card.id) == "cancelled"
-    assert await service.current(agent) is None
-
-
-async def test_a_self_posted_card_pressed_after_it_expired_says_so(owned_preview):
-    from daimon.core.switch_cards import EXPIRED_TEXT, answered_switch_card
-
-    service, agent, *_ = owned_preview
-    card = await _switch_card(owned_preview, expires_in=-1)
-    press = await _press(owned_preview, card.id)
-    assert press is not None and press.text == EXPIRED_TEXT
-    assert answered_switch_card(press).state == "expired"
-    assert await service.current(agent) is None
-
-
-async def test_a_switch_that_lands_before_the_press_says_who_won(owned_preview):
-    from daimon.core.switch_cards import answered_switch_card
-
-    service, agent, actor, _, _, trace, _, reply = owned_preview
-    card = await _switch_card(owned_preview)
-    await service.set_backend(agent, "anthropic", 0, actor)
-    trace.queue(reply())
-    press = await _press(owned_preview, card.id)
-    assert press is not None and not press.applied
-    assert press.text.startswith(
-        "Someone just switched Researcher; it's now on Anthropic. Ask again if you still want OpenAI."
-    )
-    assert answered_switch_card(press).state == "refused"
-    assert await _card_status(owned_preview, card.id) == "refused"
-    assert (await service.current(agent)).backend == "anthropic"
-
-
-def test_an_old_switch_cards_buttons_still_parse():
-    """A press on a card posted before switches applied at once still finds its row."""
+def test_an_old_switch_cards_press_closes_it_as_expired():
+    """Switches apply at once and post no card: a press on an older one only closes it."""
     import uuid
 
-    from daimon.core.switch_cards import parse_custom_id
+    from daimon.core.host_calls import EXPIRED_TEXT
+    from daimon.core.switch_cards import expired_switch_card
 
     card_id = uuid.uuid4()
     for action in ("confirm", "cancel"):
-        assert parse_custom_id(f"bsw:{card_id}:{action}") == (card_id, action), action
-    assert parse_custom_id("bsw:not-a-card:confirm") is None, "a malformed id presses nothing"
+        card = expired_switch_card(f"bsw:{card_id}:{action}")
+        assert card is not None and card.state == "expired", action
+        assert card.headline == f"⌛ {EXPIRED_TEXT}" and not card.buttons, action
+    assert expired_switch_card("bsw:not-a-card:confirm") is None, "a malformed id is not a card"
 
 
-async def test_only_the_posted_message_can_press_its_switch_card(owned_preview):
-    from unittest.mock import AsyncMock
-
-    from daimon.core.config import TurnSettings
-    from daimon.core.scope import DeploymentDefault
-    from daimon.core.switch_cards import press_switch_card
-
-    _, agent, _, sessions, client, *_ = owned_preview
-    card = await _switch_card(owned_preview)
-
-    async def press(message_id: str):
-        return await press_switch_card(
-            deps=_DEPS,
-            sessionmaker=sessions,
-            anthropic=client,
-            turn_settings=TurnSettings(channel_backends=True),
-            deployment_default=DeploymentDefault(agent_name="daimon"),
-            tenant_id=agent.tenant_id,
-            card_id=card.id,
-            action="cancel",
-            clicker="requester",
-            current_admin=AsyncMock(return_value=True),
-            place_word="server",
-            now=datetime.now(UTC),
-            message_id=message_id,
-        )
-
-    assert await press("another-message") is None
-    assert await _card_status(owned_preview, card.id) == "pending"
-    cancelled = await press("posted-1")
-    assert cancelled is not None and cancelled.text == "Cancelled. Nothing changed."
-
-
-async def test_cancel_never_overwrites_a_confirm_that_claimed_the_card_first(owned_preview):
-    from daimon.core.stores.backend_switch_cards import claim, finish
-    from daimon.core.switch_cards import CONFIRMING_TEXT
-
-    _, agent, _, sessions, *_ = owned_preview
-    card = await _switch_card(owned_preview)
-    async with sessions.begin() as session:
-        assert await claim(
-            session, tenant_id=agent.tenant_id, card_id=card.id, now=datetime.now(UTC)
-        )
-    # While that Confirm is still applying, Cancel answers only the presser.
-    cancelling = await _press(owned_preview, card.id, action="cancel")
-    assert cancelling is not None and not cancelling.closed
-    assert cancelling.text == CONFIRMING_TEXT
-    assert await _card_status(owned_preview, card.id) == "claimed"
-    async with sessions.begin() as session:
-        await finish(session, card_id=card.id, status="applied", outcome="Switched Researcher.")
-    late = await _press(owned_preview, card.id, action="cancel")
-    assert late is not None and late.text == "Switched Researcher."
-    assert await _card_status(owned_preview, card.id) == "applied"
-
-
-async def test_an_error_after_the_claim_closes_the_card_in_plain_words(owned_preview):
-    from unittest.mock import AsyncMock
-
-    from daimon.core.switch_cards import FAILED_TEXT
-
-    service, agent, *_ = owned_preview
-    card = await _switch_card(owned_preview)
-    press = await _press(
-        owned_preview, card.id, admin=AsyncMock(side_effect=RuntimeError("platform down"))
+@pytest.mark.parametrize(("everyone", "who"), [(True, "everyone"), (False, "next message")])
+def test_the_switch_card_names_the_provider_and_who_it_moves(everyone, who) -> None:
+    call = ToolCall(
+        tool_use_id="switch",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="request_agent_backend_switch",
+        input={
+            "agent_name": "Researcher",
+            "target_backend": "gemini",
+            "for_everyone": everyone,
+            "expected_revision": 0,
+        },
     )
-    assert press is not None and press.closed and press.text == FAILED_TEXT
-    assert await _card_status(owned_preview, card.id) == "refused"
-    assert await service.current(agent) is None
-
-
-async def test_a_requester_from_another_organisation_is_never_an_admin_at_the_press(owned_preview):
-    service, agent, _, _, _, trace, _, reply = owned_preview
-    card = await _switch_card(owned_preview, client=True)
-    trace.queue(reply())
-    press = await _press(owned_preview, card.id, admin=True)
-    assert press is not None and not press.applied
-    assert await _card_status(owned_preview, card.id) == "refused"
-    assert await service.current(agent) is None
-
-
-async def test_an_old_card_with_a_stale_preview_and_accepted_losses_still_applies(owned_preview):
-    """What an old card bound (its preview digest, the losses accepted) is read and ignored."""
-    service, agent, _, _, _, trace, _, reply = owned_preview
-    card = await _switch_card(
-        owned_preview, preview_digest="0" * 64, accepted_drops=["mcp:github", "skill:notes"]
-    )
-    trace.queue(reply())
-    trace.queue(reply())
-    press = await _press(owned_preview, card.id)
-    assert press is not None and press.applied, f"an old card applies: {press}"
-    current = await service.current(agent)
-    assert current is not None and current.backend == "openai", "the switch it named was written"
-    assert await _card_status(owned_preview, card.id) == "applied", "the row is closed once"
+    card = prompt_for_tool_call(call, requester_platform_user_id="1", now=datetime.now(UTC))
+    assert card.title == "Move Researcher to Gemini?", card.title
+    assert who in (card.consequence or ""), card.consequence
+    assert "Gemini receives" in (card.consequence or ""), "the card says who gets the data"

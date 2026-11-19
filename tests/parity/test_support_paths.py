@@ -86,10 +86,22 @@ def test_settle_when_clicked_then_the_post_checks_the_stamped_channel(platform: 
             assert _keyword(call, kw) is not None, f"settle_from_post gets {kw}"
 
 
+@pytest.mark.parametrize("platform", CHAT)
+def test_settle_when_the_requester_clicks_then_the_post_says_why_not(platform: str) -> None:
+    """`settle_from_post` refuses a requester who is not an admin; each path shows OWN_REQUEST."""
+    shown = {
+        module
+        for module, tree in _trees(platform).items()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "OWN_REQUEST"
+    }
+    assert shown, f"{platform} never shows the own-request refusal"
+
+
 ROUTED = [
     pytest.param(helper, platform, what, id=f"{helper}-{platform}")
     for helper, what in (
-        ("support_destination", "where a request is posted"),
+        ("request_destination", "where a request is posted"),
         ("feedback_destination", "where a thumbs-down form also goes"),
         ("deployment_channel", "the default channel a settle falls back to"),
     )
@@ -102,6 +114,11 @@ def test_routing_when_a_path_picks_a_channel_then_core_picks_it(
     helper: str, platform: str, what: str
 ) -> None:
     assert _calls(helper, (platform,)), f"{platform}: {what} comes from support_routing.{helper}"
+
+
+def test_routing_when_a_chat_path_posts_a_request_then_it_skips_no_menu_channel() -> None:
+    """`support_destination` ignores a menu's channel; requests use `request_destination`."""
+    assert not _calls("support_destination"), "a chat path routes a request past its menu"
 
 
 @pytest.mark.parametrize("platform", CHAT)

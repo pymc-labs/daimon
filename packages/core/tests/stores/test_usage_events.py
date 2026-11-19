@@ -925,6 +925,7 @@ async def test_provider_model_rows_are_priced_at_their_dated_tariff(
         # (user, agent, model, uncached input, output, cache read, day)
         ("u1", "a_openai", "gpt-6-astra", 100_000, 10_000, 100_000, day),  # $1.60
         ("u1", "a_openai", "gpt-6-astra", 200_000, 10_000, 100_000, day),  # long: $4.95
+        ("u1", "a_openai", "gpt-6-astra", 200_000, 10_000, 100_000, day),  # turn total: $2.60
         (None, "a_gemini", "gemini-3.8-flash", 1_000_000, 100_000, 200_000, day),  # $1.14
         ("u1", "a_gemini", "gemini-4-argon", 1_000_000, 0, 0, datetime(2026, 10, 20, tzinfo=UTC)),
         ("u1", "a_claude", "claude-opus-4-7", 1_000_000, 0, 0, day),  # $5.00
@@ -942,8 +943,11 @@ async def test_provider_model_rows_are_priced_at_their_dated_tariff(
             event_id=f"evt_{n}",
             agent_id=agent,
         )
+        # Row 2 is a turn observation: a total of requests, so base rates past 272k.
         await db_session.execute(
-            update(UsageEvent).where(UsageEvent.event_id == f"evt_{n}").values(occurred_at=at)
+            update(UsageEvent)
+            .where(UsageEvent.event_id == f"evt_{n}")
+            .values(occurred_at=at, observation_revision=1 if n == 2 else None)
         )
     since, until = datetime(2026, 10, 1, tzinfo=UTC), datetime(2026, 11, 1, tzinfo=UTC)
 
@@ -955,11 +959,11 @@ async def test_provider_model_rows_are_priced_at_their_dated_tariff(
     )
 
     assert by_agent == {
-        "a_openai": pytest.approx(6.55),
+        "a_openai": pytest.approx(9.15),
         "a_gemini": pytest.approx(1.14),
         "a_claude": pytest.approx(5.0),
     }, "dated tariffs, per-row tiers; argon before its tariff's checked date costs nothing"
-    assert by_user == {"u1": pytest.approx(11.55)}, "the per-person read leaves out no-person rows"
+    assert by_user == {"u1": pytest.approx(14.15)}, "the per-person read leaves out no-person rows"
 
 
 async def test_per_user_cap_read_counts_openai_and_gemini_spend_of_that_person(

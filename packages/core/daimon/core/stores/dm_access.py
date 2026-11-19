@@ -15,7 +15,7 @@ from daimon.core.stores.domain import (
     DmRuleRow,
     DmRuleSubject,
 )
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -248,14 +248,6 @@ async def set_pick(
     )
 
 
-async def clear_pick(session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID) -> None:
-    await session.execute(
-        delete(DmAgentPick).where(
-            DmAgentPick.tenant_id == tenant_id, DmAgentPick.account_id == account_id
-        )
-    )
-
-
 async def count_picks_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     return (
         await session.scalar(
@@ -308,6 +300,14 @@ async def delete_user_rules(
             deleted += len(rules) - len(kept)
             await _rewrite_rules(session, tenant_id, kept, now)
     return deleted
+
+
+async def clear_setter(session: AsyncSession, *, setter: str) -> None:
+    """Privacy erasure: the setting stays, the person who made it leaves its `set_by`."""
+    await session.execute(
+        update(DmAgentGrant).where(DmAgentGrant.set_by == setter).values(set_by=None)
+    )
+    await session.execute(update(DmRule).where(DmRule.set_by == setter).values(set_by=None))
 
 
 async def count_grants_listing(

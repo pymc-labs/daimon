@@ -11,9 +11,9 @@ import httpx
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
@@ -86,11 +86,8 @@ async def test_posted_answer_feedback_persona_matrix(
     db_session_factory: async_sessionmaker[AsyncSession], actor: Persona, route: Route
 ) -> None:
     """Mocked permission tests vote, fetch, submit and use Teams' built-in route."""
-    await provision_tenant(
-        db_session_factory,
-        platform="teams",
-        workspace_id=ENTRA_TENANT_ID,
-        signup_credit=Decimal("100"),
+    await provision_workspace(
+        db_session_factory, ENTRA_TENANT_ID, platform="teams", signup_credit=Decimal("100")
     )
     graph = OwnerGraphFake()
     fake = PersonaTeamsApiFake(active=PERSONAS[0])

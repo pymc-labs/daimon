@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from daimon.core.host_web_fetch import PINNED_HOST_TOOLS
+from daimon.core.tool_safety import confirmation_gated_tools
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import switched_request as switched_request
@@ -109,7 +110,10 @@ async def _one_reading(request, quote, switched_request, *, relay: bool, finer=(
             "the tool's text names it too"
         )
     assert ("mcp_server:linear" in drops) is not relay
-    assert not [d for d in drops if d.startswith("mcp_tool:")], drops
+    # Deliberate: with no host call gate here (no settings), a tool that needs a card can't
+    # show one, so it alone of Daimon's tools is out, named like any loss.
+    lost_tools = {d.rpartition(":")[2] for d in drops if d.startswith("mcp_tool:")}
+    assert lost_tools <= confirmation_gated_tools(), drops
     assert quote.unsupported_mcps == (() if relay else ("linear",))
     # A skill past the provider's size limits is the only skill named, each by itself:
     # keyed by id in the drops, shown by its own name.

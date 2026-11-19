@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 import pytest
@@ -35,9 +36,9 @@ from daimon.core.scope import (
 )
 from daimon.core.stores import github_access, github_app_installations, scoped_config_write
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import AgentFileRow
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
@@ -46,6 +47,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 _NOW = datetime(2026, 9, 14, 9, 30, tzinfo=UTC)
 _NO_GITHUB = GitHubDeploymentFacts(app_configured=False)
+
+_load_agent_details = partial(
+    load_agent_details,
+    platform="discord",
+    channel_id="c1",
+    thread_id=None,
+    github=_NO_GITHUB,
+    public_mcp_url=None,
+    is_admin=True,
+    channel_label="#general",
+)
+
 _PUBLIC_MCP_URL = "https://daimon.example/mcp"
 
 
@@ -277,9 +290,9 @@ async def test_load_agent_details_reads_the_agent_once_and_wires_its_stored_rows
         granted_by_account_id=None,
         is_working_repo=True,
     )
-    await put_agent_file(
+    await new_agent_file(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         agent_id=agent_uuid,
         key="LINEAR_API_KEY",
         content="super-secret",
@@ -293,19 +306,13 @@ async def test_load_agent_details_reads_the_agent_once_and_wires_its_stored_rows
         seen.append(request.url.path)
         return router.dispatch(request)
 
-    details = await load_agent_details(
+    details = await _load_agent_details(
         db_session,
         build_fake_anthropic(handler),
         tenant_id=tenant.id,
         ma_agent_id="ag_alpha",
-        platform="discord",
-        channel_id="c1",
-        thread_id=None,
         deployment_default=DeploymentDefault(agent_name="daimon"),
-        github=_NO_GITHUB,
         public_mcp_url=_PUBLIC_MCP_URL,
-        is_admin=True,
-        channel_label="#general",
     )
 
     assert seen == ["/v1/agents/ag_alpha"], (
@@ -358,18 +365,13 @@ async def test_load_agent_details_lists_skills_only_when_a_custom_skill_is_attac
         seen.append(request.url.path)
         return router.dispatch(request)
 
-    details = await load_agent_details(
+    details = await _load_agent_details(
         db_session,
         build_fake_anthropic(handler),
         tenant_id=tenant.id,
         ma_agent_id="ag_alpha",
-        platform="discord",
         channel_id=None,
-        thread_id=None,
         deployment_default=DeploymentDefault(),
-        github=_NO_GITHUB,
-        public_mcp_url=None,
-        is_admin=True,
         channel_label=None,
     )
 
@@ -407,33 +409,20 @@ async def test_load_agent_details_reports_answers_here_from_a_bound_threads_resp
     router = MARouter()
     router.add_agent(agent)
 
-    in_thread = await load_agent_details(
+    in_thread = await _load_agent_details(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
         ma_agent_id="ag_alpha",
-        platform="discord",
-        channel_id="c1",
         thread_id="t1",
         deployment_default=DeploymentDefault(),
-        github=_NO_GITHUB,
-        public_mcp_url=None,
-        is_admin=True,
-        channel_label="#general",
     )
-    in_channel = await load_agent_details(
+    in_channel = await _load_agent_details(
         db_session,
         build_fake_anthropic(router.dispatch),
         tenant_id=tenant.id,
         ma_agent_id="ag_alpha",
-        platform="discord",
-        channel_id="c1",
-        thread_id=None,
         deployment_default=DeploymentDefault(),
-        github=_NO_GITHUB,
-        public_mcp_url=None,
-        is_admin=True,
-        channel_label="#general",
     )
 
     assert in_thread.answers_here, "the thread's own responder is this agent"
@@ -450,19 +439,12 @@ async def test_load_agent_details_refuses_an_agent_from_another_install(
     router.add_agent(ma_agent(id="ag_theirs", name="theirs", tenant_id=other.id))
 
     with pytest.raises(DaimonError, match="no longer available"):
-        await load_agent_details(
+        await _load_agent_details(
             db_session,
             build_fake_anthropic(router.dispatch),
             tenant_id=tenant.id,
             ma_agent_id="ag_theirs",
-            platform="discord",
-            channel_id="c1",
-            thread_id=None,
             deployment_default=DeploymentDefault(),
-            github=_NO_GITHUB,
-            public_mcp_url=None,
-            is_admin=True,
-            channel_label="#general",
         )
 
 
@@ -491,17 +473,11 @@ async def test_load_agent_details_hides_an_isolated_channels_agent_from_a_member
     router.add_agent_list(local)
 
     with pytest.raises(DaimonError, match="no longer available"):
-        await load_agent_details(
+        await _load_agent_details(
             db_session,
             build_fake_anthropic(router.dispatch),
             tenant_id=tenant.id,
             ma_agent_id="ag_local",
-            platform="discord",
-            channel_id="c1",
-            thread_id=None,
             deployment_default=DeploymentDefault(),
-            github=_NO_GITHUB,
-            public_mcp_url=None,
             is_admin=False,
-            channel_label="#general",
         )

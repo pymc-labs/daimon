@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -68,6 +69,21 @@ from daimon.testing.ma_models import ma_agent
 
 _TEAM_ID = "T_PANEL"
 _CHANNEL_ID = "C0HERE1111"
+
+_details_view = partial(
+    build_details_view,
+    is_admin=True,
+    is_platform_admin=True,
+    coding_tools_available=True,
+    channel_id=_CHANNEL_ID,
+    attribution=None,
+)
+
+
+_agents_view = partial(
+    build_agents_view, is_admin=True, is_platform_admin=True, channel_id=_CHANNEL_ID
+)
+
 _OTHER_CHANNEL_ID = "C0THERE222"
 _TENANT_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 _MAKER = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -256,15 +272,7 @@ def test_agents_view_when_agent_answers_here_lists_it_first_then_stable_name_ord
         _roster_agent("beta-bot"),
         answering=answering,
     )
-    view = build_agents_view(
-        roster,
-        page=_page(roster),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        attributions={},
-        channel_id=_CHANNEL_ID,
-    )
+    view = _agents_view(roster, page=_page(roster), meta=_meta(), attributions={})
     headings = [text for text in _texts(view) if text.startswith("*")]
     assert headings[0] == f"*Agents in <#{_CHANNEL_ID}>*", "the roster names its channel"
     assert headings[1] == f"*zebra-bot*\nAnswers in <#{_CHANNEL_ID}>", (
@@ -305,14 +313,13 @@ def test_agents_view_connect_github_is_admin_only() -> None:
 
 def test_agents_view_when_roster_empty_shows_empty_state_and_setup_action() -> None:
     roster = _roster()
-    view = build_agents_view(
+    view = _agents_view(
         roster,
         page=_page(roster),
         meta=_meta(),
         is_admin=False,
         is_platform_admin=False,
         attributions={},
-        channel_id=_CHANNEL_ID,
     )
     assert "No agent answers here yet. Use Set up agents to add one." in _joined(view), (
         "an empty roster states the empty case in the shared copy"
@@ -328,15 +335,7 @@ def test_agents_view_when_over_page_size_renders_pager_and_stays_under_100_block
     agents = [_roster_agent(f"agent-{index:03d}") for index in range(45)]
     roster = _roster(*agents)
     page = _page(roster)
-    view = build_agents_view(
-        roster,
-        page=page,
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        attributions={},
-        channel_id=_CHANNEL_ID,
-    )
+    view = _agents_view(roster, page=page, meta=_meta(), attributions={})
     assert page.page_count == 3, "45 agents at a page size of 20 is three pages"
     assert "Page 1 of 3" in _joined(view), "a paged roster says where the reader is"
     assert ACTION_PAGE_NEXT in _action_ids(view), "a first page offers Next"
@@ -348,15 +347,7 @@ def test_agents_view_when_over_page_size_renders_pager_and_stays_under_100_block
 def test_agents_view_never_renders_made_by_for_workspace_stamp() -> None:
     stamped = _roster_agent("seeded-bot", created_by_account_id=_MAKER, is_built_in=True)
     roster = _roster(stamped)
-    view = build_agents_view(
-        roster,
-        page=_page(roster),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        attributions={},
-        channel_id=_CHANNEL_ID,
-    )
+    view = _agents_view(roster, page=_page(roster), meta=_meta(), attributions={})
     rendered = _joined(view)
     assert "made by" not in rendered, (
         "an account with no resolved person behind it — the workspace stamp — gets no attribution"
@@ -372,15 +363,8 @@ def test_agents_view_when_routed_names_given_distinguishes_unrouted_from_elsewhe
         _roster_agent("growth-bot"),
         answering=answering,
     )
-    view = build_agents_view(
-        roster,
-        page=_page(roster),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        attributions={},
-        channel_id=_CHANNEL_ID,
-        routed_agent_names={"growth-bot"},
+    view = _agents_view(
+        roster, page=_page(roster), meta=_meta(), attributions={}, routed_agent_names={"growth-bot"}
     )
     rendered = _joined(view)
     assert "Not assigned" in rendered, "an agent nothing routes to says so"
@@ -398,15 +382,7 @@ def test_details_view_when_name_exceeds_24_chars_truncates_title_and_keeps_full_
     None
 ):
     long_name = "a-very-long-agent-name-that-overflows"
-    view = build_details_view(
-        _details(name=long_name),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(name=long_name), meta=_meta())
     assert len(view["title"]["text"]) == MAX_TITLE_CHARS, "the title is cut to Slack's cap"
     assert view["title"]["text"] != long_name, "the title cannot hold the whole name"
     assert f"*{long_name}*" in _joined(view), (
@@ -416,16 +392,7 @@ def test_details_view_when_name_exceeds_24_chars_truncates_title_and_keeps_full_
 
 def test_details_avatar_row_and_admin_controls() -> None:
     avatar_url = "https://example.test/avatars/token/hash.png"
-    admin = build_details_view(
-        _details(name="research-bot"),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-        avatar_url=avatar_url,
-    )
+    admin = _details_view(_details(name="research-bot"), meta=_meta(), avatar_url=avatar_url)
     assert any(
         block.get("accessory", {}).get("image_url") == avatar_url for block in admin["blocks"]
     )
@@ -447,41 +414,21 @@ def test_details_avatar_row_and_admin_controls() -> None:
         if element.get("action_id") == ACTION_AVATAR_RESET
     )
     assert reset_button["confirm"]["confirm"]["text"] == "Use default"
-    member = build_details_view(
+    member = _details_view(
         _details(name="research-bot"),
         meta=_meta(),
         is_admin=False,
         is_platform_admin=False,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
         avatar_url=avatar_url,
     )
     assert ACTION_AVATAR_CHANGE not in json.dumps(member)
     assert ACTION_AVATAR_RESET not in json.dumps(member)
-    without_public_url = build_details_view(
-        _details(name="research-bot"),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-        avatar_url=None,
-    )
+    without_public_url = _details_view(_details(name="research-bot"), meta=_meta(), avatar_url=None)
     assert not any(
         block.get("accessory", {}).get("type") == "image" for block in without_public_url["blocks"]
     )
-    built_in = build_details_view(
-        _details(name="research-bot"),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-        avatar_url=avatar_url,
-        avatar_editable=False,
+    built_in = _details_view(
+        _details(name="research-bot"), meta=_meta(), avatar_url=avatar_url, avatar_editable=False
     )
     assert "*Picture*" not in _joined(built_in)
     assert ACTION_AVATAR_CHANGE not in json.dumps(built_in)
@@ -494,14 +441,12 @@ def _details_action_ids(
     coding_tools_available: bool = True,
     viewer_owns: bool = False,
 ) -> list[str]:
-    view = build_details_view(
+    view = _details_view(
         details,
         meta=_meta(),
         is_admin=is_admin,
         is_platform_admin=is_admin,
         coding_tools_available=coding_tools_available,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
         viewer_owns=viewer_owns,
     )
     return [
@@ -532,24 +477,14 @@ def test_details_offers_the_agents_owner_coding_tools_and_keys_but_not_add_skill
 
 
 def test_details_hides_the_unconfigured_coding_tools_note_from_a_member() -> None:
-    member = build_details_view(
+    member = _details_view(
         _details(is_admin=False),
         meta=_meta(),
         is_admin=False,
         is_platform_admin=False,
         coding_tools_available=False,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
     )
-    admin = build_details_view(
-        _details(),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=False,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    admin = _details_view(_details(), meta=_meta(), coding_tools_available=False)
     assert "Coding-tool access isn't set up" not in _joined(member)
     assert "Coding-tool access isn't set up" in _joined(admin)
 
@@ -632,15 +567,7 @@ async def test_load_details_view_queues_picture_without_generating_in_panel(
 
 
 def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:
-    view = build_details_view(
-        _details(name="research-bot"),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(name="research-bot"), meta=_meta())
     assert view["title"]["text"] == "research-bot", "a short name fits the title untouched"
     assert "*research-bot*" not in _joined(view), (
         "a name already in the title is not repeated as a heading"
@@ -650,15 +577,7 @@ def test_details_view_when_short_name_does_not_repeat_it_in_the_body() -> None:
 @pytest.mark.parametrize("is_admin", [True, False])
 def test_details_view_when_unrouted_shows_note(is_admin: bool) -> None:
     details = _details(channels=[], is_admin=is_admin)
-    view = build_details_view(
-        details,
-        meta=_meta(),
-        is_admin=is_admin,
-        is_platform_admin=is_admin,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(details, meta=_meta(), is_admin=is_admin, is_platform_admin=is_admin)
     rendered = _joined(view)
     assert details.unrouted_note is not None, "an agent nothing routes to carries the note"
     assert details.unrouted_note in rendered, "the note is rendered as the core wrote it"
@@ -672,7 +591,7 @@ def test_details_view_when_unrouted_shows_note(is_admin: bool) -> None:
 
 def test_details_view_orders_identity_then_configuration_and_collections() -> None:
     """Details reads top to bottom the way it does on the other platform."""
-    view = build_details_view(
+    view = _details_view(
         _details(
             purpose="Finds evidence and analyzes data.",
             files=[_agent_file("TOGGL_TOKEN")],
@@ -681,11 +600,6 @@ def test_details_view_orders_identity_then_configuration_and_collections() -> No
             mcp_servers=[{"type": "url", "name": "example", "url": "https://example.com/mcp"}],
         ),
         meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
     )
     rendered = _joined(view)
     headings = [
@@ -706,15 +620,7 @@ def test_details_view_orders_identity_then_configuration_and_collections() -> No
 
 def test_details_view_never_renders_key_values() -> None:
     files = [_agent_file("TOGGL_TOKEN"), _agent_file("XERO_API_KEY")]
-    view = build_details_view(
-        _details(files=files),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(files=files), meta=_meta())
     serialized = json.dumps(view)
     assert "TOGGL_TOKEN" in serialized, "key names are shown so people know what to ask for"
     assert "never-rendered" not in serialized, "a key's value must never reach a view"
@@ -724,7 +630,7 @@ def test_details_view_never_renders_key_values() -> None:
 
 
 def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
-    view = build_details_view(
+    view = _details_view(
         _details(
             channels=[
                 ChannelConfigRow(
@@ -738,11 +644,6 @@ def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
             ]
         ),
         meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
     )
     assert f"*Answers in*\n<#{_CHANNEL_ID}>\n<#{_OTHER_CHANNEL_ID}>" in _joined(view), (
         "multiple routing values remain a stable vertical list"
@@ -750,7 +651,7 @@ def test_details_view_renders_multiple_answering_places_one_per_line() -> None:
 
 
 def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
-    view = build_details_view(
+    view = _details_view(
         _details(
             mcp_servers=[
                 {
@@ -761,11 +662,6 @@ def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
             ]
         ),
         meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
     )
     assert "<https://example.com/mcp|Example¦service spoofed>" in _joined(view), (
         "a service name cannot terminate its link label or inject another row"
@@ -774,30 +670,14 @@ def test_details_view_sanitizes_connection_names_inside_slack_links() -> None:
 
 def test_details_view_when_many_keys_collapses_and_offers_expand() -> None:
     files = [_agent_file(f"KEY_{index:02d}") for index in range(12)]
-    collapsed = build_details_view(
-        _details(files=files),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    collapsed = _details_view(_details(files=files), meta=_meta())
     rendered = _joined(collapsed)
     assert "KEY_05" in rendered, "the first six key names are shown"
     assert "KEY_06" not in rendered, "the seventh and beyond collapse behind the expander"
     assert ACTION_EXPAND_KEYS in _action_ids(collapsed), "a long key list offers expansion"
     assert "Show more" in _button_labels(collapsed), "the expander says what it does"
 
-    expanded = build_details_view(
-        _details(files=files),
-        meta=_meta(expanded="keys"),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    expanded = _details_view(_details(files=files), meta=_meta(expanded="keys"))
     assert "KEY_11" in _joined(expanded), "an expanded list shows the rest"
     assert "Show fewer" in _button_labels(expanded), "an expanded list offers to collapse again"
 
@@ -828,15 +708,7 @@ def test_details_view_bounds_each_collection_consistently(
             else None
         ),
     )
-    collapsed = build_details_view(
-        details,
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    collapsed = _details_view(details, meta=_meta())
     collapsed_text = _joined(collapsed)
     assert (heading in collapsed_text) is (count > 0), "empty optional lists are omitted"
     assert (action_id in _action_ids(collapsed)) is (count > 6), (
@@ -847,15 +719,7 @@ def test_details_view_bounds_each_collection_consistently(
         assert "ITEM_06" not in collapsed_text, "the seventh item stays behind Show more"
         assert f"+{count - 6} more" in collapsed_text, "the hidden count is exact"
 
-        expanded = build_details_view(
-            details,
-            meta=_meta(expanded=kind),
-            is_admin=True,
-            is_platform_admin=True,
-            coding_tools_available=True,
-            channel_id=_CHANNEL_ID,
-            attribution=None,
-        )
+        expanded = _details_view(details, meta=_meta(expanded=kind))
         expanded_text = _joined(expanded)
         assert "Show fewer" in _button_labels(expanded), "expanded lists can collapse"
         visible_count = min(count, 60)
@@ -867,29 +731,13 @@ def test_details_view_bounds_each_collection_consistently(
 
 
 def test_details_view_when_coding_tools_unconfigured_renders_note_not_button() -> None:
-    available = build_details_view(
-        _details(),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    available = _details_view(_details(), meta=_meta())
     assert ACTION_CODING_TOOLS in _action_ids(available), (
         "a configured deployment offers the token button"
     )
     assert "claude mcp add" not in _joined(available), "CLI instructions wait for the click"
 
-    unavailable = build_details_view(
-        _details(),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=False,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    unavailable = _details_view(_details(), meta=_meta(), coding_tools_available=False)
     assert ACTION_CODING_TOOLS not in _action_ids(unavailable), (
         "a button that cannot produce a working connection is not offered"
     )
@@ -933,15 +781,7 @@ def test_details_view_renders_each_repo_access_kind(
     assert details.repo.access.kind == expected_kind, (
         "the fixture must produce the access kind under test"
     )
-    view = build_details_view(
-        details,
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(details, meta=_meta())
     rendered = _joined(view)
     assert "<https://github.com/example/widgets|example/widgets>" in rendered, (
         "the repo is a link to itself, labelled owner/repo"
@@ -955,15 +795,7 @@ def test_details_view_renders_each_repo_access_kind(
 
 
 def test_details_view_when_no_repo_omits_the_optional_section() -> None:
-    view = build_details_view(
-        _details(binding=None),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(binding=None), meta=_meta())
     assert "*Repository:*" not in _joined(view), "an unbound repo adds no empty-state noise"
 
 
@@ -971,30 +803,14 @@ def test_details_view_when_skills_truncated_says_names_may_be_missing() -> None:
     skills = [
         {"type": "custom", "skill_id": "skill_one", "version": "1"},
     ]
-    view = build_details_view(
-        _details(skills=skills, skills_truncated=True),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(skills=skills, skills_truncated=True), meta=_meta())
     assert "Some skill names may be missing." in _joined(view), (
         "a truncated skills listing says it is incomplete rather than reading as the whole set"
     )
 
 
 def test_details_view_when_skill_source_truncated_but_empty_keeps_the_warning() -> None:
-    view = build_details_view(
-        _details(skills=[], skills_truncated=True),
-        meta=_meta(),
-        is_admin=True,
-        is_platform_admin=True,
-        coding_tools_available=True,
-        channel_id=_CHANNEL_ID,
-        attribution=None,
-    )
+    view = _details_view(_details(skills=[], skills_truncated=True), meta=_meta())
     assert "*Skills*" not in _joined(view), "an empty list does not grow an empty section"
     assert "Some skill names may be missing." in _joined(view), (
         "source truncation remains visible even when no skill name was resolved"
@@ -1218,24 +1034,8 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
         ]
     )
     views = [
-        build_agents_view(
-            roster,
-            page=_page(roster),
-            meta=meta,
-            is_admin=True,
-            is_platform_admin=True,
-            attributions={_MAKER: "<@U1>"},
-            channel_id=_CHANNEL_ID,
-        ),
-        build_details_view(
-            _details(name=long_name),
-            meta=meta,
-            is_admin=True,
-            is_platform_admin=True,
-            coding_tools_available=True,
-            channel_id=_CHANNEL_ID,
-            attribution="<@U1>",
-        ),
+        _agents_view(roster, page=_page(roster), meta=meta, attributions={_MAKER: "<@U1>"}),
+        _details_view(_details(name=long_name), meta=meta, attribution="<@U1>"),
         build_routing_view(
             answering_map,
             page=paginate(answering_map.channel_overrides, page=0, page_size=PANEL_PAGE_SIZE),
@@ -1328,24 +1128,8 @@ def _all_views() -> list[dict[str, Any]]:
     roster = _roster(answering, other, answering=answering)
     meta = _meta()
     return [
-        build_agents_view(
-            roster,
-            page=_page(roster),
-            meta=meta,
-            is_admin=True,
-            is_platform_admin=True,
-            attributions={_MAKER: "<@U1>"},
-            channel_id=_CHANNEL_ID,
-        ),
-        build_details_view(
-            _details(),
-            meta=meta,
-            is_admin=True,
-            is_platform_admin=True,
-            coding_tools_available=True,
-            channel_id=_CHANNEL_ID,
-            attribution="<@U1>",
-        ),
+        _agents_view(roster, page=_page(roster), meta=meta, attributions={_MAKER: "<@U1>"}),
+        _details_view(_details(), meta=meta, attribution="<@U1>"),
         build_routing_view(
             _answering_map(),
             page=paginate((), page=0, page_size=PANEL_PAGE_SIZE),
@@ -1422,14 +1206,12 @@ def test_details_offer_an_open_in_web_url_button_only_with_a_web_url() -> None:
     url = "https://app.example.com/w/x/agents/ag_1"
 
     def built(details: AgentDetails) -> dict[str, Any]:
-        return build_details_view(
+        return _details_view(
             details,
             meta=_meta(),
             is_admin=False,
             is_platform_admin=False,
             coding_tools_available=False,
-            channel_id=_CHANNEL_ID,
-            attribution=None,
         )
 
     buttons = [

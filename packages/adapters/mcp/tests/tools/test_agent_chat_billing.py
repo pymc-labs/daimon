@@ -26,7 +26,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionStatusIdleEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
+from daimon.adapters.mcp.auth.resolver import Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,
@@ -66,6 +66,8 @@ from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG, ma_model
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _MA_AGENT_ID = "ag_billing001"
 _ENV_NAME = "production"
@@ -153,11 +155,7 @@ def _directory(tenant_id: uuid.UUID) -> MARouter:
         "created_at": "2026-06-23T00:00:00Z",
         "updated_at": "2026-06-23T00:00:00Z",
     }
-    agent = ma_agent(
-        id=_MA_AGENT_ID,
-        name="test-agent",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "test-agent"},
-    )
+    agent = ma_agent(id=_MA_AGENT_ID, name="test-agent", tenant_id=tenant_id)
     router = MARouter()
     router.add_agent(agent)
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent.model_dump(mode="json")]))
@@ -195,9 +193,9 @@ class _World:
             settings=settings,  # type: ignore[arg-type]
             deployment_default=DeploymentDefault(environment_name=_ENV_NAME),
         )
-        self.auth = AuthIdentity(
-            account_id=account_id,
-            tenant_id=tenant_id,
+        self.auth = auth_identity(
+            account_id,
+            tenant_id,
             role=Role.USER,
             agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_MA_AGENT_ID),
             platform="discord",

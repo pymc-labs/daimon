@@ -1251,3 +1251,26 @@ def test_role_gate_requires_current_membership_and_matching_role(action: Action)
     assert not authorize(
         policy, subject=Subject(platform_user_id="U1", is_admin=True), action=action
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "metadata", "aliased"),
+    [
+        ("default", {"daimon_managed": "true", "daimon_name": "default"}, True),
+        ("daimon", {"daimon_managed": "true", "daimon_name": "daimon"}, False),
+        ("default-reader", {"daimon_reader_of": "h", "daimon_reader_source": "default"}, False),
+        ("default", {"daimon_name": "default"}, False),
+    ],
+    ids=["seeded-renamed", "seeded-unrenamed", "reader", "own-default"],
+)
+def test_agent_names_when_builtin_name_then_only_the_renamed_seed_takes_the_old_rules(
+    name: str, metadata: dict[str, str], aliased: bool
+) -> None:
+    """A rule on the other built-in name may be a workspace's own agent's."""
+    from daimon.core.access_policy import AgentRule, agent_invoker_roles
+    from daimon.core.authz import agent_names
+
+    other = "daimon" if name.startswith("default") else "default"
+    policy = TenantAccessPolicy(agent_rules={other: AgentRule(invoker_role_ids=("1234",))})
+    names = agent_names(name, metadata)
+    assert bool(agent_invoker_roles(policy, names)) is aliased, f"{names} under {other}'s rule"

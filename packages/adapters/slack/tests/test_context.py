@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from functools import partial
 
 import pytest
 from aioresponses import aioresponses as AioResponsesMock
@@ -24,6 +25,12 @@ from daimon.adapters.slack.context import (
 from daimon.core.slack_file_token import verify_file_token
 from daimon.core.untrusted import UNTRUSTED_NOTE
 from slack_sdk.web.async_client import AsyncWebClient
+
+_delta_xml = partial(build_delta_xml, channel="C1", thread_ts="100.0")
+
+
+_context_xml = partial(build_context_xml, channel="C1", thread_ts="100.0")
+
 
 # Pattern matches conversations.replies regardless of query params (aioresponses GET
 # requests carry params in the URL, so exact-string matching fails).
@@ -65,9 +72,7 @@ async def test_context_requests_custom_page_and_marks_workspace_truncation(
                 "has_more": has_more,
             },
         )
-        xml = await build_context_xml(
-            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", page_limit=50
-        )
+        xml = await _context_xml(_make_client(), user_query="hi", page_limit=50)
         assert _replies_request_params(mock)["limit"] == "50"
     assert xml.count("<message ") == returned_count
     assert ('truncated="true"' in xml) is has_more
@@ -76,14 +81,7 @@ async def test_context_requests_custom_page_and_marks_workspace_truncation(
 async def test_delta_requests_the_configured_page_size() -> None:
     with AioResponsesMock() as mock:
         mock.get(_REPLIES_PATTERN, payload={"ok": True, "messages": [], "has_more": False})
-        await build_delta_xml(
-            _make_client(),
-            channel="C1",
-            thread_ts="100.0",
-            watermark_ts="101.0",
-            user_query="hi",
-            page_limit=75,
-        )
+        await _delta_xml(_make_client(), watermark_ts="101.0", user_query="hi", page_limit=75)
         assert _replies_request_params(mock)["limit"] == "75"
 
 
@@ -138,9 +136,7 @@ async def test_build_delta_xml_marks_thread_delta_truncated_when_slack_has_more(
             payload={"ok": True, "messages": _fifteen_messages(), "has_more": True},
         )
         client = _make_client()
-        xml = await build_delta_xml(
-            client, channel="C1", thread_ts="100.0", watermark_ts="99.0", user_query="hi"
-        )
+        xml = await _delta_xml(client, watermark_ts="99.0", user_query="hi")
 
     assert '<thread_delta source="slack" truncated="true" trust="untrusted">' in xml
     assert '<thread_delta source="slack" trust="untrusted">' not in xml
@@ -219,9 +215,7 @@ async def test_build_context_xml_user_query_is_escaped() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_context_xml(
-            client, channel="C1", thread_ts="100.0", user_query="x < y & z"
-        )
+        xml = await _context_xml(client, user_query="x < y & z")
 
     assert "&lt;" in xml, "< in user_query should be XML-escaped"
     assert "&amp;" in xml, "& in user_query should be XML-escaped"
@@ -235,9 +229,7 @@ async def test_build_context_xml_empty_history() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_context_xml(
-            client, channel="C1", thread_ts="100.0", user_query="trigger text"
-        )
+        xml = await _context_xml(client, user_query="trigger text")
 
     assert "trigger text" in xml, "user_query must always appear"
     assert '<thread_history source="slack" trust="untrusted">' in xml, (
@@ -260,13 +252,7 @@ async def test_build_delta_xml_calls_conversations_replies_with_oldest() -> None
             },
         )
         client = _make_client()
-        xml = await build_delta_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            watermark_ts="105.0",
-            user_query="more",
-        )
+        xml = await _delta_xml(client, watermark_ts="105.0", user_query="more")
 
     assert '<channel platform="slack" id="C1"/>' in xml, (
         "should contain channel element with platform and channel id"
@@ -294,13 +280,7 @@ async def test_build_delta_xml_escapes_xml_special_chars() -> None:
             },
         )
         client = _make_client()
-        xml = await build_delta_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            watermark_ts="105.0",
-            user_query="query",
-        )
+        xml = await _delta_xml(client, watermark_ts="105.0", user_query="query")
 
     assert "<script>" not in xml, "raw script tag must not appear in output"
     assert "&lt;script&gt;" in xml, "< and > in message text must be escaped"
@@ -338,9 +318,7 @@ async def test_build_context_xml_renders_author_id_on_user_query() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_context_xml(
-            client, channel="C1", thread_ts="100.0", user_query="hi", author_id="U0BDWSMCB26"
-        )
+        xml = await _context_xml(client, user_query="hi", author_id="U0BDWSMCB26")
 
     assert '<user_query author_id="U0BDWSMCB26" is_admin="false">' in xml, (
         "author_id must be rendered as a quoted attribute so the agent can mention the asker"
@@ -355,14 +333,7 @@ async def test_build_context_xml_renders_is_admin_true_on_user_query() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_context_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            user_query="hi",
-            author_id="U0BDWSMCB26",
-            is_admin=True,
-        )
+        xml = await _context_xml(client, user_query="hi", author_id="U0BDWSMCB26", is_admin=True)
 
     assert '<user_query author_id="U0BDWSMCB26" is_admin="true">' in xml, (
         "is_admin=True must render the lowercase literal 'true' on <user_query>"
@@ -392,14 +363,7 @@ async def test_build_delta_xml_renders_author_id_on_user_query() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_delta_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            watermark_ts="105.0",
-            user_query="more",
-            author_id="U123",
-        )
+        xml = await _delta_xml(client, watermark_ts="105.0", user_query="more", author_id="U123")
 
     assert '<user_query author_id="U123" is_admin="false">' in xml, (
         "delta user_query must carry author_id and is_admin"
@@ -414,14 +378,8 @@ async def test_build_delta_xml_renders_is_admin_true_on_user_query() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_delta_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            watermark_ts="105.0",
-            user_query="more",
-            author_id="U123",
-            is_admin=True,
+        xml = await _delta_xml(
+            client, watermark_ts="105.0", user_query="more", author_id="U123", is_admin=True
         )
 
     assert '<user_query author_id="U123" is_admin="true">' in xml, (
@@ -440,14 +398,8 @@ async def test_build_context_xml_reseed_shaped_call_carries_is_admin() -> None:
             payload={"ok": True, "messages": [], "has_more": False},
         )
         client = _make_client()
-        xml = await build_context_xml(
-            client,
-            channel="C1",
-            thread_ts="100.0",
-            user_query="reseed query",
-            author_id="U_RESEED",
-            is_admin=True,
-            proxy=None,
+        xml = await _context_xml(
+            client, user_query="reseed query", author_id="U_RESEED", is_admin=True, proxy=None
         )
 
     assert '<user_query author_id="U_RESEED" is_admin="true">' in xml, (
@@ -494,14 +446,10 @@ async def test_a_replayed_message_cannot_escape_the_untrusted_envelope(builder: 
         mock.get(_REPLIES_PATTERN, payload={"ok": True, "messages": messages, "has_more": False})
         client = _make_client()
         if builder == "history":
-            xml = await build_context_xml(
-                client, channel="C1", thread_ts="100.0", user_query="summarise"
-            )
+            xml = await _context_xml(client, user_query="summarise")
             tag = "thread_history"
         else:
-            xml = await build_delta_xml(
-                client, channel="C1", thread_ts="100.0", watermark_ts="100.5", user_query="go"
-            )
+            xml = await _delta_xml(client, watermark_ts="100.5", user_query="go")
             tag = "thread_delta"
 
     start = xml.index(f"<{tag} ")
@@ -531,12 +479,8 @@ async def test_context_leaves_out_only_this_turns_status_card() -> None:
             _REPLIES_PATTERN,
             payload={"ok": True, "messages": _thread_with_own_status_card(), "has_more": False},
         )
-        xml = await build_context_xml(
-            _make_client(),
-            channel="C1",
-            thread_ts="100.0",
-            user_query="<@U_BOT> new question",
-            status_ts="104.0",
+        xml = await _context_xml(
+            _make_client(), user_query="<@U_BOT> new question", status_ts="104.0"
         )
 
     assert "Thinking" not in xml, "this turn's own card must not replay as another bot's post"
@@ -558,10 +502,8 @@ async def test_delta_leaves_out_only_this_turns_status_card() -> None:
                 "has_more": False,
             },
         )
-        xml = await build_delta_xml(
+        xml = await _delta_xml(
             _make_client(),
-            channel="C1",
-            thread_ts="100.0",
             watermark_ts="101.0",
             user_query="<@U_BOT> new question",
             status_ts="104.0",
@@ -584,9 +526,7 @@ async def test_status_ts_keeps_a_human_message_at_the_same_ts() -> None:
                 "has_more": False,
             },
         )
-        xml = await build_context_xml(
-            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", status_ts="100.0"
-        )
+        xml = await _context_xml(_make_client(), user_query="hi", status_ts="100.0")
 
     assert "root</message>" in xml, "only a bot post at the card's ts is treated as the card"
 
@@ -639,9 +579,7 @@ async def test_a_chat_history_of_none_reads_no_thread_messages() -> None:
     """At 0 the Chat history feature reads nothing, where Slack would read 0 as its default."""
     with AioResponsesMock() as mock:
         mock.get(_REPLIES_PATTERN, payload={"ok": True, "messages": _fifteen_messages()})
-        xml = await build_context_xml(
-            _make_client(), channel="C1", thread_ts="100.0", user_query="hi", page_limit=0
-        )
+        xml = await _context_xml(_make_client(), user_query="hi", page_limit=0)
         assert not mock.requests, "no conversations.replies call"
     assert "<message " not in xml, "no earlier message is replayed"
     assert "hi" in xml.split("</context>", 1)[1], "the message itself still goes"

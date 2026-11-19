@@ -13,6 +13,7 @@ from alembic.operations import Operations
 from daimon.core._models import Base, Routine
 from daimon.core.stores.domain import FeatureValueRow, SandboxPin, stored_pin
 from daimon.core.stores.routines import create_routine
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -234,24 +235,18 @@ async def test_the_downgrade_drops_what_has_no_older_form(db_session: AsyncSessi
     """Agent opt-ins, routine Offs and Daimon's own (`system`) changes are deleted; a routine's
     pinned On and its history come back."""
     tenant = await make_tenant(db_session)
-    routine = await create_routine(
+    routine = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="owner-1",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="kept",
     )
-    off = await create_routine(
+    off = await new_routine(
         db_session,
-        tenant_id=tenant.id,
+        tenant,
         created_by_user_id="owner-1",
-        agent_id="agent_a",
-        agent_name="daimon",
         cron_expr="0 9 * * *",
-        timezone_="UTC",
         trigger_message="off",
     )
     connection = await db_session.connection()
@@ -418,16 +413,7 @@ async def test_erasing_a_setter_reaches_the_kept_columns_within_its_tenant(
     await connection.run_sync(old_columns)
     mine, other = await make_tenant(db_session), await make_tenant(db_session)
     rows = [
-        await create_routine(
-            db_session,
-            tenant_id=tenant.id,
-            created_by_user_id="1",
-            agent_id="agent_a",
-            agent_name="daimon",
-            cron_expr="0 9 * * *",
-            timezone_="UTC",
-            trigger_message="x",
-        )
+        await new_routine(db_session, tenant, created_by_user_id="1", cron_expr="0 9 * * *", trigger_message="x")
         for tenant in (mine, other, other)
     ]  # fmt: skip
     for row, setter in zip(rows, ("acct", "2002", "kept"), strict=True):

@@ -92,6 +92,7 @@ from daimon.adapters.mcp.tools.media import register_media_tools, register_uploa
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
 from daimon.adapters.mcp.tools.microsoft.register import register_microsoft_tools
 from daimon.adapters.mcp.tools.models import register_model_tools
+from daimon.adapters.mcp.tools.monitored_activity import register_monitored_activity_tools
 from daimon.adapters.mcp.tools.my_data import register_my_data_tools
 from daimon.adapters.mcp.tools.never_tag import register_never_tag_tools
 from daimon.adapters.mcp.tools.notebook import register_notebook_tools
@@ -623,6 +624,7 @@ def create_mcp_app(
     register_web_workspace_settings_tool(mcp, runtime)
     register_allowance_tools(mcp, runtime)
     register_audit_log_tools(mcp, runtime)
+    register_monitored_activity_tools(mcp, runtime)
     register_agent_edit_tools(mcp, runtime)  # agent revert, owners, skill files
     register_skill_library_edit_tools(mcp, runtime)  # library skill files and versions
     register_server_skill_tools(mcp, runtime)  # the data server node's skills
@@ -733,6 +735,7 @@ def create_mcp_app(
                     else None
                 ),
                 bearers=identity.bearers,
+                anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),

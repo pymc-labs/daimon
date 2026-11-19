@@ -20,15 +20,6 @@ from daimon.adapters.mcp.middleware.held_tools import (
     HELD_TOOL_ALLOWLIST,
     held_tool_refusal,
 )
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
@@ -52,6 +43,8 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from .harness import production_identity_middleware
 
 SECRET = b"a" * 32
 HOLD = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
@@ -239,17 +232,7 @@ def _identity_app(
         name="held-identity",
         auth=StaticTokenVerifier(tokens={"t": {"client_id": "c", "scopes": [], **claims}}),
     )
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(sessionmaker))
 
     @mcp.tool
     async def now(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]

@@ -27,21 +27,7 @@ from daimon.core.features.model_input import CHANNEL_BACKFILL
 from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES
 from daimon.core.untrusted import UNTRUSTED_NOTE
 
-
-class _AsyncIter:
-    """Async iterator adapter for mocked ``thread.history()``."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
+from .shared_fakes import AsyncIter as _AsyncIter
 
 
 def _make_message(

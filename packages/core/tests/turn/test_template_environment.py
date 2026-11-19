@@ -7,7 +7,6 @@ packages and network rules; what one can't recreate stays a named loss
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 
@@ -19,6 +18,7 @@ from daimon.core.host_web_fetch import PINNED_HOST_TOOLS
 from daimon.core.stores.domain import SkillSizeRow
 from daimon.core.turn.openai_environment import environment_name, operation_key, tenant_environment
 from daimon.core.turn.session_skills import environment_inline_bytes, fitting_skills
+from daimon.testing.turn_fakes import run_prepared
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.resources import Environment, EnvironmentSpec, NetworkPolicy
 from mux.drivers.gemini.packages import HOOKS_TARGET, SCRIPT_TARGET
@@ -218,7 +218,7 @@ async def test_default_environment_when_switched_to_openai_then_its_turn_install
     request, quote, wire, _ = openai_template
     assert not SANDBOX & set(quote.declared_drops), quote.declared_drops
     environments = SetupEnvironments()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda _key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     monkeypatch.setattr(openai_deployment, "_deployment_id", _deployment)
     await openai_turn(request, 0)
     await openai_turn(request, 1)
@@ -245,7 +245,7 @@ async def test_openai_thread_when_made_on_the_bare_environment_then_it_moves_onc
 
     request, _, wire, _ = openai_template
     environments, carried = SetupEnvironments(), [False]
-    monkeypatch.setattr(openai_deployment, "_environments", lambda _key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     monkeypatch.setattr(openai_deployment, "_deployment_id", _deployment)
     original = openai_environment.tenant_environment
 
@@ -285,13 +285,12 @@ async def _bind(request, *, reuse: bool):
 
 
 async def _run(request, prepared) -> None:
-    from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.turn_fakes import RecordingLifecycle
 
     async def no_recovery():
         pytest.fail("the turn changed its admitted source/session")
 
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         request.deps,
         prepared,
         tenant_id=request.tenant_id,
@@ -300,10 +299,10 @@ async def _run(request, prepared) -> None:
         external_user_id=request.external_user_id,
         user_message="Use the sandbox",
         lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
         reseed_user_message=no_recovery,
         recovery_lifecycle=lambda _: RecordingLifecycle(),
         operation_key="template-environment",
+        render_interval_s=2.0,
     )
     assert outcome.state.error is None, outcome.state.error
 

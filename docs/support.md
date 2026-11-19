@@ -27,8 +27,9 @@ credits apply. Without step 5, a request costs one credit.
 
 Requests go to one channel per platform. Where the deployment allows it,
 a workspace picks its own channel. Otherwise the deployment's channel
-receives every request. Changing the channel moves only new requests;
-open ones stay where they were posted.
+receives every request. A menu can name its own channel, which beats the
+workspace's. Changing either moves only new requests; open ones stay where
+they were posted.
 A channel outside the workspace is refused.
 
 ```sh
@@ -125,7 +126,8 @@ options:
 ```
 
 Save the menu under a key, then pick it for a place. A menu that a place
-uses cannot be removed.
+uses cannot be removed. Add `channel: {id: "456"}` to send its requests
+there; on Teams, also give `team_id` and `service_url`.
 
 ```sh
 daimon support menu set support support.yaml
@@ -135,23 +137,27 @@ daimon support menu use default channel 456
 
 ## Settle requests
 
-A `range` or `quoted` request holds its minimum until staff settle it. Anyone
-in the support channel settles it from the request's post, or declines it to
-refund the hold. The person who asked is not told the final charge, so tell
-them yourself. Every settle is recorded with who made it. On Slack, with
-`slack_escalation_team_id` set, settling works only in that workspace; with it
+Nothing is charged until staff handle a request. A `fixed` or `steps` request
+holds its price until someone presses **Accept**. A `range` or `quoted` request
+holds its minimum until staff settle it. Anyone in the support channel acts
+from the request's post, or declines it to release the hold. The person who
+asked is not told the final charge, so tell them yourself. Every settle is
+recorded with who made it.
+
+On Slack, with `slack_escalation_team_id` set, settling works only in that workspace; with it
 unset, only someone from the workspace the request came from can settle.
 Clearing a limit declines its pending requests.
 
 ```sh
 daimon support requests list --pending
 daimon support requests settle <request-id> 1.5
+daimon support requests settle <request-id>
 daimon support requests list --undelivered
 ```
 
 `--undelivered` shows requests no support channel received and no person
-handled: pending ones, and ones already charged at submit (a fixed or steps
-price, or exempt). Settling a pending one charges within its price; declining
-releases the hold. Settling a charged one keeps the charge as is; declining
+handled: pending ones, and ones already charged at submit (exempt, or made
+before Accept). Leaving out the amount accepts a fixed or steps price.
+Settling a pending one charges within its price; declining releases the hold. Settling a charged one keeps the charge as is; declining
 refunds it. The `support_*` tools in [MCP tools](mcp-tools.md) and **Not
 delivered** in Admin > Support do the same; chat posts only settle pending ones.

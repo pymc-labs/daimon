@@ -27,12 +27,12 @@ from daimon.core.config import Settings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -57,12 +57,10 @@ def _runtime(
     payload.update(settings_overrides or {})
     settings = Settings.model_validate(payload)
     cache = new_resolver_cache()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=default,
         resolver_cache=cache,
         turn_deps=build_turn_deps(

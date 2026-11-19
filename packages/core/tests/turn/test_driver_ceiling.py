@@ -14,11 +14,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import cast
 
-from anthropic import AsyncAnthropic
 from daimon.core.turn.ceiling import CEILING_MESSAGE
-from daimon.core.turn.posture import BillingExempt
 from daimon.testing.turn_fakes import (
     BlockForever,
     DelayThenYield,
@@ -30,12 +27,6 @@ from daimon.testing.turn_fakes import (
 
 from .conftest import make_end_turn, make_status_idle
 
-_EXEMPT = BillingExempt(reason="cli-operator-run")
-
-
-def _cast(fa: FakeAnthropic) -> AsyncAnthropic:
-    return cast(AsyncAnthropic, fa)
-
 
 async def test_no_deadline_leaves_the_driver_unbounded() -> None:
     fa = FakeAnthropic()
@@ -44,15 +35,7 @@ async def test_no_deadline_leaves_the_driver_unbounded() -> None:
     ]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc)
 
     assert final.error is None, "a normal scripted turn with no deadline must complete cleanly"
     assert len(lc.terminal_success) == 1, "the default (no-deadline) path must be untouched"
@@ -64,14 +47,7 @@ async def test_past_deadline_returns_a_ceiling_turn_error() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-        deadline=datetime.now(UTC) - timedelta(seconds=5),
+        fa, lifecycle=lc, deadline=datetime.now(UTC) - timedelta(seconds=5)
     )
 
     assert final.error is not None, "a past deadline must breach the ceiling"
@@ -84,16 +60,7 @@ async def test_ceiling_breach_delivers_on_terminal_failure_exactly_once() -> Non
     fa.beta.sessions.events.stream_scripts = [[BlockForever()]]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-        deadline=datetime.now(UTC) - timedelta(seconds=5),
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, deadline=datetime.now(UTC) - timedelta(seconds=5))
 
     assert len(lc.terminal_failures) == 1, "on_terminal_failure must be delivered exactly once"
     _, err = lc.terminal_failures[0]
@@ -107,16 +74,7 @@ async def test_ceiling_breach_closes_the_opened_stream() -> None:
     fa.beta.sessions.events.stream_scripts = [[DelayThenYield(seconds=5.0, event=terminal)]]
     lc = RecordingLifecycle()
 
-    await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-        deadline=datetime.now(UTC) + timedelta(seconds=0.2),
-    )
+    await run_turn_on_leg(fa, lifecycle=lc, deadline=datetime.now(UTC) + timedelta(seconds=0.2))
 
     assert fa.beta.sessions.events.streams[0].closed is True, (
         "a ceiling breach must close the SSE stream it abandons, not leak the connection"
@@ -131,14 +89,7 @@ async def test_a_future_deadline_does_not_disturb_a_normal_turn() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-        deadline=datetime.now(UTC) + timedelta(seconds=30),
+        fa, lifecycle=lc, deadline=datetime.now(UTC) + timedelta(seconds=30)
     )
 
     assert final.error is None, "a deadline far in the future must not disturb a normal turn"
@@ -168,16 +119,7 @@ async def test_ceiling_breach_during_stream_open_leaks_no_task_and_no_stream() -
 
     fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
 
-    final = await run_turn_on_leg(
-        anthropic=_cast(fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        billing=_EXEMPT,
-        deadline=datetime.now(UTC) + timedelta(milliseconds=50),
-    )
+    final = await run_turn_on_leg(fa, deadline=datetime.now(UTC) + timedelta(milliseconds=50))
 
     assert final.error is not None
     assert final.error.kind == "ceiling"

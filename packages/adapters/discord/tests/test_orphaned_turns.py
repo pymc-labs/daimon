@@ -34,7 +34,6 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TurnCardIntentRow
 from daimon.core.stores.thread_sessions import (
-    create_thread_session,
     get_thread_session_by_id,
     list_orphaned_turns,
     mark_turn_active,
@@ -44,6 +43,7 @@ from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     record_turn_card_message,
 )
+from daimon.testing.builders import new_thread_session
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
@@ -99,13 +99,8 @@ async def _make_orphan(
     mark_active: bool = True,
 ) -> uuid.UUID:
     tenant = await make_tenant(session)
-    row = await create_thread_session(
-        session,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id=thread_id,
-        account_id=uuid.uuid4(),
-        ma_session_id=ma_session_id,
+    row = await new_thread_session(
+        session, tenant_id=tenant.id, thread_id=thread_id, ma_session_id=ma_session_id
     )
     if mark_active:
         await mark_turn_active(

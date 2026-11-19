@@ -805,9 +805,9 @@ async def test_requests_show_as_recent_used_open_and_undelivered(
         ("1", "Ask a person", "1"),
         ("1", "Ask a person", "1"),
     ], "newest first, by option and person"
-    assert page["channel"]["open"]["count"] == 0, "fixed-price requests settle at once"
-    assert [(u["credits"], u["charged"]) for u in page["undelivered"]] == [("1", True)], (
-        "the undelivered one settled at submit: listed with its charge until a person handles it"
+    assert page["channel"]["open"]["count"] == 2, "fixed-price requests wait for Accept"
+    assert [(u["credits"], u["charged"]) for u in page["undelivered"]] == [("1", False)], (
+        "the undelivered one holds its price until a person handles it"
     )
 
 
@@ -880,10 +880,10 @@ async def test_open_requests_name_each_channel_they_sit_in_once(
     assert shown["count"] == 2 and sorted(shown["where"]) == ["general", "requests"], shown
 
 
-async def test_a_charged_at_submit_request_is_kept_or_refunded_from_the_page(
+async def test_a_fixed_price_request_is_accepted_or_declined_from_the_page(
     web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
 ) -> None:
-    """Keep leaves the charge, decline refunds it; a handled one is 409; a different amount 422."""
+    """Accept charges its price, decline releases it; a handled one is 409; another amount 422."""
     fixed = _option_fixed()
     async with _support(web_client, db_session_factory, tmp_path) as admin:
         await admin.client.put(
@@ -898,28 +898,28 @@ async def test_a_charged_at_submit_request_is_kept_or_refunded_from_the_page(
         )
         choice = RequestChoice.of(MenuSpec.model_validate(fixed).options[0])
         kept = await _submit(db_session_factory, admin, "m1", choice=choice)
-        refunded = await _submit(db_session_factory, admin, "m2", choice=choice)
+        declined = await _submit(db_session_factory, admin, "m2", choice=choice)
         post = admin.client.post
         base = "/api/support/requests"
         listed = (await admin.client.get("/api/support")).json()
         other = await post(f"{base}/{kept}/settle", json={"charge": "1"})
-        keep = await post(f"{base}/{kept}/settle", json={"charge": "2"})
-        decline = await post(f"{base}/{refunded}/decline")
+        accept = await post(f"{base}/{kept}/settle", json={})
+        decline = await post(f"{base}/{declined}/decline")
         again = await post(f"{base}/{kept}/decline")
-        again_settle = await post(f"{base}/{refunded}/settle", json={"charge": "2"})
+        again_settle = await post(f"{base}/{declined}/settle", json={})
         trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
 
     rows = {i["id"]: i for i in listed["undelivered"]}
-    assert {(r["credits"], r["charged"]) for r in rows.values()} == {("2", True)}, rows
-    assert set(rows) == {str(kept), str(refunded)}, "both are listed"
+    assert {(r["credits"], r["charged"]) for r in rows.values()} == {("2", False)}, rows
+    assert set(rows) == {str(kept), str(declined)}, "both are listed"
     assert other.status_code == 422 and _locs(other) == [["charge"]], other.text
-    assert keep.status_code == 200 and decline.status_code == 200, "kept and refunded"
+    assert accept.status_code == 200 and decline.status_code == 200, "accepted and declined"
     assert decline.json()["undelivered"] == [], "both left the list"
     limit = _one(decline.json()["limits"], scope="channel", scope_id="c1")
-    assert limit["used"] == "2", "only the kept charge is left on the limit"
+    assert limit["used"] == "2", "only the accepted charge is left on the limit"
     assert again.status_code == 409 and again_settle.status_code == 409, "already handled"
-    actions = [a for a, _, _ in trail if "support request" in a]
-    assert actions == ["Settled support request", "Declined support request"], "audited once each"
+    details = [d for a, _, d in trail if "support request" in a]
+    assert details[0] == "Accepted" and len(details) == 2, f"audited once each: {trail}"
 
 
 def _option_fixed() -> dict[str, object]:

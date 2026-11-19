@@ -21,7 +21,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules as store
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -48,11 +48,11 @@ def visible(monkeypatch: pytest.MonkeyPatch) -> None:
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession], tenant: TenantRow) -> McpRuntime:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/agents"
-        agent = ma_agent(
+        agent = ma_agent_payload(
             name="shared",
             tenant_id=tenant.id,
             mcp_servers=[{"name": "remote", "type": "url", "url": _URL}],
-        ).model_dump(mode="json")
+        )
         return httpx.Response(200, json={"data": [agent], "next_page": None})
 
     return McpRuntime(
