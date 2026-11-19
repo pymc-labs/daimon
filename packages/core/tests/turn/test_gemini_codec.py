@@ -22,6 +22,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ScopeViolation, UnsupportedCapability
@@ -135,6 +136,27 @@ async def test_cold_close_never_opens_a_provider_stream(harness: Harness) -> Non
     with pytest.raises(StopAsyncIteration):
         await stream.__anext__()
     assert not harness.transport.opened
+
+
+@pytest.mark.asyncio
+async def test_the_host_stream_reads_usage_only_for_usage_events(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness.transport.responses.append(interaction("first", text="one"))
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    snapshots, reads = io.usage_snapshots, 0
+
+    async def counted() -> dict[tuple[str, int], UsageObservation]:
+        nonlocal reads
+        reads += 1
+        return await snapshots()
+
+    monkeypatch.setattr(io, "usage_snapshots", counted)
+    stream = await io.open_stream(read_timeout_s=1)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "question"}]}])
+    frames = [frame async for frame in stream]
+    usage = [frame for frame in frames if frame.usage is not None]
+    assert len(frames) > len(usage) == reads == 1, (len(frames), reads)
 
 
 @pytest.mark.asyncio

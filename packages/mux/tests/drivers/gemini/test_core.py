@@ -986,14 +986,14 @@ async def test_a_completed_interactions_events_are_delivered_while_a_writer_hold
     """J6g PAKM6G failed busy right after `interaction.completed`: the stream reconciled,
     then read the turn's events through the account's write transaction again. Another
     copy's writer taking the records row the moment the reconcile commits must not stop
-    the events it just committed from being delivered."""
+    the events it just committed from being delivered, nor read them again."""
     ma, t, storage, _, s, _ = setup
     t.responses.append(native(status="in_progress", steps=[]))
     await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
     t.saved["i1"] = native()
     t.streams["i1"] = [{"event_type": "interaction.completed"}]
-    real_reconcile = ma.events.reconcile
-    real_transaction = storage.transaction
+    real_reconcile = ma.events._reconciled  # pyright: ignore[reportPrivateUsage]
+    real_transaction, real_read = storage.transaction, storage.read
     held = False
 
     async def reconcile_then_a_writer_takes_the_row(scope: Scope, session: ResourceRef):
@@ -1007,10 +1007,59 @@ async def test_a_completed_interactions_events_are_delivered_while_a_writer_hold
             raise RuntimeError("records row held by another copy's writer")
         return real_transaction(keys, after_dispatch=after_dispatch)
 
-    ma.events.reconcile = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
+    def read(keys: Keys = ALL):
+        if held:
+            raise RuntimeError("the stream read the records again")
+        return real_read(keys)
+
+    ma.events._reconciled = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
     storage.transaction = transaction  # type: ignore[method-assign]
+    storage.read = read  # type: ignore[method-assign]
     streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
     assert held, "the writer took the row after the reconcile"
+    assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
+
+
+async def test_an_unchanged_poll_writes_nothing_and_an_older_final_turn_is_not_read(
+    setup: Setup,
+) -> None:
+    ma, t, storage, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native(status="in_progress", steps=[])
+    await ma.events.reconcile(SCOPE, s.ref)
+    real_transaction, writes = storage.transaction, 0
+
+    def counted(keys: Keys = ALL, *, after_dispatch: bool = False):
+        nonlocal writes
+        writes += 1
+        return real_transaction(keys, after_dispatch=after_dispatch)
+
+    storage.transaction = counted  # type: ignore[method-assign]
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert writes == 0, "a poll that changes nothing writes nothing"
+    t.saved["i1"] = native()
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert writes == 1, "the finished read is written"
+    t.responses.append(native("i2", status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="second")
+    reads = len(t.read_requests)
+    await ma.events.reconcile(SCOPE, s.ref)
+    assert t.read_requests[reads:] == ["i2"], "an older finished turn is never read again"
+
+
+async def test_the_stream_reconciles_only_on_an_ending_status(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    t.saved["i1"] = native()
+    t.streams["i1"] = [
+        {"event_type": "interaction.status_update", "status": "in_progress"},
+        {"event_type": "interaction.status_update", "status": "completed"},
+    ]
+    reads = len(t.read_requests)
+    streamed = [e async for e in ma.events.stream(SCOPE, s.ref)]
+    assert len(t.read_requests) == reads + 1, "a progress update reads nothing"
     assert any(e.type == "session.turn_ended" for e in streamed), [e.type for e in streamed]
 
 
@@ -1108,7 +1157,9 @@ async def test_a_read_from_a_workspace_replaced_meanwhile_is_refused(setup: Setu
     real_get = t.get
 
     async def get_while_the_workspace_changes(interaction: str) -> Object:
-        raw = await real_get(interaction)
+        # A newer read, so it is applied (an unchanged one writes nothing).
+        later = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+        raw = {**await real_get(interaction), "updated": later}
         async with storage.transaction() as records:
             records.sessions[s.ref.id].environment_id = "e2"
         return raw

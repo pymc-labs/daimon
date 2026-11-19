@@ -368,22 +368,38 @@ class Base:
                 record.session.binding.id, ("Gemini replaced the reused workspace.",)
             )
 
-    async def _fetch_interactions(
-        self, scope: Scope, session: ResourceRef
-    ) -> tuple[tuple[str, str, Object], ...]:
-        """Read every interaction of the session from the provider, holding no lock.
-
-        The interactions come from a committed snapshot and the GETs run outside the
-        records transaction, so a slow provider read never holds the account's
-        records row (every other session in the account waits on it).
-        """
+    async def _reconciled(self, scope: Scope, session: ResourceRef) -> SessionRecord:
+        """Read the session's open interactions from the provider, holding no lock, and
+        apply them; an unchanged poll writes nothing. Open: unfinished, or the current
+        one, whose usage the provider may still correct. Older finished ones are skipped."""
         async with self._storage.read(session_keys(session.id)) as snapshot:
             seen = self._record(snapshot, scope, session)
-            pending = tuple(seen.interactions.items())
         fetched: list[tuple[str, str, Object]] = []
-        for interaction, root in pending:
-            fetched.append((interaction, root, await self._get(seen, interaction)))
-        return tuple(fetched)
+        for interaction, root in seen.interactions.items():
+            observed = seen.observations.get(interaction)
+            if observed is None or not observed.final or interaction == seen.current:
+                fetched.append((interaction, root, await self._get(seen, interaction)))
+        return await self._applied(
+            scope, session, seen, lambda record: self._apply_fetched(record, tuple(fetched))
+        )
+
+    async def _applied(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        seen: SessionRecord,
+        apply: Callable[[SessionRecord], None],
+    ) -> SessionRecord:
+        """Apply provider reads to a copy of the read snapshot `seen`, and again to the
+        locked row only when that changes it. Returns the record as applied."""
+        record = copy.deepcopy(seen)
+        apply(record)
+        if record == seen:
+            return record
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
+            record = self._record(records, scope, session)
+            apply(record)
+            return record
 
     def _apply_fetched(
         self, record: SessionRecord, fetched: tuple[tuple[str, str, Object], ...]
@@ -584,14 +600,14 @@ class GeminiAgents(Base):
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
         self._check(scope, ref, "agent")
-        async with self._storage.transaction(Keys(read=(("agent", ref.id),))) as records:
+        async with self._storage.read(Keys(read=(("agent", ref.id),))) as records:
             result = records.agents.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline agent configuration")
             return result
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
-        async with self._storage.transaction(Keys(scan=("agent",))) as records:
+        async with self._storage.read(Keys(scan=("agent",))) as records:
             return page_values(
                 [
                     a
@@ -731,7 +747,7 @@ class GeminiEnvironments(Base):
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._check(scope, ref, "environment")
-        async with self._storage.transaction(Keys(read=(("environment", ref.id),))) as records:
+        async with self._storage.read(Keys(read=(("environment", ref.id),))) as records:
             result = records.environments.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline environment configuration")
@@ -740,7 +756,7 @@ class GeminiEnvironments(Base):
     async def list(
         self, scope: Scope, *, filters: EnvironmentFilter, page: PageRequest
     ) -> Page[Environment]:
-        async with self._storage.transaction(Keys(scan=("environment",))) as records:
+        async with self._storage.read(Keys(scan=("environment",))) as records:
             return page_values(
                 [
                     e
@@ -1150,15 +1166,17 @@ class GeminiSessions(Base):
         return await self.retrying(lambda: self._retrieve(scope, ref))
 
     async def _retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
-        async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
-            record = self._record(records, scope, ref)
-            if record.current is not None:
-                self._observe(
-                    record,
-                    await self._get(record, record.current),
-                    record.interactions[record.current],
-                )
-            return record.session
+        async with self._storage.read(session_keys(ref.id)) as records:
+            seen = self._record(records, scope, ref)
+        if (current := seen.current) is None:
+            return seen.session
+        root, raw = seen.interactions[current], await self._get(seen, current)
+
+        def apply(record: SessionRecord) -> None:
+            if record.interactions.get(current) == root:
+                self._observe(record, raw, root)
+
+        return (await self._applied(scope, ref, seen, apply)).session
 
     async def list(
         self, scope: Scope, *, filters: SessionFilter, page: PageRequest
@@ -1167,7 +1185,7 @@ class GeminiSessions(Base):
             refuse("session_list_filter")
         if filters.agent is not None:
             self._check(scope, filters.agent, "agent")
-        async with self._storage.transaction(Keys(scan=("session",))) as records:
+        async with self._storage.read(Keys(scan=("session",))) as records:
             return page_values(
                 [
                     r.session
@@ -1180,7 +1198,7 @@ class GeminiSessions(Base):
             )
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
-        async with self._storage.transaction(session_keys(ref.id)) as records:
+        async with self._storage.read(session_keys(ref.id)) as records:
             record = self._record(records, scope, ref)
             return UpdatePlan(
                 session=ref,
@@ -1569,7 +1587,7 @@ class GeminiEvents(Base):
         after: str | None = None,
         previews: bool = False,
     ) -> AsyncIterator[Event]:
-        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             record = self._record(records, scope, session)
             interaction, root = record.current, record.root
             if interaction is not None:
@@ -1609,16 +1627,15 @@ class GeminiEvents(Base):
                                 native_type="step.delta",
                             )
                             preview_sequence += 1
-                    elif kind in ("interaction.completed", "interaction.status_update"):
+                    elif kind == "interaction.completed" or (
+                        kind == "interaction.status_update"
+                        and raw.get("status") in (None, "requires_action", *OUTCOMES)
+                    ):
                         # Status events alone have no saved final content. Fetch
                         # canonical steps; EOF or a child/native event is never an end.
-                        await self.reconcile(scope, session)
-                        # The reconcile just committed this turn's events: read them from
-                        # the committed snapshot, never waiting behind the account's
-                        # writers again (J6g PAKM6G failed busy here).
-                        async with self._storage.read(session_keys(session.id)) as records:
-                            current = self._record(records, scope, session)
-                            batch = tuple(e for e in current.events.values() if e.turn_id == root)
+                        # A plain progress update changes nothing a reconcile would see.
+                        current = await self.retrying(lambda: self._reconciled(scope, session))
+                        batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
                             if item.id not in delivered:
                                 delivered.add(item.id)
@@ -1684,20 +1701,17 @@ class GeminiEvents(Base):
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
-        fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
-            record = self._record(records, scope, session)
-            self._apply_fetched(record, fetched)
-            s = record.session
-            return ProjectionSnapshot(
-                session=session,
-                cursor=str(len(record.events)),
-                state=s.state if s.state != "provisioning" else "running",
-                active_root_turn=s.active_root_turn,
-                required_actions=s.required_actions,
-                gaps=tuple(e.id for e in record.events.values() if e.type == "session.history_gap"),
-                taken_at=now(),
-            )
+        record = await self._reconciled(scope, session)
+        s = record.session
+        return ProjectionSnapshot(
+            session=session,
+            cursor=str(len(record.events)),
+            state=s.state if s.state != "provisioning" else "running",
+            active_root_turn=s.active_root_turn,
+            required_actions=s.required_actions,
+            gaps=tuple(e.id for e in record.events.values() if e.type == "session.history_gap"),
+            taken_at=now(),
+        )
 
     async def cancel(
         self, scope: Scope, session: ResourceRef, *, turn_id: str, key: str
@@ -1774,21 +1788,21 @@ class GeminiEvents(Base):
                 raise ProviderError("conflict", retryable=False)
             interaction = seen.current
         raw = await self._get(seen, interaction)
-        async with self._storage.transaction(
-            session_keys(receipt.session.id, lock=True)
-        ) as records:
-            record = self._record(records, scope, receipt.session)
+
+        def apply(record: SessionRecord) -> None:
             if record.root != receipt.turn_id or record.current != interaction:
                 raise ProviderError("conflict", retryable=False)
             self._same_workspace(record, raw)
             self._observe(record, raw, receipt.turn_id)
-            outcome = OUTCOMES.get(string(raw["status"]))
-            return StopObservation(
-                receipt_operation_id=receipt.operation_id,
-                stopped=outcome is not None,
-                outcome=outcome,
-                observed_at=now(),
-            )
+
+        await self._applied(scope, receipt.session, seen, apply)
+        outcome = OUTCOMES.get(string(raw["status"]))
+        return StopObservation(
+            receipt_operation_id=receipt.operation_id,
+            stopped=outcome is not None,
+            outcome=outcome,
+            observed_at=now(),
+        )
 
 
 _IMAGE_TYPES = frozenset(

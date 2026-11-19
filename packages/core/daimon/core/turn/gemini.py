@@ -924,7 +924,10 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                             ) from None
                         if event.authority == "preview":
                             continue
-                        frame = self.io.frame(event, await self.io.usage_snapshots())
+                        usage = event.type == "usage.observed"  # only it reads the list
+                        frame = self.io.frame(
+                            event, await self.io.usage_snapshots() if usage else {}
+                        )
                     normalized = frame.normalized
                     if normalized is None or normalized.id in self._seen:
                         continue

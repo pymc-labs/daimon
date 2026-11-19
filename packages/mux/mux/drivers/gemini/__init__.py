@@ -65,12 +65,9 @@ class GeminiUsage(Base):
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
-        # Provider reads first, holding no lock; then a short write to apply them.
-        fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
-            record = self._record(records, scope, session)
-            self._apply_fetched(record, fetched)
-            return tuple(record.observation_history.values())
+        # Provider reads first, holding no lock; then a short write only on a change.
+        record = await self._reconciled(scope, session)
+        return tuple(record.observation_history.values())
 
     async def list(
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
