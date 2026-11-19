@@ -195,6 +195,64 @@ async def test_a_turn_whose_usage_is_final_is_not_reread_by_a_later_pass(sm, mon
     assert later == 0 and read == ["turn"], "a final turn is never read again"
 
 
+@pytest.mark.parametrize("billed_by", ["turn", "reread"])
+async def test_a_billed_fallback_is_reread_after_a_restart_until_final(sm, monkeypatch, billed_by):
+    """A fallback billed as the turn ended, or by a re-read whose unknown revision the drain
+    then closed, leaves nothing pending; a restarted scheduler still reads the turn until
+    its usage is final, and the final reading charges nothing twice."""
+    from daimon.core.turn import openai_deployment
+    from daimon.core.turn.openai_late_usage import DurableRereads
+    from mux.drivers.openai import OpenAIUsage
+
+    seen_ago = timedelta(hours=3)
+    if billed_by == "turn":
+        await pending_usage(sm, provider="openai", observed_at=datetime.now(UTC) - seen_ago)
+    else:
+        await _reread(sm, monkeypatch, seen_ago=seen_ago, final=False)
+    async with sm() as db:
+        row = (await mux_state.pending_outbox(db))[0]
+    await drain_pending_usage(sm, markup=Decimal(1))
+    debited = await _debited(sm)
+    assert debited < 0 and await _pending(sm) == 0, "the fallback is billed, nothing pending"
+    async with sm() as db:
+        newest = await mux_state.get_newest_usage_revision(db, row.binding_id, row.observation_id)
+    assert newest is not None
+    final = row.observation.model_copy(update=_MEASURED | {"revision": newest + 1, "final": True})
+    read: list[str] = []
+
+    async def reconcile_turn(self, scope, session, turn_id):
+        read.append(turn_id)
+        return (final,)
+
+    monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
+    monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
+    now = datetime.now(UTC)
+    assert await DurableRereads().run(sm, markup=Decimal(1), now=now) == 1, "read after restart"
+    assert await _debited(sm) == debited, "the final reading charges nothing twice"
+    assert await DurableRereads().run(sm, markup=Decimal(1), now=now) == 0, "final ends it"
+    assert read == ["turn"], "read once more after the restart, then never"
+
+
+async def test_a_billed_fallback_whose_thread_moved_is_read_once(sm, monkeypatch):
+    """Its row stays listed while not final; a pass's reads must not go on it again."""
+    from daimon.core.turn import openai_deployment
+    from daimon.core.turn.openai_late_usage import DurableRereads
+
+    await pending_usage(sm, provider="openai", observed_at=datetime.now(UTC) - timedelta(hours=3))
+    await drain_pending_usage(sm, markup=Decimal(1))
+    async with sm.begin() as db:
+        await db.execute(
+            text(
+                "UPDATE provider_binding SET binding = "
+                "jsonb_set(binding, '{native_refs,session}', '\"moved\"')"
+            )
+        )
+    monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
+    rereads, now = DurableRereads(), datetime.now(UTC)
+    assert await rereads.run(sm, markup=Decimal(1), now=now) == 1, "the move is found"
+    assert await rereads.run(sm, markup=Decimal(1), now=now) == 0, "and read no more"
+
+
 async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch):
     reads, read = await _reread(
         sm, monkeypatch, seen_ago=timedelta(hours=3), budget_s=0.05, stall=True
