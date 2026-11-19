@@ -164,6 +164,7 @@ from daimon.core.turn.unattended import (
     dm_session_authority,
     grant_owner_check,
     is_provider_turn,
+    native_owner_gate,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
@@ -2044,8 +2045,12 @@ async def run_prepared_turn_impl(
 
                             native_check()
 
+                            owner_gate = native_owner_gate(deps, admission, tenant_id)
+
                             async def native_gate() -> None:
                                 native_check()
+                                if native_entry != "mcp_chat":
+                                    await owner_gate()
 
                             stack.enter_context(unattended_sends(native_gate))
                         else:

@@ -60,6 +60,9 @@ FAILURE_NOTICE = "failure_notice"
 The poster renders such a payload as a failure notice instead of a result.
 Settling replaces the note as for any post."""
 
+OWNER_LACKS_ROLE_ERROR = "owner_lacks_agent_role"
+"""The `last_error` of a routine paused because its owner no longer holds a role its agent needs."""
+
 
 def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
     """The same owner, destination and configuration revision as the fire.
@@ -954,7 +957,8 @@ async def pause_for_lapsed_role(session: AsyncSession, row: RoutineRow, *, error
     """Pause the routine a fire was claimed as, recording `error`; caller owns the transaction.
 
     Fenced on the claimed revision, so only one fire pauses it. It stays paused
-    until someone resumes it. Returns whether this call paused it.
+    until someone resumes it. Returns whether this call paused it. The fire is
+    finished either way, as `record_result` records it, fenced on its claim time.
     """
     result = cast(
         "CursorResult[Any]",
@@ -970,6 +974,15 @@ async def pause_for_lapsed_role(session: AsyncSession, row: RoutineRow, *, error
                 handback_next_fire_at=None,
             )
         ),
+    )
+    await session.execute(
+        update(Routine)
+        .where(
+            Routine.id == row.id,
+            Routine.tenant_id == row.tenant_id,
+            Routine.last_fired_at.is_not_distinct_from(row.last_fired_at),
+        )
+        .values(last_finished_at=datetime.now(UTC), last_finished_claim_at=Routine.last_fired_at)
     )
     await session.flush()
     return result.rowcount == 1
@@ -1000,8 +1013,8 @@ async def resume_routine(
         {
             "enabled": True,
             "next_fire_at": nxt,
-            # A pause's error would otherwise block failure notices until a success.
-            "last_error": None,
+            # A role pause's error would otherwise block failure notices until a success.
+            **({"last_error": None} if row.last_error == OWNER_LACKS_ROLE_ERROR else {}),
         },
         expected_updated_at=expected_updated_at,
     )

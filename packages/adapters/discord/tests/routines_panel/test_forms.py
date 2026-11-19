@@ -2,6 +2,7 @@
 
 # pyright: reportPrivateUsage=false
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
@@ -181,14 +182,34 @@ async def test_role_gated_agent_is_saved_only_by_a_live_role_holder(
 ):
     """The saver's roles are read live, and only for an agent limited to roles."""
     view, tenant, _, _ = setup_panel
-    live = AsyncMock(
-        return_value=Subject(
-            platform_user_id="42",
-            role_ids=("123",) if held else (),
-            verified_membership=True,
-            membership_fresh=True,
-        )
+    subject = Subject(
+        platform_user_id="42",
+        role_ids=("123",) if held else (),
+        verified_membership=True,
+        membership_fresh=True,
     )
+    open_transactions = 0
+    outside_transaction: list[bool] = []
+    real_begin = db_session_factory.begin
+
+    @asynccontextmanager
+    async def tracked_begin():
+        nonlocal open_transactions
+        open_transactions += 1
+        try:
+            async with real_begin() as session:
+                yield session
+        finally:
+            open_transactions -= 1
+
+    monkeypatch.setattr(db_session_factory, "begin", tracked_begin)
+
+    async def resolve(*_args, **_kwargs):
+        # A Discord call never holds a database transaction open.
+        outside_transaction.append(open_transactions == 0)
+        return subject
+
+    live = AsyncMock(side_effect=resolve)
     monkeypatch.setattr(forms, "resolve_subject", live)
     modal = await open_modal(view, interaction())
     await modal.on_submit(interaction())
@@ -202,6 +223,7 @@ async def test_role_gated_agent_is_saved_only_by_a_live_role_holder(
     submit = interaction()
     await modal.on_submit(submit)
     assert live.await_args.kwargs["require_fresh"] is True, "roles must be read live"
+    assert outside_transaction == [True]
     async with db_session_factory() as session:
         rows = await list_routines_for_tenant(session, tenant_id=tenant.id)
     assert len(rows) == (2 if held else 1), "only a role holder saves a role-gated routine"

@@ -805,7 +805,8 @@ async def test_private_delivery_choice_belongs_to_owner_only(
     picker._values = ["dm"]
     interaction = MagicMock(spec=discord.Interaction)
     interaction.user.id = clicker
-    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
     await picker.callback(interaction)
     async with db_session_factory() as session:
@@ -815,7 +816,7 @@ async def test_private_delivery_choice_belongs_to_owner_only(
     if clicker == 123:
         assert after.destination_id == "123"
     else:
-        assert "Only the routine owner" in interaction.response.send_message.await_args.args[0]
+        assert "Only the routine owner" in interaction.followup.send.await_args.args[0]
 
 
 @pytest.mark.parametrize("held", [True, False])
@@ -849,14 +850,20 @@ async def test_private_delivery_for_a_role_gated_agent_needs_the_owners_live_rol
             tenant_id=tenant.id,
             policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("7",))}),
         )
-    live = AsyncMock(
-        return_value=Subject(
-            platform_user_id="123",
-            role_ids=("7",) if held else (),
-            verified_membership=True,
-            membership_fresh=True,
-        )
+    deferred: list[bool] = []
+    subject = Subject(
+        platform_user_id="123",
+        role_ids=("7",) if held else (),
+        verified_membership=True,
+        membership_fresh=True,
     )
+
+    async def resolve(*_args, **_kwargs):
+        # Roles come from Discord: only after the interaction is answered.
+        deferred.append(interaction.response.defer.await_count >= 1)
+        return subject
+
+    live = AsyncMock(side_effect=resolve)
     monkeypatch.setattr(forms_mod, "resolve_subject", live)
     monkeypatch.setattr(
         panel_mod,
@@ -877,21 +884,21 @@ async def test_private_delivery_for_a_role_gated_agent_needs_the_owners_live_rol
     )
     interaction = MagicMock(spec=discord.Interaction)
     interaction.user.id = 123
-    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     picker._values = ["none"]
     await picker.callback(interaction)
     live.assert_not_awaited()
     picker._values = ["dm"]
     await picker.callback(interaction)
     assert live.await_args.kwargs["require_fresh"] is True, "roles must be read live"
+    assert deferred == [True], "the interaction is answered before roles are read"
     async with db_session_factory() as session:
         after = await get_routine(session, row.id, tenant_id=tenant.id)
     assert after is not None
     assert after.destination_kind == ("dm" if held else None), "only a role holder picks DM"
     if not held:
-        interaction.response.send_message.assert_awaited_once_with(
-            ROLES_REQUIRED_REFUSAL, ephemeral=True
-        )
+        interaction.followup.send.assert_awaited_once_with(ROLES_REQUIRED_REFUSAL, ephemeral=True)
 
 
 @pytest.mark.parametrize("clear_first", [False, True])
@@ -941,7 +948,8 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
     picker._values = ["dm"]
     interaction = MagicMock(spec=discord.Interaction)
     interaction.user.id = 123
-    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
     if clear_first:
         picker._values = ["none"]
@@ -963,7 +971,7 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
     assert saved.destination_kind == (None if clear_first else "thread" if restricted else "dm")
     assert saved.delivery_payload is None
     if restricted or clear_first:
-        assert "restricted source" in interaction.response.send_message.await_args.args[0]
+        assert "restricted source" in interaction.followup.send.await_args.args[0]
     else:
         assert (saved.channel_id, saved.source_thread_id) == ("456", "789")
         async with db_session_factory.begin() as session:
@@ -973,7 +981,7 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
                 policy=TenantAccessPolicy(channel_rules={"789": ChannelRule(readers="inside")}),
             )
         await picker.callback(interaction)
-        assert "restricted source" in interaction.response.send_message.await_args.args[0]
+        assert "restricted source" in interaction.followup.send.await_args.args[0]
 
     from daimon.core.routine_delivery import poll_deliveries_once
 

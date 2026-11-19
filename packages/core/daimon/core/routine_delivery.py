@@ -77,6 +77,9 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
+from daimon.core.stores.routines import (
+    OWNER_LACKS_ROLE_ERROR as OWNER_LACKS_ROLE_ERROR,
+)
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
@@ -367,8 +370,6 @@ _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
         "It will run again at its next scheduled time once the limit resets or is raised.",
     ),
 }
-#: The error recorded when a routine's owner no longer holds a role its agent needs.
-OWNER_LACKS_ROLE_ERROR: Final = "owner_lacks_agent_role"
 _OTHER_FAILURE = ("Something went wrong while it was running.", _NEXT_RUN)
 _TURN_NOTICE_FAILURES = (
     TerminationReason.ADMISSION_BALANCE_DEPLETED,

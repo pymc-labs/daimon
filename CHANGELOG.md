@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its credential and must still match at call time. Keys are removed under every
   method's `_meta`. Senders from another organisation, replaced sessions and two
   turns at once carry none. A body that is not strict JSON, or cannot be
-  re-encoded, is refused with a 400.
+  re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
+  in the servers JSON only after every service runs this release; older images
+  reject unknown keys.
 - **GPT threads start with skills whose description spans lines.** A SKILL.md
   block scalar (`description: >`) made OpenAI refuse the session. `name` and
   `description` now upload as one line, an invalid name such as

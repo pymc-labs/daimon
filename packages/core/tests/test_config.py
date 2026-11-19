@@ -14,6 +14,7 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     HubSettings,
+    McpIdentitySettings,
     McpOAuthClientSettings,
     McpOAuthSettings,
     McpSettings,
@@ -1360,3 +1361,25 @@ def test_a_bearer_identity_server_must_be_plain_https(url: str) -> None:
             workspaces=frozenset({"discord:1"}),
             agents=("Agent A",),
         )
+
+
+def _bearer_server() -> SignedIdentityServer:
+    return SignedIdentityServer(
+        name="tools",
+        url="https://tools.example.com/mcp",
+        auth="bearer",
+        requester_meta=True,
+        workspaces=frozenset({"discord:1"}),
+        agents=("Agent A",),
+    )
+
+
+def test_a_bearer_server_without_a_key_still_loads_off_the_mcp_service() -> None:
+    settings = McpIdentitySettings(servers=[_bearer_server()])
+    assert settings.names_requester
+    assert not McpIdentitySettings().names_requester
+
+
+def test_a_key_must_name_a_bearer_server() -> None:
+    with pytest.raises(ValidationError, match="only servers whose auth is bearer"):
+        McpIdentitySettings(servers=[_bearer_server()], bearers={"other": SecretStr("key")})

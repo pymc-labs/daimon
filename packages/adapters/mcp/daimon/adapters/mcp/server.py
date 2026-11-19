@@ -196,6 +196,15 @@ def _validate_settings(
             "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
             "when DAIMON_MCP_IDENTITY__SERVERS has a signed server"
         )
+    missing = [
+        server.name
+        for server in settings.mcp_identity.servers
+        if server.auth == "bearer" and server.name not in settings.mcp_identity.bearers
+    ]
+    if missing:
+        raise BootstrapError(
+            f"DAIMON_MCP_IDENTITY__BEARERS needs a key for bearer servers: {', '.join(missing)}"
+        )
 
 
 async def _healthz(_req: Request) -> PlainTextResponse:

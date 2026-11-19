@@ -131,36 +131,39 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
             if agent is None:
                 await interaction.followup.send(embeds.AGENT_UNAVAILABLE, ephemeral=True)
                 return
-            async with runtime.sessionmaker.begin() as session:
+            async with runtime.sessionmaker() as session:
                 policy = await load_access_policy(session, tenant_id=tenant_id)
-                agent_ref = build_agent_ref(agent.name, agent.metadata, name)
-                # These routines have no automatic destination, matching the other panels.
-                decision = authorize(
-                    policy,
-                    subject=await saver_subject(
-                        runtime,
-                        policy,
-                        agent_ref,
-                        tenant_id=tenant_id,
-                        user_id=str(self.origin.user.id),
-                    ),
-                    action=Action.SAVE_ROUTINE,
-                    surface=Surface.ROUTINE,
-                    agent=agent_ref,
-                    place=Place(),
-                    origin=Place(
-                        channel_id=str(channel.id),
-                        parent_channel_id=source_channel_id if source_thread_id else None,
-                    ),
+            agent_ref = build_agent_ref(agent.name, agent.metadata, name)
+            # Reading roles may call Discord, so it happens before the transaction opens.
+            subject = await saver_subject(
+                runtime,
+                policy,
+                agent_ref,
+                tenant_id=tenant_id,
+                user_id=str(self.origin.user.id),
+            )
+            # These routines have no automatic destination, matching the other panels.
+            decision = authorize(
+                policy,
+                subject=subject,
+                action=Action.SAVE_ROUTINE,
+                surface=Surface.ROUTINE,
+                agent=agent_ref,
+                place=Place(),
+                origin=Place(
+                    channel_id=str(channel.id),
+                    parent_channel_id=source_channel_id if source_thread_id else None,
+                ),
+            )
+            if not decision:
+                await interaction.followup.send(
+                    ROLES_REQUIRED_REFUSAL
+                    if decision.reason == "invoker_not_allowed"
+                    else embeds.SAVE_REFUSED,
+                    ephemeral=True,
                 )
-                if not decision:
-                    await interaction.followup.send(
-                        ROLES_REQUIRED_REFUSAL
-                        if decision.reason == "invoker_not_allowed"
-                        else embeds.SAVE_REFUSED,
-                        ephemeral=True,
-                    )
-                    return
+                return
+            async with runtime.sessionmaker.begin() as session:
                 await create_routine(
                     session,
                     tenant_id=tenant_id,

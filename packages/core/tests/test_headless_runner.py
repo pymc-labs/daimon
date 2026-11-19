@@ -1871,3 +1871,61 @@ async def test_routine_receives_shared_repo_memory_only(
         "a routine never adopts its owner's directives"
     )
     assert "Shared rule" in sent[0]["events"][0]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("requester_meta", [True, False])
+async def test_routine_relay_claim_only_when_a_server_names_the_requester(
+    requester_meta: bool,
+    run_turn: RunTurn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older MCP image rejects the routine claim keys, so they wait for the opt-in."""
+    from daimon.core.config import (
+        AnthropicSettings,
+        DatabaseSettings,
+        McpIdentitySettings,
+        Settings,
+        SignedIdentityServer,
+    )
+    from pydantic import PostgresDsn, SecretStr
+
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="source",
+                url="https://source.example.test/mcp",
+                issuer="daimon-test",
+                audience="https://source.example.test",
+                requester_meta=requester_meta,
+            )
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
+    routine_id = uuid.uuid4()
+    with pytest.raises(_Stop):
+        await run_turn(
+            anthropic=_build_client([]),
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            origin="routine",
+            routine_id=routine_id,
+            runs_as_user="42",
+            feature_settings=settings,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+    assert seen["relay_routine_id"] == (routine_id if requester_meta else None)
+    assert seen["relay_owner"] == ("42" if requester_meta else None)

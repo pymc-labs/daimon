@@ -476,6 +476,31 @@ def grant_owner_check(deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID
     )
 
 
+def native_owner_gate(
+    deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID
+) -> Callable[[], Awaitable[None]]:
+    """The per-send gate that refuses a role-gated agent once its owner lost a role.
+
+    A turn on a native (OpenAI, Gemini) session re-checks the runs-as owner before
+    each send, as `gate_session_snapshot` does for a Managed Agents session.
+    """
+    owner_check = grant_owner_check(deps, admission, tenant_id)
+
+    async def gate() -> None:
+        from daimon.core.access_policy import agent_invoker_roles
+        from daimon.core.authz import build_agent_ref
+        from daimon.core.stores.access_policy import load_access_policy
+        from daimon.core.turn.errors import AdmissionDenied
+
+        async with deps.sessionmaker() as db:
+            access = await load_access_policy(db, tenant_id=tenant_id)
+        ref = build_agent_ref(admission.agent.name, admission.agent.metadata)
+        if agent_invoker_roles(access, ref.names) and not await owner_check(access, ref):
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    return gate
+
+
 async def dm_session_authority(
     deps: TurnDeps,
     admission: Admission,

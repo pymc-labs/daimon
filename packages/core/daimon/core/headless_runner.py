@@ -508,6 +508,13 @@ async def run_turn_impl(
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
 
+    # Older MCP images reject the claim keys, so only a deployment that opted in sends them.
+    relay_routine = (
+        origin == "routine"
+        and feature_settings is not None
+        and feature_settings.mcp_identity.names_requester
+    )
+
     async def _assemble_session() -> BetaManagedAgentsSession:
         nonlocal fragments, memory_on
         scope = (
@@ -603,8 +610,8 @@ async def run_turn_impl(
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
-            relay_routine_id=routine_id if origin == "routine" else None,
-            relay_owner=runs_as_user if origin == "routine" and routine_id else None,
+            relay_routine_id=routine_id if relay_routine else None,
+            relay_owner=runs_as_user if relay_routine and routine_id else None,
             identity=identity,
         )
 

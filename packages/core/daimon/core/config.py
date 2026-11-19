@@ -2378,8 +2378,8 @@ class McpIdentitySettings(BaseModel):
             'such as {"tools": "<key>"}. Kept apart from '
             "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
             "key as the server's bearer in place of the caller's own credential, which "
-            "never reaches the server. Every bearer server needs one; no other server may "
-            "have one. Default: {} (none)."
+            "never reaches the server. Only the MCP service needs them, and there every bearer "
+            "server needs one; no other server may have one. Default: {} (none)."
         ),
     )
 
@@ -2416,17 +2416,22 @@ class McpIdentitySettings(BaseModel):
 
     @model_validator(mode="after")
     def _bearers_match_servers(self) -> McpIdentitySettings:
-        """Each bearer server has a usable key; a key never rides a signed server."""
+        """A key is usable and names a bearer server; a signed server never has one."""
         bearer_servers = {server.name for server in self.servers if server.auth == "bearer"}
-        if set(self.bearers) != bearer_servers:
+        if not set(self.bearers) <= bearer_servers:
             raise ValueError(
-                "DAIMON_MCP_IDENTITY__BEARERS must name exactly the servers whose auth is bearer"
+                "DAIMON_MCP_IDENTITY__BEARERS must name only servers whose auth is bearer"
             )
         for key in self.bearers.values():
             value = key.get_secret_value()
             if not value or not value.isascii() or not value.isprintable() or " " in value:
                 raise ValueError("a bearer key must be printable ASCII without spaces")
         return self
+
+    @property
+    def names_requester(self) -> bool:
+        """Whether any server is sent the requester's identity (`requester_meta`)."""
+        return any(server.requester_meta for server in self.servers)
 
     @property
     def needs_signing_key(self) -> bool:

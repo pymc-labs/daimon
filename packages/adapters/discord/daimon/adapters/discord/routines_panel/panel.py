@@ -132,55 +132,59 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
         if self.view is None or self.view.state.selected is None:
             return
         selected = self.view.state.selected.routine
+        runtime = self.view.runtime
         try:
-            async with self.view.runtime.sessionmaker.begin() as session:
+            # Reading roles may call Discord, so answer first and keep it out of the transaction.
+            await interaction.response.defer()
+            async with runtime.sessionmaker() as session:
                 row = await get_routine(session, selected.id, tenant_id=selected.tenant_id)
                 if row is None or row.created_by_user_id != str(interaction.user.id):
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "Only the routine owner can change private delivery.", ephemeral=True
                     )
                     return
                 policy = await load_access_policy(session, tenant_id=row.tenant_id)
-                agent_ref = AgentRef.of(row.agent_name)
-                if self.values[0] == "dm" and any_agent_rules(policy):
-                    agent = await find_agent_by_daimon_tag(
-                        self.view.runtime.anthropic,
-                        tenant_id=row.tenant_id,
-                        name=row.agent_name,
-                        records=self.view.runtime.sessionmaker,
-                    )
-                    if agent is None:
-                        await interaction.response.send_message(
-                            "The routine agent is unavailable.", ephemeral=True
-                        )
-                        return
-                    agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
-                decision = (
-                    authorize(
-                        policy,
-                        subject=await saver_subject(
-                            self.view.runtime,
-                            policy,
-                            agent_ref,
-                            tenant_id=row.tenant_id,
-                            user_id=str(interaction.user.id),
-                        ),
-                        action=Action.SAVE_ROUTINE,
-                        surface=Surface.ROUTINE,
-                        agent=agent_ref,
-                        place=Place(),
-                    )
-                    if self.values[0] == "dm"
-                    else None
+            agent_ref = AgentRef.of(row.agent_name)
+            if self.values[0] == "dm" and any_agent_rules(policy):
+                agent = await find_agent_by_daimon_tag(
+                    runtime.anthropic,
+                    tenant_id=row.tenant_id,
+                    name=row.agent_name,
+                    records=runtime.sessionmaker,
                 )
-                if decision is not None and not decision:
-                    await interaction.response.send_message(
-                        ROLES_REQUIRED_REFUSAL
-                        if decision.reason == "invoker_not_allowed"
-                        else "This agent cannot run a private routine.",
-                        ephemeral=True,
+                if agent is None:
+                    await interaction.followup.send(
+                        "The routine agent is unavailable.", ephemeral=True
                     )
                     return
+                agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
+            decision = (
+                authorize(
+                    policy,
+                    subject=await saver_subject(
+                        runtime,
+                        policy,
+                        agent_ref,
+                        tenant_id=row.tenant_id,
+                        user_id=str(interaction.user.id),
+                    ),
+                    action=Action.SAVE_ROUTINE,
+                    surface=Surface.ROUTINE,
+                    agent=agent_ref,
+                    place=Place(),
+                )
+                if self.values[0] == "dm"
+                else None
+            )
+            if decision is not None and not decision:
+                await interaction.followup.send(
+                    ROLES_REQUIRED_REFUSAL
+                    if decision.reason == "invoker_not_allowed"
+                    else "This agent cannot run a private routine.",
+                    ephemeral=True,
+                )
+                return
+            async with runtime.sessionmaker.begin() as session:
                 await update_routine(
                     session,
                     row.id,
@@ -192,7 +196,10 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 )
             await _rerender(interaction, self.view)
         except DaimonError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(str(exc), ephemeral=True)
+            else:
+                await interaction.response.send_message(str(exc), ephemeral=True)
         except Exception as exc:  # routines-panel callback boundary
             await _send_callback_error(interaction, exc)
 

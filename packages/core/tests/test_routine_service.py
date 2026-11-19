@@ -457,3 +457,20 @@ async def test_save_reads_live_roles_only_for_a_role_gated_agent(
         await create_routine(env, caller, _new(agent_name="other"))
     with pytest.raises(RoutineRefused, match="limited to certain roles"):
         await update_routine(env, caller, gated.id, RoutineChange(trigger_message="y"))
+
+
+async def test_a_surface_that_cannot_read_roles_points_to_discord(
+    db_committing_engine: AsyncEngine, db_clean: None
+) -> None:
+    sessionmaker = async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_rules={"other": AgentRule(invoker_role_ids=("123",))}),
+        )
+    caller = _caller(tenant.id, "u_admin", admin=True)
+    assert caller.fresh_subject is None
+    with pytest.raises(RoutineRefused, match="scheduled from Discord"):
+        await create_routine(_env(sessionmaker, tenant.id), caller, _new(agent_name="other"))
