@@ -1420,15 +1420,23 @@ Configure the harness HARNESS_MCP_CRED_BINDINGS from the same operator source.
 
 Read from `daimon.core.config.GeminiSettings`. Prefix `DAIMON_GEMINI__`.
 
-Optional Gemini API credentials for media MCP tools.
+Gemini media-tool credentials and stored-conversation retention.
 
-When unset, the media tools skip registration so the ``mcp`` process boots without them.
+When the key is unset, the media tools skip registration so the ``mcp`` process boots
+without them.
 
 ### `DAIMON_GEMINI__API_KEY`
 
 `SecretStr | None` · optional · default unset · secret
 
 Gemini API key used by media-generation MCP tools. Tools are unregistered when unset.
+
+### `DAIMON_GEMINI__RECORDS_RETENTION_DAYS`
+
+`int` · optional · default `30`
+
+Days a Gemini conversation may sit idle before the scheduler prunes its stored history.
+A thread that comes back after that starts a new conversation.
 
 ## Notebook Host
 

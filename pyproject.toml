@@ -568,6 +568,7 @@ ignore_imports = [
     "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.normalize",
     # The Gemini records-row contract, for the storage backends that implement it.
     "daimon.core.turn.gemini_state -> mux.drivers.gemini.storage",
+    "daimon.core.turn.gemini_retention -> mux.drivers.gemini.storage",
     "daimon.core.stores.gemini_runtime_state -> mux.drivers.gemini.storage",
 ]
 

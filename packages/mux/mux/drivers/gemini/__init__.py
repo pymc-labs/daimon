@@ -9,6 +9,7 @@ from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
 from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini.catalog import MODE as CATALOG_MODE
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.completions import GeminiCompletions
@@ -183,6 +184,7 @@ __all__ = [
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
+    "CATALOG_MODE",
     "AgentCatalogTransport",
     "FLASH_MODELS",
     "FLASH_PRIMARY",

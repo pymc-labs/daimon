@@ -1621,9 +1621,9 @@ class SelfHostedSettings(BaseModel):
 
 
 class GeminiSettings(BaseModel):
-    """Optional Gemini API credentials for media MCP tools.
+    """Gemini media-tool credentials and stored-conversation retention.
 
-    When unset, the media tools skip registration so the ``mcp`` process
+    When the key is unset, the media tools skip registration so the ``mcp`` process
     boots without them.
     """
 
@@ -1631,6 +1631,14 @@ class GeminiSettings(BaseModel):
         default=None,
         description=(
             "Gemini API key used by media-generation MCP tools. Tools are unregistered when unset."
+        ),
+    )
+    records_retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a Gemini conversation may sit idle before the scheduler prunes its stored "
+            "history. A thread that comes back after that starts a new conversation."
         ),
     )
 

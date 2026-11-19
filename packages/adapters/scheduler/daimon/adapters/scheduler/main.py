@@ -180,6 +180,7 @@ from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refre
 from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.gemini_retention import prune_idle_records
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -1216,6 +1217,32 @@ async def _sweep_github_issued_tokens(
         log.exception("scheduler.github_issued_token_sweep.failed")
 
 
+# Each run reads every idle Gemini row; idleness is counted in days.
+_GEMINI_RETENTION_INTERVAL = timedelta(hours=1)
+_last_gemini_retention: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _prune_gemini_records(
+    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
+) -> None:
+    """Prune idle Gemini conversations at most once per interval. Boundary catch:
+    a sweep failure must not kill the scheduler loop; the next interval retries.
+    """
+    current = now or datetime.now(UTC)
+    last = _last_gemini_retention.get("started")
+    if last is not None and current - last < _GEMINI_RETENTION_INTERVAL:
+        return
+    _last_gemini_retention["started"] = current
+    try:
+        counts = await prune_idle_records(sm, now=current, window=timedelta(days=retention_days))
+    except SQLAlchemyError:
+        log.exception("scheduler.gemini_retention.failed")
+        return
+    if counts:
+        log.info("scheduler.gemini_retention", **counts)
+
+
 # Each run lists every vault, and live sessions once a relay vault is old enough.
 # Seeded at import so a restart does not sweep at once.
 _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
@@ -2074,6 +2101,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2113,6 +2141,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(

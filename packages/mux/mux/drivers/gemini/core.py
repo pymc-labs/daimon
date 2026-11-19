@@ -291,6 +291,11 @@ class Base:
             raise ScopeViolation(ref.id, "no owned logical session record")
         if record.session.state == "terminated":
             raise ContinuityLost(record.session.binding.id, ("logical session was archived",))
+        if record.pruned:
+            raise ContinuityLost(
+                record.session.binding.id,
+                ("Gemini conversation pruned after it sat idle; explicitly start a new thread.",),
+            )
         if record.workspace_expires_at is not None and now() >= record.workspace_expires_at:
             raise ContinuityLost(
                 record.session.binding.id,

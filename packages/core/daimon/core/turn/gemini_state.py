@@ -119,6 +119,16 @@ def _expire(rows: dict[str, JsonValue], now: datetime) -> None:
             )
 
 
+def held_interactions(body: str | None) -> frozenset[str]:
+    """Interaction ids an open hold in this ledger still names."""
+    rows = _ROWS.validate_json(body) if body is not None else {}
+    return frozenset(
+        str(row["interaction_id"])
+        for row in rows.values()
+        if isinstance(row, dict) and row.get("interaction_id") and _held(row) > 0
+    )
+
+
 def outstanding_holds(body: str | None) -> dict[str, JsonValue]:
     """Read-only summary of one hold ledger: what still counts against its cap."""
     rows = _ROWS.validate_json(body) if body is not None else {}

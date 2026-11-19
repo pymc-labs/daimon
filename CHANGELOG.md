@@ -113,6 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context, for every call. Reading a GPT conversation's history from OpenAI
   happens once per read rather than once per page, in pages of a thousand
   events, so a conversation past 5,000 events no longer fails to resume.
+- **Idle Gemini conversations are pruned.** After 30 days without activity
+  (`DAIMON_GEMINI__RECORDS_RETENTION_DAYS`), the scheduler removes a Gemini
+  conversation's stored history; a thread that comes back starts a new one.
 - **Busy Gemini threads no longer slow the others in an account.** Each
   conversation, agent, environment, skill and file is saved as its own row,
   and a turn saves only what changed. The first start moves stored state over;
