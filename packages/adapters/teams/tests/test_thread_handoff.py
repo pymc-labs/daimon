@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -358,9 +357,6 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
         db_session_factory,
         anthropic=build_fake_anthropic(router.dispatch),
         deployment_default=_DEFAULT,
-    )
-    runtime = dataclasses.replace(
-        runtime, turn_deps=dataclasses.replace(runtime.turn_deps, turn_path=None)
     )
     async with db_session_factory.begin() as session:
         await set_fields(

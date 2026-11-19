@@ -405,7 +405,7 @@ async def _prepare_with_runtime(
     request: ProviderPreparationRequest, runtime: OpenAIHostRuntime
 ) -> PreparedTurn:
     revision = request.admission.backend_revision
-    if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
+    if revision is None or not request.deps.channel_backends:
         raise AdmissionDenied(reason="backend_unsupported")
     # A held turn runs on a per-turn held credential (`template_mcp`). A shared
     # thread binds the account-less slot. On a channel's own deployment it runs
@@ -687,10 +687,11 @@ async def _prepare_with_runtime(
         turn_id = observation.turn_id
         # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
         if not observation.final and late is not None and turn_id is not None:
-            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id))
+            ended = observation.observed_at
+            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id, ended))
         return settled
 
-    async def reread(now: datetime, turn_id: str) -> bool:
+    async def reread(now: datetime, turn_id: str, ended: datetime) -> bool:
         """One late read of an ended root turn, under the thread's lease.
 
         True once the turn resource itself gave final usage, or the thread has no
@@ -716,6 +717,13 @@ async def _prepare_with_runtime(
                         scope, ref, turn_id
                     )
         known = [value for value in values if value.completeness != "unknown"]
+        if known:  # measures how long OpenAI takes to report a turn's usage
+            log.info(
+                "openai_late_usage.found",
+                turn_id=turn_id,
+                final=any(value.final for value in known),
+                after_s=round((now - ended).total_seconds(), 1),
+            )
         for value in known:
             await record(observation=value)
         return any(value.final for value in values) or not values

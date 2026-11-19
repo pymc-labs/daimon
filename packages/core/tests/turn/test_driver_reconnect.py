@@ -23,7 +23,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsTextBlock,
     BetaManagedAgentsUserMessageEvent,
 )
-from daimon.core.turn.io import LegacyTurnIO, TurnStream
+from daimon.core.turn.io import TurnStream, turn_io
 from daimon.core.turn.posture import AutoApprove, BillingExempt, RequireApproval
 from daimon.core.turn.state import TextBlock
 from daimon.core.turn.termination import TerminationReason
@@ -35,6 +35,7 @@ from daimon.testing.turn_fakes import (
     YieldEvent,
     run_turn_on_leg,
 )
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.receipts import StopObservation
 from mux.errors import ProviderError
 
@@ -510,11 +511,11 @@ async def test_a_4xx_on_the_status_read_is_not_retried() -> None:
 
 
 class _MuxShapedIO:
-    """The legacy IO behind the errors a mux backend raises: a normalized, retryable
+    """Mux turn I/O behind the errors a mux backend raises: a normalized, retryable
     `ProviderError` on the first status read and on every replay."""
 
     def __init__(self, fake: FakeAnthropic, *, replay_may_send: bool) -> None:
-        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
         self.replay_may_send = replay_may_send
         self.checks = 0
         self.replays = 0
@@ -647,7 +648,7 @@ async def test_stop_during_a_retried_read_interrupts_the_turn(
         [YieldEvent(make_status_idle(event_id="ack", stop_reason=make_end_turn()))],
     ]
     cancel = asyncio.Event()
-    source = LegacyTurnIO(_cast(fa), "sess_1")
+    source = turn_io(_cast(fa), "sess_1", scope=LEG_SCOPE)
     checks: list[str] = []
 
     class StoppedDuringRetry:
@@ -703,10 +704,10 @@ async def test_stop_during_a_retried_read_interrupts_the_turn(
 
 
 class _BudgetRecordingIO:
-    """The legacy IO, recording the budget the driver gives each replay."""
+    """Mux turn I/O, recording the budget the driver gives each replay."""
 
     def __init__(self, fake: FakeAnthropic) -> None:
-        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
         self.replay_budgets: list[float] = []
 
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream:

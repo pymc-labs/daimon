@@ -128,9 +128,7 @@ and
 
 `turn/driver.py` opens the event stream, posts the user message, and runs a
 consume loop and a render loop together until the session goes idle or fails.
-Turns run through the neutral ports of [mux](mux.md) by default.
-[`DAIMON_TURN__PATH`](configuration.md#daimon_turn__path) switches every turn
-back to the Anthropic-only path as an emergency stop.
+Every turn runs through the neutral ports of [mux](mux.md).
 
 - **Adapter hooks.** Adapters plug in through the `TurnLifecycle` protocol.
   `on_render` delivers answer text on its own task and may use the network.

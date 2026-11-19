@@ -706,7 +706,7 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     from daimon.core.errors import StoreError
 
     rt, *rest = operator
-    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    stopped = TurnSettings(channel_backends=False, agent_backends=False)
     rt = replace(rt, settings=rt.settings.model_copy(update={"turn": stopped}))
     operator[-1].clear()
     with pytest.raises(StoreError, match="disabled"):
@@ -857,7 +857,7 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
         resolver_cache=rt.resolver_cache,
         billing_config=None,
     )
-    deps = replace(deps, turn_path=None, channel_backends=False, agent_backends=False)
+    deps = replace(deps, channel_backends=False, agent_backends=False)
     decisions = []
     operator[-1].clear()
     with pytest.raises(AdmissionDenied):
@@ -892,7 +892,7 @@ def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch
     from daimon.core.config import TurnSettings
     from daimon.core.errors import StoreError
 
-    stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+    stopped = TurnSettings(channel_backends=False, agent_backends=False)
     monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace(turn=stopped))
 
     def forbidden_runtime(*args, **kwargs):

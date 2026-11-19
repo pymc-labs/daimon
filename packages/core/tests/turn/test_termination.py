@@ -329,7 +329,7 @@ def test_a_denial_string_maps_like_the_exception_carrying_it(
 
 
 def test_a_neutral_refusal_end_maps_to_refused() -> None:
-    """The mux leg sees a refusal as an errored `turn_ended`; it must not read as upstream."""
+    """A refusal is seen as an errored `turn_ended`; it must not read as upstream."""
     session = ResourceRef(
         id="sess_1",
         kind="session",

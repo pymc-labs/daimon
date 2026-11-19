@@ -341,7 +341,6 @@ async def test_c17_actual_sdk_host_codec_durable_wake_and_journal(
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="headless-unrecorded"),
-            path="mux",
             scope=SCOPE,
             session_ref=native.ref,
             profile=PROFILE,

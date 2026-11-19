@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -278,7 +277,7 @@ async def test_run_purge_and_update_deletes_account_rows_and_calls_views_update(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
     await run_purge_and_update(
@@ -335,7 +334,7 @@ async def test_run_purge_and_update_aborts_when_account_does_not_match_submitter
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
     # Submitter U_SUB_03 resolves to `account`, but metadata claims a foreign id.

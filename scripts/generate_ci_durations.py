@@ -11,7 +11,7 @@ from files you already have or from the artifacts of a workflow run:
 Only the suites CI splits over more than one shard read the table, so only they
 are written. The suite a junit file belongs to is the longest suite name of the
 sharded CI jobs that its name equals or starts with followed by ``-``
-(``discord-mux-shard-1.xml`` -> ``discord-mux``, ``core-shard-2.xml`` -> ``core``,
+(``discord-shard-1.xml`` -> ``discord``, ``core-shard-2.xml`` -> ``core``,
 as CI names them); files of other suites are skipped. ``--suite`` overrides it
 and writes that suite whatever its shard count. A file's seconds are the sum of
 its test cases' ``time`` (setup, call and teardown). The junit files of one

@@ -723,7 +723,7 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(
     tenant, account = tenant_row.id, uuid4()
     runtime = MagicMock()
     runtime.sessionmaker = db_session_factory
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     channel.guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -757,7 +757,7 @@ async def test_runtime_hook_platform_admin_refuses_outside_a_thread_or_text_chan
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.VoiceChannel)
     channel.guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -945,7 +945,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     channel = MagicMock(spec=discord.TextChannel)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -975,7 +975,7 @@ async def test_the_admin_cards_capture_no_agent_source(
     from daimon.core.config import TurnSettings
 
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", lambda *_a, **_k: (None, None))
     made = MagicMock()
     monkeypatch.setattr(channel_backend, "make_backend_service", made)
@@ -1029,7 +1029,7 @@ def _dm_runtime_hook(
     from daimon.core.config import TurnSettings
 
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     lookup = AsyncMock(return_value=guild)

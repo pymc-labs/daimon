@@ -2745,7 +2745,6 @@ async def _run_turn_behind_a_busy_lease(
         sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
         deps = dataclasses.replace(
             _deps(sessionmaker=sessionmaker, router=router),
-            turn_path="mux",
             channel_backends=True,
             anthropic=anthropic.AsyncAnthropic(
                 api_key="test",
@@ -2827,15 +2826,14 @@ def _record_native_abandons(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Give every turn I/O the optional `abandon_native` hook a native codec
     (Gemini) has, recording each call. A queued turn never started the work the
     lease holder is running, so it must never stop it."""
-    from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO
+    from daimon.core.turn.io import MuxTurnIO
 
     calls: list[str] = []
 
     async def abandon_native(self: object) -> None:
         calls.append(type(self).__name__)
 
-    for cls in (LegacyTurnIO, MuxTurnIO):
-        monkeypatch.setattr(cls, "abandon_native", abandon_native, raising=False)
+    monkeypatch.setattr(MuxTurnIO, "abandon_native", abandon_native, raising=False)
     return calls
 
 
@@ -3121,6 +3119,9 @@ async def test_a_profile_without_an_archive_skips_the_orphan_cleanup_quietly(
     assert [e["event"] for e in logs if "orphan" in e["event"]] == [event]
 
 
+_ORPHAN_SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="orphan")
+
+
 async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3146,11 +3147,13 @@ async def test_orphan_archive_timeout_does_not_wait_and_logs_late_failure(
         ),
         max_retries=0,
     )
-    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(run_module, "_ORPHAN_ARCHIVE_TIMEOUT_S", 0.2)
     try:
         with structlog.testing.capture_logs() as logs:
             started_at = loop.time()
-            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            await run_module._archive_orphaned_session(
+                anthropic_client, session_id="sess_orphan", scope=_ORPHAN_SCOPE
+            )
             elapsed = loop.time() - started_at
             assert started.is_set(), "the archive request should have started before timeout"
             assert elapsed < 0.5, "timeout should bound the caller's wait"
@@ -3177,6 +3180,7 @@ import asyncio
 import anthropic
 import httpx
 from daimon.core.turn.run import _archive_orphaned_session
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma_models import ma_session
 
 async def handler(_request: httpx.Request) -> httpx.Response:
@@ -3190,7 +3194,8 @@ async def main() -> None:
         ),
         max_retries=0,
     )
-    await _archive_orphaned_session(client, session_id="sess_orphan")
+    scope = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="orphan")
+    await _archive_orphaned_session(client, session_id="sess_orphan", scope=scope)
     await client.close()
 
 asyncio.run(main())
@@ -3232,7 +3237,9 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
         try:
             raise ValueError("original transaction failure")
         except BaseException:
-            await run_module._archive_orphaned_session(anthropic_client, session_id="sess_orphan")
+            await run_module._archive_orphaned_session(
+                anthropic_client, session_id="sess_orphan", scope=_ORPHAN_SCOPE
+            )
             raise
 
     try:
@@ -3526,9 +3533,6 @@ async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safe
 @pytest.mark.parametrize(
     ("runtime", "failed_batch"),
     [
-        ("legacy", None),
-        ("legacy", 1),
-        ("legacy", 2),
         ("mux", None),
         ("mux", 1),
         ("mux-with-read", None),
@@ -3558,7 +3562,7 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    gateable = runtime in ("legacy", "mux", "mux-with-read")
+    gateable = runtime in ("mux", "mux-with-read")
     agent = ma_agent(
         id="ag_wake",
         tenant_id=tenant.id,
@@ -3633,7 +3637,6 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
     router.add("POST", r"/v1/sessions/sess_wake_gate/events", send)
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        turn_path="legacy" if runtime == "legacy" else "mux",
         tool_safety=ToolSafetyPolicy(enabled=gateable),
     )
     # A timer's genuine chat origin can call MCP hand_off_task, which queues
@@ -3898,7 +3901,6 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
     router.add("POST", r"/v1/sessions.*", record)
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        turn_path="mux",
         tool_safety=ToolSafetyPolicy(enabled=True),
     )
     admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
@@ -3955,11 +3957,9 @@ async def test_prepared_runtime_without_session_reads_refuses_before_the_message
         ("private_input_applied", True, True),
     ],
 )
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    path: str,
     cancel_during_cleanup: bool,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
@@ -4033,9 +4033,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
             200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
         ),
     )
-    deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), turn_path=path
-    )
+    deps = _deps(sessionmaker=db_session_factory, router=router)
     admission = with_invocation(
         _admission(account_id=account.id, agent=agent, env=ma_environment()),
         tenant.id,
@@ -4515,7 +4513,7 @@ async def test_queued_attended_turn_cannot_borrow_or_revoke_unattended_holders_g
             200, json=ma_session(id="sess_1", agent=agent).model_dump(mode="json")
         ),
     )
-    deps = dataclasses.replace(_deps(sessionmaker=sessions, router=router), turn_path="mux")
+    deps = _deps(sessionmaker=sessions, router=router)
     admission = _admission(account_id=account.id, agent=agent, env=ma_environment())
     prepared = _prepared_turn(
         deps=deps,
@@ -4777,7 +4775,6 @@ async def test_job_completion_wake_only_reads_job_and_restores_parent_tools(
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
         public_url="https://daimon.example/mcp",
-        turn_path="legacy",
     )
     prepared = _prepared_turn(
         deps=deps,
@@ -4853,7 +4850,7 @@ async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
 
     client = build_fake_anthropic(accept_then_lose_ack).with_options(max_retries=8)
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client
     )
     admission = _admission(
         account_id=account.id,

@@ -1313,7 +1313,7 @@ async def test_continuation_turn_admin_cards_read_no_agent_source(
     await db_session.commit()
 
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
-    app.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    app.runtime.settings.turn = TurnSettings(channel_backends=True)
     row = _make_continuation_row(
         tenant_id=tenant.id, account_id=requester.account_id, reason="task_handoff"
     )

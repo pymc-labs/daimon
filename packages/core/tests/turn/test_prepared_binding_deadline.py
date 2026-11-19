@@ -124,18 +124,14 @@ async def test_delayed_binding_owner_is_cancelled_by_the_original_preparation_de
     assert len(clocks) == int(default_deadline)
 
 
-@pytest.mark.parametrize("path,enabled", [("legacy", False), ("legacy", True), ("mux", False)])
-async def test_default_and_disabled_preparation_never_wait_on_the_binding_owner(
+async def test_disabled_preparation_never_waits_on_the_binding_owner(
     monkeypatch,
     completed_preparation,
-    path,
-    enabled,
 ):
     store = WaitingStore()
     deps = replace(
         deps_for_pinned_mux(None, async_sessionmaker()),
-        turn_path=path,
-        channel_backends=enabled,
+        channel_backends=False,
         state_store=store,
     )
     current = replace(admission(), backend_revision=None, origin_channel_id="channel")

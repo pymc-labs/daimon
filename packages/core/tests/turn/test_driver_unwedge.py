@@ -61,14 +61,15 @@ def _refuse_messages(fa: FakeAnthropic, *, times: int, interrupt_lag_s: float = 
         resource.replay_events.append(make_status_idle(event_id="sevt_interrupted"))
         interrupted.set()
 
-    async def send(session_id: str, *, events: list[dict[str, Any]]) -> None:
+    async def send(session_id: str, *, events: list[dict[str, Any]]) -> object:
         stuck = left[0] > 0 or not interrupted.is_set()
         if events and events[0]["type"] == "user.message" and stuck:
             left[0] = max(left[0] - 1, 0)
             raise _refusal()
-        await real_send(session_id, events=events)
+        sent = await real_send(session_id, events=events)
         if events and events[0]["type"] == "user.interrupt":
             asyncio.get_running_loop().call_later(interrupt_lag_s, _take_interrupt)
+        return sent
 
     resource.send = send  # type: ignore[method-assign]
 

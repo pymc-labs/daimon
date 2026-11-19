@@ -74,7 +74,6 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsUserToolConfirmationEventParams,
 )
 from daimon.core.channel_backend import backend_refusal_causes
-from daimon.core.config import load_turn_settings
 from daimon.core.context_provider import ContextHook, ContextInput
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S, SessionEvent, terminal_stop_reason
@@ -89,8 +88,7 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
 from daimon.core.turn.io import (
-    LegacyTurnIO,
-    TrackedLegacyTurnIO,
+    MuxTurnIO,
     TurnConnectionLost,
     TurnIO,
     TurnStream,
@@ -132,7 +130,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic import LegacyTurnTransport, single_attempt_mutation
+from mux.drivers.anthropic import single_attempt_mutation
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, RetryCallState, retry_if_exception_type
 
@@ -834,7 +832,6 @@ async def run_turn(
     deadline: datetime | None = None,
     before_send: Callable[[], Awaitable[None]] | None = None,
     send_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
-    path: Literal["legacy", "mux"] | None = None,
     backend: ManagedAgents | None = None,
     scope: Scope | None = None,
     session_ref: ResourceRef | None = None,
@@ -893,12 +890,10 @@ async def run_turn(
 
     Returns the final `TurnState`.
     """
-    selected_path = path if path is not None else load_turn_settings().path
-    persistence = current_persistence.get() if selected_path == "mux" else None
+    persistence = current_persistence.get()
     io = turn_io(
         anthropic,
         session_id,
-        path=selected_path,
         backend=backend,
         scope=scope,
         session_ref=session_ref,
@@ -1020,37 +1015,26 @@ async def run_turn(
         )
 
     async def _pump_unwedging() -> TurnState:
-        nonlocal io
         try:
             return await _new_pump()
         except _SessionAwaitingConfirmations as stuck:
             log.warning("turn.session_awaiting_confirmations", session_id=session_id)
-            if selected_path == "mux":
-                recovery_profile = profile or (
-                    backend_request.profile if backend_request is not None else None
-                )
-                if backend is not None or recovery_profile not in (
-                    None,
-                    "anthropic.managed_agents",
-                ):
-                    # No SDK authorization for an arbitrary injected backend.
-                    # Finalize the original refusal without opening more I/O.
-                    unwedge_failure[0] = stuck.__cause__
-                    return await _new_pump()
-                # Recovery needs the provider's filtered native idle history.
-                # Keep main's proof/retry semantics on the existing SDK client;
-                # the rejected batch was never accepted. Only this turn falls
-                # back, and the closed first stream cannot end the retry.
-                if persistence is not None:
-                    io = TrackedLegacyTurnIO(
-                        anthropic, session_id, scope=persistence.scope, persistence=persistence
-                    )
-                else:
-                    io = LegacyTurnIO(anthropic, session_id, scope=scope)
-                log.info("turn.confirmation_recovery_legacy", session_id=session_id)
-            settled = await _interrupt_and_settle(
-                anthropic, session_id=session_id, cancel=cancel, io=io, scope=scope
+            recovery_profile = profile or (
+                backend_request.profile if backend_request is not None else None
             )
+            if (
+                backend is not None
+                or recovery_profile not in (None, "anthropic.managed_agents")
+                or not isinstance(io, MuxTurnIO)
+            ):
+                # Recovery reads Anthropic's filtered idle history, which only
+                # the host's own Anthropic composition offers. Finalize the
+                # original refusal without opening more I/O.
+                unwedge_failure[0] = stuck.__cause__
+                return await _new_pump()
+            # The refused batch was never accepted, so the retried pump sends
+            # it again through the same codec and journal.
+            settled = await _interrupt_and_settle(io, session_id=session_id, cancel=cancel)
             if settled == "failed":
                 unwedge_failure[0] = stuck.__cause__
             # "cancelled" leaves `cancel` set: the retried pump ends as a Stop.
@@ -1093,7 +1077,6 @@ async def run_turn(
     pumped = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
 
     async def abandon_native() -> None:
-        # Looked up at failure time: recovery may have swapped `io`.
         hook = getattr(io, "abandon_native", None)
         if hook is not None:
             await hook()
@@ -1173,12 +1156,7 @@ class _SessionAwaitingConfirmations(Exception):
 
 
 async def _interrupt_and_settle(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    cancel: asyncio.Event,
-    io: TurnIO | None = None,
-    scope: Scope | None = None,
+    io: MuxTurnIO, *, session_id: str, cancel: asyncio.Event
 ) -> Literal["idle", "cancelled", "failed"]:
     """Interrupt a session stuck on confirmations and wait until it is idle.
 
@@ -1194,17 +1172,13 @@ async def _interrupt_and_settle(
     waits on confirmations.
     """
 
-    recovery_io = io if io is not None else LegacyTurnIO(anthropic, session_id, scope=scope)
-
     async def _recover() -> bool:
-        await recovery_io.send([{"type": "user.interrupt"}])
+        await io.request_interrupt()
         while True:
-            status = await recovery_io.status()
+            status = await io.status()
             if status == "terminated":
                 return False
-            if status == "idle" and await _latest_idle_is_settled(
-                anthropic, session_id=session_id, scope=scope
-            ):
+            if status == "idle" and await io.latest_idle_is_settled():
                 return True
             await asyncio.sleep(0.5)
 
@@ -1239,16 +1213,6 @@ async def _interrupt_and_settle(
         return "failed"
     log.info("turn.session_unwedged", session_id=session_id)
     return "idle"
-
-
-async def _latest_idle_is_settled(
-    anthropic: AsyncAnthropic, *, session_id: str, scope: Scope | None = None
-) -> bool:
-    """Whether the session's most recent idle exists and is not a `requires_action` pause.
-
-    No idle in the history is no evidence MA took the interrupt, so it does not count.
-    """
-    return await LegacyTurnTransport(anthropic, session_id, scope=scope).latest_idle_is_settled()
 
 
 async def _pump(
@@ -2592,8 +2556,8 @@ async def _handle_interrupt_in_consume(
     try:
         stop = await io.interrupt(timeout_s=interrupt_timeout_s)
     except TurnError as err:
-        # send_interrupt_and_wait raises TurnError(kind="interrupt_timeout")
-        # on its timeout; propagate through the on_terminal_failure path.
+        # The codec raises TurnError(kind="interrupt_timeout") on its timeout;
+        # propagate through the on_terminal_failure path.
         log.warning(
             "turn.interrupt.timeout",
             session_id=session_id,

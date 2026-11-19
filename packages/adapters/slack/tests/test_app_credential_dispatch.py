@@ -19,7 +19,6 @@ import asyncio
 import dataclasses
 import json
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -62,7 +61,7 @@ def _make_app(sessionmaker: Any = None) -> SlackApp:
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
     return SlackApp(runtime=runtime)
 

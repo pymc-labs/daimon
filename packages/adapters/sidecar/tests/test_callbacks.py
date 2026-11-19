@@ -550,7 +550,6 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     router.add("GET", r"/v1/sessions/session-bound/events", lambda *_: list_response([]))
     deps = replace(
         deps_for(client=build_fake_anthropic(router.dispatch), sm=db_session_factory),
-        turn_path="legacy",
         tool_safety=ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
     )
     from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -653,6 +652,14 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     lifecycle = RecordingLifecycle()
 
     async def run_driver(**kwargs):
+        from daimon.core.turn.persistence import current_persistence
+
+        # Like the real driver, run inside the leased execution that grants the origin.
+        persistence = current_persistence.get()
+        assert persistence is not None
+        return await persistence.run(lambda: drive(**kwargs))
+
+    async def drive(**kwargs):
         from daimon.core.tool_safety import ToolCall
 
         # Exercise the posture selected by the actual watch turn runner, even

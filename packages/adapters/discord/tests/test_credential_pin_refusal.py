@@ -136,7 +136,7 @@ async def test_a_pin_after_the_early_check_is_decided_inside_the_consume(
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://daimon.example.com", jwt_secret="s")
         ),
-        turn_deps=replace(deps_for(None, None), fernet=object(), turn_path=None),
+        turn_deps=replace(deps_for(None, None), fernet=object()),
     )
     interaction = SimpleNamespace(
         user=SimpleNamespace(id=0),

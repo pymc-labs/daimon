@@ -71,7 +71,6 @@ async def run_headless(
             tenant_id=TENANT,
             account_id=ACCOUNT,
             session_factory=sessions,
-            turn_path="mux",
             deadline=deadline,
         )
 

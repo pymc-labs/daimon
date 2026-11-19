@@ -1,7 +1,6 @@
-"""An OpenAI-hosted chat turn (mux only: legacy cannot run it) interrupted and retried.
+"""An OpenAI-hosted chat turn interrupted and retried.
 
-Legacy refuses a non-Anthropic profile, so there is no legacy cell to compare
-with. These cells show what the mux contract itself does across a restart:
+These cells show what the mux contract does across a restart:
 an uncertain send is never repeated by the interrupted turn, the retry is a new
 input on a new key, and the interrupted turn's own usage is whatever its
 process managed to record.
@@ -253,7 +252,6 @@ async def run_case(
         "chat-openai",
         point,
         mode,
-        "mux",
         provider_inputs_accepted=texts,
         leases_held_after_death=before.live_leases,
         operations_after_death=before.operations_by_status,

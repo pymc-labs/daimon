@@ -108,7 +108,7 @@ class Manifest(Strict):
     source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     provider: Literal["anthropic"]
     profile: Literal["anthropic.managed_agents"]
-    turn_path: Literal["legacy"]
+    turn_path: Literal["mux"]
     model: Literal["claude-haiku-5-5"]
     run_admission: list[str] = Field(min_length=1)
     fixtures: dict[str, dict[str, str]]

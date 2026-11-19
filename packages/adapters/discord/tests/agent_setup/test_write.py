@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -75,7 +74,7 @@ async def test_load_agent_inline_pat_returns_none_when_crypto_unconfigured() -> 
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
     result = await write_mod.load_agent_inline_pat(runtime, agent_id=agent_id)
@@ -117,7 +116,7 @@ def _runtime_with_settings(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 

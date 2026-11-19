@@ -18,7 +18,6 @@ import pathlib
 import re
 import uuid
 from collections.abc import Coroutine
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -337,7 +336,7 @@ def _make_app(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
     return SlackApp(runtime=runtime)
 
@@ -1578,6 +1577,8 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    # A real admission names the channel it was admitted in; the pin card reads it.
+    admission.origin_channel_id = "C_TEST"
     admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id

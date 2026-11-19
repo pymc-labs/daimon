@@ -17,7 +17,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal, TypedDict, cast
+from typing import TypedDict, cast
 
 import anthropic as _anthropic
 import structlog
@@ -28,7 +28,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.channel_backend import backend_refusal_causes
-from daimon.core.config import get_repo_memory_settings, load_turn_settings
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
     ToolRuleCardReference,
@@ -45,7 +45,6 @@ from daimon.core.handoff_context import (
     select_recent_turns,
     supports_system_message,
 )
-from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
@@ -130,7 +129,7 @@ from daimon.core.turn.driver import (
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.invocation import unattended_invocation
-from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
+from daimon.core.turn.io import TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
     InterruptSource,
@@ -210,7 +209,6 @@ _JOB_ALLOWLIST = frozenset({ServerTool("daimon-mcp", "get_long_job")})
 
 
 class _TurnPortKwargs(TypedDict, total=False):
-    path: Literal["legacy", "mux"]
     backend: ManagedAgents
     scope: Scope
     session_ref: ResourceRef
@@ -266,7 +264,6 @@ def _turn_port_kwargs(
     provider_scope: Scope | None = None,
 ) -> _TurnPortKwargs:
     """Derive a real tenant scope from the existing admitted operation."""
-    selected = deps.turn_path or load_turn_settings().path
     scope = admitted_session_scope(
         admission, tenant_id=tenant_id, session_id=session_id, prepared=provider_scope
     )
@@ -275,17 +272,7 @@ def _turn_port_kwargs(
         if admission.backend_revision is not None
         else "anthropic.managed_agents"
     )
-    if selected == "legacy":
-        if profile != "anthropic.managed_agents":
-            # Forward the explicit selection so the driver refuses native
-            # legacy I/O rather than silently routing it to Anthropic.
-            return {"path": "legacy", "scope": scope, "profile": profile}
-        return (
-            {"path": "legacy", "scope": scope}
-            if load_turn_settings().path != "legacy"
-            else {"scope": scope}
-        )
-    result: _TurnPortKwargs = {"path": "mux", "scope": scope}
+    result: _TurnPortKwargs = {"scope": scope}
     if profile != "anthropic.managed_agents":
         result["profile"] = profile
     if provider_backend is not None:
@@ -617,12 +604,7 @@ def _is_dead_session(state: TurnState) -> bool:
 
 
 async def _replay_previous_session(
-    anthropic: _anthropic.AsyncAnthropic,
-    *,
-    session_id: str,
-    from_agent_name: str,
-    io: TurnIO | None = None,
-    scope: Scope | None = None,
+    io: TurnIO, *, session_id: str, from_agent_name: str
 ) -> str | None:
     """The lost session's conversation as a quoted block, or None.
 
@@ -638,11 +620,7 @@ async def _replay_previous_session(
     history rung rather than surfacing.
     """
     try:
-        events = (
-            await io.replay()
-            if io is not None
-            else await replay_events(anthropic, session_id=session_id, scope=scope)
-        )
+        events = await io.replay()
     except (_anthropic.APIError, TurnError) as err:
         log.info(
             "turn.recovery_transcript_unavailable",
@@ -720,7 +698,7 @@ async def _archive_orphaned_session(
     archive_task = asyncio.create_task(
         archive()
         if archive is not None
-        else (io or LegacyTurnIO(anthropic, session_id, scope=scope)).archive(),
+        else (io or turn_io(anthropic, session_id, scope=scope)).archive(),
         name="turn.orphan_session_archive",
     )
     deadline = asyncio.get_running_loop().time() + _ORPHAN_ARCHIVE_TIMEOUT_S
@@ -929,14 +907,13 @@ async def _replace_dead_session_locked(
                 dead_snapshot.agent_name if dead_snapshot is not None else admission.agent.name
             )
             previous_session = await _replay_previous_session(
-                deps.anthropic,
-                session_id=dead_session_id,
-                from_agent_name=from_agent_name,
-                io=turn_io(
+                turn_io(
                     deps.anthropic,
                     dead_session_id,
                     **_turn_port_kwargs(deps, admission, dead_session_id, tenant_id=tenant_id),
                 ),
+                session_id=dead_session_id,
+                from_agent_name=from_agent_name,
             )
 
             # What the successor actually inherited, recorded on its row as the
@@ -1295,11 +1272,16 @@ async def run_prepared_turn(
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
 
+    # Imported here: it reads this package's turn state.
+    from daimon.core.provider_turn_cost import LATE_TURN_COSTS
+
     observation = (
         prepared.admission.observation
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    # This turn may edit the thread's earlier footers.
+    LATE_TURN_COSTS.release(tenant_id, platform, thread_id)
     prepared, carry_over_pending = await _with_pending_carry_over(
         deps, prepared, tenant_id=tenant_id
     )
@@ -1969,7 +1951,6 @@ async def run_prepared_turn_impl(
 
         # Preparation/queueing cannot borrow an ambient parent execution.
         with execution_origin(None):
-            selected_path = deps.turn_path or load_turn_settings().path
             posture = confirmation
             async with contextlib.AsyncExitStack() as stack:
                 if origin_id is None and unattended and is_provider_turn(admission):
@@ -1991,7 +1972,7 @@ async def run_prepared_turn_impl(
                     managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
                     gateable = managed
                     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
-                    injected = (backend or deps.backend) if selected_path == "mux" else None
+                    injected = backend or deps.backend
                     gate_scope = admitted_session_scope(
                         admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
                     )
@@ -2160,10 +2141,6 @@ async def run_prepared_turn_impl(
                             stack.enter_context(unattended_sends(native_gate))
                         else:
                             stack.enter_context(unattended_sends(None))
-                if selected_path == "legacy":
-                    async with origin_grant():
-                        yield posture
-                    return
                 persistence = await prepared_persistence(
                     deps,
                     admission,

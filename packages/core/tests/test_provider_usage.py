@@ -10,6 +10,7 @@ import pytest
 import pytest_asyncio
 from daimon.core import accounting_outbox
 from daimon.core.pricing import ProviderPrice, provider_cost_of, provider_usage_tokens
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.stores import mux_state, tenant_ledger, usage_events
 from daimon.core.stores.turn_outcomes import list_for_tenant
 from daimon.core.turn.outcomes import TurnObservation, drain_outcomes
@@ -20,6 +21,7 @@ from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from mux.drivers.openai.usage import observation as driver_observation
 from mux.errors import ScopeViolation
 from mux.state.usage_ledger import UsageRevisionConflict
 from sqlalchemy import text
@@ -493,6 +495,42 @@ async def test_root_model_binding_and_unknown_child_outcomes(sessions):
     assert rows[0].cost_usd is None and rows[0].unpriced_calls == 1
     assert rows[0].billing_posture == "metered"
     assert await balance(sessions) == Decimal("-0.006318")
+
+
+async def test_late_driver_usage_reaches_the_waiting_footer_as_the_ledger_debit(sessions):
+    """The OpenAI driver names no model: the footer gets the debit the recorder settled."""
+    ref, turn, shown = observation().session, {"id": "late-turn", "usage": None}, list[float]()
+
+    async def show(debit: float) -> bool:
+        shown.append(debit)
+        return True
+
+    unknown = driver_observation(turn, ref, revision=1)
+    LATE_TURN_COSTS.turn_debit(
+        ProviderUsageTotals().add_observation(unknown), markup=Decimal(2), show=show
+    )
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 0},
+    }
+    measured = driver_observation({**turn, "usage": usage}, ref, revision=2, final=True)
+    for reading in (unknown, measured):
+        await record_provider_usage(
+            sessionmaker=sessions,
+            binding_id="binding",
+            observation=reading,
+            tenant_id=TENANT,
+            platform_user_id="user",
+            provider_price=price(),
+            infrastructure_usd=Decimal(0),
+            billing_grain="turn",
+            model_id="model",
+            markup=Decimal(2),
+            channel_id="channel",
+        )
+    await LATE_TURN_COSTS.wait()
+    assert shown == [float(-await balance(sessions))] != [0.0], shown
 
 
 async def test_outcomes_replace_revisions_include_actual_and_keep_unknown(sessions):

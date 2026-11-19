@@ -16,7 +16,7 @@ from ..test_agent_backend import owned as owned
 
 def test_native_agent_execution_defaults_on_and_stays_a_stop():
     assert TurnSettings().agent_backends is True
-    assert TurnSettings(path="mux", channel_backends=True).agent_backends is True
+    assert TurnSettings(channel_backends=True).agent_backends is True
     assert TurnSettings(agent_backends=False).agent_backends is False
 
 

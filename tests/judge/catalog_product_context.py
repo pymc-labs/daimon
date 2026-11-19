@@ -166,7 +166,6 @@ class ProductContext:
             deps.sessionmaker is not self.admin.sessions
             or deps.state_store is not None
             or not deps.channel_backends
-            or deps.turn_path != "mux"
         ):
             raise ValueError("product dependencies differ from the owned DB path")
         if self.admin.backend != "anthropic":
@@ -279,7 +278,6 @@ class ProductContext:
                 github_app_id=None,
                 github_app_private_key=None,
                 public_url=None,
-                turn_path="mux",
                 channel_backends=True,
                 tool_safety=OPEN_TOOL_SAFETY,
             )

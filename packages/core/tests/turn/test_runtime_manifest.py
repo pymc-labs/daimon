@@ -28,7 +28,6 @@ PREFIXES = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 def settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://offline/unused")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "offline-settings-required-value")
-    monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
     monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "true")
 
 
@@ -110,15 +109,11 @@ def test_host_scoped_references_validate_without_key_or_persistence(
 
 
 @pytest.mark.parametrize("loader", [load_settings, load_turn_settings])
-@pytest.mark.parametrize("selection", ["legacy-enabled", "mux-disabled"])
-def test_inactive_path_does_not_discover_or_read_a_manifest(
-    loader, selection: str, monkeypatch: pytest.MonkeyPatch
+def test_disabled_backends_do_not_discover_or_read_a_manifest(
+    loader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings_env(monkeypatch)
-    if selection == "legacy-enabled":
-        monkeypatch.setenv("DAIMON_TURN__PATH", "legacy")
-    else:
-        monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
+    monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
     original = os.environ.get
 
     def get(name, default=None):
@@ -130,7 +125,7 @@ def test_inactive_path_does_not_discover_or_read_a_manifest(
     monkeypatch.setattr(Path, "open", Mock(side_effect=AssertionError("inactive manifest read")))
     settings = loader(_env_file=None)
     turn = settings.turn if loader is load_settings else settings
-    assert turn.path == ("mux" if selection == "mux-disabled" else "legacy")
+    assert turn.channel_backends is False
 
 
 @pytest.mark.parametrize("loader", [load_settings, load_turn_settings])

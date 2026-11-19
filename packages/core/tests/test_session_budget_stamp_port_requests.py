@@ -1,7 +1,6 @@
 """Budget-stamp extraction keeps actual SDK requests and partial-record semantics."""
 
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import ANY, AsyncMock, Mock
@@ -54,7 +53,7 @@ def host(
     monkeypatch.setattr(session_preparation, "get_live_thread_session", lookup)
     monkeypatch.setattr(session_preparation, "set_budget_channel_stamp", write)
     monkeypatch.setattr(session_preparation.log, "warning", warning)
-    deps = replace(deps_for(client, factory), turn_path=None)
+    deps = deps_for(client, factory)
     return deps, lookup, write, warning
 
 

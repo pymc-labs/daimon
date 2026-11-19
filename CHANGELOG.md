@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **GPT and Gemini turns show their cost.** The summary line under a finished
+  GPT or Gemini turn in Discord, Slack and Teams shows the same debit the
+  balance takes, markup included, as Claude turns do. When OpenAI reports a
+  turn's usage after the turn ended, the summary line is edited to show that
+  debit and the money left, unless a later turn has started in the thread.
+  Daimon reads that usage again from 2 seconds after the turn, doubling up to
+  an hour, and the scheduler keeps its slower pace. The line shows no cost
+  while Daimon cannot know it, such as an unpriced model or usage the provider
+  never reported.
+
+- **The legacy turn path is gone.** Every turn runs through the neutral turn
+  ports. `DAIMON_TURN__PATH=mux` or an empty value is accepted and does nothing;
+  `legacy` now fails at startup, so remove the variable. `daimon run` always
+  runs as the local CLI operator and refuses a session another tenant owns.
+  `daimon-mux` 0.3.0 drops `LegacyTurnTransport`.
+
 - **Admins can monitor an agent, and people are told.** Two features, Monitor
   direct messages and Monitor coding tools, are off by default and set per
   workspace or agent. While one is on, Daimon keeps what people ask that agent

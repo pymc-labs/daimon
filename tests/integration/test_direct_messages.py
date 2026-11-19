@@ -1365,7 +1365,6 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     from daimon.adapters.mcp.tools.agent_chat import register_agent_chat_tools
     from daimon.adapters.mcp.tools.sessions import register_sessions_tools
     from daimon.adapters.mcp.tools.slack._read import _slack_read_channel_impl
-    from daimon.core.config import load_turn_settings
     from daimon.core.headless_runner import run_turn as headless_turn
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import mint_agent_mcp_token, mint_jwt, mint_panel_mcp_token
@@ -1379,7 +1378,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
 
     # Which turn I/O every turn in this test (two DM replies, two headless runs)
     # actually used: counted at construction, so a scope check alone cannot pass.
-    constructed = {"LegacyTurnIO": 0, "MuxTurnIO": 0}
+    constructed = {"MuxTurnIO": 0}
     for name in constructed:
         original_init = getattr(turn_io_module, name).__init__
 
@@ -1669,12 +1668,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
     assert len(private_tokens) == 2 and private_tokens[0] != private_tokens[1]
     assert len(denied_headless) == 2
     assert len(vaults["vaults"]) == 3, "two isolated DM grants and one shared non-DM vault"
-    used, unused = (
-        ("MuxTurnIO", "LegacyTurnIO")
-        if load_turn_settings().path == "mux"
-        else ("LegacyTurnIO", "MuxTurnIO")
-    )
-    assert constructed[used] >= 4 and constructed[unused] == 0, constructed
+    assert constructed["MuxTurnIO"] >= 4, constructed
 
 
 @pytest.mark.parametrize("mismatch", ["tenant", "account", "id", "expired"])
@@ -2046,7 +2040,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         await asyncio.Event().wait()
 
     with (
-        patch("mux.drivers.anthropic.transport.LegacyTurnTransport.send", stalled),
+        patch("anthropic.resources.beta.sessions.events.AsyncEvents.send", stalled),
         patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
     ):
         await asyncio.wait_for(core_direct_messages._settle_cancelled_dm(deps, row), 2)

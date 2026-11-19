@@ -1,4 +1,4 @@
-"""Fenced state for one admitted mux turn; legacy turns never enter this seam."""
+"""Fenced state for one admitted turn."""
 
 from __future__ import annotations
 

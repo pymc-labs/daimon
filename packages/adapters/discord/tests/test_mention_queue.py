@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -56,9 +55,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(
-            deps_for(), turn_path=None
-        ),  # _handle_mention/_orchestrate stubbed per-test
+        turn_deps=deps_for(),  # _handle_mention/_orchestrate stubbed per-test
     )
 
 

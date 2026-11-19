@@ -101,7 +101,6 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession], router: MARouter) -
         turn_deps=replace(
             deps_for(client, sessionmaker),
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
-            turn_path=None,
         ),
     )
 

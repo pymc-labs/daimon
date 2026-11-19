@@ -41,7 +41,7 @@ def _runtime(
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
             anthropic=AnthropicSettings(api_key=SecretStr("test")),
-            turn=TurnSettings(path="mux", channel_backends=True) if mux else TurnSettings(),
+            turn=TurnSettings(channel_backends=True) if mux else TurnSettings(),
             features=features,
         ),
         deployment_default=DeploymentDefault(agent_name="daimon"),

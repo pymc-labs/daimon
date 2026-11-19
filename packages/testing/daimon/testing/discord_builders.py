@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from anthropic import AsyncAnthropic
@@ -28,7 +27,7 @@ def discord_runtime(
         "billing_config": None,
         "deployment_default": DeploymentDefault(),
         "resolver_cache": new_resolver_cache(),
-        "turn_deps": replace(deps_for(), turn_path=None),
+        "turn_deps": deps_for(),
     }
     return DiscordRuntime(
         settings=settings, anthropic=anthropic, sessionmaker=sessionmaker, **(defaults | fields)

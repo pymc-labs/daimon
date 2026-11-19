@@ -84,6 +84,7 @@ from daimon.core.outbound.mentions import mentioned_user_ids, untag
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
@@ -217,6 +218,8 @@ class SlackTurnLifecycle(OutputGate):
         self._vote_buttons = vote_buttons
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
+        # Each post carrying the summary line: ts, text, blocks, the line's index, its clock.
+        self._summary_posts: list[tuple[str, str, list[dict[str, Any]], int, float]] = []
         self._render_tables = render_tables
         self._client = client
         self._post_as_agent = self.guarded_output(post_as_agent)
@@ -479,8 +482,9 @@ class SlackTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Compatibility counters never become an MA meter: no cost shown.
-            self._state = dataclasses.replace(self._state, cost_str=None)
+            # Compatibility counters never become an MA meter: priced from the observations.
+            cost = LATE_TURN_COSTS.turn_debit(t, markup=self._markup, show=self._show_late_debit)
+            self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
             return
         cost = cost_of_totals(
             state.usage_totals,
@@ -513,6 +517,10 @@ class SlackTurnLifecycle(OutputGate):
             self._register(self._status_ts, self._cancel, self._author_id)
             await self.record_post(self._status_ts)
         else:
+            # A rewritten status card no longer carries the summary a late debit edits.
+            self._summary_posts = [
+                post for post in self._summary_posts if post[0] != self._status_ts
+            ]
             await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
@@ -662,20 +670,40 @@ class SlackTurnLifecycle(OutputGate):
         whose product is this card: a tool-only turn has no answer to carry them.
         """
         self._terminal = True
+        now = self._clock()
         blocks = await self._untag_blocks(
             to_blocks(
                 self._state,
-                now=self._clock(),
+                now=now,
                 cancel_key=self._cancel_key,
                 answer_visible=answer_visible,
             )
         )
+        summary = len(blocks) - 1
         if feedback and (controls := self._feedback_block()) is not None:
             blocks.append(controls)
         fallback = "Something went wrong. Mention me to try again."
         if self._state.phase is TurnPhase.DONE:
             fallback = "Done."
-        await self._post_or_update(blocks, fallback_text or fallback)
+        text = fallback_text or fallback
+        await self._post_or_update(blocks, text)
+        if not self._state.footer_hidden and self._status_ts is not None:
+            self._summary_posts.append((self._status_ts, text, blocks, summary, now))
+
+    async def _show_late_debit(self, debit: float) -> bool:
+        """Edit a debit priced after the turn ended into each summary line the turn posted."""
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(debit))
+        await self._apply_balance()
+        if self._state.footer_hidden or not self._summary_posts:
+            return False
+        for ts, text, posted, index, now in self._summary_posts:
+            blocks = list(posted)
+            blocks[index] = to_blocks(self._state, now=now)[-1]
+            await self.check_output()
+            await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=self._channel, ts=ts, blocks=blocks, text=text
+            )
+        return True
 
     def _feedback_block(self) -> dict[str, Any] | None:
         """👍/👎 while `message_feedback` is on, plus Ask a human when offered; None for neither."""
@@ -835,9 +863,12 @@ class SlackTurnLifecycle(OutputGate):
                 if index == 0 and mention and block.get("type") == "table":
                     blocks.insert(0, {"type": "markdown", "text": mention})
                     notification_chunk = f"{mention}\n{chunk}"
+                summary_at, summary = None, 0
                 if index == len(deliveries) - 1:
                     # The summary line closes the answer, under its last chunk.
-                    blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
+                    summary_at = self._clock()
+                    blocks.extend(to_blocks(self._state, now=summary_at, answer_visible=True))
+                    summary = len(blocks) - 1
                     if not cancelled and (controls := self._feedback_block()) is not None:
                         blocks.append(controls)
                 try:
@@ -859,6 +890,16 @@ class SlackTurnLifecycle(OutputGate):
                     if index == 0:
                         self._answer_ts = current_ts
                         surface_replaced = True
+                    if summary_at is not None and current_ts and not self._state.footer_hidden:
+                        self._summary_posts.append(
+                            (
+                                current_ts,
+                                _notification_text(notification_chunk),
+                                blocks,
+                                summary,
+                                summary_at,
+                            )
+                        )
                 except SlackApiError as exc:
                     if block.get("type") != "table":
                         raise

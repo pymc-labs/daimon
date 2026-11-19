@@ -234,7 +234,7 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     )
     await db_session.commit()
     app, _ = make_orchestrate_app(db_session_factory, deployment_default=default, crypto_key=key)
-    deps = replace(deps_for(client, db_session_factory), turn_path=None, deployment_default=default)
+    deps = replace(deps_for(client, db_session_factory), deployment_default=default)
     app.runtime = replace(app.runtime, anthropic=client, turn_deps=deps)
     app.runtime.settings.agent_identity.enabled = False
 

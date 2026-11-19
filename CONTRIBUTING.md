@@ -105,7 +105,7 @@ how to write it; `scripts/check_docs.py` keeps the hand-written pages within
 their length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
-suites (`core`, `mcp`, `discord`, `discord-mux`) into shards by test file with
+suites (`core`, `mcp`, `discord`) into shards by test file with
 `-p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=S --ci-shard-index=N --ci-shard-count=M`.
 Files are placed longest-first on the least-loaded shard using the per-file
 seconds in `packages/testing/daimon/testing/ci_durations.json`; a file missing

@@ -148,7 +148,7 @@ async def test_exact_approval_arguments_and_session_key(monkeypatch, mode):
             SimpleNamespace(type="user.tool_confirmation", result="allow", tool_use_id="tool-call")
         )
     monkeypatch.setattr(
-        fly, "LegacyTurnIO", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
     if mode == "approved":
         key, metadata = await fly._approved(
@@ -252,7 +252,7 @@ async def test_background_command_key_is_the_provider_tool_use(monkeypatch, mode
             for e in events
         ]
     monkeypatch.setattr(
-        fly, "LegacyTurnIO", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
     if mode in {"same", "proxied"}:
         key, _ = await fly._approved(
