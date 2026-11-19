@@ -918,7 +918,7 @@ async def test_a_used_up_daily_model_cap_refuses_before_google_is_called(
     tmp_path: Path,
     db_clean: None,
 ) -> None:
-    """Gemini usage reaches no ledger debit; the daily model cap stops the turn first."""
+    """The daily model cap stops a Gemini turn before anything is created."""
     import httpx
 
     from .test_gemini_runtime_transport import clients_for

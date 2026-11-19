@@ -1850,8 +1850,8 @@ class BillingSettings(BaseModel):
     markup: Decimal = Field(
         default=Decimal("1.0"),
         description=(
-            "Multiplier applied to raw Anthropic usage cost before billing "
-            "the tenant. 1.0 = pass-through."
+            "Multiplier applied to raw provider usage cost (every provider) before "
+            "billing the tenant. 1.0 = pass-through."
         ),
     )
     selfhosted: SelfhostedBillingSettings = Field(default_factory=SelfhostedBillingSettings)
@@ -1870,11 +1870,11 @@ class BillingSettings(BaseModel):
         description=(
             "Most a tenant may spend each UTC day on any one Gemini model, in provider "
             "USD at list price, counted across every agent turn. A "
-            "Gemini agent turn has no token envelope and its usage reaches no ledger "
-            "debit, so this is the guard. Checked as each turn starts, for "
+            "Gemini agent turn has no token envelope and its usage is debited only "
+            "once measured, so this is the guard. Checked as each turn starts, for "
             "its first request's model and any Flash fallback of it, never mid-turn; "
-            "a model with no current tariff is refused, and an unpriced fallback never "
-            "runs. It resets at midnight UTC. 0 allows no Gemini turns."
+            "a model with no current tariff never runs on any request. It resets at "
+            "midnight UTC. 0 allows no Gemini turns."
         ),
     )
     openai_daily_model_cap_usd: Decimal = Field(

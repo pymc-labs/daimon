@@ -117,7 +117,7 @@ async def record(sm, name: str, value: UsageObservation) -> None:
             platform_user_id="person",
             pricing=None,
             provider_price=PRICES[value.model.id],
-            # As on every OpenAI turn today: infrastructure unknown, no ledger debit.
+            # Infrastructure unknown: the usage stays pending, with no ledger debit.
             infrastructure_usd=None,
             channel_id="c",
             billing_grain="turn",
