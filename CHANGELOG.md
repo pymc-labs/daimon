@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Refusals on GPT and Gemini say what actually happened.** A spent daily
+  Gemini quota no longer says to try again in a minute; it says the quota
+  refills daily and to use another model. A provider that can't run a
+  conversation no longer claims to be "unavailable right now".
 - **A channel's tool limits are no longer ignored on GPT and Gemini.** A tool
   switched off for a channel or thread still ran there when the agent was on
   GPT or Gemini. The reply is now refused, saying those providers can't apply

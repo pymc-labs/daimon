@@ -95,7 +95,7 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
         case None:
-            return _refusal(f"{named} can't run right now.", _NO_ANSWER, ask, way_back)
+            return _refusal(f"{named} can't run this chat here.", _NO_ANSWER, ask, way_back)
 
 
 def failed() -> WebRefusalCard:

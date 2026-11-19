@@ -329,7 +329,7 @@ async def test_a_failed_release_never_breaks_the_call() -> None:
 
 @pytest.mark.parametrize(
     ("native_code", "rejected"),
-    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+    [("quota_zero", 429), ("quota_daily", 429), ("quota_exhausted", 429), (None, None)],
 )
 def test_a_429_naming_its_quota_is_a_definite_rejection(
     native_code: str | None, rejected: int | None
@@ -340,7 +340,7 @@ def test_a_429_naming_its_quota_is_a_definite_rejection(
 
     error = ProviderError(
         "rate_limited",
-        retryable=native_code != "quota_zero",
+        retryable=native_code not in ("quota_zero", "quota_daily"),
         native_code=native_code,
         native_error_code="http_429",
     )

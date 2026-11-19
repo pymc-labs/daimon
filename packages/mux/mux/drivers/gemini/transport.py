@@ -441,11 +441,12 @@ _ZERO_LIMIT = re.compile(r"limit: 0\b")
 
 
 def quota_failure(error: Exception) -> tuple[str, str | None] | None:
-    """A 429's quota cause: ("quota_zero" | "quota_exhausted", model) or None.
+    """A 429's quota cause: ("quota_zero" | "quota_daily" | "quota_exhausted", model) or None.
 
     `quota_zero` is a quota of 0 for the model on this project's plan (the
-    free tier gives some models none): retrying never helps. Any other spent
-    quota is a rate limit that refills. Only Google's own structured fields are
+    free tier gives some models none): retrying never helps. `quota_daily` is a
+    spent per-day quota, which refills only at the day's end. Any other spent
+    quota is a rate limit that refills within minutes. Only Google's own structured fields are
     read; the message is checked for its "limit: 0" line alone.
     """
     body: object = getattr(error, "body", None) or getattr(error, "details", None)
@@ -480,7 +481,8 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     model = next(iter(models)) if len(models) == 1 else None
     message = payload.get("message")
     zero = isinstance(message, str) and _ZERO_LIMIT.search(message) is not None
-    return ("quota_zero" if zero else "quota_exhausted"), model
+    daily = any("PerDay" in str(v.get("quotaId", "")) for v in violations)
+    return ("quota_zero" if zero else "quota_daily" if daily else "quota_exhausted"), model
 
 
 def connect_failure(error: BaseException) -> bool:
@@ -532,10 +534,10 @@ def normalize_error(error: Exception) -> ProviderError:
         )
     if status == 429 and (quota := quota_failure(error)) is not None:
         code, model = quota
-        # A quota of 0 never refills: retrying it only looks like a stall.
+        # A zero quota never refills and a daily one not for hours: retrying looks like a stall.
         return ProviderError(
             "rate_limited",
-            retryable=code != "quota_zero",
+            retryable=code == "quota_exhausted",
             native_code=code,
             native_error_code=http,
             native_param=model,

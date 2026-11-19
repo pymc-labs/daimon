@@ -227,7 +227,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
     "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
-        "This agent's model provider isn't available here right now.",
+        "This agent's model provider can't run this conversation here.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
     "provider_hold_cap_reached": _Copy(
@@ -571,13 +571,18 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":
-            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+            if cause.native_code not in ("quota_zero", "quota_daily", "quota_exhausted"):
                 continue
             model = _model_words(cause.native_param)
             if cause.native_code == "quota_zero":
                 return (
                     f"{_capitalised(model)} isn't available on this server's Google plan.",
                     "Pick another model or ask an admin to upgrade it.",
+                )
+            if cause.native_code == "quota_daily":
+                return (
+                    f"Today's Google quota for {model} is used up.",
+                    "It refills daily; use another model until then, or ask an admin to raise it.",
                 )
             return (
                 f"Google is rate-limiting {model} right now.",

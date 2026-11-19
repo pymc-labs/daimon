@@ -71,7 +71,7 @@ def definite_rejection(error: ProviderError) -> int | None:
     QuotaFailure was not.
     """
     code = error.native_error_code or ""
-    if code == "http_429" and error.native_code in ("quota_zero", "quota_exhausted"):
+    if code == "http_429" and error.native_code in ("quota_zero", "quota_daily", "quota_exhausted"):
         return 429  # Google's QuotaFailure: refused before any interaction existed
     if error.category not in _DEFINITE or not code.startswith("http_4"):
         return None

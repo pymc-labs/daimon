@@ -357,7 +357,7 @@ def test_an_unattributed_provider_refusal_never_blames_the_channel():
     rendered = admission_refusal_text("backend_unsupported", _NOUNS)
     assert "channel" not in rendered
     assert rendered == (
-        "This agent's model provider isn't available here right now.\n\n"
+        "This agent's model provider can't run this conversation here.\n\n"
         "Ask an admin to check which provider this agent uses."
     )
 
@@ -383,6 +383,11 @@ def test_a_full_gemini_hold_ledger_reads_as_busy_in_plain_words() -> None:
             "quota_zero",
             "Gemini 4 Argon isn't available on this server's Google plan.",
             "Pick another model or ask an admin to upgrade it.",
+        ),
+        (
+            "quota_daily",
+            "Today's Google quota for Gemini 4 Argon is used up.",
+            "It refills daily; use another model until then, or ask an admin to raise it.",
         ),
         (
             "quota_exhausted",
