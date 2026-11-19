@@ -366,6 +366,31 @@ def test_defaults_apply_when_dry_run_then_each_tenant_reports_one_rename(
     assert len(renamed) == 2, f"one rename for cli:local and one for the other tenant: {outcomes}"
 
 
+def test_defaults_apply_when_another_tenant_rename_fails_then_reports_it_and_exits_zero(
+    tmp_path: Path,
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One tenant's error must not stop every container from starting."""
+    from daimon.core.defaults import _reconcile
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise DefaultsError("the provider refused")
+
+    monkeypatch.setattr(_reconcile, "rename_seeded_agent", refuse)
+
+    async def run() -> list[dict[str, str]]:
+        await _seed_legacy_tenant(schema_sessionmaker, "discord", "guild-sh", "daimon")
+        rt = _keyed_runtime(schema_sessionmaker, FakeMAState())
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=False)
+
+    outcomes = asyncio.run(run())
+
+    assert [o["action"] for o in outcomes if o["action"] == "failed"] == ["failed"], (
+        f"the failure is reported: {outcomes}"
+    )
+
+
 def test_defaults_apply_when_preflight_fails_then_selfhosted_records_are_untouched(
     tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:

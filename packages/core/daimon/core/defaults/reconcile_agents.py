@@ -40,6 +40,7 @@ from daimon.core.defaults.metadata import (
     compute_spec_fingerprint,
 )
 from daimon.core.defaults.owned import AgentNameTaken, reconcile_owned_agent
+from daimon.core.defaults.rename_agents import AgentRenameBlocked
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.defaults.spec_merge import (
@@ -176,10 +177,15 @@ async def reconcile_agent(
     ma_match = matches[0] if matches else None
     if managed and ma_match is not None and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
         # Never adopt (and re-stamp as managed) a workspace's own agent that
-        # holds the built-in's name: prefer the seeded one, else refuse.
+        # holds the built-in's name: prefer the seeded one, else defer, which
+        # never fails the apply (it runs at every boot).
         seeded = [m for m in matches if m.metadata.get(MA_METADATA_KEY_MANAGED) == "true"]
         if not seeded:
-            raise AgentNameTaken(spec.name)
+            _log.warning("reconcile.unmanaged_builtin_skipped", tenant_id=str(tenant_id))
+            error = str(AgentRenameBlocked(old=LEGACY_BUILTIN_AGENT_NAME, new=spec.name))
+            return ResourceOutcome(
+                kind="agent", name=spec.name, action=Action.DEFERRED, error=error
+            )
         if len(seeded) < len(matches):
             _log.warning("reconcile.unmanaged_builtin_skipped", tenant_id=str(tenant_id))
         matches, ma_match = seeded, seeded[0]

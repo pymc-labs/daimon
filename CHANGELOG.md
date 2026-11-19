@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults, tool and access rules keep working; audit history keeps the old name
   and `daimon` stays taken by the renamed agent. A workspace with its own
   `default` keeps it, and requests for `default` reach that agent: apply reports
-  the rename as deferred, exits zero and tries again next time. A workspace's own
+  the rename as deferred, exits zero and tries again next time. Another
+  workspace's rename error is reported without failing apply. A workspace's own
   unmanaged `daimon` record is not renamed. Copies such as `daimon-copy` keep
   their names, the `init` commands default to `default`, and `selfhosted init`
   reuses an existing `daimon` record. On Discord, a reply from the built-in
