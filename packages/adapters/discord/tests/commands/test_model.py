@@ -32,7 +32,7 @@ _THREAD_ID = 777
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
     return DiscordRuntime(
-        # Backend selection off, as production pins it; `_with_selection` turns it on.
+        # Backend selection off (the emergency-stop setting); `_with_selection` turns it on.
         settings=MagicMock(turn=TurnSettings(channel_backends=False)),
         anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]  # /model makes no MA call
         sessionmaker=sessionmaker,
