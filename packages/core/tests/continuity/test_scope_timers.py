@@ -121,6 +121,22 @@ async def test_a_refused_dm_timer_settles_skipped_and_never_retries(
         assert settled.skip_reason == reason
 
 
+@pytest.mark.parametrize("cause", ["provider_busy", "provider_cooling"])
+async def test_a_timer_refused_by_a_busy_or_cooling_provider_is_offered_again(
+    db_session_factory: async_sessionmaker[AsyncSession], cause: str
+) -> None:
+    row = await _seed(db_session_factory)
+
+    async def run(_row: TaskContinuationRow, _seed: str) -> None:
+        raise AdmissionDenied(reason="backend_unsupported", cause=cause)  # pyright: ignore[reportArgumentType]
+
+    await dispatch_scope_timer(db_session_factory, row, run_timer=run)
+
+    again = await _read(db_session_factory, row.idempotency_key)
+    assert again.status == "pending", "a refusal that clears by itself must not drop the timer"
+    assert again.available_at is not None and again.available_at > datetime.now(UTC)
+
+
 async def test_a_timer_that_hit_a_full_queue_is_offered_again(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

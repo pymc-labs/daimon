@@ -174,8 +174,13 @@ TAIL = (
     "0210_dm_access",
     "0211_callback_watch_imports",
     "0212_sandbox_tools_feature",
-    "0213_support_menu_channel",
-    "0214_channel_budget_alerts",
+    "0213_outbox_attribution",
+    "0214_provider_key_gate",
+    "0215_gemini_records",
+    "0216_usage_obs_observed_at",
+    "0217_monitored_events",
+    "0218_support_menu_channel",
+    "0219_channel_budget_alerts",
 )
 HEAD = TAIL[-1]
 
@@ -229,7 +234,10 @@ AFTER_MERGE_COLUMNS = {
     ("thread_model_settings", "provider"),
     ("thread_model_settings", "effort"),
     ("thread_model_settings", "model"),
+    ("usage_observation", "provider"),
+    ("usage_observation", "observed_at"),
 }
+AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
@@ -487,7 +495,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             table = getattr(getattr(obj, "table", None), "name", None)
             if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS | AFTER_MERGE_COLUMNS:
                 return False
-            if name in MAIN_BRANCH_OBJECTS:
+            if name in MAIN_BRANCH_OBJECTS | AFTER_MERGE_OBJECTS:
                 return False
         # Historical main retains these two objects for older readers, while
         # its ORM intentionally omits them. These retained objects

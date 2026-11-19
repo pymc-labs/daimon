@@ -19,7 +19,7 @@ import { useCan, useChatAgents, useMe, useSessions } from "@/lib/hooks"
 import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
-import { Refusal } from "./Cards"
+import { MonitoringNotice, Refusal } from "./Cards"
 import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
@@ -118,7 +118,7 @@ export function ChatView() {
   const { id } = useParams()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { messages, busy, reconnecting, next, loadingEarlier } = useThread(id)
+  const { messages, busy, reconnecting, next, loadingEarlier, monitoring } = useThread(id)
   const { out, card, meter } = useCredit()
   const bottom = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
@@ -135,6 +135,15 @@ export function ChatView() {
     retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
   })
   const { data } = detail
+  const [closed, setClosed] = useState<string | undefined>()
+  const notice = closed === id ? undefined : monitoring ?? data?.monitoring
+  // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
+  useEffect(() => setClosed(undefined), [monitoring])
+  // Gone for this person and agent until monitoring is switched on again; the server keeps it.
+  const closeNotice = () => {
+    setClosed(id)
+    api.post(`/api/chat/sessions/${id}/monitoring/dismiss`).catch(() => setClosed(undefined))
+  }
   useEffect(() => {
     if (!id || !data) return
     hydrate(id, data)
@@ -246,6 +255,7 @@ export function ChatView() {
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" />Reconnecting</div>
             )}
             {out && card}
+            {!out && notice && <MonitoringNotice notice={notice} onDismiss={closeNotice} />}
             {agent && (
               <Composer
                 key={id} onSend={(t, f) => { stick.current = true; send(qc, id!, t, f) }} onStop={() => stop(id!)} busy={busy} disabled={out} canAttach={can("files.attach")} autoFocus

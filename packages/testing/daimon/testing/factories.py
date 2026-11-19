@@ -38,6 +38,7 @@ from daimon.core._models import (
     TenantLedger,
     UsageEvent,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_budget_notice import BudgetAlert
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantConfigRow, TenantScopeRef
@@ -54,6 +55,7 @@ from daimon.core.stores import (
 from daimon.core.stores import (
     wizard_session as wizard_session_store,
 )
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.direct_messages import (
     DirectMessageRow,
@@ -165,6 +167,15 @@ async def make_tenant(
     session.add(orm)
     await session.flush()
     return TenantRow.model_validate(orm)
+
+
+async def enable_all_providers(session: AsyncSession, *, tenant: TenantRow) -> None:
+    """Opt the tenant in to every provider, as an admin's allowlist choice does."""
+    await set_access_policy(
+        session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+    )
 
 
 async def make_account(

@@ -191,9 +191,10 @@ async def test_public_repeated_429_keeps_original_failure_and_durable_unknown(
     final, error = lifecycle.terminal_failures[0]
     assert state.error is error is final.error
     assert state.rate_limit_until == final.rate_limit_until
-    # The SDK currently exposes no retry-after metadata on this error. Keep
-    # the original nullable timing unchanged rather than synthesizing a date.
-    assert state.rate_limit_until is None and not lifecycle.rate_limits
+    # The 429 names no wait, so it carries the 30 s default: the notice can show a time.
+    assert state.error.cause.retry_after_s == 30.0, "default wait on a 429 with no hint"
+    assert state.rate_limit_until is not None, "the turn state carries when to retry"
+    assert lifecycle.rate_limits == [state.rate_limit_until], "the lifecycle is told once"
     assert not lifecycle.terminal_success and not lifecycle.reconnects
     assert sum(r.method == "POST" for r in native_host.wire.requests) == 1
     assert sum(r.method == "GET" for r in native_host.wire.requests) == 2

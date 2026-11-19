@@ -86,7 +86,11 @@
         }),
       }),
       'describe_daimon': dict({
-        'description': 'Describe one Daimon: role, skills, repo, environment, platform and workspace.',
+        'description': '''
+          Describe one Daimon: role, skills, repo, environment, platform and workspace.
+          <blank line>
+          ``monitoring``, when set, is a notice to show the person before they ask anything.
+        ''',
         'parameters': dict({
           'additionalProperties': False,
           'properties': dict({
@@ -131,7 +135,8 @@
           <blank line>
           Call this first. ``id`` is what every other tool takes as ``daimon_id``;
           ``workspace`` tells you which workspace the Daimon lives in. Two Daimons may
-          share a ``name`` in different workspaces.
+          share a ``name`` in different workspaces. ``monitoring``, when set, is a notice
+          to show the person before they ask that Daimon anything.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -228,7 +233,8 @@
         'description': '''
           Start a turn without waiting.
           <blank line>
-          Returns ``{"handle": ...}`` for polling with ``get_session``.
+          Returns ``{"handle": ...}`` for polling with ``get_session``; show the person
+          ``monitoring`` when it is set.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -720,7 +726,8 @@
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. Show the person
+        ``monitoring`` when it is set; the text result leads with it.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
       ''',
@@ -1364,6 +1371,7 @@
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
         <blank line>
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool
@@ -2669,7 +2677,7 @@
         (this turn's), and a run is skipped while that budget is used up.
         <blank line>
         ``agent_name`` MUST be the exact daimon-side display name of an
-        existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
+        existing agent on this tenant (e.g. ``"default"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
         <blank line>
         - a free-text description of the routine
@@ -2689,7 +2697,7 @@
         <blank line>
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
-        ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
+        ``create_routine(agent_name="default", cron_expr="*/5 * * * *",
         timezone="UTC", trigger_message="ping")``.
       ''',
       'parameters': dict({
@@ -3421,7 +3429,8 @@
         <blank line>
         Returns the agent's name, system-prompt summary, skill identifiers,
         and configured environment. No parameters — agent identity is read
-        from the token claim (confused-deputy mitigation).
+        from the token claim (confused-deputy mitigation). ``monitoring``, when
+        set, is a notice to show the person before they ask anything.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4393,6 +4402,53 @@
         'required': list([
           'channel_id',
           'message_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'get_monitored_conversation': dict({
+      'description': '''
+        Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
+        in order: questions, answers, coding-tool calls with their outcome, and ``notice``
+        when the person was told. Works only in a direct message with the admin or the web
+        chat; pass this active turn's origin_context_id. The read is audited. Admins only.
+        ``next_page`` goes back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'conversation_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'conversation_id',
         ]),
         'type': 'object',
       }),
@@ -5802,6 +5858,105 @@
         'additionalProperties': False,
         'properties': dict({
         }),
+        'type': 'object',
+      }),
+    }),
+    'list_monitored_activity': dict({
+      'description': '''
+        List the conversations kept for a monitored agent, most recent first, with
+        when each monitoring switch was turned on. ``where`` is ``direct_messages``,
+        ``web`` or ``coding_tools``; filter by web person and UTC days ``first`` to ``last``
+        (YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only
+        in a direct message with the admin; elsewhere ``private_details`` is
+        ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
+        back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'first': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'last': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'person_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'where': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'direct_messages',
+                  'web',
+                  'coding_tools',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -7716,7 +7871,7 @@
     }),
     'request_agent_backend_switch': dict({
       'description': '''
-        Change an agent's model to another provider's. It applies at once.
+        Change an agent's model to another provider's.
         <blank line>
         Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
         or Gemini. It stays the same agent on a new model: say "Researcher now uses
@@ -7734,7 +7889,10 @@
         The switch applies to new conversations wherever the agent answers, and to
         this conversation from the next message when the switched agent answers here
         (the result's summary says which). The summary also says what is off on the
-        new provider: tell the person, and never ask them to confirm. The
+        new provider: tell the person. A move to another provider first returns
+        status "preview" and changes nothing: call again with the same arguments and
+        its expected_revision, and the person confirms on a card that names the
+        provider. A model change within the provider applies at once. The
         server's default or built-in agent switches only when the person says
         it's for everyone (for_everyone=true); otherwise offer the copy
         below. For "make a copy of yourself on Gemini": copy the agent with
@@ -7748,7 +7906,8 @@
         If the call asks the uncommitted-work question, ask the person and call
         again with their answer as ``unsaved_work``.
         ``expected_revision`` refuses a switch when the agent changed since it was
-        read. ``preview_digest`` and ``accepted_drops`` are ignored.
+        read; it is also what asks for the card. ``preview_digest`` and ``accepted_drops``
+        are ignored.
         Pass this active turn's origin_context_id.
         The same tool states the agent's own settings: ``thread_mode`` ("shared"
         to share threads where the channel allows it, admins only; or "per_caller") and
@@ -8300,8 +8459,8 @@
         Preview and confirm the server's allowed model providers. Admin-only.
         <blank line>
         providers is the complete replacement list, not an addition. A server no
-        admin configured uses every provider this Daimon install holds a key for;
-        saving a list makes it the server's own choice, which always wins.
+        admin configured uses Anthropic only; adding another provider is the admin's
+        opt-in to send this server's conversations to that company.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.
@@ -10035,8 +10194,11 @@
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.
         <blank line>
-        A pick applies at once. What the new provider can't carry is off
-        there; the note says what.
+        A pick within the conversation's provider applies at once. A pick on
+        another provider changes nothing yet and returns a ``revision``: call
+        again with the same arguments and that ``revision``, and the person
+        confirms on a card that names the provider. What the new provider can't
+        carry is off there; the note says what.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
@@ -10292,6 +10454,7 @@
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
         <blank line>
         ``bundle`` is an opaque handle returned by the bundle upload route.
         Passing it mounts that archive read-only in the session's uploads

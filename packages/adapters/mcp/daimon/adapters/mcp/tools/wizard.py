@@ -12,7 +12,7 @@ brand-new message (a keyed block resolved by the turn pipeline), not as
 anything this tool call can return synchronously. In the system this
 behaviour is ported from, the tool result's instruction alone was found
 insufficient — models kept narrating past it or calling another tool — which
-is why the seeded agent prompt (``defaults/agents/daimon.yaml``) carries a
+is why the seeded agent prompt (``defaults/agents/default.yaml``) carries a
 matching, reinforcing line rather than relying on this docstring alone.
 """
 

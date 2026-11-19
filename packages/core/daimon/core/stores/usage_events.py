@@ -304,12 +304,15 @@ def _long_prompt() -> ColumnElement[bool]:
     """
     limits = {model: n for model, n in PROVIDER_PRICED_INPUT_LIMITS.items() if n is not None}
     threshold = case(limits, value=UsageEvent.model, else_=LONG_CONTEXT_PROMPT_TOKENS)
-    return (
+    prompt = (
         UsageEvent.input_tokens
         + UsageEvent.cache_creation_input_tokens
         + UsageEvent.cache_read_input_tokens
-        > threshold
-    ).label("long_prompt")
+    )
+    # A tiered provider model's observation row is a turn total (the OpenAI meter),
+    # settled at the base rates whatever its size (`provider_cost_of`).
+    aggregate = UsageEvent.model.in_(limits) & UsageEvent.observation_revision.is_not(None)
+    return case((aggregate, False), else_=prompt > threshold).label("long_prompt")
 
 
 def _tariff_day() -> ColumnElement[date | None]:

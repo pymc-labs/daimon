@@ -36,7 +36,7 @@ Errors and notices are never hardcoded text in or beside the agent's reply:
 
 `tests/parity/test_plain_words.py` and `tests/parity/test_plain_words_parity.py`
 enforce the words and the separators; Daimon's own prompt carries the setup part
-(`defaults/agents/daimon.yaml`).
+(`defaults/agents/default.yaml`).
 
 ## One rule, every path
 

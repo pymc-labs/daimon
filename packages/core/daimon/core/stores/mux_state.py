@@ -761,7 +761,12 @@ async def projection(
 
 
 async def record_usage(
-    session: AsyncSession, binding_id: str, observation: ObservationContract
+    session: AsyncSession,
+    binding_id: str,
+    observation: ObservationContract,
+    *,
+    platform_user_id: str | None = None,
+    channel_id: str | None = None,
 ) -> OutboxRow | None:
     owner = await _session_owner(session, observation.session.id)
     if owner is None or owner[0] != binding_id:
@@ -796,6 +801,8 @@ async def record_usage(
             revision=applied.revision,
             tenant_id=tenant_id,
             applied=_json(applied),
+            provider=applied.observation.session.provider,
+            observed_at=applied.observation.observed_at,
         )
     )
     await session.execute(
@@ -806,6 +813,8 @@ async def record_usage(
             prior_applied_revision=row.prior_applied_revision,
             tenant_id=tenant_id,
             row=_json(row),
+            platform_user_id=platform_user_id,
+            channel_id=channel_id,
         )
     )
     return OutboxRow.model_validate(_json(row))
@@ -834,6 +843,7 @@ class PendingSettlement:
     tenant_id: uuid.UUID
     profile: str
     channel_id: str
+    platform_user_id: str | None
 
 
 async def pending_outbox_for_profiles(
@@ -849,7 +859,9 @@ async def pending_outbox_for_profiles(
     rebind to another profile, and a row of that other profile must not be read as
     this one. Keyed by (binding, observation, newest revision first), from just after
     `after`, so a caller can page past rows it could not settle. Each comes with its
-    tenant, the binding's current profile and its channel. A binding whose slot account
+    tenant, the binding's current profile, the budget channel and person recorded with
+    the row (the binding's channel and no person for a row recorded before they were
+    kept). A binding whose slot account
     erasure removed is read from its `AccountingBindingContext`, which records the same.
     """
     generation = aliased(ProviderBinding)
@@ -863,14 +875,24 @@ async def pending_outbox_for_profiles(
         .exists()
     )
     profile = func.coalesce(ProviderBinding.profile, AccountingBindingContext.profile)
-    channel_id = func.coalesce(ProviderBindingSlot.channel_id, AccountingBindingContext.channel_id)
+    channel_id = func.coalesce(
+        AccountingOutbox.channel_id,
+        ProviderBindingSlot.channel_id,
+        AccountingBindingContext.channel_id,
+    )
     live = and_(ProviderBindingSlot.binding_id.is_not(None), ~other)
     erased = and_(
         ProviderBindingSlot.binding_id.is_(None),
         AccountingBindingContext.profiles.contained_by(list(profiles)),
     )
     statement = (
-        select(AccountingOutbox.row, AccountingOutbox.tenant_id, profile, channel_id)
+        select(
+            AccountingOutbox.row,
+            AccountingOutbox.tenant_id,
+            profile,
+            channel_id,
+            AccountingOutbox.platform_user_id,
+        )
         .outerjoin(
             ProviderBindingSlot, ProviderBindingSlot.binding_id == AccountingOutbox.binding_id
         )
@@ -911,9 +933,20 @@ async def pending_outbox_for_profiles(
             tenant_id=tenant_id,
             profile=profile_name,
             channel_id=channel,
+            platform_user_id=person,
         )
-        for row, tenant_id, profile_name, channel in rows
+        for row, tenant_id, profile_name, channel, person in rows
     ]
+
+
+async def slot_of_binding(session: AsyncSession, binding_id: str) -> Slot | None:
+    """The slot a binding id lives in; None once account erasure removed it."""
+    generation = await session.scalar(
+        select(ProviderBindingSlot.generation).where(ProviderBindingSlot.binding_id == binding_id)
+    )
+    if generation is None:
+        return None
+    return binding_slot(await _binding(session, binding_id, generation))
 
 
 async def agent_of_usage_session(

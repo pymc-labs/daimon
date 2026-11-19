@@ -399,8 +399,8 @@ async def require_skip_defaults(
         return
     if source == "callback":
         raise ToolError(
-            "A callback watch makes a private link, so it needs the approval card. Ask a "
-            "server admin to set watch approval to Ask."
+            "Callback watches always need the approval card. Ask a server admin to set "
+            "watch approval to Ask."
         )
     if (
         delivery != "thread"

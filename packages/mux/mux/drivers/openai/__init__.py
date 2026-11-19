@@ -13,21 +13,25 @@ from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
 from mux.drivers.openai.artifacts import OpenAIArtifacts
 from mux.drivers.openai.completions import OpenAICompletions
-from mux.drivers.openai.deployment import configured_completions, configured_transport
+from mux.drivers.openai.deployment import (
+    OpenAIClients,
+    configured_completions,
+    configured_transport,
+)
 from mux.drivers.openai.environments import OpenAIEnvironments
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, fits_shared_credential
 from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
 from mux.drivers.openai.skills import OpenAISkills, bundle_digest
-from mux.drivers.openai.transport import SDKTransport, Transport, object_json
+from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport, object_json
 from mux.drivers.openai.turn import (
     MemoryRecoveryJournal,
     OpenAIEvents,
     RecoveryJournal,
     merge_history,
 )
-from mux.drivers.openai.usage import OpenAIUsage, UsageRevisions
+from mux.drivers.openai.usage import MemoryUsageRevisions, OpenAIUsage, UsageRevisions
 from mux.drivers.openai.vaults import OpenAIVaults, SecretResolver
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
@@ -129,10 +133,12 @@ __all__ = [
     "Context",
     "MCPSecretResolver",
     "MemoryRecoveryJournal",
+    "MemoryUsageRevisions",
     "OpenAIAgents",
     "OpenAIArtifacts",
     "OpenAIDriver",
     "OpenAIEnvironments",
+    "OpenAIClients",
     "OpenAIEvents",
     "OpenAISessions",
     "OpenAISkills",
@@ -142,6 +148,8 @@ __all__ = [
     "SCHEMA_DATE",
     "SecretResolver",
     "SessionControls",
+    "Method",
+    "Object",
     "SDKTransport",
     "Transport",
     "UsageRevisions",

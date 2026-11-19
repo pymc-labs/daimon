@@ -944,7 +944,7 @@ async def test_a_protected_first_party_action_is_refused_unattended(
 ) -> None:
     """Review A, finding 1: nobody is here to press its card, policy on or off.
 
-    A provider switch is not protected: it applies like a model change.
+    A provider switch is protected too: it asks before another provider receives the chat.
     """
     call: Call = ("daimon-mcp", "microsoft_send", {"action": "send_mail"})
     fake = FakeSession(script=[[call]]).with_daimon()
@@ -958,7 +958,7 @@ async def test_a_protected_first_party_action_is_refused_unattended(
     daimon = next(t for t in agent["tools"] if t["mcp_server_name"] == "daimon-mcp")
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
     assert "microsoft_send" in asked, asked
-    assert "request_agent_backend_switch" not in asked, "a switch asks nobody"
+    assert "request_agent_backend_switch" in asked, "a move to another provider asks"
 
 
 async def test_a_foreign_reserved_server_is_healed_with_safety_off(

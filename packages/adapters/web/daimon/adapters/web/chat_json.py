@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.stores.domain import WebMessageRow, WebThreadRow
 from pydantic import BaseModel
 
@@ -76,6 +77,10 @@ def session_json(
         "updated_at": thread.updated_at.isoformat(),
         "running": running,
     }
+
+
+def notice_json(notice: MonitoringNotice) -> dict[str, str]:
+    return {"line": notice.line, "help": notice.help}
 
 
 def message_json(row: WebMessageRow) -> dict[str, Any]:

@@ -1644,14 +1644,16 @@ async def _pump(
             )
         except (_anthropic.APIError, ProviderError) as err:
             await _cancel_render()
+            wait = err.retry_after_s if isinstance(err, ProviderError) else None
             return await _finalize_upstream(
                 state_cell=state_cell,
                 lifecycle=lifecycle,
                 render_once=_render_once,
                 session_id=session_id,
                 err=err,
-                rate_limit_until=None,
-                retry_after_s=None,
+                # A native provider's 429 names its wait (`ProviderError.retry_after_s`).
+                rate_limit_until=now() + timedelta(seconds=wait) if wait is not None else None,
+                retry_after_s=wait,
                 renders_failed=renders_failed_cell[0],
             )
 

@@ -34,6 +34,7 @@ from daimon.core.continuity.wakes import (
     WakeClaim,
     busy_retry_at,
     claim_wake,
+    is_transient_denial,
     keep_wake,
     list_dispatchable_wakes,
     release_wake,
@@ -292,8 +293,12 @@ async def dispatch_pending_continuations(
                 else:
                     await _settle(sessionmaker, claim, f"not_started:{exc.result}", now)
             except AdmissionDenied as exc:
-                # Held to the same gates as a mention, and not retried.
-                await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
+                # Held to the same gates as a mention: a busy or cooling provider is
+                # offered again, any other refusal is final.
+                if is_transient_denial(exc):
+                    await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                else:
+                    await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
             except SessionBusyError as busy:
                 # Nothing ran: the same row goes back to pending with its claim refunded.
                 retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)

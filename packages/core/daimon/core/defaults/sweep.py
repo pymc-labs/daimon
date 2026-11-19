@@ -66,7 +66,7 @@ async def sweep_removed_agents(
             continue
         name = ag.metadata.get(MA_METADATA_KEY_NAME, "")
         if name in present_names or is_renamed_seeded_agent(ag.metadata):
-            # The renamed seeded agent is spared: see `SEEDED_AGENT_RENAME`.
+            # The renamed seeded agent is spared: see `LEGACY_BUILTIN_AGENT_NAME`.
             continue
         if dry_run:
             outcomes.append(

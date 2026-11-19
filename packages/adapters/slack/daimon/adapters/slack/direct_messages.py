@@ -54,6 +54,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import DirectMessageRow, dm_enabled, get_conversation
 from daimon.core.stores.domain import Role
@@ -285,7 +286,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         else:
             refusal = (
                 "That option isn't recognized.\n\n"
-                "Run `/dm-me` in a channel to continue privately. "
+                "Run `/dm-me` in a channel to continue in a direct message. "
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
         fields: dict[str, Any] = (
@@ -502,6 +503,11 @@ def _answerer(
                 causes=backend_refusal_causes(exc),
             )
 
+    async def tell(notice: MonitoringNotice) -> None:
+        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id, **notice_fields(notice.text, neutral=True), **thread
+        )
+
     async def answer(group: list[dict[str, Any]]) -> None:
         content = "\n\n".join(t for e in group if (t := str(e.get("text") or "")).strip())
         if not content:
@@ -521,6 +527,7 @@ def _answerer(
                 text=content,
                 role=role,
                 on_agent=on_agent,
+                tell=tell,
                 groups=groups,
             )
             if said is not None:

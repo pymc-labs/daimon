@@ -1,21 +1,19 @@
-"""Which providers this deployment holds its own key for: the default backend allowlist.
+"""Which providers this deployment holds its own key for, and the default allowlist.
 
-A tenant whose admin never chose its providers may use Anthropic plus every
-provider the operator keyed for the whole deployment. That is the operator's
-consent for the install, read when the policy is read; nothing is written per
-tenant, and an admin's own choice (`request_provider_allowlist`) always wins.
+A key makes a provider available, not enabled: sending a tenant's conversations
+to another company needs that tenant's admin to opt in
+(`request_provider_allowlist`, the web admin settings or the CLI). A tenant whose
+admin never chose therefore stays on Anthropic, however many keys the operator set.
 
 Only deployment keys count (`DEFAULT_KEY_ENV`), never a tenant's runtime row: one
-tenant's row must not turn a provider on for another. The code runtime defaults
-serve exactly these providers, so a provider allowed by default can also run.
-Self-hosted backends are operator-registered hosts, not a key, so they are never
-defaulted on.
+tenant's row must not make a provider available to another. The code runtime
+defaults serve exactly these providers, so an opted-in provider can also run.
+Self-hosted backends are operator-registered hosts, not a key.
 """
 
 from __future__ import annotations
 
 import os
-from typing import get_args
 
 from mux.contracts.ids import Provider
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
@@ -25,8 +23,6 @@ DEFAULT_KEY_ENV: dict[Provider, str] = {
     PERSISTENT_WORKSPACE.provider: "DAIMON_CHANNEL_OPENAI_KEY",
     INLINE_REUSE.provider: "DAIMON_CHANNEL_GEMINI_KEY",
 }
-# The order a default allowlist lists its providers in.
-_ORDER: tuple[Provider, ...] = get_args(Provider)
 
 
 def provider_key_present(provider: Provider) -> bool:
@@ -48,6 +44,5 @@ def deployment_keyed_providers() -> frozenset[Provider]:
 
 
 def default_enabled_backends() -> tuple[Provider, ...]:
-    """The keyed providers in a stable order, Anthropic first."""
-    keyed = deployment_keyed_providers()
-    return tuple(provider for provider in _ORDER if provider in keyed)
+    """What a tenant whose admin never chose may use: Anthropic only."""
+    return (MANAGED_AGENTS.provider,)

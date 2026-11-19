@@ -361,21 +361,22 @@ async def _sending_grant(
     return (await load_routing(session, tenant_id=tenant_id)).grants.get(name, DmGrant())
 
 
-async def sender_admits(
+async def sender_admission(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     agent_name: str | None,
     user_id: str,
     groups: DmGroups,
-) -> bool:
+) -> bool | None:
     """Whether the sending agent's grant admits `user_id` to an agent-sent DM.
 
-    Every agent-sent path (the DM tools, routines, watches, notices, support) calls
+    Every agent-sent path (the DM tools, routines, watches, notices, support) asks
     this with its platform's lookup. Locks only decide who answers, so they do not
     apply. A message with no sending agent (a notice) uses the workspace default
-    agent's grant, and none when no default is set. A workspace that turned DMs off,
-    or groups unknown: not admitted.
+    agent's grant, and none when no default is set. A workspace that turned DMs off
+    is refused. None when a group lookup failed: the person may well be admitted, so
+    a caller that can wait retries, and `sender_admits` treats it as refused.
     """
     async with sessionmaker() as session:
         # Main never needed the feature on for an agent to message someone; off by choice stops it.
@@ -386,4 +387,25 @@ async def sender_admits(
         return True
     wanted: frozenset[str] = frozenset() if user_id in grant.user_ids else grant.group_ids
     found = await resolve_groups(groups, user_id, wanted, tenant_id=tenant_id)
-    return grant_admits(grant, Person(user_id, found)) is True
+    return grant_admits(grant, Person(user_id, found))
+
+
+async def sender_admits(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str | None,
+    user_id: str,
+    groups: DmGroups,
+) -> bool:
+    """`sender_admission` failing closed: groups unknown is not admitted."""
+    return (
+        await sender_admission(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=agent_name,
+            user_id=user_id,
+            groups=groups,
+        )
+        is True
+    )

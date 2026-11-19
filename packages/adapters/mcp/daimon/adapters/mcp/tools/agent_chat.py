@@ -128,6 +128,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.monitoring import KeptQuestion, capture_question, monitored_notice
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -250,6 +251,43 @@ async def _send_billed(
     return turn_event_id
 
 
+async def _keep_question(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    turn_event_id: str,
+    message: str,
+) -> KeptQuestion | None:
+    """Keep the sent message when its agent is monitored over MCP; the settle that sees
+    the turn end keeps the reply (`usage_sweep.settle_finished_turn`)."""
+    return await capture_question(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
+        platform="mcp",
+        account_id=auth.account_id,
+        conversation=session.id,
+        turn_ref=turn_event_id,
+        content=message,
+    )
+
+
+def _turn_handle(
+    handle: str, turn_event_id: str, started_at: dt.datetime, kept: KeptQuestion | None = None
+) -> dict[str, str]:
+    """A started turn's handle; `monitoring` is a notice the client shows the person."""
+    out = {
+        "handle": handle,
+        "turn_event_id": turn_event_id,
+        "turn_started_at": started_at.isoformat(),
+    }
+    if kept is not None and kept.notice is not None:
+        out["monitoring"] = kept.notice.text
+    return out
+
+
 def _settle_when_finished(runtime: McpRuntime) -> OnRead:
     """Bill a headless turn the moment a read sees it ended (bounded, synchronous)."""
 
@@ -282,6 +320,8 @@ class AgentDescription(BaseModel):
     platform: str | None = None
     workspace_id: str | None = None
     workspace: str | None = None
+    # Set while the agent is monitored: tell the person before they ask anything.
+    monitoring: str | None = None
 
 
 class AskResult(BaseModel):
@@ -292,6 +332,8 @@ class AskResult(BaseModel):
     handle: str
     message: str
     chart_urls: tuple[ChartUrl, ...] = ()
+    # Set when the person must be told this conversation is monitored; show it to them.
+    monitoring: str | None = None
     # Excluded from dumps AND the JSON schema: image blocks travel as MCP
     # content, never inside structured content, and advertising the field
     # would point schema-reading clients at a value that never arrives.
@@ -306,8 +348,9 @@ def _ask_tool_result(result: AskResult) -> ToolResult:
     Built the same way with or without charts, so the caller sees one content
     shape: prose text first, image blocks after, structured payload throughout.
     """
+    notice = [TextContent(type="text", text=result.monitoring)] if result.monitoring else []
     return ToolResult(
-        content=[TextContent(type="text", text=result.message), *result.image_blocks],
+        content=[*notice, TextContent(type="text", text=result.message), *result.image_blocks],
         structured_content=result.model_dump(mode="json"),
     )
 
@@ -567,6 +610,13 @@ async def _describe_agent_impl(
     repo_url = next((repo.repo_full_name for grant, repo in grants if grant.is_working_repo), None)
     skill_names = [sk.skill_id for sk in ma_agent.skills]
     role_summary = (ma_agent.system or "")[:200]
+    notice = await monitored_notice(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=ma_agent.id),
+        platform="mcp",
+    )
     return AgentDescription(
         name=ma_agent.name,
         role_summary=role_summary,
@@ -575,6 +625,7 @@ async def _describe_agent_impl(
         environment_name=env_name,
         platform=auth.platform,
         workspace_id=auth.external_id,
+        monitoring=notice.text if notice is not None else None,
     )
 
 
@@ -954,15 +1005,14 @@ async def _start_turn_impl(
     await gate(runtime, auth, session)
     turn_started_at = now()
     turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
+    kept = await _keep_question(
+        runtime, auth, session, turn_event_id=turn_event_id, message=message
+    )
     channel = rules_channel(auth, session)
     await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
-    return {
-        "handle": session.id,
-        "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at.isoformat(),
-    }
+    return _turn_handle(session.id, turn_event_id, turn_started_at, kept)
 
 
 @observed_agent_turn
@@ -1093,14 +1143,13 @@ async def _continue_turn_impl(
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
+        kept = await _keep_question(
+            runtime, auth, current, turn_event_id=turn_event_id, message=message
+        )
         channel = rules_channel(auth, current)
         await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
-    return {
-        "handle": handle,
-        "turn_event_id": turn_event_id,
-        "turn_started_at": turn_started_at.isoformat(),
-    }
+    return _turn_handle(handle, turn_event_id, turn_started_at, kept)
 
 
 async def _list_sessions_impl(
@@ -1568,15 +1617,18 @@ async def _ask_impl(
                     message=delivery.message,
                     chart_urls=delivery.chart_urls,
                     image_blocks=delivery.image_blocks,
+                    monitoring=started.get("monitoring"),
                 )
 
         remaining = deadline - clock()
         if remaining <= 0:
             if (observation := current_outcome.get()) is not None:
                 observation.finish(reason=TerminationReason.CEILING)
+            notice = started.get("monitoring")
             raise ToolError(
                 f"Daimon did not finish a reply within "
                 f"{timeout_seconds:g} seconds; resume with handle {handle}"
+                + (f"\n{notice}" if notice else "")
             )
         await sleep(min(poll_interval_seconds, remaining))
 
@@ -1638,7 +1690,8 @@ def register_agent_chat_tools(
 
         Returns the agent's name, system-prompt summary, skill identifiers,
         and configured environment. No parameters — agent identity is read
-        from the token claim (confused-deputy mitigation).
+        from the token claim (confused-deputy mitigation). ``monitoring``, when
+        set, is a notice to show the person before they ask anything.
         """
         return await _describe_agent_impl(runtime, await _auth(ctx))
 
@@ -1667,6 +1720,7 @@ def register_agent_chat_tools(
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
 
         ``bundle`` is an opaque handle returned by the bundle upload route.
         Passing it mounts that archive read-only in the session's uploads
@@ -1702,7 +1756,8 @@ def register_agent_chat_tools(
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. Show the person
+        ``monitoring`` when it is set; the text result leads with it.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
         """
@@ -1739,6 +1794,7 @@ def register_agent_chat_tools(
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
 
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool

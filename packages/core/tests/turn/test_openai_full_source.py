@@ -19,6 +19,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from daimon.core.channel_backend import AgentBackendService
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
@@ -490,6 +491,7 @@ async def full_openai(switched_request, source_mcp, monkeypatch, tmp_path, reque
         )
     finally:
         await binding.close()
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 
@@ -887,7 +889,7 @@ async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_op
             platform=request.platform,
             external_id="caller",
         )
-    target = ma_agent(id="handoff-target", name="daimon", tenant_id=request.tenant_id)
+    target = ma_agent(id="handoff-target", name=BUILTIN_AGENT_NAME, tenant_id=request.tenant_id)
     # This test exercises signed-origin authorization, so the destination
     # shares the source provider. Cross-provider handoffs retain their own fence.
     from daimon.core.ma_identity import derive_agent_uuid

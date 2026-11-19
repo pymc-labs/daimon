@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.core.agent_record_ports import RecordRoutedManagedAgents
+    from daimon.core.provider_key_gate import ProviderKeySource
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -56,6 +57,8 @@ class TurnRuntime:
     materialize_root: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
         field(default=None, kw_only=True)
     )
+    # Names the API key this turn runs on, for the key's rate-limit wait and turn caps.
+    provider_key: ProviderKeySource | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

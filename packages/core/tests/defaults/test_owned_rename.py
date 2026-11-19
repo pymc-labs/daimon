@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 from daimon.core.defaults.ma_index import find_renamed_seeded_agent
 from daimon.core.defaults.metadata import build_metadata
-from daimon.core.defaults.owned import owned_scope, reconcile_owned_agent, resolve_owned_agent
+from daimon.core.defaults.owned import (
+    AgentNameTaken,
+    owned_scope,
+    reconcile_owned_agent,
+    resolve_owned_agent,
+)
 from daimon.core.defaults.report import Action
 from daimon.core.setup_conversations import resolve_setup_agents
 from daimon.core.specs import AgentSpec
@@ -193,3 +198,21 @@ async def test_setup_responds_with_the_renamed_record_beside_an_empty_provider(
         build_fake_anthropic(router.dispatch), tenant_id=tenant.id, records=db_session_factory
     )
     assert (responder.id, target) == (seeded, None), "setup runs on the renamed record"
+
+
+async def test_create_of_daimon_beside_the_renamed_record_is_refused(
+    db_session, db_session_factory
+):
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    await _record(db_session_factory, tenant, "default", managed=True)
+    with pytest.raises(AgentNameTaken):
+        await reconcile_owned_agent(
+            db_session_factory,
+            SPEC,
+            tenant_id=tenant.id,
+            dry_run=True,
+            account_id=None,
+            managed=False,
+            create_only=True,
+        )

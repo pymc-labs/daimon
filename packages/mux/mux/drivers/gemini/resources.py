@@ -15,6 +15,7 @@ from mux.drivers.gemini.bundles import (
     SKILL_SOURCE,
     fits_inline,
     mounted_files,
+    mounted_skill_ids,
     owned_skill,
     relative_path,
     upload_manifest,
@@ -22,7 +23,18 @@ from mux.drivers.gemini.bundles import (
 )
 from mux.drivers.gemini.core import Base, now, page_values, refuse
 from mux.drivers.gemini.skill_deployment import SkillBundlePublisher, validate_deployment
-from mux.drivers.gemini.storage import ArtifactRecord, Records, SkillRecord, Storage, owner
+from mux.drivers.gemini.storage import (
+    ACCOUNT,
+    ArtifactRecord,
+    Keys,
+    Records,
+    RowKey,
+    SkillRecord,
+    Storage,
+    owner,
+    session_key,
+    session_keys,
+)
 from mux.drivers.gemini.transport import Object, Transport, close_iterator
 from mux.errors import ContinuityLost, OperationConflict, ProviderError, ScopeViolation
 from mux.state.operations import request_digest
@@ -136,43 +148,45 @@ class GeminiSkills(Base):
             bundle, external=self._publisher is not None, upload=self._uploads
         )
         digest = request_digest({"kind": "skill", "account": self._account, "bundle": version})
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT,), create=("skill",))
+        async with self._storage.transaction(keys) as records:
             prior = self._creation(records, scope, key, digest)
-            if prior is not None:
-                record = owned_skill(records, scope, self._account, prior)
-                return record.skill.model_copy(
-                    update={
-                        "latest_version": record.versions[version].ref,
-                        "display_title": bundle.display_title,
-                        "updated_at": None,
-                    }
+            if prior is None:
+                id_ = str(uuid4())
+                ref = SkillRef(id=id_, version=version, digest=version, source=SKILL_SOURCE)
+                skill = Skill(
+                    id=id_,
+                    display_title=bundle.display_title,
+                    latest_version=ref,
+                    source=SKILL_SOURCE,
+                    created_at=now(),
+                    native={
+                        "deployment": "gcs_on_interaction"
+                        if self._publisher is not None
+                        else "upload_on_session"
+                        if self._uploads and not fits_inline(bundle)
+                        else "inline_on_interaction",
+                        "provider_upload": False,
+                    },
                 )
-            id_ = str(uuid4())
-            ref = SkillRef(id=id_, version=version, digest=version, source=SKILL_SOURCE)
-            skill = Skill(
-                id=id_,
-                display_title=bundle.display_title,
-                latest_version=ref,
-                source=SKILL_SOURCE,
-                created_at=now(),
-                native={
-                    "deployment": "gcs_on_interaction"
-                    if self._publisher is not None
-                    else "upload_on_session"
-                    if self._uploads and not fits_inline(bundle)
-                    else "inline_on_interaction",
-                    "provider_upload": False,
-                },
+                record = SkillRecord(owner(scope), self._account, skill)
+                await self._deploy(scope, record, version, bundle)
+                self._store(record, version, bundle)
+                record.versions[version] = SkillVersion(
+                    ref=ref, version=version, created_at=skill.created_at
+                )
+                records.skills[id_] = record
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return skill
+        async with self._storage.read(Keys(read=(("skill", prior),))) as records:
+            record = owned_skill(records, scope, self._account, prior)
+            return record.skill.model_copy(
+                update={
+                    "latest_version": record.versions[version].ref,
+                    "display_title": bundle.display_title,
+                    "updated_at": None,
+                }
             )
-            record = SkillRecord(owner(scope), self._account, skill)
-            await self._deploy(scope, record, version, bundle)
-            self._store(record, version, bundle)
-            record.versions[version] = SkillVersion(
-                ref=ref, version=version, created_at=skill.created_at
-            )
-            records.skills[id_] = record
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return skill
 
     async def publish_version(
         self, scope: Scope, skill_id: str, bundle: SkillUpload, *, key: str
@@ -188,7 +202,8 @@ class GeminiSkills(Base):
                 "bundle": version,
             }
         )
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT, ("skill", skill_id)))
+        async with self._storage.transaction(keys) as records:
             record = owned_skill(records, scope, self._account, skill_id)
             prior = self._creation(records, scope, key, digest)
             if prior is not None:
@@ -211,11 +226,11 @@ class GeminiSkills(Base):
             return item
 
     async def retrieve(self, scope: Scope, skill_id: str) -> Skill:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=(("skill", skill_id),))) as records:
             return owned_skill(records, scope, self._account, skill_id).skill
 
     async def list(self, scope: Scope, *, page: PageRequest) -> Page[Skill]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(scan=("skill",))) as records:
             return page_values(
                 [
                     r.skill
@@ -229,7 +244,8 @@ class GeminiSkills(Base):
         digest = request_digest(
             {"kind": "skill_delete", "account": self._account, "skill": skill_id}
         )
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT, ("skill", skill_id)), scan=("agent",))
+        async with self._storage.transaction(keys) as records:
             prior = delete_replay(records, scope, key, digest)
             if prior is not None:
                 return prior
@@ -284,31 +300,33 @@ class GeminiArtifacts(Base):
                 "sha256": sha,
             }
         )
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(
+            Keys(lock=(ACCOUNT,), create=("artifact",))
+        ) as records:
             prior = self._creation(records, scope, key, digest)
-            if prior is not None:
-                return self._artifact(records, scope, self._ref(scope, prior, "artifact")).artifact
-            id_ = str(uuid4())
-            artifact = Artifact(
-                ref=self._ref(scope, id_, "artifact"),
-                filename=filename,
-                media_type=media_type,
-                size_bytes=len(contents),
-                created_at=now(),
-                native={"storage": "host_inline"},
-            )
-            records.artifacts[id_] = ArtifactRecord(artifact, sha, contents)
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return artifact
+            if prior is None:
+                id_ = str(uuid4())
+                artifact = Artifact(
+                    ref=self._ref(scope, id_, "artifact"),
+                    filename=filename,
+                    media_type=media_type,
+                    size_bytes=len(contents),
+                    created_at=now(),
+                    native={"storage": "host_inline"},
+                )
+                records.artifacts[id_] = ArtifactRecord(artifact, sha, contents)
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return artifact
+        return await self.retrieve(scope, self._ref(scope, prior, "artifact"))
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Artifact:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=(("artifact", ref.id),))) as records:
             return self._artifact(records, scope, ref).artifact
 
     async def _snapshot(
         self, scope: Scope, session: ResourceRef
     ) -> tuple[str | None, str | None, dict[str, bytes]]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             record = self._record(records, scope, session)
             env, root, binding = record.environment_id, record.root, record.session.binding.id
             if env is None:
@@ -324,7 +342,7 @@ class GeminiArtifacts(Base):
                 ) from None
             raise
         files = parse_snapshot(data)
-        async with self._storage.transaction() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             current = self._record(records, scope, session)
             if current.environment_id != env:
                 raise ContinuityLost(binding, ("Gemini replaced the snapshot workspace.",))
@@ -343,7 +361,32 @@ class GeminiArtifacts(Base):
             if turn_id is not None and turn_id != root:
                 refuse("historical_workspace_snapshot")
             ids: list[str] = []
-            async with self._storage.transaction() as records:
+            candidates = {
+                path: (
+                    request_digest(
+                        {
+                            "session": session.id,
+                            "environment": env,
+                            "root": root,
+                            "path": path,
+                            "sha": hashlib.sha256(data).hexdigest(),
+                        }
+                    ),
+                    data,
+                )
+                for path, data in files.items()
+            }
+            async with self._storage.read(session_keys(session.id)) as records:
+                request = self._record(records, scope, session).request
+            keys = Keys(
+                lock=(session_key(session.id),),
+                read=(
+                    *(("artifact", id_) for id_, _ in candidates.values()),
+                    *(("skill", id_) for id_ in mounted_skill_ids(request.get("environment"))),
+                ),
+                create=("artifact",),
+            )
+            async with self._storage.transaction(keys) as records:
                 current = self._record(records, scope, session)
                 if (current.environment_id, current.root) != (env, root):
                     raise ProviderError(
@@ -353,19 +396,10 @@ class GeminiArtifacts(Base):
                 # those were never the agent's work, so they are never outputs. Nor is
                 # the bytecode Python caches when a skill script imports a sibling.
                 mounted = mounted_files(current.request.get("environment"), records.skills)
-                for path, data in sorted(files.items(), reverse=order == "desc"):
+                for path, (id_, data) in sorted(candidates.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
                     if mounted.covers(path, sha) or "__pycache__" in path.split("/"):
                         continue
-                    id_ = request_digest(
-                        {
-                            "session": session.id,
-                            "environment": env,
-                            "root": root,
-                            "path": path,
-                            "sha": sha,
-                        }
-                    )
                     if id_ in records.delivered_artifacts:
                         continue
                     artifact = Artifact(
@@ -399,15 +433,18 @@ class GeminiArtifacts(Base):
                 start = int(offset)
             except ValueError:
                 raise ValueError("invalid snapshot cursor") from None
-        async with self._storage.transaction() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             self._record(records, scope, session)
             listing = records.artifact_pages.get(snapshot)
-            if listing is None or listing[:3] != (session.id, turn_id, order):
-                raise ScopeViolation(session.id, "snapshot cursor does not belong to this query")
-            ids = list(listing[3])
-            if start < 0 or start > len(ids):
-                raise ValueError("invalid snapshot cursor offset")
-            end = min(start + (page.limit or 100), len(ids))
+        if listing is None or listing[:3] != (session.id, turn_id, order):
+            raise ScopeViolation(session.id, "snapshot cursor does not belong to this query")
+        ids = list(listing[3])
+        if start < 0 or start > len(ids):
+            raise ValueError("invalid snapshot cursor offset")
+        end = min(start + (page.limit or 100), len(ids))
+        async with self._storage.read(
+            Keys(read=tuple(("artifact", i) for i in ids[start:end]))
+        ) as records:
             return Page(
                 data=tuple(records.artifacts[id_].artifact for id_ in ids[start:end]),
                 has_more=end < len(ids),
@@ -415,14 +452,13 @@ class GeminiArtifacts(Base):
             )
 
     async def download(self, scope: Scope, ref: ResourceRef) -> AsyncIterator[bytes]:
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=(("artifact", ref.id),))) as records:
             record = self._artifact(records, scope, ref)
             artifact, body, digest = record.artifact, record.body, record.digest
-            binding = (
-                self._record(records, scope, artifact.session).session.binding.id
-                if body is None and artifact.session is not None
-                else ""
-            )
+        binding = ""
+        if body is None and artifact.session is not None:
+            async with self._storage.read(session_keys(artifact.session.id)) as records:
+                binding = self._record(records, scope, artifact.session).session.binding.id
         if body is None:
             if artifact.session is None:
                 raise ProviderError(
@@ -448,7 +484,16 @@ class GeminiArtifacts(Base):
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         self._check(scope, ref, "artifact")
         digest = request_digest({"kind": "artifact_delete", "ref": ref.model_dump(mode="json")})
-        async with self._storage.transaction() as records:
+        # A workspace file's delivery is saved on its session's row: lock that too.
+        async with self._storage.read(Keys(read=(("artifact", ref.id),))) as records:
+            seen = records.artifacts.get(ref.id)
+        session = seen.artifact.session if seen is not None else None
+        locked: list[RowKey] = [ACCOUNT, ("artifact", ref.id)]
+        if session is not None:
+            locked.append(session_key(session.id))
+        async with self._storage.transaction(
+            Keys(lock=tuple(locked), scan=("environment",))
+        ) as records:
             prior = delete_replay(records, scope, key, digest)
             if prior is not None:
                 return prior

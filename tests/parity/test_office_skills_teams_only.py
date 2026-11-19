@@ -25,7 +25,7 @@ def test_only_teams_gets_platform_limited_default_skills() -> None:
         for ref in refs
     }
     names = ("docx", "pptx", "xlsx", "microsoft-365")
-    assert limited == {("daimon", name, ("teams",)) for name in names}, (
+    assert limited == {("default", name, ("teams",)) for name in names}, (
         f"platform-limited default skills changed: {sorted(limited)} -- if Slack or Discord "
         "gets one, replace this record rather than deleting it"
     )

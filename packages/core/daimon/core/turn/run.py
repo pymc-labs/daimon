@@ -49,6 +49,13 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
+from daimon.core.monitoring import (
+    KeptQuestion,
+    capture_answer,
+    capture_question,
+    continued_question,
+    record_notice,
+)
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_runtime import (
@@ -130,9 +137,10 @@ from daimon.core.turn.lifecycle import (
     ReconnectReason,
     TurnLifecycle,
     acknowledge,
+    tell_monitored,
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
-from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
 from daimon.core.turn.posture import (
@@ -158,7 +166,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionHook,
     ProviderActionRequester,
 )
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_routine_sandbox,
@@ -1272,12 +1280,17 @@ async def run_prepared_turn(
     watch_row: TaskContinuationRow | None = None,
     job_row: TaskContinuationRow | None = None,
     request_text: str | None = None,
+    request_ref: str | None = None,
+    continues: TaskContinuationRow | None = None,
 ) -> RunOutcome:
     """Drive an admitted turn, including unattended wakes.
 
     Unattended Managed Agents sends re-gate the current session before each
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
+    `request_ref` is the platform's id for the person's message, kept with it
+    when the agent is monitored. `continues` is the queued work this turn carries
+    on: its answer is kept with the question that was open when it was queued.
     """
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
@@ -1314,6 +1327,38 @@ async def run_prepared_turn(
             reseed_user_message=reseed_user_message,
             now=now(),
         )
+    kept = await _keep_question(
+        deps,
+        prepared,
+        tenant_id=tenant_id,
+        platform=platform,
+        thread_id=thread_id,
+        origin=origin,
+        request_text=request_text,
+        request_ref=request_ref,
+    )
+    kept_question = kept.turn_ref if kept is not None else None
+    continued_from = None
+    if kept is None and continues is not None:
+        continued_from = await continued_question(
+            deps.sessionmaker,
+            deps.settings,
+            tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(
+                tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id
+            ),
+            platform=platform,
+            conversation=thread_id,
+            account_id=continues.requester_account_id,
+            queued_at=continues.created_at,
+        )
+        kept_question = str(continues.id) if continued_from is not None else None
+    if (
+        kept is not None
+        and kept.notice is not None
+        and await tell_monitored(lifecycle, kept.notice)
+    ):
+        await record_notice(deps.sessionmaker, kept.subject, kept.notice, turn_ref=kept.turn_ref)
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id
@@ -1334,7 +1379,7 @@ async def run_prepared_turn(
     revision = prepared.admission.backend_revision
     backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
     profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
-    observation.backend = f"{backend}/{profile}"
+    observation.backend = backend_label(revision)
     # Every log line of the turn names the backend it ran on, so failures, lost
     # connections and ceilings can be counted per backend. Bound until the end of
     # the `finally`, so the credential finalizer's lines carry it too.
@@ -1387,6 +1432,18 @@ async def run_prepared_turn(
                 )
     except BaseException as exc:
         observation.finish(error=exc)
+        # A cancelled turn has no answer to keep; its question stays unanswered.
+        if kept_question is not None and isinstance(exc, Exception):
+            await capture_answer(
+                deps.sessionmaker,
+                deps.settings,
+                tenant_id=tenant_id,
+                conversation=thread_id,
+                turn_ref=kept_question,
+                content=None,
+                outcome=str(termination_reason(exc)),
+                question_ref=continued_from,
+            )
         if seeded is not None and not sent:
             await _restore_handoff_summary(
                 deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1422,6 +1479,17 @@ async def run_prepared_turn(
             structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
+    if kept_question is not None:
+        await capture_answer(
+            deps.sessionmaker,
+            deps.settings,
+            tenant_id=tenant_id,
+            conversation=thread_id,
+            turn_ref=kept_question,
+            content=extract_final_response(result.state.content),
+            outcome=str(result.termination),
+            question_ref=continued_from,
+        )
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(
             deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1449,6 +1517,43 @@ async def run_prepared_turn(
 
 #: Origins whose lifecycle draws the turn in a chat for a person to read.
 _CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
+
+
+async def _keep_question(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    origin: TurnContext,
+    request_text: str | None,
+    request_ref: str | None,
+) -> KeptQuestion | None:
+    """Keep a person's direct message or web chat question when the answering agent is
+    monitored (`daimon.core.monitoring`), under the message's own id when the platform
+    gave one, so a re-run of the same message keeps one question."""
+    if origin != "chat" or request_text is None:
+        return None
+    if platform not in ("discord", "slack", "teams", "web"):
+        return None
+    if platform != "web":
+        grant = prepared.admission.grant
+        if grant is None or not grant.is_dm:
+            return None
+    if not prepared.admission.feature_on("monitor_direct_messages"):
+        return None  # Off in the turn's own snapshot: no read on the way to the agent.
+    return await capture_question(
+        deps.sessionmaker,
+        deps.settings,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
+        platform=platform,
+        account_id=prepared.admission.account_id,
+        conversation=thread_id,
+        turn_ref=request_ref or str(uuid.uuid4()),
+        content=request_text,
+    )
 
 
 async def _repo_memory_state(

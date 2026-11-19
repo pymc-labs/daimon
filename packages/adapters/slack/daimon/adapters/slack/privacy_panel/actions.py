@@ -43,8 +43,9 @@ from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.privacy import summary_line
+from daimon.core.privacy import account_other_providers, summary_line
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_user_tokens import delete_slack_user_token, get_slack_user_token
 from slack_sdk.errors import SlackApiError
@@ -128,6 +129,9 @@ async def handle_privacy_command(
             account_id = await resolve_privacy_account(
                 s, tenant_id=tenant_id, platform_user_id=user_id
             )
+            monitored = account_id is not None and await monitors_any(
+                s, runtime.settings, tenant_id=tenant_id, platform="slack"
+            )
 
         if account_id is None:
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -156,6 +160,10 @@ async def handle_privacy_command(
                 policy_url=str(runtime.settings.privacy_policy_url),
                 display_name=resolve_bot_display_name(runtime.settings),
                 delete_enabled=runtime.settings.privacy.delete_enabled,
+                monitored=monitored,
+                providers=await account_other_providers(
+                    runtime.sessionmaker, account_id=account_id
+                ),
             ),
         )
     except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
@@ -240,6 +248,9 @@ async def handle_privacy_block_action(
                     user_name=user_name,
                     view_id=current_view_id,
                     display_name=resolve_bot_display_name(runtime.settings),
+                    providers=await account_other_providers(
+                        runtime.sessionmaker, account_id=account_id
+                    ),
                 ),
             )
         elif action_id == "privacy_export":

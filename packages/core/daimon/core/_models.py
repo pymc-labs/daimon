@@ -303,7 +303,7 @@ class TenantAccessPolicyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # False: an admin never chose; the tenant follows the deployment's keyed providers
+    # False: an admin never chose; the tenant follows the deployment default (Anthropic)
     # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
     enabled_backends_explicit: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
@@ -3029,14 +3029,14 @@ class ThreadModelSetting(Base):
     )
     platform: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str] = mapped_column(Text)
-    # Null when only the effort was chosen: the agent's own model runs (0206).
+    # Null when only the effort was chosen: the agent's own model runs (0209).
     model: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # The model's provider; null is a Claude model chosen before providers could be (0197).
     provider: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # The chosen effort; null keeps the agent's own (0206).
+    # The chosen effort; null keeps the agent's own (0209).
     effort: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -4881,6 +4881,8 @@ class UsageObservation(Base):
         PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
         # The OpenAI daily model cap reads one tenant's observations per turn.
         Index("ix_usage_observation_tenant_id", "tenant_id"),
+        # The provider daily ceiling reads today's observations of one provider.
+        Index("ix_usage_observation_provider_observed_at", "provider", "observed_at"),
     )
 
     # No foreign key to the slot: erasing a private slot must leave these rows
@@ -4891,6 +4893,9 @@ class UsageObservation(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.AppliedUsage` as JSON.
     applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Copied from `applied` for the daily reads; NULL on a row older code wrote.
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AccountingOutbox(Base):
@@ -4915,6 +4920,9 @@ class AccountingOutbox(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
     row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Who asked and the budget channel, as recorded: a row settled later debits them.
+    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -5063,6 +5071,39 @@ class DiscordGatewayLease(Base):
     holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProviderKeyCooldown(Base):
+    """When a provider key may be used again for one model, after a rate limit.
+
+    Keyed by a digest of the key, never the key itself. Private to
+    `daimon.core.stores.provider_key_gate`.
+    """
+
+    __tablename__ = "provider_key_cooldowns"
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    key_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderKeyLease(Base):
+    """One running turn on a provider key; it expires if the turn never releases it."""
+
+    __tablename__ = "provider_key_leases"
+    __table_args__ = (Index("ix_provider_key_leases_key", "provider", "key_digest", "tenant_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_provider_key_leases_tenants"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    key_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SessionSettleState(Base):
@@ -5223,6 +5264,42 @@ class GeminiRuntimeState(Base):
     project: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GeminiRecord(Base):
+    """One Gemini driver record row: an account's operation log, a session, a resource.
+
+    Split from the one `gemini_runtime_state` blob per account, so a turn locks and
+    rewrites only its own session. `version` and `touched_at` change on every write.
+    """
+
+    __tablename__ = "gemini_records"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "account_id", "project", "kind", "id"),
+        CheckConstraint(
+            "kind IN ('account', 'session', 'agent', 'environment', 'skill', 'artifact')",
+            name="ck_gemini_records_kind",
+        ),
+        Index("ix_gemini_records_kind_touched_at", "kind", "touched_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    project: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    touched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # A session's binding; an artifact's session (workspace snapshot files).
+    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A session's `kind:id` refs: its agent, environment, pinned skills and files.
+    refs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
 
 
 class Watch(Base):
@@ -6656,15 +6733,83 @@ class PendingCarryOver(Base):
     )
 
 
+class MonitoredEvent(Base):
+    """A question, answer, MCP tool call or shown notice, kept while the agent is monitored.
+
+    `agent_id` is the agent's local id (`ma_identity.derive_agent_uuid`). `conversation`
+    is the DM, web chat or MCP session, and `turn_ref` pairs an answer with its question.
+    A tool row has its name and outcome only, never what the call sent or returned. A
+    notice row says when the person was told they are monitored.
+    """
+
+    __tablename__ = "monitored_events"
+    __table_args__ = (
+        Index("ix_monitored_events_agent_created", "tenant_id", "agent_id", "created_at"),
+        Index("ix_monitored_events_created", "created_at"),
+        Index("ix_monitored_events_account", "account_id"),
+        Index(
+            "ix_monitored_events_notice",
+            "tenant_id",
+            "agent_id",
+            "created_at",
+            postgresql_where=text("kind = 'notice'"),
+        ),
+        # One row of each kind per turn, so a retried capture is a no-op.
+        Index(
+            "uq_monitored_events_turn",
+            "tenant_id",
+            "conversation",
+            "turn_ref",
+            "kind",
+            unique=True,
+            postgresql_where=text("turn_ref IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams', 'web', 'mcp')",
+            name="ck_monitored_events_platform",
+        ),
+        CheckConstraint(
+            "kind IN ('question', 'answer', 'tool', 'notice')", name="ck_monitored_events_kind"
+        ),
+        CheckConstraint(
+            "(kind = 'tool') = (tool_name IS NOT NULL)", name="ck_monitored_events_tool_name"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 def _install_erased_account_guards() -> None:
     """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
 
-    Production gets the same statements from migration 0142; this keeps a schema built
+    Production gets the same statements from migrations 0142 and 0206; this keeps a schema built
     by `create_all` (the test schemas) behaving the same.
     """
     for table_name in _erasure_guards.GUARDED_TABLES:
         table = Base.metadata.tables[table_name]
-        for statement in (*_erasure_guards.FUNCTIONS, _erasure_guards.create_trigger(table_name)):
+        for statement in (
+            *_erasure_guards.ALL_FUNCTIONS,
+            _erasure_guards.create_trigger(table_name),
+        ):
             event.listen(table, "after_create", DDL(statement))
 
 

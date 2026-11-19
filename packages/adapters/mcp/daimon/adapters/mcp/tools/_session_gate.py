@@ -37,8 +37,8 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
+    PROVIDER_MOVE_TOOLS,
     REACH_APPROVAL_TOOLS,
-    RETIRED_GATES,
     WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
@@ -49,6 +49,13 @@ from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 
 _log = structlog.get_logger(__name__)
+
+#: What a refusal says when the session can't show the card, such as one that started
+#: before the card existed: only a new session carries it.
+CARD_UNVERIFIED = (
+    "This conversation cannot verify the confirmation card. "
+    "Start a new conversation and ask again. Nothing changed."
+)
 
 CardGap = Literal[
     "no_origin",
@@ -296,12 +303,13 @@ async def _recorded_as_gated(
         before_pin_set,
         before_pin_clear,
     )
-    # A bind from before the provider switches stopped asking holds them gated; it
-    # still proves every other card. Older still, the thread-model pick didn't ask.
+    # A bind from before the thread pick asked holds only the agent switch gated, and one
+    # from while provider moves applied at once holds neither; each still proves every
+    # other card it gated.
     if selection:
         candidates += tuple(
-            candidate | switch
-            for switch in (RETIRED_GATES, RETIRED_GATES - {"set_thread_model"})
+            candidate - ungated
+            for ungated in ({"set_thread_model"}, PROVIDER_MOVE_TOOLS)
             for candidate in candidates
         )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)

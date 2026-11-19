@@ -30,7 +30,6 @@ import httpx
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.config import McpSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -226,8 +225,9 @@ async def test_discord_mention_delivers_agent_reply_via_edit(
         "expected at least one message_ref.edit call with content kwarg "
         "(terminal success should edit the thinking embed)"
     )
-    assert edit_calls[-1].kwargs["content"] == fallback_name_prefix("test-agent", _AGENT_TEXT), (
-        "terminal success edits the embed message to the agent's labelled final text"
+    assert edit_calls[-1].kwargs["content"] == _AGENT_TEXT, (
+        "terminal success edits the embed message to the final text, unlabelled "
+        "because the agent is the deployment default"
     )
 
 

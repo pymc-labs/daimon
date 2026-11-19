@@ -22,6 +22,7 @@ from daimon.core.continuity.wakes import (
     WAKE_RETRY_DELAY,
     busy_retry_at,
     claim_wake,
+    is_transient_denial,
     release_wake,
     settle_wake,
     start_wake,
@@ -100,6 +101,9 @@ async def dispatch_scope_timer(
         except SessionPreparationFailed:
             skip_reason = "blocked_preparation_failed"
         except AdmissionDenied as exc:
+            if is_transient_denial(exc):
+                await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
+                return
             skip_reason = f"admission_denied:{exc.reason}"
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning(

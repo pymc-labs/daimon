@@ -66,6 +66,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core import monitoring
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -98,6 +99,7 @@ log = structlog.get_logger(__name__)
 # Bounds for a settle on a caller's path (a chat turn's end, an MCP read).
 SETTLE_MAX_PAGES = 10
 SETTLE_BUDGET_S = 5.0
+KEEP_REPLIES_BUDGET_S = 3.0  # monitored replies, kept after the settle
 _PAGE_SIZE = 100
 _CALLS = "span.model_request_end"
 # A Claude search is a `web_search` use and its result; neither span counts it.
@@ -567,6 +569,98 @@ async def turn_ended(
     return bool(unnamed_turn)
 
 
+async def _keep_monitored_replies(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+) -> bool:
+    """Keep the replies to this agent chat session's kept questions whose turns ended
+    (`daimon.core.monitoring`): each turn's newest `agent.message` text. A turn paused on
+    a confirmation has not ended; it is kept by a later settle. Bounded by
+    `KEEP_REPLIES_BUDGET_S`. False when the read failed or ran out of time, so a reply may
+    be unkept: the caller leaves its settle request, and the next sweep retries."""
+    try:
+        tenant_id = uuid.UUID(session.metadata.get(MA_METADATA_KEY_TENANT) or "")
+    except ValueError:
+        return True
+    try:
+        async with asyncio.timeout(KEEP_REPLIES_BUDGET_S):
+            await _keep_replies(anthropic, sessionmaker, session, tenant_id)
+    except _anthropic.RateLimitError:
+        raise
+    # Billing goes on without the kept reply: the question stays open for a later settle.
+    except (TimeoutError, _anthropic.APIError, SQLAlchemyError) as error:
+        log.warning(
+            "monitoring.capture_failed",
+            kind="answer",
+            causes=backend_refusal_causes(error),
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+async def _keep_replies(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    # Imported here: `daimon.core.turn` imports this module.
+    from daimon.core.turn.termination import TerminationReason
+
+    waiting = set(
+        await monitoring.open_questions(sessionmaker, tenant_id=tenant_id, conversation=session.id)
+    )
+    if not waiting:
+        return
+    page = await _list_events(
+        anthropic,
+        session.id,
+        scope=_stamped_scope(session),
+        query=EventQuery(
+            order="desc",
+            limit=_PAGE_SIZE,
+            types=[
+                "user.message",
+                "agent.message",
+                "session.status_idle",
+                "session.status_terminated",
+            ],
+        ),
+    )
+    # Newest first: the end and the reply seen since the previous `user.message`.
+    ended: TerminationReason | Literal["paused"] | None = None
+    reply: str | None = None
+    for _ in range(SETTLE_MAX_PAGES):
+        for event in page.data:
+            if event.type == "session.status_terminated":
+                ended = ended or TerminationReason.SESSION_TERMINATED
+            elif event.type == "session.status_idle":
+                paused = event.stop_reason.type == "requires_action"
+                ended = ended or ("paused" if paused else TerminationReason.COMPLETED)
+            elif event.type == "agent.message":
+                text = "\n".join(block.text for block in event.content if block.text)
+                reply = reply or text or None
+            elif event.type == "user.message":
+                if event.id in waiting and ended not in (None, "paused"):
+                    waiting.discard(event.id)
+                    await monitoring.capture_answer(
+                        sessionmaker,
+                        tenant_id=tenant_id,
+                        conversation=session.id,
+                        turn_ref=event.id,
+                        content=reply,
+                        outcome=str(ended),
+                    )
+                if not waiting:
+                    return
+                ended, reply = None, None
+        if not page.has_next_page():
+            return
+        page = await page.get_next_page()
+
+
 async def settle_finished_turn(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -585,8 +679,10 @@ async def settle_finished_turn(
     only when the settle read to the end, and only if it is still the very
     request this call verified (a newer send replaces it), so a settle cut
     short, or one racing a send, leaves it for the next read or the drain.
-    `budget_s` bounds the whole call, database work included; on expiry the
-    request stays.
+    `budget_s` bounds the settle, database work included; on expiry the
+    request stays. A turn that ended then keeps its monitored replies, within
+    `budget_s` and a budget of their own; the request is cleared only once they
+    were read too, so a reply that could not be read is retried by the next sweep.
 
     Named boundary: an upstream or database error is logged and the request
     kept, except a rate limit, which propagates so the drain stops its pass
@@ -595,6 +691,7 @@ async def settle_finished_turn(
     if session.status not in ("idle", "terminated"):
         return None
     deadline = None if budget_s is None else time.monotonic() + budget_s
+    result: SettleResult | None = None
     try:
         async with asyncio.timeout(budget_s):
             async with sessionmaker() as s:
@@ -620,14 +717,16 @@ async def settle_finished_turn(
                 max_pages=max_pages,
                 deadline=deadline,
             )
-            if result is None or result.complete:
+            # Before the request is cleared: the open questions are the retry list, and
+            # nothing else would revisit a reply that could not be read.
+            replies_kept = await _keep_monitored_replies(anthropic, sessionmaker, session)
+            if (result is None or result.complete) and replies_kept:
                 async with sessionmaker() as s, s.begin():
                     await session_settle_state.clear_settle_request(
                         s, managed_session_id=session.id, request=request
                     )
-            return result
     except TimeoutError:
-        return None  # out of budget; the request stays for the next read or the drain
+        result = None  # out of budget; the request stays for the next read or the drain
     except _anthropic.RateLimitError:
         raise
     except (_anthropic.APIError, SQLAlchemyError) as error:
@@ -636,7 +735,8 @@ async def settle_finished_turn(
             managed_session_id=session.id,
             causes=backend_refusal_causes(error),
         )
-        return None
+        result = None
+    return result
 
 
 async def sweep_headless_usage(

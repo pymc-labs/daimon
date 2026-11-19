@@ -25,6 +25,8 @@ export function useFeatureSave(place: FeaturePlace) {
       try {
         await m.mutateAsync(c)
         await qc.invalidateQueries({ queryKey: ["features"] })
+        // The Features panel's "Since" line under a monitor switch reads the monitoring state.
+        if (c.key.startsWith("monitor_")) await qc.invalidateQueries({ queryKey: ["admin", "monitoring"] })
         return null
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {

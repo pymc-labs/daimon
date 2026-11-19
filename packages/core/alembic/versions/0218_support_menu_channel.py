@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0213_support_menu_channel"
-down_revision: str | None = "0212_sandbox_tools_feature"
+revision: str = "0218_support_menu_channel"
+down_revision: str | None = "0217_monitored_events"
 branch_labels = None
 depends_on = None
 
