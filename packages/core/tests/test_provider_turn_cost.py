@@ -104,3 +104,26 @@ async def test_overlapping_settles_make_one_edit_at_a_time_and_the_newest_debit_
     await costs.wait()
     assert peak == [1], f"edits of one footer overlapped: {peak[0]} at once"
     assert shown == [0.02, 0.03], shown
+
+
+async def test_a_final_debit_settled_during_the_last_retry_of_an_older_one_is_shown() -> None:
+    """The edit in flight ran out of tries for the older debit; the newest gets its own."""
+    calls, gate = list[float](), asyncio.Event()
+
+    async def show(debit: float) -> bool:
+        calls.append(debit)
+        if len(calls) == 4:  # the last try of the first debit
+            await gate.wait()
+        return len(calls) > 4
+
+    costs = LateTurnCosts(retry_s=(0.0, 0.0, 0.0))
+    costs.turn_debit(
+        ProviderUsageTotals().add_observation(_reading(1)), markup=Decimal(1), show=show
+    )
+    _settle(costs, _reading(2))
+    while len(calls) < 4:
+        await asyncio.sleep(0)
+    _settle(costs, _reading(3, final=True))
+    gate.set()
+    await costs.wait()
+    assert calls == [0.02] * 4 + [0.025], calls

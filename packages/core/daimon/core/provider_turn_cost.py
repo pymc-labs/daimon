@@ -232,7 +232,7 @@ class LateTurnCosts:
             await asyncio.gather(*self._shows, return_exceptions=True)
 
     async def _show(self, key: tuple[str, str], footer: _Footer) -> None:
-        delays, attempt = (0.0, *self._retry_s), 0
+        delays, attempt, trying = (0.0, *self._retry_s), 0, footer.latest
         while attempt < len(delays):
             await asyncio.sleep(delays[attempt])
             debit = footer.latest
@@ -247,10 +247,11 @@ class LateTurnCosts:
             except Exception:  # a footer edit is cosmetic: a failed one is retried, then dropped
                 log.warning("late_turn_cost.show_failed", key=":".join(key), exc_info=True)
                 applied = False
-            if applied:  # a debit settled during the edit is shown next, at once
-                footer.shown, attempt = debit, 0
-            else:
-                attempt += 1
+            if applied:
+                footer.shown = debit
+            attempt = 0 if applied else attempt + 1
+            if footer.latest != trying:  # settled meanwhile: the newest debit gets its own tries
+                attempt, trying = 0, footer.latest
 
 
 #: The process's waiting footers, shared by every chat platform's lifecycle.
