@@ -316,6 +316,20 @@ async def test_a_failed_role_lookup_puts_the_timer_back_not_settled(
     delivery.run_turn.assert_not_awaited()
 
 
+async def test_an_unknown_lookup_after_the_turn_settles_without_rerunning_it(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admits = AsyncMock(side_effect=[True, None])
+    monkeypatch.setattr(timer_delivery, "sender_admission", admits)
+    delivery = await _delivery(db_session_factory)
+
+    with pytest.raises(AdmissionDenied):
+        await delivery.run(db_session_factory)
+
+    delivery.run_turn.assert_awaited_once()
+    delivery.channel.send.assert_not_awaited()
+
+
 async def test_a_closed_dm_settles_as_not_allowed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

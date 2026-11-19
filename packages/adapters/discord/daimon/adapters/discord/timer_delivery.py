@@ -71,8 +71,9 @@ async def _deliver[A](
 
     `open_place` raises `LookupError` when the place is definitely gone. Raises
     `AdmissionDenied` when the timer may not start or stops partway. A transient error
-    before the turn raises `DeliveryRetry`; one that outlasts the in-place retries after
-    it raises `DeliveryFailed`. A permanent Discord error propagates and settles.
+    before the turn, or an unknown lookup there, raises `DeliveryRetry`; after the turn
+    neither re-runs it: one that outlasts the in-place retries raises `DeliveryFailed`, an
+    unknown lookup raises `AdmissionDenied`. A permanent Discord error propagates and settles.
     """
     sent = 0
 
@@ -81,6 +82,9 @@ async def _deliver[A](
         for pause in (*DELIVERY_BACKOFF, None):
             try:
                 return await op()
+            except DeliveryRetry:
+                # An unknown lookup after the turn must not put the timer back to run it again.
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
             except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
                 if not is_transient(error):
                     raise
