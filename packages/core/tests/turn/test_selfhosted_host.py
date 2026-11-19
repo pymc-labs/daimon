@@ -163,7 +163,7 @@ class Resources:
 
 @pytest.fixture
 def pinned_leg():
-    """The leg `composed` builds on: mux here; test_turn_leg_selfhosted overrides it."""
+    """The leg `composed` builds on: mux here."""
     return MUX_LEG
 
 

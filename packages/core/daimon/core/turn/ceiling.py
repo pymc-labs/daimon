@@ -95,7 +95,7 @@ def remaining_s(deadline: datetime, *, now: datetime, refuse_expired: bool = Fal
 # Rendered through the adapters' existing generic error path, both of
 # which truncate to `str(err)[:100]`. `TurnError.__str__` is `f"{kind}: {msg}"`,
 # so this message must leave room for the "ceiling: " prefix -- see
-# `ceiling_error` and the length invariant pinned in test_ceiling.py.
+# `ceiling_error`.
 CEILING_MESSAGE: str = "this reply stopped responding and was dropped — send a new message"
 
 
