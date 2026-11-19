@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import pytest
-from daimon.core import channel_backend
+from daimon.core import channel_backend, usage_recording
 from daimon.core.turn import openai_host
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runtime_for
 from daimon.core.turn.openai_late_usage import LateUsage
@@ -261,6 +261,9 @@ class Wire:
         return httpx.Response(200, json=self.session())
 
 
+_RECORD_PROVIDER_USAGE = usage_recording.record_provider_usage
+
+
 @pytest.fixture(params=["memory", "postgres"])
 async def composed(request, db_session_factory, db_clean, monkeypatch):
     wire = Wire()
@@ -279,6 +282,8 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
         return False  # durable pending, never a known free turn
 
     monkeypatch.setattr(openai_host, "record_provider_usage", record)
+    # The late re-read (`reread_turn`) records through the same recorder.
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record)
 
     async def plan(request):
         return SessionSpec(
@@ -502,9 +507,10 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
 
     from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.tenant_ledger import get_balance
-    from daimon.core.usage_recording import record_provider_usage
 
+    record_provider_usage = _RECORD_PROVIDER_USAGE  # the real recorder, unpatched
     monkeypatch.setattr(openai_host, "record_provider_usage", record_provider_usage)
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record_provider_usage)
     request, wire, store, _, runtime = composed
     first = await prepare_openai(request)
     binding = await store.get_binding(
@@ -871,6 +877,44 @@ async def test_an_unknown_turn_is_reread_after_it_and_recorded_measured(composed
     later = [x["observation"] for x in turn.observations]
     assert [x.completeness for x in later] == ["unknown", "measured"], later
     assert (later[1].revision, later[1].input_tokens) == (unknown.revision + 1, 100), later
+
+
+async def test_a_late_reread_charges_the_runtimes_own_price_and_infrastructure(composed):
+    """The process's re-read prices the turn as the turn itself did."""
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    wire, gate = composed[1], asyncio.Event()
+    price = ProviderPrice(
+        provider="openai",
+        model="gpt-6-luna",
+        checked_on=date(2020, 1, 1),
+        input=Decimal("7"),
+        output=Decimal("9"),
+        cache_read=Decimal("1"),
+    )
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    async def infrastructure(observation: UsageObservation) -> Decimal:
+        return Decimal("0.0053")
+
+    late = LateUsage(delays_s=(1.0,), sleep=held)
+    async with _late_turn(composed, late, price=price, infrastructure=infrastructure) as turn:
+        wire.turns = [_root(None)]
+        await turn.record(await turn.read())
+        wire.turns[0]["usage"] = FINAL_USAGE
+        gate.set()
+        await late.wait()
+    reread = turn.observations[-1]
+    assert reread["observation"].final, "the re-read recorded the final usage"
+    assert (reread["provider_price"], reread["infrastructure_usd"]) == (
+        price,
+        Decimal("0.0053"),
+    ), "the re-read must charge the runtime's tariff and infrastructure"
 
 
 async def test_a_fallback_usage_when_the_resource_still_lacks_it_then_is_reread_to_the_final(

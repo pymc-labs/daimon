@@ -196,8 +196,9 @@ async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is
 
     monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
     monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
+    seen = datetime.now(UTC) - timedelta(hours=3)
     for _ in range(2):
-        await pending_usage(sm, provider="openai", unknown=True)
+        await pending_usage(sm, provider="openai", unknown=True, observed_at=seen)
     async with sm() as db:
         pending = (await mux_state.pending_outbox(db))[0].observation
     measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
@@ -208,6 +209,19 @@ async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is
     later = now + timedelta(seconds=1)
     assert await rereads.run(sm, markup=Decimal(1), now=later) == 1, "only the other row is due"
     assert await _debited(sm) < 0, "the row behind the slow one was read"
+
+
+async def test_unknown_openai_usage_is_left_to_the_process_that_ran_the_turn(sm, monkeypatch):
+    """Within its hold-off the scheduler leaves the turn to the process that ran it."""
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(minutes=5))
+    assert (reads, read) == (0, []), "the scheduler read a turn the bot still re-reads"
+    assert await _pending(sm) == 1 and await _debited(sm) == 0
+
+
+async def test_unknown_openai_usage_just_past_the_hold_off_is_read(sm, monkeypatch):
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(minutes=11))
+    assert (reads, read) == (1, ["turn"]), "the scheduler takes a turn after its hold-off"
+    assert await _debited(sm) < 0, "the read usage was debited"
 
 
 async def test_unknown_openai_usage_is_given_up_a_day_after_it_was_seen(sm, monkeypatch):

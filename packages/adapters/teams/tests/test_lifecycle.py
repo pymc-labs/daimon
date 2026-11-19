@@ -1444,3 +1444,14 @@ async def test_watch_posts_controls_before_its_output_grant_closes():
     guard.close()
     await lifecycle.release_controls()
     assert len(sender.activities) == count
+
+
+async def test_a_late_debit_whose_notice_edit_is_refused_is_reported_unshown() -> None:
+    """A refused edit (a 429) is not counted as shown, so the late debit is tried again."""
+    sender = FakeSender(refuse_status=429)
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(TurnState())  # no answer: the notice carries the summary
+    sender.refuse_on = {len(sender.sent)}
+    assert not await lifecycle._show_late_debit(0.015), "a refused edit was counted as shown"
+    assert await lifecycle._show_late_debit(0.015), "the next try edits the notice"
+    assert "$0.015" in _card_json(sender, -1), _card_json(sender, -1)
