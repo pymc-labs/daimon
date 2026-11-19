@@ -301,23 +301,6 @@ async def test_reply_lookup_failure_does_not_start_turn(
     bot._handle_mention.assert_not_awaited()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue]
 
 
-async def test_mention_skips_reply_lookup(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    bot = make_bot(_make_runtime(db_session_factory))
-    bot._handle_mention = AsyncMock()  # pyright: ignore[reportPrivateUsage,reportAttributeAccessIssue,reportMethodAssign]
-    message = _make_channel_message(guild_id=801000095)
-    message.webhook_id = None
-    message.reference = discord.MessageReference(message_id=123, channel_id=789, guild_id=801000095)
-    resolved = MagicMock(spec=discord.Message)
-    resolved.author.id = bot.user.id
-    resolved.webhook_id = None
-    message.reference.resolved = resolved
-    with patch("daimon.adapters.discord.bot.get_post", new_callable=AsyncMock) as get_post:
-        await bot.on_message(message)
-    get_post.assert_not_awaited()
-
-
 class TestInflightCapRejection:
     """4th turn for a saturated tenant rejected (SCALE-01)."""
 

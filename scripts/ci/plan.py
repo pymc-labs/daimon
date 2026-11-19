@@ -36,6 +36,9 @@ FILES: dict[str, str] = {
     ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
     "azure.yaml": "repo",
+    # The scripts the migration-upgrade and image-smoke jobs run.
+    "scripts/ci/migration_upgrade.py": "migration-check",
+    "scripts/ci/image_tls_check.py": "image-check",
     ".github/workflows/ci.yml": "all",
     # Their contract tests are repo tests, but a change deploys everything it can break.
     ".github/workflows/deploy.yml": "deploy-workflow",
@@ -66,6 +69,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("tests/parity/", "parity"),
     ("tests/harness_conformance/", "harness"),
     ("tests/golden/", "golden"),
+    ("tests/simulated/", "simulated"),
     ("tests/", "tests"),
     ("qa/", "tests"),
     ("packages/mux/", "mux"),
@@ -76,8 +80,10 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/mcp/", "mcp"),
     ("packages/adapters/scheduler/", "scheduler"),
     ("packages/testing/", "testing"),
-    # Only a migration needs the migrate job; any other core change skips it.
+    # Only a migration or a change to the table models needs the migrate job; any other
+    # core change skips it.
     ("packages/core/alembic/", "migrations"),
+    ("packages/core/daimon/core/_models.py", "migrations"),
     # Core and the CLI, which migrations and the smoke turn run through.
     ("packages/", "core"),
     ("defaults/", "core"),
@@ -96,7 +102,7 @@ RULES: tuple[tuple[str, str], ...] = (
 #: (daimon.testing) import every adapter but web, so those adapters select them all.
 DAIMON = (
     "core", "mcp", "slack", "teams", "web", "parity", "discord",
-    "staging-config", "journeys", "lint", "shard-check",
+    "staging-config", "journeys", "lint", "shard-check", "simulated",
 )  # fmt: skip
 _HOSTS = (*DAIMON, "image-daimon")
 
@@ -121,11 +127,15 @@ SUITES: dict[str, tuple[str, ...]] = {
     "web-links": ("spa", "web", "parity", "image-daimon"),
     "parity": ("parity", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
+    "simulated": ("simulated", "lint"),
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
     "golden": (*DAIMON, "mux"),
     "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
     "core": (*_HOSTS, "mux"),
-    "migrations": (*_HOSTS, "mux"),
+    "migrations": (*_HOSTS, "mux", "migration-upgrade"),
+    # A script, so ruff runs on it as well.
+    "migration-check": ("lint", "migration-upgrade"),
+    "image-check": ("lint", "image-daimon"),
     "discord": _HOSTS,
     "slack": _HOSTS,
     "teams": _HOSTS,
@@ -157,7 +167,7 @@ _CORE = (
 #: the legs of its selected suites, so an unselected leg never starts. Add a shard here.
 MATRICES: dict[str, list[Leg]] = {
     "pytest-db": [
-        *_shards("core", 6, _CORE, **{"fetch-depth": 0}),
+        *_shards("core", 4, _CORE, **{"fetch-depth": 0}),
         *_shards("mcp", 2, "packages/adapters/mcp", **{"fetch-depth": 1}),
         *(
             leg
@@ -166,6 +176,8 @@ MATRICES: dict[str, list[Leg]] = {
                 ("teams", "packages/adapters/teams"),
                 ("web", "packages/adapters/web"),
                 ("parity", "tests/parity"),
+                # Whole turns on each provider, from a fresh install, over faked HTTP.
+                ("simulated", "tests/simulated"),
             )
             for leg in _shards(suite, 1, paths, **{"fetch-depth": 1})
         ),
@@ -193,6 +205,9 @@ JOBS: dict[str, tuple[str, ...]] = {
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
     "docker-build": ("image-daimon", "image-notebook-host", "image-report-host"),
+    # The simulated turns run inside the built image.
+    "image-smoke": ("image-daimon", "simulated"),
+    "migration-upgrade": ("migration-upgrade",),
     "harness-image": ("image-harness",),
 }
 ALL_SUITES = tuple(sorted({s for suites in (*SUITES.values(), *JOBS.values()) for s in suites}))

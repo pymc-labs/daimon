@@ -135,7 +135,7 @@ _FILES_ATTRIBUTE_PARAGRAPH_TEAMS = _FILES_ATTRIBUTE_PARAGRAPH.replace(
 )
 
 #: (shipped passage, replacement) for one platform. Each shipped passage appears
-#: verbatim in the shipped prompt; `test_platform_system` fails when one drifts out.
+#: verbatim in the shipped prompt.
 SHIPPED_PASSAGES: tuple[str, ...] = (
     _EVERY_PLATFORM[0],
     _SHIPPED_FORMAT,

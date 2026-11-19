@@ -98,5 +98,5 @@ assertion dictionaries. N9 resolves catalog placeholders before evaluation.
 Reports contain reason codes and evidence IDs, not captured message/log values.
 No CLI/HTTP/SQL/pytest command in a catalog assertion is executed by this oracle.
 
-Offline tests: `uv run pytest -q packages/testing/tests/test_outcome_oracle.py`.
+The oracle runs offline.
 No keys, external API, staging database or paid judge are used.

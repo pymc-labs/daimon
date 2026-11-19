@@ -163,7 +163,7 @@ class Resources:
 
 @pytest.fixture
 def pinned_leg():
-    """The leg `composed` builds on: mux here; test_turn_leg_selfhosted overrides it."""
+    """The leg `composed` builds on: mux here."""
     return MUX_LEG
 
 
@@ -1914,7 +1914,15 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit, 
 
 
 async def test_an_agent_saved_on_a_selfhosted_model_runs_a_reply(composed):
-    """The agent's own choice prepares and replies like a channel pin; shared stays refused."""
+    """The agent's own choice prepares and replies like a channel pin; shared stays refused.
+
+    No agent revision is retained here, as for a record born on its provider, and the
+    host re-puts the revision with none. Deliberate difference: the OpenAI host refuses
+    a missing association before its paid request, because it runs a counterpart proven
+    against the agent's switch
+    (`test_agent_origin_openai_host_preserves_its_switch_before_paid_request`); the
+    self-hosted host runs the record itself.
+    """
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.outcomes import drain_outcomes
 
@@ -1948,3 +1956,47 @@ async def test_an_agent_saved_on_a_selfhosted_model_runs_a_reply(composed):
     shared = replace(shared, admission=replace(shared.admission, backend_revision_origin="agent"))
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await prepare_selfhosted(shared)
+
+
+@pytest.mark.parametrize("origin", ["agent", "thread"])
+async def test_an_agent_turn_keeps_the_association_admission_stored(composed, origin):
+    """Admission stores the agent's revision linked to `[agent, local]`, or to the
+    conversation whose model choice it is (origin `thread`); preparing re-puts it
+    under that association instead of conflicting with it."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends, mux_state, thread_models
+
+    request, _, _, _ = composed
+    sessions = request.deps.sessionmaker
+    agent_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=request.admission.agent.id)
+    thread_id = "thread" if origin == "thread" else None
+    async with sessions.begin() as db:
+        linked = await agent_backends.put_revision(
+            db,
+            tenant_id=TENANT,
+            agent_id=agent_id,
+            local=1,
+            backend="selfhosted",
+            digest="switched",
+            previous_local=None,
+            agent_name="test",
+            preview_digest="preview",
+            model="gpt-6-luna",
+            environment="sh_env_test",
+        )
+        if thread_id is not None:
+            await thread_models.put_thread_consent(
+                db, platform=REVISION.channel.platform, thread_id=thread_id, revision=linked
+            )
+        await mux_state.put_config_revision(
+            db, REVISION, origin=origin, agent_revision=linked, thread_id=thread_id
+        )
+    own = replace(request, admission=replace(request.admission, backend_revision_origin="agent"))
+
+    prepared = await prepare_selfhosted(own)
+
+    assert prepared.session_ref is not None, "the agent's own revision prepares"
+    async with sessions() as db:
+        kept = await mux_state.config_origin(db, REVISION.channel, REVISION.local)
+        retained = await mux_state.get_config_agent_revision(db, REVISION, agent_id=agent_id)
+    assert (kept, retained) == (origin, linked), "the stored association is unchanged"

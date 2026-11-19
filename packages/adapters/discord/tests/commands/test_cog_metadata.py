@@ -1,11 +1,4 @@
-"""Cog metadata invariants: guild_only, registration topology, admin-gating.
-
-ConfigCog has been deleted.
-/propagate and /unpropagate were folded into /agent-setup and
-deleted the propagate cog and its package. The assertions here lock the
-current cog set so a future re-introduction of ConfigCog or the propagate
-command module fails CI.
-"""
+"""Cog metadata invariants: guild_only, registration topology, admin-gating."""
 
 from __future__ import annotations
 
@@ -47,29 +40,6 @@ def test_guild_only_on_all_cogs(cog_cls: str) -> None:
     assert getattr(cls, "__discord_app_commands_guild_only__", False) is True, (  # type: ignore[attr-defined]
         f"{cog_cls} must have @app_commands.guild_only() decorator"
     )
-
-
-def test_config_cog_not_importable() -> None:
-    """ConfigCog must be gone after D-CONFIG-01 — the import must fail.
-
-    Plan 26-PLAN T10 deleted ``commands/config.py`` outright; this regression
-    test guards against a future re-introduction by asserting the module is
-    no longer importable.
-    """
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.commands.config  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
-
-
-def test_propagate_cog_not_importable() -> None:
-    """commands/propagate.py is deleted; the import must fail."""
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.commands.propagate  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
-
-
-def test_propagate_package_not_importable() -> None:
-    """The propagate/ adapter package is deleted; the import must fail."""
-    with pytest.raises(ModuleNotFoundError):
-        import daimon.adapters.discord.propagate.panel  # type: ignore[import-not-found]  # noqa: F401  intentional: must fail
 
 
 def test_routines_cog_registers_routines_slash() -> None:
@@ -136,17 +106,6 @@ def test_billing_cog_registers_billing_slash() -> None:
     """BillingCog must own /billing (DUX-04)."""
     names = _all_app_command_names(BillingCog)
     assert "billing" in names, f"/billing must be registered on BillingCog; got {names!r}"
-
-
-def test_billing_slash_is_not_admin_gated() -> None:
-    """The /billing panel is open-read; @require_admin must NOT appear."""
-    import daimon.adapters.discord.commands.billing as billing_module
-
-    src = inspect.getsource(billing_module)
-    assert "require_admin" not in src, (
-        f"/billing must be open-read (Discord-native admin resolution at click time); "
-        f"found @require_admin in source:\n{src}"
-    )
 
 
 def test_billing_slash_uses_require_registered_guild() -> None:

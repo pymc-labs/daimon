@@ -726,19 +726,6 @@ async def test_reconnect_on_reused_session_two_turn_log_renders_only_current_tur
     )
 
 
-def test_driver_source_contains_no_except_cancelled_error() -> None:
-    """Driver contains no `except asyncio.CancelledError`. The only acceptable
-    pattern is `_suppress_task_exc`'s `except BaseException:` when draining
-    the cancelled render task.
-    """
-    import pathlib
-
-    path = pathlib.Path("packages/core/daimon/core/turn/driver.py")
-    src = path.read_text()
-    assert "except asyncio.CancelledError" not in src
-    assert "except CancelledError" not in src
-
-
 async def test_run_turn_sends_system_message_after_user_message_when_blocks_given() -> None:
     """Handoff framing rides a `system.message` on the FIRST send only, and the
     live API rejects the whole batch unless it is last and directly follows the

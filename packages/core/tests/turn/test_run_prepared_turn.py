@@ -1744,9 +1744,8 @@ async def test_run_prepared_turn_default_deadline_none_still_succeeds_on_the_hap
 #
 # Both tests below monkeypatch `daimon.core.turn.run.run_turn` itself rather
 # than racing a real driver call against a real cancel signal. The driver's
-# OWN cancel race (stream-open, send-initial, consume loop) is already
-# pinned by test_driver_cancel.py -- what's under test here is
-# run_prepared_turn's OWN orchestration: does it abort recovery when cancel
+# OWN cancel race (stream-open, send-initial, consume loop) is not under
+# test here -- what's under test here is run_prepared_turn's OWN orchestration: does it abort recovery when cancel
 # is already set, and does the mirror task actually forward a late cancel
 # into the recovery turn's own event. Faking `run_turn` isolates that from
 # the driver's internal race timing, which would otherwise make the exact

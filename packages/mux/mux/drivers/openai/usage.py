@@ -170,17 +170,20 @@ class OpenAIUsage:
     async def _settled(self, session: ResourceRef, turn: Object) -> tuple[Object, bool]:
         """The turn with usage filled in, and whether that fill is a fallback.
 
-        A resource lacking usage keeps what is known: its terminal event's, else
-        stored. A fresh driver never saw the event, so a stored meter's usage
-        stands; a null read never replaces counts already revised.
+        A resource lacking usage keeps what is known: a stored final reading, else
+        its terminal event's, else stored. A fresh driver never saw the event, so a
+        stored meter's usage stands; a null read never replaces counts already
+        revised, and a lagging replica never turns a final reading back into a fallback.
         """
         if turn.get("usage") is not None:
             return turn, False
         turn_id = text(turn["id"])
+        stored = await self._revisions.latest(session, "openai:turn:" + turn_id)
+        if stored is not None and stored.get("final") is True:
+            return {**turn, "usage": stored.get("usage")}, False
         noted = self._terminal.get((session, turn_id)) if turn.get("status") in _ENDED else None
-        if noted is None:
-            stored = await self._revisions.latest(session, "openai:turn:" + turn_id)
-            noted = stored.get("usage") if stored is not None else None
+        if noted is None and stored is not None:
+            noted = stored.get("usage")
         return (turn, False) if noted is None else ({**turn, "usage": noted}, True)
 
     async def _observe(
@@ -201,8 +204,12 @@ class OpenAIUsage:
         meter: Object = {"usage": turn.get("usage"), "subagent_id": turn.get("subagent_id")}
         if searches:
             meter["web_searches"] = searches
-        rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
         final = not fallback and turn.get("usage") is not None and turn.get("status") in _ENDED
+        # Finality too: the resource confirming the terminal event's counts is
+        # a new revision, never the fallback's revision with another value.
+        if final:
+            meter["final"] = True
+        rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
         return observation(turn, session, revision=rev, web_searches=searches, final=final)
 
     async def _searches(self, session: ResourceRef, turn: Object) -> int:

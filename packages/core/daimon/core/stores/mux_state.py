@@ -1026,6 +1026,23 @@ async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
     return False
 
 
+async def close_superseded_outbox(session: AsyncSession, row: OutboxRow) -> None:
+    """Mark the observation's unapplied revisions older than `row` applied, with no debit.
+
+    Only for a final exact settlement, where the newest settled revision carries the whole cost.
+    """
+    await session.execute(
+        update(AccountingOutbox)
+        .where(
+            AccountingOutbox.binding_id == row.binding_id,
+            AccountingOutbox.observation_id == row.observation_id,
+            AccountingOutbox.revision < row.revision,
+            AccountingOutbox.applied_at.is_(None),
+        )
+        .values(applied_at=func.now())
+    )
+
+
 # Legacy thread_sessions links
 
 
@@ -1347,3 +1364,22 @@ async def get_config_agent_revision(
     if retained is None:
         raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
     return retained
+
+
+async def put_agent_config_revision(
+    session: AsyncSession, revision: ConfigRevision, *, retained: AgentBackendRevision | None
+) -> ConfigRevision:
+    """Re-put an agent's revision under the association admission stored it with.
+
+    Admission reports a conversation's model choice (stored as `thread`) as the
+    agent's own, so its thread comes from the row: re-put as `agent`, it conflicts.
+    `retained` is `get_config_agent_revision`'s; None for a record born on its provider.
+    """
+    pin = await config_thread_pin(session, revision.channel, revision.local)
+    return await put_config_revision(
+        session,
+        revision,
+        origin="agent" if pin is None else "thread",
+        agent_revision=retained,
+        thread_id=None if pin is None else pin[0],
+    )

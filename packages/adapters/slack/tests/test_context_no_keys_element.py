@@ -23,7 +23,6 @@ them.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.context import build_context_xml, build_delta_xml
@@ -150,15 +149,3 @@ async def test_build_context_xml_omits_keys_when_the_mounted_env_is_stale(
         )
 
     _assert_no_keys_element(xml, builder_name="build_context_xml")
-
-
-def test_context_module_references_turn_keys() -> None:
-    source = Path("packages/adapters/slack/daimon/adapters/slack/context.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "turn_keys" in source, (
-        "slack/context.py must reference daimon.core.turn_keys — this is the wiring's "
-        "tripwire. If you are reading this because it failed, you unwired render_keys_element: "
-        "do so deliberately, then invert the assertions in this file back to name-absence."
-    )

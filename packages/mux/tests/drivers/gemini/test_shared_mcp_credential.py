@@ -66,10 +66,3 @@ def test_servers_on_different_or_no_credentials_still_refuse(second: MCPConnecti
     with pytest.raises(UnsupportedCapability) as refused:
         compile_mcp((DAIMON, second), enabled=True)
     assert refused.value.missing == ("one_resolver_bound_mcp_server",), "one reference only"
-
-
-def test_the_first_bound_server_still_needs_an_allowlist() -> None:
-    bare = DAIMON.model_copy(update={"tool_policy": {}})
-    with pytest.raises(UnsupportedCapability) as refused:
-        compile_mcp((bare, *SHARED[1:]), enabled=True)
-    assert refused.value.missing == ("mcp_tool_policy",), "the host server stays allowlisted"

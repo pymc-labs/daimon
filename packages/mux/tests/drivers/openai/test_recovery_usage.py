@@ -696,6 +696,74 @@ async def test_reconcile_turn_when_a_fresh_driver_replays_then_the_priced_revisi
 
 
 @pytest.mark.asyncio
+async def test_reconcile_turn_when_the_resource_confirms_the_events_counts_then_revises_final(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """Same counts plus finality is a new revision: the host ignores a repeated one."""
+    transport.stream_values = [event("turn.completed", "done", turn=turn(), usage=_usage())]
+    assert [e.type async for e in driver.events.stream(SCOPE, REF)] == ["session.turn_ended"]
+    (streamed,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    transport.responses["GET", _ROOT] = {**turn(), "usage": _usage()}
+    (confirmed,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert confirmed.revision == streamed.revision + 1, (streamed, confirmed)
+    assert confirmed.input_tokens == streamed.input_tokens == 100, confirmed
+    assert confirmed.final and not streamed.final, "only the resource's answer is final"
+
+
+@pytest.mark.parametrize("fresh", [False, True], ids=["same-driver", "replay"])
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_usage_reads_null_after_final_then_keeps_the_final_revision(
+    transport: FakeTransport, fresh: bool
+) -> None:
+    """A lagging read after the final one keeps it: no non-final revision, no new re-read."""
+    revisions = MemoryUsageRevisions()
+
+    def driver() -> OpenAIDriver:
+        return OpenAIDriver(
+            transport,
+            account_scope_id="project",
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=revisions,
+            authorization=lambda s, k, i: s == SCOPE,
+        )
+
+    first = driver()
+    transport.stream_values = [event("turn.completed", "done", turn=turn(), usage=_usage())]
+    assert [e.type async for e in first.events.stream(SCOPE, REF)] == ["session.turn_ended"]
+    transport.responses["GET", _ROOT] = {**turn(), "usage": _usage()}
+    (final,) = await first.usage.reconcile_turn(SCOPE, REF, "root")
+    assert final.final, final
+    transport.responses["GET", _ROOT] = turn()
+    (lagged,) = await (driver() if fresh else first).usage.reconcile_turn(SCOPE, REF, "root")
+    assert lagged.revision == final.revision, "a fallback after final does not revise"
+    assert lagged.final and lagged.input_tokens == 100, lagged
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_a_stored_meter_predates_finality_then_revises_once(
+    transport: FakeTransport,
+) -> None:
+    """A meter stored without `final` may have been a fallback: one final revision, then none.
+
+    The driver cannot tell a final meter from a fallback with the same counts, and the
+    host recorded the fallback's revision as not final, so it is never left out.
+    """
+    revisions = MemoryUsageRevisions()
+    meter = {"usage": _usage(), "subagent_id": None}
+    assert await revisions.revise(REF, "openai:turn:root", meter) == 1
+    driver = OpenAIDriver(
+        transport,
+        account_scope_id="project",
+        journal=MemoryRecoveryJournal(),
+        usage_revisions=revisions,
+        authorization=lambda s, k, i: s == SCOPE,
+    )
+    transport.responses["GET", _ROOT] = {**turn(), "usage": _usage()}
+    reads = [(await driver.usage.reconcile_turn(SCOPE, REF, "root"))[0] for _ in range(2)]
+    assert [(r.revision, r.final) for r in reads] == [(2, True), (2, True)], reads
+
+
+@pytest.mark.asyncio
 async def test_later_history_pages_read_the_journal_not_the_provider(
     driver: OpenAIDriver, transport: FakeTransport
 ) -> None:

@@ -302,7 +302,7 @@ unavailable. C08 and deployed repository/MCP certification remain pending.
 
 | Mandatory capability | Actual-driver offline evidence |
 | --- | --- |
-| Workspace persistence | `test_skill_workflow`: two completed turns reuse one environment and immutable installed pins; existing binding tests refuse changed environment identity |
+| Workspace persistence | Binding tests refuse a changed environment identity |
 | Turn lifecycle | C05: child-first completion, authoritative saved items, EOF occupancy and one root outcome |
 | Cancel | C06: queued acknowledgement retains occupancy until an independently observed interrupted root |
 | Tool loop | `test_tool_result_routes_call_and_turn_from_required_action`: preserves native function call/turn routing |

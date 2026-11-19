@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A conversation moved to GPT keeps replying.** After `/model` picked a GPT
+  model in a thread, every turn there failed with "Something went wrong on our
+  side". Agents saved on a self-hosted model failed the same way. Threads that
+  hit this reply again on their next message. A GPT turn whose usage arrives
+  late also settles on the first read that has it, instead of reading it again
+  for an hour.
+
 - **GPT and Gemini turns show their cost.** The summary line under a finished
   GPT or Gemini turn in Discord, Slack and Teams shows the same debit the
   balance takes, markup included, as Claude turns do. When OpenAI reports a

@@ -314,7 +314,7 @@ uncaptured. No catalog assertions or fixture/source pins are weakened. The table
 scenario exercises `render_tables=False`, the existing ordinary adapter default:
 raw pipe rows in the actual posts produce a real oracle FAIL.
 
-Focused verification: `uv run pytest -q -o addopts='' tests/judge/test_discord_catalog_surface.py tests/judge/test_headless_executor.py tests/judge/test_openai_catalog.py tests/judge/test_gemini_catalog.py packages/testing/tests/test_discord_surface.py`.
+Focused verification: `uv run pytest -q -o addopts='' tests/judge/test_discord_catalog_surface.py tests/judge/test_headless_executor.py tests/judge/test_openai_catalog.py tests/judge/test_gemini_catalog.py`.
 
 Catalog baseline reporting retains raw `CellResult.status` and oracle diagnostics,
 and adds `reported_status` to distinguish `EXPECTED-FAIL`. Only the reviewed

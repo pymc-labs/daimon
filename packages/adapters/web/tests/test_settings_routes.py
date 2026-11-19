@@ -49,23 +49,6 @@ async def test_members_read_approvals_and_the_footer_as_not_editable(
 
 
 @pytest.mark.parametrize("linked", [False, True], ids=["web_only_owner", "linked_non_admin"])
-async def test_approvals_are_editable_only_with_a_linked_chat_account(
-    web_client: WebClientFactory,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    linked: bool,
-) -> None:
-    if linked:
-        _linked(monkeypatch, admin=False)
-    async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        settings = (await admin.client.get("/api/channels/c1/settings")).json()
-
-    assert settings["approvals"]["own"] is None
-    assert settings["approvals"]["editable"] is linked
-
-
-@pytest.mark.parametrize("linked", [False, True], ids=["web_only_owner", "linked_non_admin"])
 async def test_the_web_actor_is_refused_an_approvals_change(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],

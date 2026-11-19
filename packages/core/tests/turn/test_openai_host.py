@@ -928,11 +928,18 @@ async def test_a_fallback_usage_when_the_resource_still_lacks_it_then_is_reread_
         if len(waits) == 2:
             wire.turns[0]["usage"] = FINAL_USAGE
 
+    running = True
+
+    async def serve(req: httpx.Request) -> httpx.Response:
+        if running and "/turns/" in req.url.path:
+            return httpx.Response(200, json={**wire.turns[-1], "status": "in_progress"})
+        return wire.handle(req)
+
     late = LateUsage(delays_s=(1.0, 2.0, 4.0), sleep=sleep)
-    async with _late_turn(composed, late) as turn:
+    async with _late_turn(composed, late, serve=serve) as turn:
         wire.turns = [_root({"input_tokens": 50, "output_tokens": 5})]
         await turn.read()  # the spend guard stores a mid-turn snapshot
-        wire.turns[0]["usage"] = None
+        running, wire.turns[0]["usage"] = False, None
         fallback = await turn.read()
         assert (fallback.completeness, fallback.input_tokens) == ("measured", 50), fallback
         assert not fallback.final, "a fallback is never final"

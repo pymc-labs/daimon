@@ -84,7 +84,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     deploy = jobs["deploy-gcp"]
     legs = _legs(jobs["pytest-db"])
     discord_legs = _legs(jobs["pytest-discord"])
-    for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
+    for suite, count in (("core", 4), ("mcp", 2), ("discord", 2)):
         suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
         shards = [leg["shard"] for leg in suite_legs]
         assert shards == list(range(count)), f"{suite} must run every shard exactly once"
@@ -92,7 +92,9 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     # The sharded legs of one suite select the same paths, or a shard would skip tests.
     for suite in {leg["suite"] for leg in legs + discord_legs}:
         assert len({leg["paths"] for leg in legs + discord_legs if leg["suite"] == suite}) == 1
-    assert {leg["suite"] for leg in legs} == {"core", "mcp", "slack", "teams", "web", "parity"}
+    assert {leg["suite"] for leg in legs} == {
+        "core", "mcp", "slack", "teams", "web", "parity", "simulated",
+    }  # fmt: skip
     assert {leg["suite"] for leg in discord_legs} == {"discord"}
     for name in ("pytest-db", "pytest-discord"):
         shard_options = [
@@ -171,7 +173,7 @@ def test_core_legs_check_out_full_history() -> None:
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
     legs = _legs(job)
     core = [leg for leg in legs if leg["suite"] == "core"]
-    assert len(core) == 6
+    assert len(core) == 4
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
     assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
 
@@ -876,3 +878,55 @@ def test_a_config_change_recreates_and_checks_every_worker() -> None:
     for step in (settle, steps["Verify deployed installs match shipped defaults"]):
         assert without_freshness(step["if"]) == f"({reconcile}) != ''"
     assert "steps.refresh.outputs.smoke == 'true'" in steps["Post-deploy smoke turn"]["if"]
+
+
+def test_guard_jobs_run_the_checks_in_parallel_and_stay_out_of_the_deploy_gate() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    runs = lambda job: " ".join(s.get("run", "") for s in jobs[job]["steps"])  # noqa: E731
+    assert "scripts/ci/image_tls_check.py" in runs("image-smoke")
+    assert "daimon:smoke" in runs("image-smoke")
+    assert "tests/simulated" in runs("image-smoke")
+    # The tooling added to the image is what the lock pins.
+    lock = (_ROOT / "uv.lock").read_text()
+    for pin in re.findall(r"\b(pytest[\w-]*)==([\d.]+)", runs("image-smoke")):
+        assert f'name = "{pin[0]}"\nversion = "{pin[1]}"' in lock, pin
+    assert any(s.get("with", {}).get("load") for s in jobs["image-smoke"]["steps"])
+    assert "scripts/ci/migration_upgrade.py" in runs("migration-upgrade")
+    # The release tag and the parent commit come from history.
+    assert jobs["migration-upgrade"]["steps"][0]["with"]["fetch-depth"] == 0
+    for name in ("image-smoke", "migration-upgrade"):
+        assert jobs[name]["needs"] == "changes"
+        assert jobs[name]["timeout-minutes"] <= 15
+        assert name not in jobs["deploy-gcp"]["needs"]
+
+
+def test_the_tls_check_retries_a_blip_and_fails_a_stale_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import runpy
+    import time
+
+    import httpx
+
+    def no_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(time, "sleep", no_sleep)
+    answers = {"calls": 0, "blips": 1}
+
+    def get(_client: httpx.Client, url: str) -> httpx.Response:
+        answers["calls"] += 1
+        if answers["blips"] > 0 and answers["calls"] == 1 or answers["blips"] < 0:
+            raise httpx.ConnectError("handshake")
+        return httpx.Response(401, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    script = str(_ROOT / "scripts/ci/image_tls_check.py")
+
+    with pytest.raises(SystemExit) as one_blip:
+        runpy.run_path(script, run_name="__main__")
+    assert one_blip.value.code == 0, "one blip at one provider must not fail the run"
+    answers.update(calls=0, blips=-1)
+    with pytest.raises(SystemExit) as stale:
+        runpy.run_path(script, run_name="__main__")
+    assert stale.value.code == 1, "a store that never handshakes still fails"

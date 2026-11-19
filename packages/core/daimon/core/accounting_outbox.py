@@ -185,6 +185,9 @@ async def apply_usage_outbox(
     if not await mux_state.mark_outbox_applied(session, row):
         return False
     if actual is not None:
+        if observation.final:
+            # A final settlement replaces older revisions; before it they keep the re-read alive.
+            await mux_state.close_superseded_outbox(session, row)
         assert provider_price is not None
         searches = await _search_tally(session, observation, provider_price)
         search_usd = web_search_cost(observation, provider_price, searches.paid)

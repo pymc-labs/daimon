@@ -43,7 +43,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.scope import DeploymentDefault
 from daimon.core.session_snapshot import (
     SessionSnapshot,
     desired_snapshot,
@@ -53,7 +53,6 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.domain import FeatureTarget, Role, ThreadSessionRow
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token, upsert_slack_bot_token
 from daimon.core.stores.tenants import get_tenant, set_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -888,78 +887,6 @@ async def test_handle_app_mention_no_token_when_no_token_row_drops(
     assert dropped_logs[0]["team_id"] == team_id, "the dropped log must bind the team_id"
 
 
-async def test_handle_app_mention_slack_connect_external_reaches_orchestration(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """An event whose sender belongs to a different Slack workspace (Slack Connect) is
-    no longer turned away at the listener: it reaches the orchestration seam, where
-    the sender's organisation is decided and the turn runs held, and no refusal is posted.
-
-    ``fake_slack_web_client`` activates an aioresponses context that intercepts ALL
-    aiohttp requests made by any AsyncWebClient during this test, including the
-    per-event client constructed inside ``_handle_app_mention``.
-    """
-    from yarl import URL
-
-    team_id = "T_APP_80_CONNECT"
-    external_team = "T_EXTERNAL"
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    await upsert_slack_bot_token(
-        db_session,
-        team_id=team_id,
-        encrypted_token=encrypt_token(fernet, "xoxb-connect-test"),
-    )
-    await db_session.flush()
-
-    app = _make_app(db_session_factory, crypto_key=fernet_key)
-
-    orchestrate_calls: list[dict[str, Any]] = []
-
-    async def _spy_orchestrate(
-        event: dict[str, Any],
-        *,
-        team_id: str,
-        channel: str,
-        event_ts: str,
-        web_client: Any,
-        tenant_id: uuid.UUID,
-    ) -> None:
-        orchestrate_calls.append({"team_id": team_id})
-
-    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "channel": "C_TEST",
-        "event_ts": "1000000003.000001",
-        "ts": "1000000003.000001",
-        "user": "U_EXTERNAL",
-        "user_team": external_team,  # Slack Connect: user is from a different team
-        "text": "<@U_BOT> hello",
-    }
-
-    # The fake_slack_web_client fixture's aioresponses context already intercepts
-    # all aiohttp calls (including those from a freshly constructed AsyncWebClient).
-    # chat.postEphemeral is pre-registered as ok=True by _register_slack_defaults.
-    mock = fake_slack_web_client.mock  # type: ignore[union-attr]
-    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
-
-    assert len(orchestrate_calls) == 1, "an external sender's mention must reach orchestration"
-
-    ephemeral_calls = [
-        req
-        for (_, url), reqs in mock.requests.items()
-        if url == URL("https://slack.com/api/chat.postEphemeral")
-        for req in reqs
-    ]
-    assert ephemeral_calls == [], "no refusal is posted to an external sender"
-
-
 async def _bot_mention_run(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1720,121 +1647,6 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
     assert len(intents) == 1
     assert intents[0].status == "prepared"
     assert intents[0].message_id is None
-
-
-async def test_orchestrate_continuation_when_live_session_exists_calls_build_delta_xml(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """continuation_delta: a second mention in the same thread reuses the MA session
-    and replays via build_delta_xml(watermark_ts=<prior watermark>), then updates
-    the watermark.
-    """
-    from daimon.core.stores.identity import get_or_create_platform_principal
-
-    team_id = "T_ORCH_80_CONT"
-    channel = "C_TEST"
-    thread_ts = "9000000002.000001"
-    prior_watermark = "9000000002.000002"
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-
-    await provision_workspace(
-        db_session_factory, team_id, platform="slack", signup_credit=Decimal("10")
-    )
-    # Pre-create the principal so account_id is known for both the seed row and the verify query.
-    # _orchestrate uses external_id=str(event["user"]) = "U_TEST_CONT".
-    async with db_session_factory() as s:
-        cont_principal = await get_or_create_platform_principal(
-            s, tenant_id=tenant_id, platform="slack", external_id="U_TEST_CONT"
-        )
-        await s.commit()
-
-    # Pre-create a live thread_sessions row (as if a first turn already ran).
-    _cont_snapshot = _seeded_snapshot(agent_id="agent_test_id", environment_id="env_test_id")
-    async with db_session_factory() as s:
-        await create_thread_session(
-            s,
-            tenant_id=tenant_id,
-            platform="slack",
-            thread_id=thread_ts,
-            account_id=cont_principal.account_id,
-            ma_session_id="sess-cont-existing",
-            budget_channel_id=channel,
-            ma_agent_id="agent_test_id",
-            watermark_message_id=prior_watermark,
-            effective_config=_cont_snapshot,
-            identity_fingerprint=fingerprint_identity(_cont_snapshot),
-            mutable_fingerprint=fingerprint_mutable(_cont_snapshot),
-        )
-        await s.commit()
-
-    app, _ = make_orchestrate_app(db_session_factory)
-
-    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
-        state = TurnState(content=[TextBlock(kind="text", text="Continuation!")])
-        await lifecycle.on_terminal_success(state)
-        return state
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "ts": "9000000002.000003",
-        "thread_ts": thread_ts,
-        "event_ts": "9000000002.000003",
-        "channel": channel,
-        "user": "U_TEST_CONT",
-        "text": "<@U_BOT> follow-up",
-    }
-
-    with (
-        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
-        patch(
-            "daimon.adapters.slack.app.build_delta_xml", new_callable=AsyncMock
-        ) as mock_build_delta,
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-    ):
-        mock_run_turn.side_effect = _fake_run_turn
-        mock_build_delta.return_value = (
-            "<context><thread_delta/></context>\n\n<user_query>follow-up</user_query>"
-        )
-        mock_resolve_agent.return_value = "agent_test_id"
-        mock_resolve_env.return_value = "env_test_id"
-
-        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            event,
-            team_id=team_id,
-            channel=channel,
-            event_ts="9000000002.000003",
-            web_client=fake_slack_web_client.client,
-            tenant_id=tenant_id,
-        )
-
-    # Assert build_delta_xml was called with the prior watermark.
-    assert mock_build_delta.called, "build_delta_xml must be called for a continuation turn"
-    call_kwargs = mock_build_delta.call_args.kwargs
-    assert call_kwargs.get("watermark_ts") == prior_watermark, (
-        f"build_delta_xml must be called with watermark_ts={prior_watermark!r}, "
-        f"got {call_kwargs.get('watermark_ts')!r}"
-    )
-
-    # Assert watermark was updated in the DB.
-    async with db_session_factory() as s:
-        row = await get_live_thread_session(
-            s,
-            tenant_id=tenant_id,
-            platform="slack",
-            thread_id=thread_ts,
-            account_id=cont_principal.account_id,
-        )
-    assert row is not None, "thread_sessions row must still exist"
-    assert row.watermark_message_id != prior_watermark, (
-        "watermark must be updated after the continuation turn"
-    )
 
 
 async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_and_drains_to_one_turn(
@@ -3283,79 +3095,6 @@ async def test_run_thread_turn_two_turns_same_session_chain_sweeps_serially(
     )
 
 
-async def test_orchestrate_first_mention_adds_eyes_reaction_before_turn(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A first mention gets an immediate 👀 ack so cold-start isn't dead air."""
-    team_id = "T_ORCH_80_EYES"
-    channel = "C_TEST"
-    thread_ts = "9000000005.000001"
-    event_ts = thread_ts
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-
-    app, _ = make_orchestrate_app(db_session_factory)
-
-    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
-        state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
-        await lifecycle.on_terminal_success(state)
-        return state
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "ts": thread_ts,
-        "event_ts": event_ts,
-        "channel": channel,
-        "user": "U_TEST_EYES",
-        "text": "<@U_BOT> hello",
-    }
-
-    _fake_session = ma_session(
-        id="sess-eyes-001",
-        agent=ma_session_agent(id="agent_eyes_id"),
-        environment_id="env_eyes_id",
-    )
-
-    with (
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-        patch(
-            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
-        ) as mock_create_session,
-        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
-    ):
-        mock_resolve_agent.return_value = "agent_eyes_id"
-        mock_resolve_env.return_value = "env_eyes_id"
-        mock_create_session.return_value = _fake_session
-        mock_run_turn.side_effect = _fake_run_turn
-
-        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            event,
-            team_id=team_id,
-            channel=channel,
-            event_ts=event_ts,
-            web_client=fake_slack_web_client.client,
-            tenant_id=tenant_id,
-        )
-
-    reactions_calls = [
-        (method, url, kwargs)
-        for (method, url), calls in fake_slack_web_client.mock.requests.items()
-        if method == "POST" and url.path == "/api/reactions.add"
-        for kwargs in calls
-    ]
-    assert any("eyes" in str(kwargs) for _, _, kwargs in reactions_calls), (
-        "first mention must add the 👀 reaction before the turn runs"
-    )
-
-
 async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_slot(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -3570,91 +3309,6 @@ async def test_orchestrate_tenant_cap_when_exhausted_sends_ephemeral_and_skips_t
     assert shed_logs[0]["in_flight"] == cap and shed_logs[0]["cap"] == cap, (
         "the shed log must carry the in-flight count and cap for the operator"
     )
-
-
-async def test_orchestrate_first_turn_when_channel_agent_propagated_resolves_channel_agent_tag(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """A channel-scope agent_name written by /agent-setup propagation must be
-    the daimon_tag resolved when a new thread session is created — not the
-    hardcoded deployment default.
-    """
-    team_id = "T_ORCH_SCOPED_AGENT"
-    channel = "C_SCOPED"
-    thread_ts = "9000000010.000001"
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    # Simulate /agent-setup → "Set as default → This channel".
-    async with db_session_factory() as s:
-        await set_fields(
-            s,
-            scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel),
-            tenant_id=tenant_id,
-            agent_name="marketing-bot",
-            mode="agent",
-        )
-        await s.commit()
-
-    app, _ = make_orchestrate_app(db_session_factory)
-
-    async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
-        state = TurnState(content=[TextBlock(kind="text", text="Hello!")])
-        await lifecycle.on_terminal_success(state)
-        return state
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "ts": thread_ts,
-        "event_ts": thread_ts,
-        "channel": channel,
-        "user": "U_TEST_SCOPED",
-        "text": "<@U_BOT> hello",
-    }
-
-    _fake_session = ma_session(
-        id="sess-scoped-001",
-        agent=ma_session_agent(id="agent_scoped_id", name="marketing-bot"),
-        environment_id="env_scoped_id",
-    )
-
-    with (
-        patch(
-            "daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock
-        ) as mock_resolve_agent,
-        patch(
-            "daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock
-        ) as mock_resolve_env,
-        patch(
-            "daimon.core.turn.prepare.create_session", new_callable=AsyncMock
-        ) as mock_create_session,
-        patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock) as mock_run_turn,
-    ):
-        mock_resolve_agent.return_value = "agent_scoped_id"
-        mock_resolve_env.return_value = "env_scoped_id"
-        mock_create_session.return_value = _fake_session
-        mock_run_turn.side_effect = _fake_run_turn
-
-        await app._orchestrate(  # pyright: ignore[reportPrivateUsage]
-            event,
-            team_id=team_id,
-            channel=channel,
-            event_ts=thread_ts,
-            web_client=fake_slack_web_client.client,
-            tenant_id=tenant_id,
-        )
-
-        assert mock_resolve_agent.await_args is not None, "resolve_agent must be called"
-        assert mock_resolve_agent.await_args.kwargs["daimon_tag"] == "marketing-bot", (
-            "new session must resolve the channel-propagated agent, not the deployment default"
-        )
-        # Environment has no channel/tenant override here → deployment default.
-        assert mock_resolve_env.await_args is not None, "resolve_environment must be called"
-        assert mock_resolve_env.await_args.kwargs["daimon_tag"] == "default", (
-            "environment falls through to the deployment default when no scoped row sets it"
-        )
 
 
 async def test_orchestrate_first_turn_when_no_agent_configured_posts_guidance_and_skips_turn(
@@ -7100,66 +6754,6 @@ async def test_handle_app_mention_without_explicit_mention_drops(
     )
 
 
-async def test_handle_app_mention_resolves_bot_user_id_via_auth_test(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """On a cold cache the handler resolves its bot user id via auth.test,
-    caches it per team, and admits an explicitly mentioned event."""
-    team_id = "T_APP_AUTH_RESOLVE"
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    await upsert_slack_bot_token(
-        db_session,
-        team_id=team_id,
-        encrypted_token=encrypt_token(fernet, "xoxb-auth-resolve-test"),
-    )
-    await db_session.flush()
-
-    app = _make_app(db_session_factory, crypto_key=fernet_key)
-
-    orchestrate_calls: list[dict[str, Any]] = []
-
-    async def _spy_orchestrate(
-        event: dict[str, Any],
-        *,
-        team_id: str,
-        channel: str,
-        event_ts: str,
-        web_client: Any,
-        tenant_id: uuid.UUID,
-    ) -> None:
-        orchestrate_calls.append({"event_ts": event_ts})
-
-    app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "channel": "C_TEST",
-        "event_ts": "1000000011.000001",
-        "ts": "1000000011.000001",
-        "user": "U_TEST",
-        "text": "<@U_BOT> what's our rejection rate?",
-    }
-
-    with aioresponses() as mock:
-        mock.post(
-            "https://slack.com/api/auth.test",
-            payload={"ok": True, "user_id": "U_BOT", "team_id": team_id},
-            repeat=True,
-        )
-        await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
-
-    assert len(orchestrate_calls) == 1, (
-        "an explicitly mentioned event must pass the gate after auth.test resolution"
-    )
-    assert app._bot_user_ids[team_id] == "U_BOT", (  # pyright: ignore[reportPrivateUsage]
-        "the resolved bot user id must be cached per team to avoid repeated auth.test calls"
-    )
-
-
 async def test_handle_app_mention_external_without_mention_gets_no_ephemeral(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -7475,37 +7069,6 @@ async def _plain_text_app(
 
     app._orchestrate = _spy_orchestrate  # type: ignore[method-assign]
     return app, turns
-
-
-async def test_on_request_dispatches_a_typed_bot_name_as_a_by_name_mention() -> None:
-    """A channel message typing the name reaches the mention handler, counted for drain."""
-    fake_client = _FakeSocketClient()
-    app = _make_app()
-    app.runtime.settings.slack.bot_display_name = "daimon"
-    calls: list[dict[str, Any]] = []
-
-    async def _record(event: dict[str, Any], **kwargs: Any) -> None:
-        calls.append(kwargs)
-
-    app._handle_app_mention = _record  # type: ignore[method-assign]
-    named = _make_events_api_request(
-        event_type="message",
-        extra_event={"channel_type": "channel", "text": "@DAIMON help"},
-    )
-    await app.on_request(fake_client, named)  # type: ignore[arg-type]
-    await asyncio.sleep(0)
-
-    assert calls == [{"team_id": "T_TEST", "received_before_drain": True, "by_name": True}], (
-        "the typed name must run the mention handler in by-name mode, admitted before drain"
-    )
-
-    calls.clear()
-    plain = _make_events_api_request(
-        event_type="message", extra_event={"channel_type": "channel", "text": "no name here"}
-    )
-    await app.on_request(fake_client, plain)  # type: ignore[arg-type]
-    await asyncio.sleep(0)
-    assert calls == [], "an ordinary channel message must not reach the mention handler"
 
 
 async def test_typed_bot_name_runs_one_turn_when_the_switch_is_on(

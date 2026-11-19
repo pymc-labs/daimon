@@ -61,20 +61,7 @@ budget rates. The primary is `gemini-3.8-flash`, with fallback only after a 503 
 `gemini-flash-latest`, then `gemini-3.5-flash-lite`; key appearance alone does not
 authorize a call. This adapter ships no live path.
 
-F2 offline proof (`tests/parity/test_f2_gemini_default_capability.py`) explicitly
-injects a full-byte GCS publisher and N3 credential resolver. All twelve authored
-skills, including binary font assets, are retained and pinned; no asset filtering
-or implicit publisher is enabled. The wire request maps the six logical builtins
-to one Python code-execution tool and the neutral `daimon-mcp` toolset selector
-to its declared native server once. Unbound selectors and confirmation policies
-are refused. The scenario admits only two read-only MCP tools through N2’s real
-loopback host; the provider endpoint and GCS/model execution remain replayed.
-Valid authorization yields both host tool results; wrong/revoked bearers fail.
-The normalized tape uses the merged credential-audited identity projection.
-This is an offline SDK/host proof, with no native-agent CAS or live certification
-claim. The uninjected adapter stays typed PENDING.
-
-The bundle and F2 replay tests use `mux.testing.isolated_sdk.build_gemini_client`
+The bundle replay tests use `mux.testing.isolated_sdk.build_gemini_client`
 with explicit synthetic keys, fixed routes and owned sync/async MockTransport
 clients. Ambient provider names, including empty and unknown future settings,
 refuse before SDK construction; proxy/TLS settings do not configure the clients.

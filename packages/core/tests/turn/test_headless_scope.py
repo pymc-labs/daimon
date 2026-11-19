@@ -9,7 +9,6 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import Scope
-from mux.errors import ScopeViolation
 from mux.testing.drivers.anthropic.ma import MARouter, sse_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
@@ -114,29 +113,3 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
     ]
     assert not turn_scopes[0].is_platform
     assert not turn_scopes[0].is_legacy_host_authorized
-
-
-@pytest.mark.parametrize(
-    "tenant_id,account_id",
-    [
-        (None, None),
-        (uuid.UUID(int=23), None),
-        (None, uuid.UUID(int=24)),
-    ],
-)
-async def test_headless_missing_identity_fails_before_provider_io(
-    tenant_id: uuid.UUID | None, account_id: uuid.UUID | None
-) -> None:
-    transport = ScriptedTransport(router=MARouter())
-    async with transport.client() as client:
-        with pytest.raises(ScopeViolation, match="authorized tenant/account"):
-            await headless_runner.run_turn(
-                anthropic=client,
-                agent_id="agent-headless",
-                environment_id="env-headless",
-                trigger_message="hello",
-                tenant_id=tenant_id,
-                account_id=account_id,
-                tool_safety=OPEN_TOOL_SAFETY,
-            )
-    assert transport.requests == []

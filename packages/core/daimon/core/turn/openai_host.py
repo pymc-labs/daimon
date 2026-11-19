@@ -451,9 +451,7 @@ async def _prepare_with_runtime(
             )
             if retained is None:
                 raise ScopeViolation(request.thread_id, "missing original backend revision")
-            await mux_state.put_config_revision(
-                session, revision, origin="agent", agent_revision=retained
-            )
+            await mux_state.put_agent_config_revision(session, revision, retained=retained)
     else:
         await store.put_config_revision(revision)
     slot = Slot(

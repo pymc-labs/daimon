@@ -60,8 +60,7 @@ PERSISTENT_WORKSPACE = Profile(
         "cancel": "native",
         "tool_loop": "native",
         "required_actions": "native",
-        # Inline ZIP upload -> agent intent -> concrete session skill pins;
-        # test_skill_workflow proves the installed version survives two turns.
+        # Inline ZIP upload -> agent intent -> concrete session skill pins.
         "skills_bundle": "native",
         "skills_versions": "native",
         # Resource coverage: all pages, exact binary bytes, typed truncation
