@@ -169,9 +169,9 @@ class LateTurnCosts:
             self._bound(self._waiting, key)
         return guessed if debit is None else float(debit)
 
-    def release(self, outcome: TurnObservation) -> None:
-        """A turn starts in `outcome`'s thread: earlier footers there take no later debit."""
-        place = _place(outcome)
+    def release(self, tenant_id: object, platform: str, thread_id: str | None) -> None:
+        """A turn starts in this thread: earlier footers there take no later debit."""
+        place = (str(tenant_id), platform, thread_id)
         for key in [key for key, footer in self._waiting.items() if footer.place == place]:
             del self._waiting[key]
 

@@ -263,7 +263,7 @@ async def test_a_later_turn_in_the_thread_stops_the_late_edit(platform: str) -> 
     unknown = _observation("openai", "gpt-6-luna", completeness="unknown", session=session)
     writes = await _finish_turn(platform, ProviderUsageTotals().add_observation(unknown), outcome)
     ended = writes()
-    LATE_TURN_COSTS.release(TurnObservation(None, None, platform, thread_id="t"))
+    LATE_TURN_COSTS.release(None, platform, "t")
     _settle(_observation("openai", "gpt-6-luna", revision=2, final=True, session=session))
     await LATE_TURN_COSTS.wait()
     assert writes() == ended, f"{platform} edited a released footer"

@@ -1280,7 +1280,8 @@ async def run_prepared_turn(
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
-    LATE_TURN_COSTS.release(observation)  # this turn may edit the thread's earlier footers
+    # This turn may edit the thread's earlier footers.
+    LATE_TURN_COSTS.release(tenant_id, platform, thread_id)
     prepared, carry_over_pending = await _with_pending_carry_over(
         deps, prepared, tenant_id=tenant_id
     )
