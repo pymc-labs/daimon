@@ -110,6 +110,11 @@ A channel turn of an agent with a relay server runs held: it posts only in its
 channel and its threads, sends no DMs and has no admin tools. The agent keeps no
 long-term memory, and its sessions are sealed to the channel.
 
+Set `"channel_scoped": false` on a server that checks each call's asker and
+place itself. An agent whose relay servers all set it gets its normal memory and
+sessions, so what it learns can surface in its other channels. One server left
+at the default `true` still limits the agent.
+
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 

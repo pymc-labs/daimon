@@ -2778,6 +2778,7 @@ async def _admit_with_servers(
     server_urls: list[str],
     *,
     channel_id: str = "chan-1",
+    unscoped: frozenset[str] = frozenset(),
 ) -> Admission:
     tenant = await _seed_admittable_tenant(db_session, policy=None)
     router = resolved_agent_env_router(
@@ -2794,6 +2795,7 @@ async def _admit_with_servers(
     deps = replace(
         _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
         public_url=f"{_RELAY_APP}/mcp",
+        relay_unscoped=unscoped,
     )
     CACHE.clear()
     return await admit(
@@ -2827,6 +2829,35 @@ async def test_admit_holds_a_relay_agent_to_its_channel_and_drops_its_memory(
     assert not (identity.personal_memory or identity.shared_memory or identity.channel_memory)
     assert not admission.feature_on("repo_memory")
     assert admission.origin_seal_ids == {"chan-1"}, "its session is sealed to its channel"
+
+
+async def test_admit_leaves_an_agent_whose_only_relay_server_is_unscoped_as_it_was(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A relay server with `channel_scoped=false` leaves memory, sessions and the hold
+    alone; one scoped server beside it still restricts the agent."""
+    grove, tools = f"{_RELAY_APP}/mcp-identity/grove", f"{_RELAY_APP}/mcp-identity/tools"
+    open_agent = await _admit_with_servers(
+        db_session, db_session_factory, tmp_path, [grove], unscoped=frozenset({"grove"})
+    )
+    assert open_agent.hold is None and not open_agent.relay_scoped, "no hold, session resumes"
+    assert not open_agent.origin_seal_ids, "its session is not sealed"
+    identity = open_agent.identity
+    assert identity.personal_memory and identity.shared_memory and identity.channel_memory
+    assert open_agent.feature_on("repo_memory")
+
+    mixed = await _admit_with_servers(
+        db_session,
+        db_session_factory,
+        tmp_path,
+        [grove, tools],
+        channel_id="chan-2",
+        unscoped=frozenset({"grove"}),
+    )
+    assert mixed.hold is not None and mixed.relay_scoped, "one scoped server restricts it"
+    assert not mixed.feature_on("repo_memory")
 
 
 async def test_admit_leaves_an_agent_without_a_relay_server_as_it_was(

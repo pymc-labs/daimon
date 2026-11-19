@@ -561,9 +561,14 @@ then sends the key from DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, 
 workspaces and agents (agent names that may use it) are required. Set requester_meta to
 true for a server that attributes writes to the requester: Daimon removes any requester
 fields the caller supplied and stamps each tool call with who it is for and where: the
-asker while their turn is live, or the person an unattended run acts for. The MCP
-service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat
-workers use the same server policy without the signing key. Default: [] (off).
+asker while their turn is live, or the person an unattended run acts for. An agent using
+a server stays in its channel with no long-term memory, a fresh session per channel turn
+and no handoffs, because the server answers with what the channel's readers can read.
+Set channel_scoped to false for a server that checks each call's asker and place itself:
+its agents then get their normal memory and sessions, so what they learn can surface in
+their other channels. The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any
+server is signed; chat workers use the same server policy without the signing key.
+Default: [] (off).
 
 ### `DAIMON_MCP_IDENTITY__BEARERS`
 

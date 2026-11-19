@@ -1500,7 +1500,9 @@ async def _admit_gates(
     # An agent with a signed-identity MCP server answers with what its channel's
     # readers can read, so its turn stays in that channel (`daimon.core.relay_scope`).
     relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
-        (server.url for server in agent.mcp_servers), public_url=deps.public_url
+        (server.url for server in agent.mcp_servers),
+        public_url=deps.public_url,
+        unscoped=deps.relay_unscoped,
     )
     if relay_agent and not is_dm:
         hold = (
@@ -2812,7 +2814,9 @@ async def _capture_backend_source(
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
             relay = agent_has_identity_relay(
-                (server.url for server in actual.mcp_servers), public_url=deps.public_url
+                (server.url for server in actual.mcp_servers),
+                public_url=deps.public_url,
+                unscoped=deps.relay_unscoped,
             )
             features = without_long_term_memory(features) if relay else features
             admission = replace(admission, features=features)

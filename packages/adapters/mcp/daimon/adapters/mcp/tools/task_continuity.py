@@ -195,11 +195,12 @@ _RELAY_HANDOFF_REFUSAL = (
 
 
 def _is_relay_agent(runtime: McpRuntime, agent: BetaManagedAgentsAgent | None) -> bool:
-    """Whether `agent` has a signed-identity MCP server attached (`daimon.core.relay_scope`)."""
+    """Whether `agent` has a channel-scoped identity MCP server (`daimon.core.relay_scope`)."""
     public_url = runtime.settings.mcp.public_url
     return agent is not None and agent_has_identity_relay(
         (server.url for server in agent.mcp_servers),
         public_url=None if public_url is None else str(public_url),
+        unscoped=runtime.settings.mcp_identity.unscoped_names,
     )
 
 

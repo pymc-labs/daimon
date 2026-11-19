@@ -3,7 +3,9 @@
 A server that opts into signed caller identity (`daimon.core.mcp_identity`)
 answers with what the readers of the turn's channel can read. So a turn of such
 an agent stays in that channel (it runs held, `daimon.core.turn_hold`) and the
-agent keeps no long-term memory. An agent with no such server is untouched.
+agent keeps no long-term memory. An agent with no such server is untouched, as is
+one whose servers all set `channel_scoped=false` (they check each call's asker and
+place themselves).
 One predicate decides both: `agent_has_identity_relay`. Pure: no I/O.
 """
 
@@ -15,7 +17,8 @@ from typing import Final
 
 from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
-from daimon.core.mcp_identity import identity_relay_urls
+from daimon.core.mcp_identity import identity_relay_urls, relay_base
+from daimon.core.mcp_server_url import canonical_mcp_url
 
 #: Features that read or write long-term memory, forced off for these agents.
 RELAY_AGENT_OFF_FEATURES: Final = (
@@ -26,11 +29,24 @@ RELAY_AGENT_OFF_FEATURES: Final = (
 )
 
 
-def agent_has_identity_relay(server_urls: Iterable[str], *, public_url: str | None) -> bool:
-    """Whether any of the agent's MCP server URLs is this deployment's identity relay."""
+def agent_has_identity_relay(
+    server_urls: Iterable[str],
+    *,
+    public_url: str | None,
+    unscoped: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether any of the agent's MCP server URLs is a channel-scoped identity relay.
+
+    `unscoped` names the servers that set `channel_scoped=false`; a relay URL naming
+    any other server, configured or not, restricts the agent.
+    """
     if public_url is None:
         return False
-    return bool(identity_relay_urls(server_urls, public_url=public_url))
+    base = relay_base(public_url)
+    return any(
+        canonical_mcp_url(url)[len(base) :] not in unscoped
+        for url in identity_relay_urls(server_urls, public_url=public_url)
+    )
 
 
 def relay_seal_ids(*, channel_id: str, thread_id: str | None) -> frozenset[str]:
