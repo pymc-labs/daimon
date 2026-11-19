@@ -1,3 +1,0 @@
-The retrieved tools fixture preserves the non-secret tools array from an actual staging agent GET recorded at 2026-10-13T16:35:05Z, request ID req_011CfzZUESTAzYqd2JLPVa96. Source SHA256: efeddafe68f07308b16e8a92e5d6a710eef702db3c6e04dc4adc1753f28390f9. Only the tools array was retained; there are no credentials, URLs, metadata or system prompts. Every retrieved builtin config carries matching type/name, enabled and permission_policy fields.
-
-The legacy fixture is the builtin tools subtree of the signed October 11 F2-R2 profile and intentionally has no type field. It is a legacy configuration profile, not an agent-retrieve recording. Source SHA256: fae850d5674507f3b1a2a1d9b6bc3551984bb7dd26ed71de622f6eba2d5f9473.
