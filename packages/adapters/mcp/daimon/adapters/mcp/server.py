@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -190,10 +191,19 @@ def _validate_settings(
             "DAIMON_MCP__PUBLIC_URL is required — use the URL MA will dial, "
             "e.g. https://daimon-mcp.example.com/mcp"
         )
-    if settings.mcp_identity.servers and settings.mcp_identity.signing_key is None:
+    if settings.mcp_identity.needs_signing_key and settings.mcp_identity.signing_key is None:
         raise BootstrapError(
             "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
-            "when DAIMON_MCP_IDENTITY__SERVERS is set"
+            "when DAIMON_MCP_IDENTITY__SERVERS has a signed server"
+        )
+    missing = [
+        server.name
+        for server in settings.mcp_identity.servers
+        if server.auth == "bearer" and server.name not in settings.mcp_identity.bearers
+    ]
+    if missing:
+        raise BootstrapError(
+            f"DAIMON_MCP_IDENTITY__BEARERS needs a key for bearer servers: {', '.join(missing)}"
         )
 
 
@@ -297,6 +307,9 @@ def create_mcp_app(
     validation is skipped; PUBLIC_URL is still enforced because
     `ensure_mcp_vault` needs it on the session-create side.
     """
+    # A switch preview's first use imports the OpenAI SDK: seconds of CPU on the
+    # event loop, stalling every request. Paid here, at startup, instead.
+    import_module("mux.drivers.openai")
     effective_settings = settings or load_settings()
     # The JSON chain and stdlib redaction before the first log line (uvicorn
     # has configured its loggers by the time it calls this factory); without
@@ -701,7 +714,6 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:
-        assert identity.signing_key is not None
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,
@@ -715,9 +727,12 @@ def create_mcp_app(
                 servers={server.name: server for server in identity.servers},
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
-                tokens=IdentityTokenCache(
-                    load_signing_key(identity.signing_key.get_secret_value())
+                tokens=(
+                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    if identity.signing_key is not None
+                    else None
                 ),
+                bearers=identity.bearers,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),

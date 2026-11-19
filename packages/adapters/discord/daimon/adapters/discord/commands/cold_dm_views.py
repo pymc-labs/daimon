@@ -55,8 +55,10 @@ class ServerSelector(_PrivateControl):
         servers: Sequence[tuple[str, str]],
         choose: SelectServer,
         expire: Callable[[], None],
+        placeholder: str = "Choose a server",
     ) -> None:
         super().__init__(timeout=300)
+        self.placeholder = placeholder
         self.user_id = user_id
         self.route_id = route_id
         self.servers = list(servers)
@@ -91,7 +93,7 @@ class ServerSelector(_PrivateControl):
     def _render(self) -> None:
         self.clear_items()
         selector = discord.ui.Select[ServerSelector](
-            placeholder="Choose a server",
+            placeholder=self.placeholder,
             options=[
                 discord.SelectOption(label=name[:100], value=tenant)
                 for tenant, name in self.servers[self.page * 25 : (self.page + 1) * 25]

@@ -25,6 +25,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
     BetaManagedAgentsSessionEvent,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime, resource_scope
@@ -653,6 +654,7 @@ class GeminiTurnIO:
                     "turn.usage_reconciliation_failed",
                     category=error.category,
                     error_class=type(error).__name__,
+                    causes=backend_refusal_causes(error),
                 )
                 # Local reads and validation are deliberately outside the
                 # native fetch handler. Their failures must still propagate.
@@ -731,6 +733,7 @@ class GeminiTurnIO:
         except Exception as error:
             log.warning(
                 "turn.gemini_native_abandon_failed",
+                causes=backend_refusal_causes(error),
                 session_id=self.session.id,
                 error_class=type(error).__name__,
                 category=getattr(error, "category", None),

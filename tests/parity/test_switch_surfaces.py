@@ -19,11 +19,10 @@ ROOTS: Final = (REPO / "packages/core/daimon", *sorted(REPO.glob("packages/adapt
 ENTRY_POINTS: Final = frozenset(
     {
         "preview_or_refusal",
-        "preview_thread_or_refusal",
-        "preview_thread_model",
         "preview_model_switch",
         "pick_or_refusal",
         "pick_thread",
+        "thread_revision",
         "change_model",
         "switch_provider",
         "set_backend",

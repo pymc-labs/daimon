@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -47,6 +47,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
     build_turn_place,
+    holds_agent_roles,
 )
 from daimon.core.channel_backend import (
     BackendUnsupported,
@@ -58,20 +59,25 @@ from daimon.core.channel_backend import (
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
+    HIDING_KEYS,
     HISTORY_KEYS,
+    LIMIT_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
     TURN_KEYS,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     agent_toolset,
+    answer_message_cap,
     builtins_of,
+    turn_limit_minutes,
 )
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
@@ -134,6 +140,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
+from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -143,8 +150,10 @@ from daimon.core.turn.errors import (
     MissingTurnConfigError,
     SessionBusyError,
 )
+from daimon.core.turn.invocation import unattended_invocation
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
+from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.core.web_links import TenantLinks
 from daimon.core.web_roles_rules import is_admin as is_web_admin
@@ -463,6 +472,8 @@ class Admission:
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
+    # The effort that session runs at when the people chose one; None keeps the agent's.
+    model_effort: str | None = None
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
@@ -488,6 +499,28 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def dm_history(self) -> DmHistoryCap:
+        """How much of a DM conversation a reply at this place carries."""
+        return DmHistoryCap.of(self.features)
+
+    @property
+    def answer_message_cap(self) -> int:
+        """The most messages one answer may post here before it is attached as a file."""
+        return answer_message_cap(self.features)
+
+    @property
+    def turn_ceiling_s(self) -> float:
+        """How long a turn here may run before it is stopped, never past
+        `LONGEST_TURN_CEILING_S`: a person's message reads the turn time limit set at this
+        place, a turn nobody waits on (`unattended_invocation`) the unattended run limit, and a
+        hand-built admission or a missing setting the built-in 45 minutes. A turn allowed
+        past 45 minutes stores its deadline for the stale-turn and lock-wait checks."""
+        unattended = self.request is not None and unattended_invocation(
+            self.request.origin, self.request.attended
+        )
+        return limit_ceiling_s(turn_limit_minutes(self.features, unattended=unattended))
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
@@ -906,17 +939,12 @@ async def _admit_gates(
     provider (M03); each slot moved is added to `followed`, so a refused move can be
     withdrawn.
     """
-    started = last_stage = perf_counter()
+    started = perf_counter()
     stage_ms: dict[str, float] = {}
+    mark = stage_timer(stage_ms)
     # A helper's own conversation keys its session and provider slot; the place it
     # runs in (rules, seals, holds) stays the asking turn's thread.
     slot_thread_id = helper.thread_key if helper is not None else thread_id
-
-    def mark(stage: str) -> None:
-        nonlocal last_stage
-        current = perf_counter()
-        stage_ms[stage] = round((current - last_stage) * 1000, 1)
-        last_stage = current
 
     # --- Identity resolution ---
     async with deps.sessionmaker() as session:
@@ -1542,6 +1570,21 @@ async def _admit_gates(
             return None
         return chosen.thread_id
 
+    resolved: dict[tuple[str, str], FeatureSnapshot] = {}
+
+    async def features_at(admission: Admission) -> FeatureSnapshot:
+        """The features this admission's turn runs with, read once: the counterpart check
+        and the turn hide the same tools, or their copies differ."""
+        key = (admission.agent.id, running_on(admission)["provider"])
+        if key in resolved:
+            return resolved[key]
+        place = FeaturePlace.of(
+            tenant_id, platform, channel_id, thread_id, agent_id=key[0], backend=key[1]
+        )
+        features = await place_features(deps, place, admission.agent)
+        resolved[key] = without_long_term_memory(features) if relay_agent else features
+        return resolved[key]
+
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
@@ -1585,6 +1628,7 @@ async def _admit_gates(
             backend_agent_revision=agent_revision,
             backend_thread_id=_thread_of(agent_revision),
         )
+        provisional = replace(provisional, features=await features_at(provisional))
         request = ProviderPreparationRequest(
             deps=deps,
             admission=provisional,
@@ -1960,38 +2004,11 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
         model_override=thread_model.model_override,
+        model_effort=thread_model.model_effort,
         model_fell_back=thread_model.fell_back,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
-    result = replace(
-        result,
-        features=await resolve_features(
-            deps.sessionmaker,
-            deps.settings,
-            FeaturePlace.of(
-                tenant_id,
-                platform,
-                channel_id,
-                thread_id,
-                agent_id=agent.id,
-                backend=running_on(result)["provider"],
-            ),
-            keys=tuple(
-                dict.fromkeys(
-                    (
-                        *TURN_KEYS,
-                        *SESSION_KEYS,
-                        *PER_TURN_KEYS,
-                        *IDENTITY_KEYS,
-                        *HISTORY_KEYS,
-                        *CHAT_KEYS,
-                    )
-                )
-            ),
-            agent_builtins=builtins_of(agent),
-            server_setup=False,
-        ),
-    )
+    result = replace(result, features=await features_at(result))
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
         # still the binding this message read (a concurrent move or card wins).
@@ -2014,8 +2031,6 @@ async def _admit_gates(
             account_id=principal.account_id,
             now=now,
         )
-    if relay_agent and result.features is not None:
-        result = replace(result, features=without_long_term_memory(result.features))
     mark("result")
     _log.info(
         "turn.admission_timing",
@@ -2023,7 +2038,7 @@ async def _admit_gates(
         platform=platform,
         channel_id=channel_id,
         thread_id=thread_id,
-        total_ms=round((perf_counter() - started) * 1000, 1),
+        total_ms=elapsed_ms(started),
         stage_ms=stage_ms,
     )
     return result
@@ -2104,9 +2119,12 @@ def _require_turn_start(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
-    if (grant.act_for_creator or not grant.human_invocation) and agent_invoker_roles(
-        policy, grant.agent.names
+    if (
+        (grant.act_for_creator or not grant.human_invocation)
+        and agent_invoker_roles(policy, grant.agent.names)
+        and not holds_agent_roles(policy, grant.agent.names, grant.subject)
     ):
+        # Unattended: only a freshly verified owner holding every required role.
         raise AdmissionDenied(reason="invoker_not_allowed")
     subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
     if grant.cold_dm and not authorize(
@@ -2287,8 +2305,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         not authorize(
             policy, subject=grant.subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         )
-        or not deps.direct_message_policies.get(grant.tenant_id, DirectMessagePolicy()).allows(
-            grant.subject.platform_user_id or ""
+        or not env_admits(
+            deps.direct_message_policies, grant.tenant_id, grant.subject.platform_user_id or ""
         )
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")
@@ -2516,7 +2534,61 @@ async def capture_backend_source(
     """Read the actual target's source in a verified host context, without admitting a turn.
 
     `responder_ma_agent_id` is the verified turn's responder, for a copy of it made here.
+    Logs one `backend_source.capture_timing` line: its stages, and the outcome.
     """
+    started, stage_ms = perf_counter(), dict[str, float]()
+    outcome, detail = "failed", None
+    try:
+        captured = await _capture_backend_source(
+            deps,
+            source,
+            context=context,
+            subject=subject,
+            place=place,
+            is_dm=is_dm,
+            slack_turn_context_id=slack_turn_context_id,
+            private_dm_id=private_dm_id,
+            external_user_id=external_user_id,
+            explicit_target_name=explicit_target_name,
+            responder_ma_agent_id=responder_ma_agent_id,
+            stage_ms=stage_ms,
+        )
+        outcome = "captured"
+        return captured
+    except channel_backend.AgentBackendRefused as error:
+        outcome = error.reason
+        detail = error.detail if error.detail in channel_backend.REFUSAL_DETAILS else None
+        raise
+    finally:
+        _log.info(
+            "backend_source.capture_timing",
+            tenant_id=str(context.tenant_id),
+            agent_id=str(source.agent_id),
+            platform=context.platform,
+            channel_id=context.channel_id,
+            thread_id=context.thread_id,
+            outcome=outcome,
+            detail=detail,
+            total_ms=elapsed_ms(started),
+            stage_ms=stage_ms,
+        )
+
+
+async def _capture_backend_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    context: ScopeContext,
+    subject: Subject,
+    place: Place,
+    is_dm: bool,
+    slack_turn_context_id: uuid.UUID | None,
+    private_dm_id: str | None,
+    external_user_id: str | None,
+    explicit_target_name: str | None,
+    responder_ma_agent_id: str | None,
+    stage_ms: dict[str, float],
+) -> BackendAgent:
     from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
     from daimon.core.mux_backend import resource_scope
     from daimon.core.mux_compat import retrieve_agent
@@ -2526,6 +2598,7 @@ async def capture_backend_source(
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from daimon.core.turn.runtime_manifest import capture_preparation_source
 
+    mark = stage_timer(stage_ms)
     try:
         async with asyncio.timeout(PREVIEW_CAPTURE_BUDGET_S):
             if context.tenant_id != source.tenant_id or context.account_id is None:
@@ -2541,6 +2614,7 @@ async def capture_backend_source(
                     if explicit_target_name is not None
                     else ()
                 )
+            mark("config")
             if account is None or account.tenant_id != context.tenant_id:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if (
@@ -2619,9 +2693,19 @@ async def capture_backend_source(
                 account_id=str(context.account_id),
                 authorization_id="backend-preview",
             )
-            actual = await retrieve_agent(
-                deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+            # Independent reads: one round trip, not two.
+            actual, environment = await asyncio.gather(
+                retrieve_agent(
+                    deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+                ),
+                find_environment_by_daimon_tag(
+                    deps.anthropic,
+                    tenant_id=context.tenant_id,
+                    name=config.environment_name,
+                    records=deps.sessionmaker,
+                ),
             )
+            mark("agent_environment_reads")
             if explicit_target_name is not None:
                 await channel_backend.load_backend_agent(
                     deps.anthropic,
@@ -2630,12 +2714,7 @@ async def capture_backend_source(
                     agent_name=explicit_target_name,
                     actual_agent=actual,
                 )
-            environment = await find_environment_by_daimon_tag(
-                deps.anthropic,
-                tenant_id=context.tenant_id,
-                name=config.environment_name,
-                records=deps.sessionmaker,
-            )
+                mark("load_backend_agent")
             if environment is None or environment.archived_at is not None:
                 raise channel_backend.AgentBackendRefused(
                     "source_unavailable", detail="environment"
@@ -2663,6 +2742,7 @@ async def capture_backend_source(
             ):
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="place")
             seals = limiting_ids_at(policy, channel_id=grant.channel_id, thread_id=grant.thread_id)
+            mark("place")
             skills = (
                 await turn_channel_skills(
                     deps.sessionmaker,
@@ -2708,15 +2788,29 @@ async def capture_backend_source(
                     deps, context.tenant_id, context.account_id, chat_admin=grant.subject.is_admin
                 ),
             )
+            # An agent's own read is of its chat turns: its features are the tenant's.
+            read_on = (
+                account.platform
+                if explicit_target_name is not None
+                else (context.platform or account.platform)
+            )
+            # The turn leaves out what is Off here, so the preview names none of it as lost.
+            # Only those keys: the target, which narrows others by backend, is not known here.
+            ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
+            here = FeaturePlace.of(*ids, agent_id=actual.id)
+            features = await place_features(deps, here, actual, HIDING_KEYS)
+            relay = agent_has_identity_relay(
+                (server.url for server in actual.mcp_servers), public_url=deps.public_url
+            )
+            features = without_long_term_memory(features) if relay else features
+            admission = replace(admission, features=features)
+            mark("admission")
             request = ProviderPreparationRequest(
                 deps,
                 admission,
                 scope,
                 context.tenant_id,
-                # An agent's own read is of its chat turns: its features are the tenant's.
-                account.platform
-                if explicit_target_name is not None
-                else context.platform or account.platform,
+                read_on,
                 label,
                 context.thread_id or "",
                 context.account_id,
@@ -2728,16 +2822,22 @@ async def capture_backend_source(
                 answers_on=answers_on,
             )
             captured = await capture_preparation_source(
-                request, fresh=True, capability_preview=True
+                request, fresh=True, capability_preview=True, stage_ms=stage_ms
             )
             if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             return captured
     except (APIError, TimeoutError) as error:
+        _log.warning(
+            "backend_source.unavailable", causes=channel_backend.backend_refusal_causes(error)
+        )
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
     except TurnError as error:
         # A capture blip asks for a retry; it never confirms a loss.
         if channel_backend.transient_failure(error):
+            _log.warning(
+                "backend_source.unavailable", causes=channel_backend.backend_refusal_causes(error)
+            )
             raise channel_backend.AgentBackendRefused("source_unavailable") from error
         raise
     except ScopeViolation as error:
@@ -2769,6 +2869,38 @@ async def capture_agent_source(
         private_dm_id=None,
         external_user_id=external_user_id,
         explicit_target_name=source.name,
+    )
+
+
+_TURN_FEATURE_KEYS: Final = tuple(
+    dict.fromkeys(
+        (
+            *TURN_KEYS,
+            *SESSION_KEYS,
+            *PER_TURN_KEYS,
+            *IDENTITY_KEYS,
+            *HISTORY_KEYS,
+            *LIMIT_KEYS,
+            *CHAT_KEYS,
+        )
+    )
+)
+
+
+async def place_features(
+    deps: TurnDeps,
+    place: FeaturePlace,
+    agent: BetaManagedAgentsAgent,
+    keys: tuple[str, ...] = _TURN_FEATURE_KEYS,
+) -> FeatureSnapshot:
+    """The features a turn of `agent` reads at `place`; its toolset hides tools by them."""
+    return await resolve_features(
+        deps.sessionmaker,
+        deps.settings,
+        place,
+        keys=keys,
+        agent_builtins=builtins_of(agent),
+        server_setup=False,
     )
 
 

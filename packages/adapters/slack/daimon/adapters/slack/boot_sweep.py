@@ -56,6 +56,7 @@ from daimon.adapters.slack.blockkit import (
 from daimon.adapters.slack.card_recovery import CardLookupStatus, find_turn_card_by_key
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
@@ -191,7 +192,12 @@ async def _seed_tenant_defaults(
     except (DaimonError, _anthropic.APIError, SQLAlchemyError) as exc:
         # Per-tenant supervisor boundary: one tenant's provider or DB error
         # must not stop the sweep over its siblings.
-        log.warning("slack.boot_sweep_tenant_failed", tenant_id=str(tenant_id), error=str(exc))
+        log.warning(
+            "slack.boot_sweep_tenant_failed",
+            tenant_id=str(tenant_id),
+            error=str(exc),
+            causes=backend_refusal_causes(exc),
+        )
         await _record_failure(
             sessionmaker,
             tenant_id=tenant_id,

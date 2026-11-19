@@ -101,7 +101,9 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.direct_messages import (
+    DM_PICK_ACTION_ID,
     handle_direct_message,
+    handle_dm_agent_pick,
     handle_dm_command,
     is_direct_message_event,
 )
@@ -244,6 +246,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -1468,6 +1471,8 @@ class SlackApp:
                 "thread_model_confirm": handle_thread_model_confirm,
             }.get(action_id, handle_thread_model_cancel)
             self._spawn(handler(self.runtime, payload))
+        elif action_id == DM_PICK_ACTION_ID:
+            self._spawn(handle_dm_agent_pick(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1889,6 +1894,7 @@ class SlackApp:
                 event_ts=event_ts,
                 request_id=request_id,
                 exc_info=exc,
+                causes=backend_refusal_causes(exc),
             )
             capture_exception_with_scope(exc)
             # Before the per-event client exists there is no token to post
@@ -2181,6 +2187,7 @@ class SlackApp:
                     thread_id=thread_id,
                     team_id=team_id,
                     exc_info=exc,
+                    causes=backend_refusal_causes(exc),
                 )
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
@@ -2554,7 +2561,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2722,7 +2733,9 @@ class SlackApp:
             # run_prepared_turn fail immediately at its first await with a
             # ceiling TurnError. Bounding the interstitial itself is separate,
             # deferred work.
-            turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+            turn_deadline_at = turn_deadline(
+                now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s
+            )
 
             # --- Stage two: bind_session (find-or-create, mapping write,
             # recorder binding) -- bind_session(). As on Discord,
@@ -2854,6 +2867,7 @@ class SlackApp:
                         active_turn_message_id=lifecycle.status_ts,
                         active_turn_channel_id=channel,
                         now=datetime.now(UTC),
+                        deadline=turn_deadline_at,
                     )
                     await _at_session.commit()
                 _marker_mapping_ids.add(prepared.mapping_id)
@@ -3447,7 +3461,9 @@ class SlackApp:
             admitted_name=follow_admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        follow_deadline = turn_deadline(now=datetime.now(UTC))
+        follow_deadline = turn_deadline(
+            now=datetime.now(UTC), ceiling_s=follow_admission.turn_ceiling_s
+        )
         follow_prepared = await bind_session(
             self.runtime.turn_deps,
             follow_admission,
@@ -3488,7 +3504,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(
@@ -3550,6 +3570,7 @@ class SlackApp:
                     active_turn_message_id=follow_lifecycle.status_ts,
                     active_turn_channel_id=channel,
                     now=datetime.now(UTC),
+                    deadline=follow_deadline,
                 )
                 await _at_session.commit()
 
@@ -3877,12 +3898,14 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, waits for acked
+        Sets draining=True so new mentions are rejected, ends every direct
+        message burst's wait so it is answered now, waits for acked
         mention handlers and ``_processing`` to drain (or the grace window to
         elapse), then closes the WebSocket client. Stays within the
         deployment's 60s kill timeout.
         """
         self.draining = True
+        self.runtime.dm_bursts.stop()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),

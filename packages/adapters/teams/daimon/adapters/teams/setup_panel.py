@@ -63,6 +63,7 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -322,8 +323,12 @@ class SetupPanel:
             return dialog_message(exc.refusal)
         except SkillIngestError as exc:
             return dialog_message(f"{exc} Nothing was added.")
-        except (DaimonError, anthropic.APIError):
-            log.exception("teams.agent_setup.skill_add_failed", agent_name=agent.name)
+        except (DaimonError, anthropic.APIError) as error:
+            log.exception(
+                "teams.agent_setup.skill_add_failed",
+                agent_name=agent.name,
+                causes=backend_refusal_causes(error),
+            )
             return dialog_message(
                 f"Adding {bundle.preview.name} to {agent.name} failed. Try again."
             )
@@ -583,11 +588,14 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
-                web=web_links(
+                web=await web_links(
                     self._runtime,
                     actor.tenant_id,
                     admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                     foreign=actor.foreign,
+                    channel_id=actor.channel_thread[0],
+                    thread_id=actor.channel_thread[1],
+                    agent_id=match.ma_agent_id,
                 ),
                 records=self._runtime.sessionmaker,
             )

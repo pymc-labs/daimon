@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import uuid
 from unittest.mock import Mock
 
@@ -14,6 +15,7 @@ from daimon.core.runtime_health import (
     current_turn_counts,
     log_health_once,
     runtime_health,
+    stall_watch,
     take_anthropic_window,
     take_discord_ratelimit_window,
     track_turn,
@@ -177,3 +179,16 @@ def test_turn_counts_are_process_local_and_released() -> None:
         with track_turn(tenant):
             assert current_turn_counts() == (2, 2)
     assert current_turn_counts() == (0, 0)
+
+
+async def test_a_blocked_loop_logs_the_blocking_stack() -> None:
+    def block_the_loop() -> None:
+        time.sleep(0.5)
+
+    with capture_logs() as logs:
+        async with stall_watch(0.1):
+            await asyncio.sleep(0.05)
+            block_the_loop()
+            await asyncio.sleep(0.2)
+    stalls = [log for log in logs if log["event"] == "runtime.loop_stalled"]
+    assert any(s["stalled_ms"] >= 400 and "in block_the_loop" in s["stack"] for s in stalls)

@@ -77,7 +77,12 @@ class PurgePreview(BaseModel):
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_carry_overs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    held_timers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_picks: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
@@ -130,7 +135,12 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.dm_carry_overs, "imported earlier conversation"),
+        (preview.held_timers, "imported timer"),
         (preview.tag_opt_outs, "never-tag setting"),
+        (preview.dm_picks, "private conversation agent choice"),
+        (preview.dm_rules, "private conversation routing rule"),
+        (preview.dm_grant_users, "private conversation access entry"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),

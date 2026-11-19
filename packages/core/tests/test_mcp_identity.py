@@ -16,6 +16,7 @@ from daimon.core.mcp_identity import (
     IdentityClaims,
     IdentityTokenCache,
     RelayBinding,
+    RequesterBodyError,
     SigningKey,
     SigningKeyError,
     TurnPlace,
@@ -29,7 +30,10 @@ from daimon.core.mcp_identity import (
     public_jwk,
     public_pem,
     relay_url,
+    requester_conversation,
+    routine_conversation,
     sign_identity,
+    stamp_requester,
 )
 from daimon.core.stores.domain import Role, TurnOriginRow
 from pydantic import ValidationError
@@ -164,6 +168,49 @@ def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
             parse_relay_claim(bad)
 
 
+def test_relay_claim_carries_the_routine_owner_and_refuses_a_stray_one() -> None:
+    routine_id = uuid.uuid4()
+    owned = RelayBinding("Helper", routine_id=routine_id, owner="42")
+    assert parse_relay_claim(owned.claim()) == owned, "the owner reads back"
+    assert parse_relay_claim(RelayBinding("Helper", routine_id=routine_id).claim()).owner is None
+    for bad in (
+        {"agent_name": "Helper", "owner": "42"},
+        {"agent_name": "Helper", "routine": str(routine_id), "owner": ""},
+        {"agent_name": "Helper", "routine": str(routine_id), "owner": 42},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim(bad)
+
+
+def test_requester_conversation_of_an_unopened_dm_is_named_only_for_unattended_runs() -> None:
+    origin = _origin_at(thread_id="dm:7", parent="dm:7")
+    assert requester_conversation(origin) is None, "a person's turn needs a real channel"
+    assert requester_conversation(origin, unattended=True) == {
+        "place_type": "dm",
+        "channel_id": None,
+        "parent_channel_id": None,
+    }
+
+
+def test_requester_keys_are_stripped_from_every_method_and_unencodable_bodies_refused() -> None:
+    forged = {"requester_platform_user_id": "666", "requester_kind": "person", "keep": 1}
+    message = {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"_meta": forged}}
+    out = json.loads(
+        stamp_requester(json.dumps(message).encode(), person="42", conversation=_CONVERSATION)
+    )
+    assert out["params"]["_meta"] == {"keep": 1}, "only a tool call is stamped; forged keys go"
+    plain = {"jsonrpc": "2.0", "method": "ping", "params": {"x": 1}}
+    assert (
+        json.loads(
+            stamp_requester(json.dumps(plain).encode(), person="42", conversation=_CONVERSATION)
+        )
+        == plain
+    ), "a method without _meta gains none"
+    for body in (b'{"params":{"a":"\\ud800"}}', b"[" * 50_000 + b"]" * 50_000):
+        with pytest.raises(RequesterBodyError):
+            stamp_requester(body, person="42", conversation=_CONVERSATION)
+
+
 def _origin(tenant_id: uuid.UUID, ma_agent_id: str, thread_id: str = "2") -> TurnOriginRow:
     return TurnOriginRow(
         id=uuid.uuid4(),
@@ -228,3 +275,290 @@ def test_settings_parse_servers_without_distributing_the_signing_key() -> None:
         {"servers": json.dumps(limited), "signing_key": seed}
     ).servers
     assert server.workspaces == frozenset({"discord:1"}), "a workspace allowlist parses"
+
+
+_SERVER = {"name": "internal", "url": "https://tools.example.com/mcp"}
+_BEARER = {
+    **_SERVER,
+    "auth": "bearer",
+    "workspaces": ["discord:1"],
+    "agents": ["Helper"],
+    "requester_meta": True,
+}
+
+
+def _settings(servers: list[dict[str, Any]], **extra: object) -> McpIdentitySettings:
+    return McpIdentitySettings.model_validate({"servers": json.dumps(servers), **extra})
+
+
+def test_bearer_server_needs_workspaces_agents_and_a_matching_key() -> None:
+    settings = _settings([_BEARER], bearers=json.dumps({"internal": "k-1"}))
+    (server,) = settings.servers
+    assert (server.auth, server.requester_meta, server.agents) == ("bearer", True, ("Helper",))
+    assert not settings.needs_signing_key, "a bearer-only deployment needs no signing key"
+    assert settings.bearers["internal"].get_secret_value() == "k-1", "the key parses from JSON"
+    for weaker in (
+        {k: v for k, v in _BEARER.items() if k != "workspaces"},
+        {k: v for k, v in _BEARER.items() if k != "agents"},
+        {**_BEARER, "agents": []},
+        {**_BEARER, "issuer": "x", "audience": "https://tools.example.com"},
+    ):
+        with pytest.raises(ValidationError):
+            _settings([weaker], bearers={"internal": "k-1"})
+
+
+@pytest.mark.parametrize(
+    "bearers",
+    [
+        {"other": "k-1"},
+        {"internal": "k-1", "other": "k-2"},
+        {"internal": ""},
+        {"internal": "a b"},
+    ],
+)
+def test_bearer_keys_must_name_bearer_servers_and_be_usable(bearers: dict[str, str]) -> None:
+    with pytest.raises(ValidationError) as raised:
+        _settings([_BEARER], bearers=bearers)
+    assert "k-1" not in str(raised.value), "a key is never echoed"
+
+
+def test_signed_server_needs_issuer_audience_and_takes_no_bearer() -> None:
+    with pytest.raises(ValidationError):
+        _settings([_SERVER])
+    signed = {**_SERVER, "issuer": "i", "audience": "https://tools.example.com"}
+    assert _settings([signed]).needs_signing_key, "a signed server needs the signing key"
+    with pytest.raises(ValidationError):
+        _settings([signed], bearers={"internal": "k-1"})
+
+
+def _origin_at(
+    *, thread_id: str, parent: str, platform: str = "discord", channel: str | None = None
+):
+    base = _origin(uuid.uuid4(), "agent_a", thread_id=thread_id)
+    return base.model_copy(
+        update={"parent_channel_id": parent, "platform": platform, "platform_channel_id": channel}
+    )
+
+
+def test_conversation_place_names_channel_thread_and_dm_from_the_origin() -> None:
+    assert requester_conversation(_origin_at(thread_id="5", parent="5")) == {
+        "place_type": "channel",
+        "channel_id": "5",
+        "parent_channel_id": None,
+    }, "a turn in a channel names the channel"
+    assert requester_conversation(_origin_at(thread_id="9", parent="5")) == {
+        "place_type": "thread",
+        "channel_id": "9",
+        "parent_channel_id": "5",
+    }, "a thread names itself and its channel"
+    assert requester_conversation(_origin_at(thread_id="dm:7", parent="dm:7", channel="77")) == {
+        "place_type": "dm",
+        "channel_id": "77",
+        "parent_channel_id": None,
+    }, "a direct message names the DM channel"
+    assert requester_conversation(_origin_at(thread_id="dm:7", parent="dm:7")) is None, (
+        "a DM with no known channel names no place"
+    )
+
+
+_CONVERSATION = {"place_type": "channel", "channel_id": "5", "parent_channel_id": None}
+
+
+def _call(**meta: object) -> dict[str, Any]:
+    params: dict[str, Any] = {"name": "send", "arguments": {"text": "hi"}}
+    if meta:
+        params["_meta"] = dict(meta)
+    return {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+
+
+def _stamp(message: object, person: str | None = "42") -> Any:
+    out = stamp_requester(
+        json.dumps(message).encode(), person=person, conversation=_CONVERSATION if person else None
+    )
+    return json.loads(out)
+
+
+def test_stamp_sets_the_requester_and_keeps_other_meta() -> None:
+    meta = _stamp(_call(progressToken="p1"))["params"]["_meta"]
+    assert meta == {
+        "progressToken": "p1",
+        "requester_platform_user_id": "42",
+        "requester_conversation": _CONVERSATION,
+        "requester_kind": "person",
+    }, "the asker and place are added beside the caller's own meta"
+
+
+def test_stamp_overwrites_forged_values_and_strips_them_without_a_person() -> None:
+    forged = _call(
+        requester_platform_user_id="666",
+        requester_conversation={"place_type": "dm", "channel_id": "1"},
+        requester_kind="routine",
+    )
+    stamped = _stamp(forged)["params"]["_meta"]
+    assert stamped["requester_platform_user_id"] == "42", "a forged asker is overwritten"
+    assert stamped["requester_conversation"] == _CONVERSATION, "a forged place is overwritten"
+    assert stamped["requester_kind"] == "person", "a forged kind is overwritten"
+    bare = _stamp(forged, person=None)["params"]["_meta"]
+    assert bare == {}, "with no person the forged fields are removed, not kept"
+    assert _stamp(_call(), person=None)["params"]["_meta"] == {}, "nothing is invented"
+
+
+def test_stamp_names_no_asker_when_the_place_is_unknown() -> None:
+    out = json.loads(stamp_requester(json.dumps(_call()).encode(), person="42", conversation=None))
+    assert out["params"]["_meta"] == {}, "an asker with no known place is not stamped"
+
+
+def test_stamp_handles_each_call_in_a_batch_and_leaves_other_messages() -> None:
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    reply = {"jsonrpc": "2.0", "id": 3, "result": {"_meta": {"requester_platform_user_id": "9"}}}
+    out = _stamp([_call(requester_platform_user_id="666"), ping, reply])
+    assert out[0]["params"]["_meta"]["requester_platform_user_id"] == "42", "calls are stamped"
+    assert out[1] == ping, "other methods pass unchanged"
+    assert out[2] == reply, "a response from the client passes unchanged"
+
+
+def test_stamp_removes_the_unaliased_meta_key() -> None:
+    message = _call()
+    message["params"]["meta"] = {"requester_platform_user_id": "666"}
+    assert "meta" not in _stamp(message)["params"], "no second spelling carries a forged value"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not json",
+        b"[]",
+        b"7",
+        b'"x"',
+        b"[1]",
+        b"\xef\xbb\xbf{}",
+        b'{"method":"tools/call","method":"ping"}',
+        b'{"method":"tools/call","params":{"_meta":{"requester_platform_user_id":"1",'
+        b'"requester_platform_user_id":"2"}}}',
+        b'{"method":"tools/call","params":[]}',
+        b'{"method":"tools/call"}',
+        b'{"method":"tools/call","params":{"x":NaN}}',
+        b'\xff\xfe{"method":"ping"}',
+    ],
+)
+def test_stamp_refuses_a_body_it_cannot_read_strictly(body: bytes) -> None:
+    with pytest.raises(RequesterBodyError):
+        stamp_requester(body, person="42", conversation=_CONVERSATION)
+
+
+def test_stamp_treats_a_differently_cased_method_as_a_tool_call() -> None:
+    message = {**_call(requester_platform_user_id="666"), "method": "Tools/Call"}
+    assert _stamp(message, person=None)["params"]["_meta"] == {}, "no spelling skips the strip"
+
+
+def _routine_row(**changes: Any) -> Any:
+    from daimon.core.stores.domain import RoutineRow
+
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    base: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "tenant_id": uuid.uuid4(),
+        "created_by_user_id": "42",
+        "agent_id": "agent_1",
+        "agent_name": "daimon",
+        "cron_expr": "0 9 * * *",
+        "timezone": "UTC",
+        "trigger_message": "go",
+        "enabled": True,
+        "next_fire_at": None,
+        "last_fired_at": None,
+        "last_error": None,
+        "last_result_tail": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    return RoutineRow(**{**base, **changes})
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        (
+            {"destination_kind": "channel", "destination_id": "5"},
+            {"place_type": "channel", "channel_id": "5", "parent_channel_id": None},
+        ),
+        (
+            {"destination_kind": "thread", "destination_id": "9", "channel_id": "5"},
+            {"place_type": "thread", "channel_id": "9", "parent_channel_id": "5"},
+        ),
+        ({"destination_kind": "thread", "destination_id": "9"}, None),
+        (
+            {"destination_kind": "dm", "destination_id": "42"},
+            {"place_type": "dm", "channel_id": None, "parent_channel_id": None},
+        ),
+        ({}, None),
+    ],
+)
+def test_routine_delivery_place_is_named_only_when_it_is_recorded(
+    changes: dict[str, Any], expected: dict[str, str | None] | None
+) -> None:
+    assert routine_conversation(_routine_row(**changes)) == expected
+
+
+def test_a_routine_is_stamped_with_its_owner_place_and_kind() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_kind="person", requester_platform_user_id="666")).encode(),
+            person="42",
+            conversation=_CONVERSATION,
+            kind="routine",
+        )
+    )
+    assert out["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_conversation": _CONVERSATION,
+        "requester_kind": "routine",
+    }, "a forged kind or asker is replaced by the routine's owner"
+
+
+def test_a_routine_without_a_recorded_place_is_stamped_without_one() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_conversation={"place_type": "dm"})).encode(),
+            person="42",
+            conversation=None,
+            kind="routine",
+        )
+    )
+    assert out["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_kind": "routine",
+    }, "a forged place is removed and none is invented"
+
+
+@pytest.mark.parametrize("kind", ["routine", "person", None])
+def test_nothing_is_stamped_without_an_owner(kind: Any) -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_kind="routine")).encode(),
+            person=None,
+            conversation=_CONVERSATION,
+            kind=kind,
+        )
+    )
+    assert out["params"]["_meta"] == {}
+
+
+def test_a_person_without_a_kind_is_not_stamped() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call()).encode(), person="42", conversation=_CONVERSATION, kind=None
+        )
+    )
+    assert out["params"]["_meta"] == {}
+
+
+def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
+    routine_id = uuid.uuid4()
+    binding = RelayBinding(agent_name="daimon", routine_id=routine_id)
+    assert parse_relay_claim(binding.claim()) == binding
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"})
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "routine": 7})

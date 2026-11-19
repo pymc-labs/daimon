@@ -27,6 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
@@ -121,6 +122,7 @@ from daimon.core.turn.driver import (
     unattended_sends,
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.invocation import unattended_invocation
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -130,7 +132,6 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
-from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
@@ -161,7 +162,9 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
+    grant_owner_check,
     is_provider_turn,
+    native_owner_gate,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
@@ -388,8 +391,12 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
         log.info("billing.settle_skipped", managed_session_id=session_id)
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session_id)
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session_id,
+            causes=backend_refusal_causes(error),
+        )
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -632,6 +639,7 @@ async def _replay_previous_session(
             "turn.recovery_transcript_unavailable",
             session_id=session_id,
             error=str(err)[:200],
+            causes=backend_refusal_causes(err),
         )
         return None
     turns = select_recent_turns(events)
@@ -1592,11 +1600,6 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
-    if origin in _CHAT_RENDERED_ORIGINS:
-        # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
-        # will be sent or run, so a scrubbed card over the original call would misstate it.
-        lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
-
     if job_row is not None and (job_row.reason != "job_finished" or attended is not False):
         raise ValueError("Job completion turns must be explicitly unattended")
     if job_row is not None and (
@@ -1612,7 +1615,7 @@ async def run_prepared_turn_impl(
     ):
         raise ValueError("Watch turns must be explicitly unattended")
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    unattended = not (attended if attended is not None else origin != "routine")
+    unattended = unattended_invocation(origin, attended)
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1644,6 +1647,8 @@ async def run_prepared_turn_impl(
         platform=platform,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
+    if (observation := current_outcome.get()) is not None:
+        observation.tool_server_names = prepared.admission.shown("tool_server_names", platform)
     sources = _web_search_sources(prepared)
     memory_state = await _repo_memory_state(
         deps,
@@ -1940,6 +1945,7 @@ async def run_prepared_turn_impl(
                                 tenant_id=tenant_id,
                                 read_session=read_session,
                                 entry_point=unattended_entry_point(origin),
+                                principal_check=grant_owner_check(deps, admission, tenant_id),
                             )
                         else:
                             from daimon.core.continuity.watch_turn import watch_capabilities
@@ -2036,8 +2042,12 @@ async def run_prepared_turn_impl(
 
                             native_check()
 
+                            owner_gate = native_owner_gate(deps, admission, tenant_id)
+
                             async def native_gate() -> None:
                                 native_check()
+                                if native_entry != "mcp_chat":
+                                    await owner_gate()
 
                             stack.enter_context(unattended_sends(native_gate))
                         else:

@@ -20,6 +20,8 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, Tu
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
+from daimon.core.thread_models import _MODEL_EFFORTS  # pyright: ignore[reportPrivateUsage]
+from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
@@ -184,7 +186,7 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
                 runtime,
                 _auth(tenant.id, caller.id),
                 origin_context_id=str(origin.id),
-                model="fable",
+                model="gpt-6",
             )
 
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
@@ -222,20 +224,16 @@ _LIMIT = "Only people here can use it."
 
 
 def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Previews here lose something, so a pick asks first."""
-    from dataclasses import replace
+    """A pick's preview here loses something."""
+    from daimon.core.channel_backend import AgentBackendService
 
-    from daimon.core import thread_model_switch as core
+    real = AgentBackendService.thread_revision
 
-    real = core.preview_thread_model
+    async def lossy(self, agent, target, model):
+        run, preview = await real(self, agent, target, model)
+        return run, preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
 
-    async def lossy(pick, value):
-        shown = await real(pick, value)
-        assert shown.preview is not None, "another provider's pick is previewed"
-        limited = shown.preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
-        return replace(shown, preview=limited)
-
-    monkeypatch.setattr(core, "preview_thread_model", lossy)
+    monkeypatch.setattr(AgentBackendService, "thread_revision", lossy)
 
 
 @pytest.mark.parametrize("carded", [True, False], ids=["card_surface", "no_card_surface"])
@@ -288,3 +286,77 @@ async def test_another_providers_model_needs_the_owner_without_opt_in(
                 model="openai:gpt-6-luna",
             )
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+
+
+async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_conversation(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.stores.thread_models import get_thread_effort
+    from daimon.core.stores.turn_origins import bind_origin_session
+    from daimon.core.turn.invocation import human_invocation
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="D_ROUTE",
+        thread_id="dm:scope-1",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db,
+                origin_id=origin.id,
+                chat_session_id=_CHAT_SESSION,
+                attended=True,
+                human_invocation=human_invocation("chat", True),
+            )
+            await db.commit()
+        auth = _auth(tenant.id, caller.id)
+        origin_id = str(origin.id)
+        alone = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, effort="xhigh"
+        )
+        assert (alone.model, alone.effort) == ("default", "xhigh")
+        both = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, model="fable", effort="low"
+        )
+        assert (both.model, both.effort) == ("claude-fable-5-2", "low")
+        assert both.note == "This conversation runs on Fable 5.2 at low effort from the next reply."
+        with pytest.raises(ToolError, match="isn't an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id, effort="turbo")
+        with pytest.raises(ToolError, match="isn't an effort"):
+            # A bad effort refuses before the model changes.
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="opus", effort="turbo"
+            )
+        with pytest.raises(ToolError, match="Name a model, an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id)
+        # A model that takes no effort refuses the pair before saving the model.
+        monkeypatch.delitem(_MODEL_EFFORTS, "claude-haiku-5-5")
+        with pytest.raises(ToolError, match="Haiku 5.5 doesn't take an effort. Nothing changed."):
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="haiku", effort="low"
+            )
+
+    assert await _stored(committing_sessionmaker, tenant.id, "dm:scope-1") == "claude-fable-5-2"
+    async with committing_sessionmaker() as session:
+        assert (
+            await get_thread_effort(
+                session, tenant_id=tenant.id, platform="discord", thread_id="dm:scope-1"
+            )
+            == "low"
+        )

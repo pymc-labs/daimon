@@ -16,8 +16,15 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware, caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.capability_tools import CAPABILITY_TOOLS
-from daimon.core.config import ComputeSettings, NotebookSettings, ReportHostSettings, Settings
+from daimon.core.config import (
+    ComputeSettings,
+    NotebookSettings,
+    ReportHostSettings,
+    Settings,
+    WebSettings,
+)
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
@@ -177,13 +184,45 @@ async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
     tenant_id = await _tenant(sessionmaker)
     await _set(sessionmaker, tenant_id, "github", "off", FeatureTarget("channel", channel_id="c1"))
     agent_id = str(uuid.uuid4())
-    _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c1")
+    # Self-hosted: the key's agent is looked up in the records, where it has none.
+    key = {"platform": "discord", "agent_id": agent_id, "anthropic_disabled": True}
+    _as(monkeypatch, tenant_id, **key, bound_channel_id="c1")
     async with Client(mcp) as client:
         bound = await _error(client, "github_connect", {})
-        _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c2")
+        _as(monkeypatch, tenant_id, **key, bound_channel_id="c2")
         elsewhere = await _error(client, "github_connect", {})
     assert OFF in bound, f"the key bound to the Off channel reached github_connect: {bound!r}"
     assert OFF not in elsewhere, f"a key in another channel was refused: {elsewhere!r}"
+
+
+async def test_an_agent_key_whose_agent_has_the_web_app_off_is_kept_from_the_web_app(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The key's derived uuid maps to its agent, whose agent-tier Off then applies."""
+    tenant_id = await _tenant(sessionmaker)
+    web = WebSettings(public_url="https://app.example.com/")  # type: ignore[arg-type]
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        settings=_set_up().model_copy(update={"web": web}),
+        deployment_default=DeploymentDefault(),
+    )
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_k")
+    runtime.resolver_cache.derived_agent_ids[(tenant_id, derived)] = "agent_k"
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        platform="discord",
+        agent_id=derived,
+    )
+    assert await tenant_links(runtime, auth) is not None, "On: the caller gets links"
+    await _set(sessionmaker, tenant_id, "web_awareness", "off", FeatureTarget("agent", "agent_k"))
+    assert await tenant_links(runtime, auth) is None, "Off at the key's agent: no web_url"
+    web_tool = await _gate(sessionmaker, auth, "list_web_invites", runtime)
+    lookup = await _gate(sessionmaker, auth, "list_web_people", runtime)
+    assert OFF in web_tool, f"the key's agent has the web app Off but reached it: {web_tool!r}"
+    assert OFF not in lookup, f"allowances and owners need the people lookup: {lookup!r}"
 
 
 async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_external_client(
@@ -295,10 +334,14 @@ class _Context:
 
 
 async def _gate(
-    sessionmaker: async_sessionmaker[AsyncSession], auth: AuthIdentity, tool: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    tool: str,
+    runtime: McpRuntime | None = None,
 ) -> str:
     gate = CapabilityGateMiddleware(
-        McpRuntime(
+        runtime
+        or McpRuntime(
             session_factory=sessionmaker,
             client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
             settings=_set_up(),

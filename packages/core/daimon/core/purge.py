@@ -118,6 +118,7 @@ import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.erasure import ERASABLE, Principal, Subject
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
@@ -167,7 +168,12 @@ class PurgeReport(BaseModel):
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
+    dm_carry_overs: int = 0
+    held_timers: int = 0
     tag_opt_outs: int = 0
+    dm_picks: int = 0
+    dm_rules: int = 0
+    dm_grant_users: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -281,6 +287,7 @@ async def purge_principal(
                 tenant_id=str(tenant_id),
                 account_id=str(account_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             return PrincipalPurgeResult(
                 db=db_report, sessions=SessionDeletionReport(upstream_error=True)
@@ -533,6 +540,7 @@ async def _retry_account_session_delete_locked(
                 account_id=str(account_id),
                 tenant_id=str(tenant_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             upstream_error = True
             continue

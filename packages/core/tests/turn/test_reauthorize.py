@@ -451,12 +451,15 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
         ("private_input_applied", True),
     ],
 )
-async def test_nonhuman_origins_refuse_gated_agent_at_admission(
+@pytest.mark.parametrize(("owner_roles", "admitted"), [(("123",), True), (("999",), False)])
+async def test_nonhuman_origins_admit_gated_agent_only_for_an_owner_holding_the_role(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     origin: str,
     attended: bool,
+    owner_roles: tuple[str, ...],
+    admitted: bool,
 ) -> None:
     from dataclasses import replace
     from unittest.mock import AsyncMock
@@ -469,7 +472,7 @@ async def test_nonhuman_origins_refuse_gated_agent_at_admission(
     deps = replace(
         deps,
         membership_resolver=CachedMembershipResolver(
-            AsyncMock(return_value=Membership(is_member=True, role_ids=("123",))),
+            AsyncMock(return_value=Membership(is_member=True, role_ids=owner_roles)),
         ),
     )
     await _set_policy(
@@ -477,8 +480,9 @@ async def test_nonhuman_origins_refuse_gated_agent_at_admission(
         tenant,
         TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
     )
-    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
-        await admit_chat(
+
+    async def run() -> object:
+        return await admit_chat(
             deps,
             tenant,
             external_user_id="member-1",
@@ -487,3 +491,9 @@ async def test_nonhuman_origins_refuse_gated_agent_at_admission(
             origin=origin,
             attended=attended,
         )
+
+    if admitted:
+        await run()
+        return
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await run()

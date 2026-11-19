@@ -5,14 +5,12 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.continuity.watch_notices import notice_text
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.watches import notice_kind
 
 CASES: list[tuple[str, dict[str, object], str, str]] = [
     ("expired", {"reason": "source_unmapped"}, "expired", " expired."),
-    ("paused", {"reason": "source_unmapped"}, "source_unmapped", UNMAPPED_NOTICE),
     ("paused", {"reason": "Watch paused: source moved"}, "paused", ": Watch paused: source moved"),
     ("paused", {"reason": "tool_unlisted"}, "tool_unlisted", "can no longer check that tool"),
     ("paused", {"reason": "source_changed"}, "source_changed", "changed on its server"),

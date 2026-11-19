@@ -15,7 +15,7 @@ import structlog
 from daimon.adapters.discord import checks, layout
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
-from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
+from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton, saver_subject
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -24,12 +24,13 @@ from daimon.adapters.discord.routines_panel.write import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
 from daimon.core.routines import can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -131,41 +132,59 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
         if self.view is None or self.view.state.selected is None:
             return
         selected = self.view.state.selected.routine
+        runtime = self.view.runtime
         try:
-            async with self.view.runtime.sessionmaker.begin() as session:
+            # Reading roles may call Discord, so answer first and keep it out of the transaction.
+            await interaction.response.defer()
+            async with runtime.sessionmaker() as session:
                 row = await get_routine(session, selected.id, tenant_id=selected.tenant_id)
                 if row is None or row.created_by_user_id != str(interaction.user.id):
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         "Only the routine owner can change private delivery.", ephemeral=True
                     )
                     return
                 policy = await load_access_policy(session, tenant_id=row.tenant_id)
-                agent_ref = AgentRef.of(row.agent_name)
-                if self.values[0] == "dm" and any_agent_rules(policy):
-                    agent = await find_agent_by_daimon_tag(
-                        self.view.runtime.anthropic,
-                        tenant_id=row.tenant_id,
-                        name=row.agent_name,
-                        records=self.view.runtime.sessionmaker,
+            agent_ref = AgentRef.of(row.agent_name)
+            if self.values[0] == "dm" and any_agent_rules(policy):
+                agent = await find_agent_by_daimon_tag(
+                    runtime.anthropic,
+                    tenant_id=row.tenant_id,
+                    name=row.agent_name,
+                    records=runtime.sessionmaker,
+                )
+                if agent is None:
+                    await interaction.followup.send(
+                        "The routine agent is unavailable.", ephemeral=True
                     )
-                    if agent is None:
-                        await interaction.response.send_message(
-                            "The routine agent is unavailable.", ephemeral=True
-                        )
-                        return
-                    agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
-                if self.values[0] == "dm" and not authorize(
+                    return
+                agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
+            decision = (
+                authorize(
                     policy,
-                    subject=Subject(),
+                    subject=await saver_subject(
+                        runtime,
+                        policy,
+                        agent_ref,
+                        tenant_id=row.tenant_id,
+                        user_id=str(interaction.user.id),
+                    ),
                     action=Action.SAVE_ROUTINE,
                     surface=Surface.ROUTINE,
                     agent=agent_ref,
                     place=Place(),
-                ):
-                    await interaction.response.send_message(
-                        "This agent cannot run a private routine.", ephemeral=True
-                    )
-                    return
+                )
+                if self.values[0] == "dm"
+                else None
+            )
+            if decision is not None and not decision:
+                await interaction.followup.send(
+                    ROLES_REQUIRED_REFUSAL
+                    if decision.reason == "invoker_not_allowed"
+                    else "This agent cannot run a private routine.",
+                    ephemeral=True,
+                )
+                return
+            async with runtime.sessionmaker.begin() as session:
                 await update_routine(
                     session,
                     row.id,
@@ -177,7 +196,10 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 )
             await _rerender(interaction, self.view)
         except DaimonError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(str(exc), ephemeral=True)
+            else:
+                await interaction.response.send_message(str(exc), ephemeral=True)
         except Exception as exc:  # routines-panel callback boundary
             await _send_callback_error(interaction, exc)
 

@@ -313,7 +313,11 @@ async def test_routine_effects_match_recording(platform, op, scenario, monkeypat
         factory = MagicMock(side_effect=transaction)
         factory.begin = transaction
         runtime = SimpleNamespace(
-            sessionmaker=factory, anthropic=None, settings=SimpleNamespace(web=None)
+            sessionmaker=factory,
+            anthropic=None,
+            settings=SimpleNamespace(web=None),
+            deployment_default=None,
+            resolver_cache=None,
         )
 
         async def load(session, routine_id, *, tenant_id):
@@ -403,6 +407,7 @@ async def test_routine_effects_match_recording(platform, op, scenario, monkeypat
                         is_admin=scenario == "admin",
                         admin_for=lambda _action: scenario == "admin",
                         foreign=False,
+                        channel_thread=("C1", None),
                     )
                 ),
                 store=SimpleNamespace(

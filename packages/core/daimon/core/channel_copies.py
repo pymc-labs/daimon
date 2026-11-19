@@ -22,6 +22,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, AgentRef, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -204,9 +205,12 @@ async def archive_channel_copy(
             tenant_id=tenant_id,
             agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
         )
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         # The agent is archived already; its store is an audit trail, kept.
         _log.warning(
-            "channel_copy.memory_store_archive_failed", tenant_id=str(tenant_id), agent=name
+            "channel_copy.memory_store_archive_failed",
+            tenant_id=str(tenant_id),
+            agent=name,
+            causes=backend_refusal_causes(error),
         )
     return ArchivedCopy(name=name, agent_id=agent.id, closed_channel_id=closing_channel_id)

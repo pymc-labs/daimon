@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AnthropicError, AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError, TurnError
@@ -266,7 +267,9 @@ async def source_skill_archive(
             stored = await catalog.get_agent_skill(scope, record, pin)
         except (MuxError, SQLAlchemyError) as error:
             log.warning(
-                "session_skills.catalog_unread", skill_id=skill_id, error=type(error).__name__
+                "session_skills.catalog_unread",
+                skill_id=skill_id,
+                causes=backend_refusal_causes(error),
             )
             stored = None
         if stored is not None:
@@ -383,7 +386,9 @@ def _measuring(
         if _IN_FLIGHT.get(key) is done:
             del _IN_FLIGHT[key]
         if not done.cancelled() and (error := done.exception()) is not None:
-            log.warning("skill_size.measure_failed", skill_id=pin[0], error=type(error).__name__)
+            log.warning(
+                "skill_size.measure_failed", skill_id=pin[0], causes=backend_refusal_causes(error)
+            )
 
     task.add_done_callback(settle)
     return task
@@ -406,7 +411,9 @@ async def _measure_one(
     except (AnthropicError, DaimonError, MuxError) as error:
         if (busy := read_blip(error)) is not None:
             raise busy from error
-        log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
+        log.warning(
+            "skill_size.measure_failed", skill_id=skill_id, causes=backend_refusal_causes(error)
+        )
         return None
     row = measure_archive(tenant_id, skill_id, version, data)
     async with sessionmaker.begin() as db:
@@ -421,7 +428,7 @@ async def copy_skills(
     *,
     scope: Scope,
     tenant_id: uuid.UUID,
-    provider: str,
+    profile: Profile,
     account_scope_id: str,
     pins: tuple[SkillRef, ...],
     record: Agent | None = None,
@@ -439,14 +446,15 @@ async def copy_skills(
         if pin.version in (None, "latest"):
             raise ValueError("a carried skill needs a concrete version")
         assert pin.version is not None
+        version = "+".join(filter(None, (pin.version, profile.skill_copy_format)))
         async with sessionmaker() as db:
             row = await get_skill_copy(
                 db,
                 tenant_id=tenant_id,
-                provider=provider,
+                provider=profile.provider,
                 account_scope_id=account_scope_id,
                 skill_id=pin.id,
-                version=pin.version,
+                version=version,
             )
         if row is None:
             files = retained_archive_files(
@@ -465,7 +473,7 @@ async def copy_skills(
                 )
             )
             # One key per source version and project: a retried upload is the same one.
-            seed = f"{tenant_id}:{account_scope_id}:{pin.id}:{pin.version}"
+            seed = f"{tenant_id}:{account_scope_id}:{pin.id}:{version}"
             created = await skills.create(
                 scope, upload, key="skill-copy-" + hashlib.sha256(seed.encode()).hexdigest()[:32]
             )
@@ -476,30 +484,48 @@ async def copy_skills(
                     db,
                     SkillCopyRow(
                         tenant_id=tenant_id,
-                        provider=provider,
+                        provider=profile.provider,
                         account_scope_id=account_scope_id,
                         skill_id=pin.id,
-                        version=pin.version,
+                        version=version,
                         copy_id=created.id,
                         copy_version=created.latest_version.version,
                     ),
                 )
         return SkillRef(id=row.copy_id, version=row.copy_version)
 
+    # A native upload waits until it reads back (~4s), so up to 4 run at once. An
+    # emulated catalogue's records share one host transaction (a single writer).
+    gate = asyncio.Semaphore(4 if profile.support_for("skills_bundle") == "native" else 1)
+
+    handled = (AnthropicError, DaimonError, MuxError, ValueError)
+
+    async def attempt(pin: SkillRef) -> SkillRef | Exception:
+        async with gate:
+            try:
+                return await copy(pin)
+            except handled as error:
+                return error
+
+    # Every copy settles first, so none is left running when one raises.
+    outcomes = await asyncio.gather(*(attempt(pin) for pin in pins), return_exceptions=True)
+    # A transient failure retries with the reply; only a permanent one is a loss,
+    # because the session is created once with whatever copied.
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, handled):
+            raise outcome
+        if isinstance(outcome, ProviderError) and outcome.retryable:
+            raise outcome
     copies: list[SkillRef] = []
     losses: list[str] = []
-    # One at a time: a provider's local record store may take a single writer.
-    for pin in pins:
-        try:
-            copies.append(made := await copy(pin))
-        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-            # A transient failure retries with the reply; only a permanent one is a loss,
-            # because the session is created once with whatever copied.
-            if isinstance(error, ProviderError) and error.retryable:
-                raise
-            log.warning("session_skills.copy_failed", skill_id=pin.id, error=type(error).__name__)
+    for pin, made in zip(pins, outcomes, strict=True):
+        if isinstance(made, BaseException):
+            log.warning(
+                "session_skills.copy_failed", skill_id=pin.id, causes=backend_refusal_causes(made)
+            )
             losses.append(f"skill:{pin.id}")
             continue
+        copies.append(made)
         if sources is not None:
             sources[(made.id, str(made.version))] = pin
     return tuple(copies), tuple(losses)
@@ -608,7 +634,9 @@ async def measure_carried_skills(
             if (busy := read_blip(error)) is not None:
                 raise busy from error
             log.warning(
-                "source_capture.skill_unresolved", skill_id=attached.id, error=type(error).__name__
+                "source_capture.skill_unresolved",
+                skill_id=attached.id,
+                causes=backend_refusal_causes(error),
             )
             return SkillRef(id=attached.id, version=attached.version)
         return SkillRef(id=attached.id, version=version)
@@ -651,7 +679,9 @@ async def channel_session_skills(
             if (busy := read_blip(error)) is not None:
                 raise busy from error
             log.warning(
-                "session_skills.unresolved", skill_id=skill.skill_id, error=type(error).__name__
+                "session_skills.unresolved",
+                skill_id=skill.skill_id,
+                causes=backend_refusal_causes(error),
             )
             return None
         return SkillRef(id=skill.skill_id, version=version)
@@ -714,7 +744,7 @@ async def turn_session_skills(
             skills(),
             scope=scope,
             tenant_id=request.tenant_id,
-            provider=profile.provider,
+            profile=profile,
             account_scope_id=account_scope_id,
             pins=pins,
             record=record,
@@ -767,4 +797,4 @@ async def _tell_missing_skills(
                 texts=[missing_skills_notice(sorted({names.get(i, i) for i in ids}))],
             )
     except SQLAlchemyError as error:  # the notice is advisory; never block the reply
-        log.warning("session_skills.notice_failed", error=type(error).__name__)
+        log.warning("session_skills.notice_failed", causes=backend_refusal_causes(error))

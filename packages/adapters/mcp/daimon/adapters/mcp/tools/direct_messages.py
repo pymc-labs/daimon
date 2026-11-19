@@ -8,7 +8,8 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
+from daimon.adapters.mcp.tools import _dm_groups
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -25,7 +26,8 @@ from daimon.adapters.mcp.tools.slack._send import (
     _post_with_identity,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.teams._direct import teams_direct_message
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
+from daimon.core.dm_access import member_roles
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from slack_sdk.errors import SlackApiError
@@ -60,7 +62,7 @@ async def send_direct_message_impl(
         recipient_id = recipient_id.lower()  # Entra ids compare case-insensitively
     if re.fullmatch(_RECIPIENT[auth.platform], recipient_id) is None:
         raise ToolError("recipient_id must be one platform user ID, not a mention or channel")
-    policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id)
     if not policy.allows(recipient_id):
         raise ToolError("direct messages to this recipient are not allowed here")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)
@@ -83,6 +85,12 @@ async def send_direct_message_impl(
                 recipient = await guild.fetch_member(int(recipient_id))
                 if recipient.bot:
                     raise ToolError("recipient must be a person in this server")
+                await require_dm_grant(
+                    runtime,
+                    auth,
+                    recipient_id=recipient_id,
+                    groups=member_roles(str(role.id) for role in recipient.roles),
+                )
                 dm = await recipient.create_dm()
                 for chunk in chunks:
                     message = await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
@@ -112,6 +120,13 @@ async def send_direct_message_impl(
                 or user.get("is_stranger")
             ):
                 raise ToolError("sender and recipient must be active human members here")
+        async with _dm_groups.slack_http() as http:
+            await require_dm_grant(
+                runtime,
+                auth,
+                recipient_id=recipient_id,
+                groups=_dm_groups.slack_groups(http, client, team_id=team_id),
+            )
         opened = await client.conversations_open(users=recipient_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast(dict[str, str], opened["channel"])["id"]
         identity_kwargs = await _agent_identity_kwargs(runtime, auth)

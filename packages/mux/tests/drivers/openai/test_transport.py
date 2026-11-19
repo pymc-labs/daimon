@@ -250,3 +250,29 @@ async def test_native_validation_details_keep_the_cause_but_redact_wire_credenti
     )
     assert secret not in error.native_message and "offline-placeholder" not in error.native_message
     assert "[redacted]" in error.native_message and secret not in str(error)
+
+
+def test_mcp_error_details_mask_known_secrets_fragments_and_bearers() -> None:
+    """MCP flows keep the provider's reason but never a known credential or part of one."""
+    from mux.drivers.openai.transport import suppress_mcp_error_details
+
+    secret = "opaque-user-token-0123456789"
+    leaks = (secret, secret[5:13], "Bearer unrelated-bearer-value")
+    for leak in leaks:
+        error = ProviderError(
+            "invalid_request",
+            retryable=False,
+            native_code="400",
+            native_message=f"skill archive mismatch near {leak}",
+            native_error_code=leak,
+            native_param=f"tools[0].{leak}",
+        )
+        with pytest.raises(ProviderError), suppress_mcp_error_details([secret]):
+            raise error
+        fields = (error.native_message, error.native_error_code, error.native_param)
+        assert error.native_message and "skill archive mismatch" in error.native_message, (
+            "the provider's reason must survive redaction"
+        )
+        assert not any(part in str(fields) for part in (secret[5:13], "unrelated-bearer")), (
+            f"{leak!r} reached a native field: {fields}"
+        )

@@ -109,7 +109,7 @@ async def _service(
             teams_escalation_channel_id="19:ops@thread.tacv2"
         )
     else:
-        runtime.settings.features = {"support_own_channel": "off"}
+        runtime.settings.features = {**runtime.settings.features, "support_own_channel": "off"}
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     create = patch("daimon.core.turn.prepare.create_session", return_value=session)
     with create if one_session else nullcontext():

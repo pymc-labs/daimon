@@ -14,6 +14,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
 from daimon.core.stores import (
@@ -21,7 +22,10 @@ from daimon.core.stores import (
     agent_posts,
     credential_requests,
     direct_messages,
+    dm_access,
+    dm_carry_overs,
     github_connect,
+    held_timers,
     host_call_cards,
     identity,
     lead_intake,
@@ -213,6 +217,29 @@ async def _slack_token(session: AsyncSession, pp: PlatformPrincipalRow, *, delet
         session, team_id=tenant.external_id, slack_user_id=pp.external_id
     )
     return int(token is not None)
+
+
+def by_imported_user(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
+    """Rows imported before the person had an account, keyed by (tenant, platform, user)."""
+
+    def users(subject: Subject) -> list[tuple[uuid.UUID, str, str]]:
+        return [_who(pp) for pp in subject.platform]
+
+    return by_user(
+        key,
+        lambda s, pp: erase(s, users=[_who(pp)]),
+        total=lambda s, sub: count(s, users=users(sub)),
+        account=lambda s, sub: erase(s, users=users(sub)),
+    )
+
+
+def by_dm_user(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
+    """DM routing rows naming the person by (tenant, platform user); erased per account."""
+    return Erasable(
+        key,
+        count=lambda s, sub: count(s, keys=sub.user_keys),
+        account=lambda s, sub: erase(s, keys=sub.user_keys, now=datetime.now(UTC)),
+    )
 
 
 async def _first_routine(session: AsyncSession, subject: Subject) -> str | None:
@@ -462,7 +489,15 @@ ERASABLE: tuple[Erasable, ...] = (
             direct_messages.delete_conversations_for_account,
         ),
     ),
+    by_imported_user(
+        "dm_carry_overs", dm_carry_overs.count_for_users, dm_carry_overs.delete_for_users
+    ),
+    by_imported_user("held_timers", held_timers.count_for_users, held_timers.delete_for_users),
     by_account("tag_opt_outs", (tag_opt_outs.count_for_account, tag_opt_outs.delete_for_account)),
+    # The person's agent picks, personal routing rules and listed-grant entries.
+    by_account("dm_picks", (dm_access.count_picks_for_account, dm_access.delete_picks_for_account)),
+    by_dm_user("dm_rules", dm_access.count_user_rules, dm_access.delete_user_rules),
+    by_dm_user("dm_grant_users", dm_access.count_grants_listing, dm_access.scrub_user_from_grants),
     # Their identities, tokens and browser sessions cascade from the person.
     by_account("web_people", (web_people.count_for_account, web_people.delete_for_account)),
     by_account(

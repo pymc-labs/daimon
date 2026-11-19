@@ -39,19 +39,24 @@ async def test_switch_timeout_clears_view_store_and_route_registry():
     await cog.cog_unload()
 
 
-async def test_unload_stops_pending_selectors_and_drops_original_text(
+async def test_unload_stops_pending_selectors_and_tells_the_held_text_was_not_sent(
     db_session_factory, monkeypatch
 ):
-    from .test_cold_direct_messages import message, selector, setup
+    from daimon.adapters.discord.commands import direct_messages as module
 
-    cog, _, _, _ = await setup(db_session_factory, monkeypatch, count=2)
+    from .test_cold_direct_messages import message, offered, selector, setup
+
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch, count=2)
     msg = message()
-    await cog.on_message(msg)
+    task = await offered(cog, msg)
     view = selector(msg)
     assert cog._pending
     await cog.cog_unload()
+    await asyncio.wait_for(task, 5)
     assert view.is_finished() and view._expiry.cancelled()
     assert not cog._pending
+    reply.assert_not_awaited()
+    assert msg.channel.send.await_args.kwargs["embed"].description == module._DROPPED_NOTICE
 
 
 async def test_an_inflight_reply_cannot_register_a_new_switch_after_unload():

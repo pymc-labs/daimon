@@ -6,8 +6,9 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
@@ -21,18 +22,30 @@ from daimon.adapters.mcp.tools._web_admin import (
     web_admin_of,
 )
 from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
-from daimon.core import web_admin
+from daimon.core import dm_settings, web_admin
 from daimon.core.allowances import EVERYONE
 from daimon.core.cursor import decode_cursor, encode_cursor
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.dm_access import dm_agents_of
+from daimon.core.dm_settings import MAX_SUBJECTS, NO_DMS, DmActor, PlatformId
+from daimon.core.errors import UserFacingError
+from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_invites
 from daimon.core.stores import web_people as people_store
-from daimon.core.stores.domain import WebAgentWho, WebIdentityRow, WebPersonRow, WebPersonStatus
+from daimon.core.stores.domain import (
+    DmGrantMode,
+    WebAgentWho,
+    WebIdentityRow,
+    WebPersonRow,
+    WebPersonStatus,
+)
 from daimon.core.web_admin import AgentAccess, WebAdminError
 from daimon.core.web_roles_rules import Role, role_of, roles_of
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _LIMIT = 200
 PersonRole = Literal["admin", "member"]
@@ -92,6 +105,15 @@ class AgentWebAccess:
     groups: list[str]
     fixed_to: str | None
     """The channel an agent is kept to, which keeps it off the web."""
+    dm: AgentDmAccess | None = None
+    """Who may DM the agent; null when the workspace or the agent takes no DMs."""
+
+
+@dataclass(frozen=True)
+class AgentDmAccess:
+    who: DmGrantMode
+    user_ids: list[str]
+    group_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -126,7 +148,7 @@ def _uuid(value: str) -> uuid.UUID:
         raise ToolError("person_id is not valid.") from err
 
 
-def _access(row: AgentAccess) -> AgentWebAccess:
+def _access(row: AgentAccess, dm: dict[str, AgentDmAccess]) -> AgentWebAccess:
     return AgentWebAccess(
         agent_id=row.agent_id,
         name=row.name,
@@ -134,7 +156,26 @@ def _access(row: AgentAccess) -> AgentWebAccess:
         who=row.who,
         groups=row.groups,
         fixed_to=row.fixed_to,
+        dm=dm.get(row.agent_id),
     )
+
+
+async def _dm_access(
+    db: AsyncSession, tenant_id: uuid.UUID, agents: Sequence[BetaManagedAgentsAgent]
+) -> dict[str, AgentDmAccess]:
+    """Each DM agent's grant by agent id; empty when the workspace has no DMs."""
+    if await dm_settings.dm_platform(db, tenant_id) is None:
+        return {}
+    grants = await dm_store.list_grants(db, tenant_id=tenant_id)
+    found: dict[str, AgentDmAccess] = {}
+    for agent in dm_agents_of(agents):
+        grant = grants.get(agent.name)
+        found[agent.ma_agent_id] = (
+            AgentDmAccess("members", [], [])
+            if grant is None
+            else AgentDmAccess(grant.who, list(grant.user_ids), list(grant.group_ids))
+        )
+    return found
 
 
 async def _people_impl(
@@ -168,7 +209,7 @@ async def _people_impl(
         rows = rows[:size]
         identities = await identities_store.list_for_people(db, person_ids=[p.id for p in rows])
         roles = await roles_of(db, rows)
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return WebPeople(
         [_person(p, roles[p.id], _groups(identities[p.id]), details) for p in rows],
         details,
@@ -195,7 +236,7 @@ async def _person_impl(
             else None
         )
     open_invite = invite if invite is not None and invite.revoked_at is None else None
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return WebPersonDetail(
         person=_person(person, role, _groups(identities), details),
         identities=[f"{i.provider}:{i.label}" for i in identities] if details == "shown" else [],
@@ -242,7 +283,7 @@ async def _update_impl(
             shown = await role_of(db, changed)
     except WebAdminError as err:
         raise refused(err) from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return replace(
         _person(changed, shown, _groups(identities), details),
         web_url=links.person(str(changed.id)) if links else None,
@@ -258,8 +299,9 @@ async def _access_list_impl(
     )
     async with runtime.session_factory() as db:
         rows = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
+        dm = await _dm_access(db, actor.tenant_id, agents)
     shown, total, next_page = paged(rows, after)
-    return AgentWebAccessList([_access(r) for r in shown], total, next_page)
+    return AgentWebAccessList([_access(r, dm) for r in shown], total, next_page)
 
 
 async def _access_set_impl(
@@ -270,6 +312,7 @@ async def _access_set_impl(
     who: WebAgentWho | None,
     groups: list[str] | None,
     origin_context_id: str | None = None,
+    dm: AgentDmAccess | None = None,
 ) -> AgentWebAccess:
     actor = await web_admin_of(runtime, auth)
     await require_card(
@@ -284,15 +327,53 @@ async def _access_set_impl(
     ]
     if not agents:
         raise ToolError("This agent isn't on this team.")
+    probe = (
+        await dm_settings.slack_groups_probe(
+            runtime.session_factory, actor.tenant_id, fernet=runtime.fernet
+        )
+        if dm is not None
+        else None
+    )
     try:
         async with runtime.session_factory.begin() as db:
             [current] = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
-            changed = await web_admin.set_agent_access(
-                db, actor, now(), current, web=web, who=who, groups=groups
-            )
+            if dm is None or (web, who, groups) != (None, None, None):
+                current = await web_admin.set_agent_access(
+                    db, actor, now(), current, web=web, who=who, groups=groups
+                )
+            if dm is not None:
+                await _set_dm(db, actor, agents[0], dm, probe)
+            dm_now = await _dm_access(db, actor.tenant_id, agents)
     except WebAdminError as err:
         raise refused(err) from err
-    return _access(changed)
+    except UserFacingError as err:
+        raise ToolError(str(err)) from err
+    return _access(current, dm_now)
+
+
+async def _set_dm(
+    db: AsyncSession,
+    admin: web_admin.WebAdmin,
+    agent: BetaManagedAgentsAgent,
+    dm: AgentDmAccess,
+    probe: dm_settings.GroupsProbe | None,
+) -> None:
+    """Who may DM `agent`, as the web's agent access page sets it."""
+    if await dm_settings.dm_platform(db, admin.tenant_id) is None:
+        raise ToolError(NO_DMS)
+    dm_agents = dm_agents_of([agent])
+    if not dm_agents:
+        raise ToolError("This agent doesn't take direct messages.")
+    await dm_settings.set_grant(
+        db,
+        DmActor(admin.tenant_id, admin.account_id, now()),
+        dm_agents[0],
+        agent.name,
+        who=dm.who,
+        user_ids=dm.user_ids,
+        group_ids=dm.group_ids,
+        probe=probe,
+    )
 
 
 def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -304,7 +385,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
         after: str | None = None,
     ) -> WebPeople:
-        """List the web app's people, oldest first, with role, status and groups. ``query``
+        """List the workspace's people, oldest first, with role, status and groups. ``query``
         keeps those whose name or email contains it. Emails show only in a direct message with
         the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass
         this active turn's origin_context_id. ``next_page`` goes back as ``after``."""
@@ -314,7 +395,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def get_person(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, person_id: str, origin_context_id: str | None = None
     ) -> WebPersonDetail:
-        """Show one web person: role, status, groups, sign-ins and, for a visitor, their
+        """Show one person: role, status, groups, sign-ins and, for a visitor, their
         invite. Email and sign-ins show only in a direct message with the admin; elsewhere
         ``private_details`` is ``direct_message``. Pass this active turn's origin_context_id.
         Admin-only."""
@@ -322,7 +403,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(name="list_web_groups", tags={"admin"})
     async def list_groups(ctx: Context) -> WebGroups:  # pyright: ignore[reportUnusedFunction]
-        """List everyone and each group the web sign-ins carry, with head counts. Admin-only."""
+        """List everyone and each group people sign in with, with head counts. Admin-only."""
         return await _groups_impl(runtime, await _auth(ctx))
 
     @mcp.tool(name="update_web_person", tags={"admin"})
@@ -358,11 +439,18 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         groups: list[str] | None = None,
         *,
         origin_context_id: str,
+        dm_who: DmGrantMode | None = None,
+        dm_user_ids: Annotated[list[PlatformId], Field(max_length=MAX_SUBJECTS)] | None = None,
+        dm_group_ids: Annotated[list[PlatformId], Field(max_length=MAX_SUBJECTS)] | None = None,
     ) -> AgentWebAccess:
         """Turn an agent's web chat on or off and set who may use it: everyone or up to 100
-        groups or invitees."""
+        groups or invitees. ``dm_who`` sets who may DM it: ``members`` (everyone), ``listed``
+        or ``excluded``, with platform user and group ids."""
+        dm = (
+            None if dm_who is None else AgentDmAccess(dm_who, dm_user_ids or [], dm_group_ids or [])
+        )
         return await _access_set_impl(
-            runtime, await _auth(ctx), agent_id, web, who, groups, origin_context_id
+            runtime, await _auth(ctx), agent_id, web, who, groups, origin_context_id, dm
         )
 
 

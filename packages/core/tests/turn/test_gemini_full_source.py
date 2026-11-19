@@ -671,6 +671,18 @@ async def full(switched_request, source_mcp, monkeypatch, tmp_path, request):
     assert all(client.is_closed for client in clients)
 
 
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("full", [False], indirect=True)
+async def test_a_pinned_copy_keeps_its_allowlist_where_a_tool_is_off(full, monkeypatch):
+    """A tool Off here stays in a pinned install's allowlist; the server refuses it on call."""
+    from daimon.core.features.model_input import SessionToolset
+
+    request, *_ = full
+    monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", property(lambda _: {"search_tools"}))
+    selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
+    assert selected.verified_counterpart == selected.counterpart
+
+
 @pytest.mark.parametrize(
     "switched_request,full",
     [(PARAMS, False), (LATEST_PARAMS, False), (GATED_PARAMS, True)],

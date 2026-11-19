@@ -44,6 +44,7 @@ import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_attach import McpServerReplaceRefusedError
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
@@ -700,6 +701,7 @@ async def forget_mirrored_mcp_token(
                 "mcp_credentials.copy_delete_failed",
                 vault_id=vault_id,
                 error=type(err).__name__,
+                causes=backend_refusal_causes(err),
             )
             failed.append(vault_id)
     log.info(

@@ -432,7 +432,7 @@ async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
         memory_read_only=False,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     monkeypatch.setattr(
         direct_messages, "quarantine_conversation", AsyncMock(return_value=["sess_dm"])

@@ -13,6 +13,8 @@ from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.app import SlackApp
 from daimon.testing.db import db_clean as db_clean
+from daimon.testing.db import db_committing_engine as db_committing_engine
+from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session

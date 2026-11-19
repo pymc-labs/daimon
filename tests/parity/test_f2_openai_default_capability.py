@@ -33,6 +33,7 @@ from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, Skill
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Context
 from mux.drivers.openai.agents import agent_spec
+from mux.drivers.openai.skills import plain_bundle
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
@@ -401,6 +402,7 @@ class _F2Factory(OpenAIDefaultCapabilityFactory):
             transport=script,
             builtin_mapping=BUILTIN_MAPPING,
             atomic_revision_pin=False,
+            uploaded=plain_bundle,
         )
 
 

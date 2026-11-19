@@ -71,7 +71,7 @@ async def test_a_cold_dm_names_no_server(monkeypatch: pytest.MonkeyPatch) -> Non
     _no_conversation(monkeypatch)
     message = _dm(1)
 
-    await _cog()._reply(message)  # pyright: ignore[reportPrivateUsage]
+    await _cog()._open(message)  # pyright: ignore[reportPrivateUsage]
 
     text = message.channel.send.await_args.kwargs["embed"].description
     assert text.startswith("I can't start a private chat from here.")

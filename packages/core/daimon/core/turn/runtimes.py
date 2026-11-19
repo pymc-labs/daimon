@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
@@ -9,6 +10,7 @@ from importlib import import_module
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import structlog
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.turn.errors import AdmissionDenied
 from mux.errors import ScopeViolation, UnsupportedCapability
@@ -135,6 +137,25 @@ def shares_agent_threads(profile: str) -> bool:
     """Whether `profile` runs an agent's own copy in a shared thread (as its owner)."""
     backend = hosted_backend(profile)
     return backend is not None and backend.shares_agent_threads
+
+
+async def preload_channel_runtimes() -> None:
+    """Install every provider runtime off the event loop before a process serves turns.
+
+    Otherwise a provider's first turn imports its SDK on the loop, stalling every turn
+    in the process for seconds.
+    """
+
+    def install() -> None:
+        for profile in hosted_profiles():
+            try:
+                hosted_backend(profile)
+            except Exception:  # one broken provider must not stop the process
+                structlog.get_logger().warning(
+                    "runtime.preload_failed", profile=profile, exc_info=True
+                )
+
+    await asyncio.to_thread(install)
 
 
 def authorized_channel_deployments(profile: str, tenant_id: str) -> tuple[RuntimeDeployment, ...]:

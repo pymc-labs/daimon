@@ -11,6 +11,8 @@ from typing import cast
 
 import httpx
 import pytest
+from mux.contracts.actions import UserMessage
+from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
@@ -28,7 +30,7 @@ from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 
-from .conftest import SCOPE, native_session
+from .conftest import SCOPE, native_session, turn
 
 URL = "https://qa.example.com/mcp"
 
@@ -1288,20 +1290,25 @@ async def test_raw_session_vault_ids_cannot_authorize_foreign_vault_cleanup() ->
 
 
 @pytest.mark.parametrize("secret", ["opaque-user-token", "eyJpartial.jwt-fragment"])
-@pytest.mark.parametrize("phase", ["credential", "session"])
+@pytest.mark.parametrize("phase", ["credential", "session", "turn"])
 async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase: str) -> None:
+    """Create masks the bearers it knows; a turn on a vault-bound session wipes every field."""
+
     class EchoWire(Wire):
         def handle(self, request: httpx.Request) -> httpx.Response:
             failure = (
                 request.url.path.endswith("/credentials")
                 if phase == "credential"
-                else request.url.path == "/v1/agents/sessions"
+                else request.url.path
+                == ("/v1/agents/sessions/s/events" if phase == "turn" else "/v1/agents/sessions")
             )
             if failure and request.method == "POST":
                 self.requests.append(request)
                 return httpx.Response(
                     403, json={"error": {"message": secret, "code": secret, "param": secret}}
                 )
+            if request.url.path == "/v1/agents/sessions/s/turns":
+                return httpx.Response(200, json={"data": [turn("in_progress")], "has_more": False})
             return super().handle(request)
 
     wire = EchoWire()
@@ -1314,14 +1321,21 @@ async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
         with pytest.raises(ProviderError) as refused:
-            await driver.sessions.create(
+            session = await driver.sessions.create(
                 SCOPE,
                 SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
                 key="session",
             )
+            wire.sessions["s"]["status"] = "in_progress"
+            steer = UserMessage(content=(TextPart(text="more"),), mode="steer")
+            await driver.events.send(SCOPE, session.ref, [steer], key="turn")
     error = refused.value
     assert error.category == "permission" and error.native_code == "403"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    fields = (error.native_message, error.native_error_code, error.native_param)
+    if phase == "turn":
+        assert fields == (None,) * 3, "the vault may echo an earlier turn's bearer: wiped"
+        return
+    assert fields == ("[redacted]",) * 3, "a known MCP secret is masked, never kept"
     assert not wire.vaults
     assert not any(r.method == "GET" and r.url.path == "/v1/vaults" for r in wire.requests)
     for request in wire.requests:
@@ -1360,7 +1374,7 @@ async def test_mcp_cleanup_failure_preserves_original_error(phase: str) -> None:
             )
     error = refused.value
     assert error.category == "invalid_request" and error.native_code == "400"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    assert error.native_message == "[redacted]", "the echoed MCP secret is masked"
     assert any(
         "cleanup failed (ProviderError)" in note and "vault-1" in note for note in error.__notes__
     )

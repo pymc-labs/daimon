@@ -50,6 +50,7 @@ from daimon.core.agent_pins import (
     agent_pin_names,
     request_pin_refusal,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_flow import (
@@ -299,6 +300,7 @@ async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
             "credential_request.continuation_dispatch_failed",
             kind=kind,
             err_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
         )
 
 
@@ -866,6 +868,7 @@ async def _attach_skills_to_requested_agent(
             "credential_request.skill_repo_attach_failed",
             agent_id=str(agent_id),
             err_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
         )
         return SkillAttachOutcome(
             note="Attaching them did not finish. Try again using the same form.",

@@ -12,3 +12,11 @@ def human_invocation(origin: str, attended: bool | None) -> bool:
     even when it retains a recorded owner whose current membership can be looked up.
     """
     return origin in HUMAN_MESSAGE_ORIGINS and attended is not False
+
+
+def unattended_invocation(origin: str, attended: bool | None) -> bool:
+    """Nobody waits on this turn: its caller says so, or, unsaid, a routine started it.
+
+    Wakes always say. Decides the unattended tool rules and the unattended run limit alike.
+    """
+    return attended is False or (attended is None and origin == "routine")

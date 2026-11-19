@@ -20,6 +20,7 @@ from daimon.adapters.teams.card import TEAMS_LIMIT
 from daimon.adapters.teams.card_actions import clip, heading
 from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.memory_view import (
     get_channel_memory_store,
@@ -207,7 +208,7 @@ async def show_memory(context: CommandContext) -> None:
     try:
         cards = await _memory_card(context)
     except (DaimonError, anthropic.APIError) as exc:
-        log.warning("teams.memory.failed", exc_info=exc)
+        log.warning("teams.memory.failed", exc_info=exc, causes=backend_refusal_causes(exc))
         cards = _card(str(exc) if isinstance(exc, DaimonError) else _FAILED)
     for card in cards if isinstance(cards, list) else [cards]:
         await context.send_card(card)

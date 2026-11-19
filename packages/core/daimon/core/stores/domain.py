@@ -344,6 +344,8 @@ class ThreadSessionRow(BaseModel):
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
     active_turn_channel_id: str | None = None
+    active_turn_deadline: datetime | None = None
+    model_marks: list[str] | None = None
     # The configuration the MA session froze at create time. NULL on rows
     # written before continuity existed — callers read that as "unknown".
     effective_config: SessionSnapshot | None = None
@@ -1721,6 +1723,47 @@ class WebAgentGrantRow(BaseModel):
     web: bool = True
     who: WebAgentWho = "everyone"
     groups: tuple[str, ...] = ()
+
+
+DmGrantMode = Literal["members", "listed", "excluded"]
+DmRuleSubject = Literal["user", "group", "everyone"]
+
+
+class DmAgentGrantRow(BaseModel):
+    """Who may DM one agent (see `DmAgentGrant`); `members` when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_name: str
+    who: DmGrantMode = "members"
+    user_ids: tuple[str, ...] = ()
+    group_ids: tuple[str, ...] = ()
+    set_by: str | None = None
+
+
+class DmRuleRow(BaseModel):
+    """One ordered routing rule (see `DmRule`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    position: int
+    subject: DmRuleSubject
+    subject_id: str | None = None
+    agent_name: str | None = None
+    locked: bool = False
+    set_by: str | None = None
+
+
+class DmAgentPickRow(BaseModel):
+    """A person's chosen DM agent in a workspace (see `DmAgentPick`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_name: str
 
 
 class WebWorkspaceSettingsRow(BaseModel):

@@ -27,10 +27,11 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.stage_timing import stage_timer
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
-from mux.contracts.profile import Capability, Effort
+from mux.contracts.profile import Capability, Effort, Profile
 from mux.contracts.resources import (
     AgentSpec,
     EnvironmentSpec,
@@ -338,26 +339,41 @@ def shared_copy_slot(request: ProviderPreparationRequest) -> Slot | None:
 
 
 async def capture_preparation_source(
-    request: ProviderPreparationRequest, *, fresh: bool = False, capability_preview: bool = False
+    request: ProviderPreparationRequest,
+    *,
+    fresh: bool = False,
+    capability_preview: bool = False,
+    stage_ms: dict[str, float] | None = None,
 ) -> BackendAgent:
-    """Capture source facts; the existing proof and materializer validate them."""
+    """Capture source facts; the existing proof and materializer validate them.
+
+    `stage_ms` gets each stage's time, for the caller's timing line.
+    """
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
 
+    mark = stage_timer(stage_ms)
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
         records = request.deps.sessionmaker
-        actual = await retrieve_agent(
-            request.deps.anthropic, request.admission.agent.id, scope=request.scope, records=records
+        # Independent reads: one round trip, not two.
+        actual, environment = await asyncio.gather(
+            retrieve_agent(
+                request.deps.anthropic,
+                request.admission.agent.id,
+                scope=request.scope,
+                records=records,
+            ),
+            retrieve_environment(
+                request.deps.anthropic,
+                request.admission.environment.id,
+                scope=request.scope,
+                records=records,
+            ),
         )
-        environment = await retrieve_environment(
-            request.deps.anthropic,
-            request.admission.environment.id,
-            scope=request.scope,
-            records=records,
-        )
+        mark("fresh_reads")
         request = replace(
             request,
             source=None,
@@ -375,6 +391,7 @@ async def capture_preparation_source(
             or "",
             actual_agent=request.admission.agent,
         )
+        mark("load_backend_agent")
     captured = await project_session_resources(
         source,
         agent=request.admission.agent,
@@ -403,9 +420,12 @@ async def capture_preparation_source(
         origin_seal_ids=request.admission.origin_seal_ids,
         caller_resources_on_credential=carries_caller_resources(request, capability_preview),
     )
-    return await _capture_source_capabilities(
-        request, captured, capability_preview=capability_preview
+    mark("project_session_resources")
+    captured = await _capture_source_capabilities(
+        request, captured, capability_preview=capability_preview, mark=mark
     )
+    mark("capabilities")
+    return captured
 
 
 def carries_caller_resources(request: ProviderPreparationRequest, preview: bool) -> bool:
@@ -458,7 +478,11 @@ def relayed_connectors(
 
 
 async def _capture_source_capabilities(
-    request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
+    request: ProviderPreparationRequest,
+    source: BackendAgent,
+    *,
+    capability_preview: bool = False,
+    mark: Callable[[str], None],
 ) -> BackendAgent:
     """Verify configured representations at the common preview/preparation capture edge.
 
@@ -636,6 +660,7 @@ async def _capture_source_capabilities(
                 # restricted external-agent key (which sees a different catalogue).
                 # This preview credential is revoked before returning and never
                 # exposed to a provider; the ACK owner mints the runtime credential.
+                mark("capabilities")
                 now = request.now()
                 secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
                 async with request.deps.sessionmaker.begin() as db:
@@ -669,6 +694,7 @@ async def _capture_source_capabilities(
                         await revoke_mcp_token(
                             db, jti=token_jti(catalogue_token), now=request.now()
                         )
+                    mark("catalogue")
             catalogue = source_catalogue
             allowed = next(
                 (
@@ -765,6 +791,10 @@ async def _capture_source_capabilities(
 
             settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), RETIRED_GATES
+            # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
+            # its tools out of a template's allowlist, as a Claude session's toolset does. A
+            # pinned install keeps its exact allowlist; the server refuses them on call.
+            hidden = request.admission.toolset.hidden_daimon_tools if template else frozenset[str]()
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
@@ -773,7 +803,9 @@ async def _capture_source_capabilities(
                 # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
                 name: (
-                    "auto"
+                    "disabled"
+                    if name in hidden
+                    else "auto"
                     if name in carded and permission != "disabled"
                     else "ask"
                     if name in gated
@@ -958,7 +990,9 @@ async def _capture_source_capabilities(
                 latest = dict(await asyncio.gather(*(resolve_latest(s) for s in unresolved)))
 
             async def verify_skill(
-                item: SourceSkillMapping, versions: Mapping[str, str] = latest
+                item: SourceSkillMapping,
+                versions: Mapping[str, str] = latest,
+                pinned: Profile = profile,
             ) -> None:
                 attached = next(s for s in spec.skills or () if s.id == item.source.id)
                 version = (
@@ -989,7 +1023,16 @@ async def _capture_source_capabilities(
                         for path, body in sorted(retained.items())
                     )
                 )
-                if request_digest(canonical.model_dump(mode="json")) != item.target.digest:
+                from mux.drivers.openai import bundle_digest
+
+                # The digest the target driver pinned: a content pin is of the bytes the
+                # OpenAI driver uploads (`plain_bundle`); a version pin, of the source bytes.
+                digest = (
+                    bundle_digest(canonical)
+                    if pinned.skill_digest == "content"
+                    else request_digest(canonical.model_dump(mode="json"))
+                )
+                if digest != item.target.digest:
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
@@ -1059,7 +1102,11 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences and code labels are logged, never a provider's or a validator's text.
-        from daimon.core.channel_backend import exception_labels, transient_failure
+        from daimon.core.channel_backend import (
+            backend_refusal_causes,
+            exception_labels,
+            transient_failure,
+        )
         from daimon.core.errors import TurnError
 
         # A blip (a timeout, a lost connection, a 5xx or 429) proves no loss: the
@@ -1078,6 +1125,7 @@ async def _capture_source_capabilities(
             profile=revision.profile if revision is not None else None,
             model=revision.model if revision is not None else None,
             capability_preview=capability_preview,
+            causes=backend_refusal_causes(error),
         )
         return source
 

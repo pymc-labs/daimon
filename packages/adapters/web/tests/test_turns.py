@@ -24,6 +24,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.channel_budgets import OriginSpend, origin_spend
+from daimon.adapters.web import turns as turns_module
 from daimon.adapters.web.stream import Event
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.access_policy import TenantAccessPolicy
@@ -32,7 +33,8 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import accounts, spend_allowances, tenants, turn_outcomes, usage_events
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import Role, WebThreadRow
+from daimon.core.stores.domain import FeatureTarget, Role, WebMessageBlocks, WebThreadRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.shared_channels import is_channel_shared
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -123,6 +125,71 @@ async def test_a_turn_streams_its_answer_and_saves_it(
     assert (reply.role, reply.status, reply.content) == ("assistant", "done", AGENT_TEXT)
     assert str(reply.id) == done["message"]["id"], "the saved reply is the one streamed"
     assert turns.streams.running(thread.id) is None, "the stream closes with the turn"
+
+
+@pytest.mark.parametrize(("chosen", "kept"), [(None, 12), ("25", 25)])
+async def test_a_reseed_replays_as_many_earlier_messages_as_dm_history_depth_allows(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    chosen: str | None,
+    kept: int,
+) -> None:
+    ws = await funded_workspace(db_session_factory)
+    async with db_session_factory.begin() as session:
+        if chosen is not None:
+            await set_feature_value(
+                session,
+                tenant_id=ws.tenant_id,
+                target=FeatureTarget("workspace"),
+                key="dm_history_depth",
+                value=chosen,
+                set_by=None,
+                surface="chat",
+            )
+        thread = await chat_store.create_thread(
+            session,
+            tenant_id=ws.tenant_id,
+            person_id=ws.person.id,
+            agent_id=AGENT_ID,
+            agent_name=DEFAULT_AGENT_NAME,
+            title="New chat",
+        )
+        for n in range(30):
+            await chat_store.insert_user_message(
+                session,
+                tenant_id=ws.tenant_id,
+                thread_id=thread.id,
+                message_id=uuid.uuid4(),
+                content=f"earlier {n}",
+                blocks=WebMessageBlocks(),
+            )
+        message, _ = await chat_store.insert_user_message(
+            session,
+            tenant_id=ws.tenant_id,
+            thread_id=thread.id,
+            message_id=uuid.uuid4(),
+            content="now",
+            blocks=WebMessageBlocks(),
+        )
+        principal = await principal_of(session, ws.person, "member")
+    turns = build_turns(db_session_factory, build_turn_router(str(ws.tenant_id)), tmp_path)
+    replayed: list[str] = []
+    real = turns_module.run_prepared_turn
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        replayed.append(await kwargs["reseed_user_message"]())
+        return await real(*args, **kwargs)
+
+    with one_session(), patch.object(turns_module, "run_prepared_turn", spy):
+        stream = turns.start(person=ws.person, principal=principal, thread=thread, message=message)
+        [_ async for _ in stream.segment(0)]
+        await turns.drain(10)
+
+    [history] = replayed
+    assert history.count('<turn role="user">') == kept, "the workspace setting caps it"
+    assert f"earlier {30 - kept}<" in history and f"earlier {29 - kept}<" not in history, (
+        "the newest are kept"
+    )
 
 
 async def test_a_tool_call_streams_as_a_step(

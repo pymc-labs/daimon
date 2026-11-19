@@ -25,7 +25,7 @@ server](https://daimon.decision.ai/) instead.
   [Repository memory](repo-memory.md),
   [Context providers](context-providers.md),
   [Lead intake](lead-intake.md) and [Ask a person](support.md). [Move routines in](routine-migration.md)
-  from another system.
+  and [people in](people-migration.md) from another system.
 
 ## Understand it
 

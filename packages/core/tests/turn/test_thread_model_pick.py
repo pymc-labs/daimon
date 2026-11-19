@@ -8,7 +8,6 @@ from dataclasses import replace
 import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
-    AgentBackendRefused,
     BackendActor,
     ThreadBackend,
     resolve_turn_backend,
@@ -27,8 +26,6 @@ from daimon.core.thread_model_switch import (
     ThreadPick,
     pick_thread,
     pick_value,
-    preview_thread_model,
-    preview_thread_or_refusal,
 )
 from daimon.core.thread_models import ThreadModelChange, thread_backend
 from mux.contracts.ids import ChannelRef, ModelRef
@@ -100,12 +97,9 @@ async def test_a_pick_off_the_agents_provider_needs_the_owner(switching):
     service, agent, _, sessions, _, _ = switching
     stranger = BackendActor(agent.tenant_id, uuid.uuid4(), Subject())
     pick = _pick(service, agent, stranger, sessions)
-    with pytest.raises(AgentBackendRefused) as refused:
-        await preview_thread_model(pick, LUNA)
-    assert refused.value.reason == "owner_or_admin_required", refused.value.reason
-    assert (await preview_thread_model(pick, "anthropic:claude-haiku-5-5")).preview is None, (
-        "a Claude pick on a Claude agent has nothing to check"
-    )
+    refused = await pick_thread(pick, LUNA, thread_id="thread", admin=False)
+    assert isinstance(refused, SwitchRefusal), "a refusal, not an exception"
+    assert refused.reason == "owner_or_admin_required", refused.reason
     assert await _thread(sessions, agent) is None, "nothing was kept"
     async with sessions.begin() as db:
         await set_feature_value(
@@ -124,8 +118,9 @@ async def test_a_pick_off_the_agents_provider_needs_the_owner(switching):
 
 async def test_a_lossy_pick_is_kept_at_once_and_runs_this_conversation_only(switching):
     """Sandbox is off on OpenAI: said as information, kept in one call, audited."""
-    service, agent, actor, sessions, _, _ = switching
+    service, agent, actor, sessions, _, reads = switching
     change = await _keep(_pick(service, agent, actor, sessions))
+    assert reads == [agent], "one source read: the stored run's preview is the one shown"
     assert "Off on OpenAI: sandbox." in change.note, change.note
     assert "?" not in change.note, "information, never a question"
     thread = await _thread(sessions, agent)
@@ -214,17 +209,3 @@ def test_a_typed_word_names_its_catalog_value():
     """A typed family name maps to its catalog value; a catalog value is kept."""
     assert pick_value(" Sonnet ") == "anthropic:claude-sonnet-5-5", "the family's value"
     assert pick_value(LUNA) == LUNA, "a value stays"
-
-
-async def test_refusals_come_back_as_the_words_a_chat_shows(switching):
-    """A refused pick is the shared words and keeps nothing."""
-    service, agent, _, sessions, _, _ = switching
-    stranger = BackendActor(agent.tenant_id, uuid.uuid4(), Subject())
-    pick = _pick(service, agent, stranger, sessions)
-
-    refused = await preview_thread_or_refusal(pick, LUNA, admin=False)
-    assert isinstance(refused, SwitchRefusal), "a refusal, not an exception"
-    assert refused.reason == "owner_or_admin_required", refused.reason
-    kept = await pick_thread(pick, LUNA, thread_id="thread", admin=False)
-    assert isinstance(kept, SwitchRefusal), "the pick itself is refused the same way"
-    assert await _thread(sessions, agent) is None, "nothing was kept"

@@ -13,6 +13,7 @@ import json
 import os
 import ssl
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -786,10 +787,10 @@ class DiscordSettings(BaseModel):
         ge=1,
         description=(
             "Minimum age in seconds before Discord can retire a card after definite "
-            "recovery failure or repeated failed recovery passes. Must be at least the turn "
-            "ceiling plus 15 minutes. Recovery runs at startup and periodically, "
-            "and deletes a known "
-            "pending card when the bot has Manage Messages permission."
+            "recovery failure or repeated failed recovery passes. Must be at least the longest "
+            "turn time limit (180 minutes) plus 15 minutes. Recovery runs at startup and "
+            "periodically, and deletes a known pending card when the bot has Manage Messages "
+            "permission."
         ),
     )
     turn_card_unrecoverable_after_attempts: int = Field(
@@ -806,11 +807,13 @@ class DiscordSettings(BaseModel):
     def _stale_card_age_exceeds_turn_ceiling(cls, age_s: int) -> int:
         # Import after config is initialized: turn.__init__ imports admission,
         # which imports config, so a module-level import would form a cycle.
-        from daimon.core.turn.ceiling import TURN_CEILING_S
+        from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
-        if age_s < TURN_CEILING_S + 15 * 60:
+        # A card's turn may run to the longest time limit; it is not stale before that.
+        if age_s < LONGEST_TURN_CEILING_S + 15 * 60:
             raise ValueError(
-                "turn card unrecoverable age must be at least turn ceiling plus 15 minutes"
+                "turn card unrecoverable age must be at least the longest turn time limit "
+                "plus 15 minutes"
             )
         return age_s
 
@@ -2265,18 +2268,65 @@ class DirectMessagePolicy(BaseModel):
         )
 
 
+def env_dm_policy(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID
+) -> DirectMessagePolicy:
+    """A workspace's deprecated env DM policy; `members` (no limit) when it has none."""
+    return policies.get(tenant_id, DirectMessagePolicy())
+
+
+def env_admits(
+    policies: Mapping[uuid.UUID, DirectMessagePolicy], tenant_id: uuid.UUID, user_id: str
+) -> bool:
+    """Whether `DAIMON_DIRECT_MESSAGE_POLICIES` lets `user_id` have a private message here.
+
+    The one env rule. Every path applies it with the stored access, inbound, agent-sent
+    and explain alike, so the stricter wins until the env value is removed.
+    """
+    return env_dm_policy(policies, tenant_id).allows(user_id)
+
+
 class SignedIdentityServer(BaseModel):
-    """One remote MCP server that receives a signed caller identity on every request."""
+    """One remote MCP server reached through the identity relay.
+
+    `auth="signed"` sends a short-lived signed caller identity on every request.
+    `auth="bearer"` sends one configured key instead, for a server that attributes
+    writes to the requester (`requester_meta`) but trusts the key rather than a
+    signature. A bearer key is one shared credential, so such a server must name its
+    workspaces and agents.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     url: str
-    issuer: str = Field(min_length=1)
-    audience: str = Field(min_length=1)
+    auth: Literal["signed", "bearer"] = "signed"
+    issuer: str = ""
+    audience: str = ""
     # Servers are deployment-wide: without a list any workspace's agents may use one.
     workspaces: frozenset[str] | None = None
     ca_certificate: str | None = None
+    requester_meta: bool = False
+    agents: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _auth_fields(self) -> SignedIdentityServer:
+        if self.auth == "signed":
+            if not self.issuer or not self.audience:
+                raise ValueError("a signed server needs an issuer and an audience")
+            return self
+        if self.issuer or self.audience:
+            raise ValueError("a bearer server takes no issuer or audience")
+        if not self.workspaces or not self.agents:
+            raise ValueError("a bearer server needs workspaces and agents")
+        return self
+
+    @field_validator("agents")
+    @classmethod
+    def _agent_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name for name in value):
+            raise ValueError("agents must be non-empty names")
+        return value
 
     @field_validator("url")
     @classmethod
@@ -2329,23 +2379,43 @@ class McpIdentitySettings(BaseModel):
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
             "for a person's turn, who asked, the channel and the message. Daimon names the "
             "asker only while that person's turn is live in the calling session's thread. "
-            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the "
-            "same server policy without the signing key. Default: [] (off)."
+            'A server may instead set auth to "bearer": Daimon then sends the key from '
+            "DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and workspaces and "
+            "agents (agent names that may use it) are required. Set requester_meta to true "
+            "for a server that attributes writes to the requester: Daimon removes any "
+            "requester fields the caller supplied and stamps each tool call with who it is "
+            "for and where: the asker while their turn is live, or the person an unattended "
+            "run acts for. "
+            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is "
+            "signed; chat workers use the same server policy without the signing key. "
+            "Default: [] (off)."
         ),
     )
 
-    @field_validator("servers", mode="before")
+    bearers: Annotated[dict[str, SecretStr], NoDecode] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            'Keys for the servers whose auth is "bearer", by server name: a JSON object '
+            'such as {"tools": "<key>"}. Kept apart from '
+            "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
+            "key as the server's bearer in place of the caller's own credential, which "
+            "never reaches the server. Only the MCP service needs them, and there every bearer "
+            "server needs one; no other server may have one. Default: {} (none)."
+        ),
+    )
+
+    @field_validator("servers", "bearers", mode="before")
     @classmethod
-    def _parse_json(cls, value: object) -> object:
+    def _parse_json(cls, value: object, info: ValidationInfo) -> object:
         if not isinstance(value, str):
             return value
         if not value.strip():
-            return []
+            return [] if info.field_name == "servers" else {}
         try:
             return json.loads(value)
         except json.JSONDecodeError as err:
             raise ValueError(
-                f"DAIMON_MCP_IDENTITY__SERVERS is not valid JSON "
+                f"DAIMON_MCP_IDENTITY__{(info.field_name or '').upper()} is not valid JSON "
                 f"(line {err.lineno}, column {err.colno})"
             ) from None
 
@@ -2364,6 +2434,30 @@ class McpIdentitySettings(BaseModel):
         if value is not None:
             load_signing_key(value.get_secret_value())
         return value
+
+    @model_validator(mode="after")
+    def _bearers_match_servers(self) -> McpIdentitySettings:
+        """A key is usable and names a bearer server; a signed server never has one."""
+        bearer_servers = {server.name for server in self.servers if server.auth == "bearer"}
+        if not set(self.bearers) <= bearer_servers:
+            raise ValueError(
+                "DAIMON_MCP_IDENTITY__BEARERS must name only servers whose auth is bearer"
+            )
+        for key in self.bearers.values():
+            value = key.get_secret_value()
+            if not value or not value.isascii() or not value.isprintable() or " " in value:
+                raise ValueError("a bearer key must be printable ASCII without spaces")
+        return self
+
+    @property
+    def names_requester(self) -> bool:
+        """Whether any server is sent the requester's identity (`requester_meta`)."""
+        return any(server.requester_meta for server in self.servers)
+
+    @property
+    def needs_signing_key(self) -> bool:
+        """Whether any server is sent a signed identity, which needs `signing_key`."""
+        return any(server.auth == "signed" for server in self.servers)
 
 
 class AgentIdentitySettings(BaseModel):
@@ -2581,6 +2675,32 @@ class WatchesSettings(BaseModel):
         ),
     )
 
+    callback_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Public https address of the callback endpoint, with no path, query or "
+            "trailing slash (for example https://hooks.example.com). Callback watches "
+            "give their owner a secret link under it once; unset refuses new callback "
+            "watches and leaves existing ones working. Route "
+            "/callbacks/watches/ on the sidecar to it, and keep proxy access logs "
+            "off that path, since the secret is part of it."
+        ),
+    )
+
+    callback_max_body_bytes: int = Field(
+        default=4096,
+        ge=4096,
+        le=524288,
+        description=(
+            "Largest body, in bytes, that one post to a callback watch link may carry; "
+            "a larger post is refused. Default 4096 (4 KiB); up to 524288 (512 KiB). "
+            "Raise it for senders that post a whole record, for example 262144 for "
+            "256 KiB. The per-watch, per-owner and per-server evidence limits grow "
+            "with it, and a wake that would carry more than 512 KiB of evidence drops "
+            "its oldest posts. Signed page events keep their own 4 KiB limit."
+        ),
+    )
+
     chat_tools: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
@@ -2591,6 +2711,29 @@ class WatchesSettings(BaseModel):
             "refused there. Default: none."
         ),
     )
+
+    @field_validator("callback_base_url", mode="before")
+    @classmethod
+    def _callback_base_url(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            return None
+        parts = urlsplit(value)
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        ):
+            raise ValueError(
+                "DAIMON_WATCHES__CALLBACK_BASE_URL must be an https address with no path"
+            )
+        return f"https://{parts.netloc}"
 
     @field_validator("pollable_tools", mode="before")
     @classmethod
@@ -2835,7 +2978,9 @@ class Settings(BaseSettings):
             "invalid keys rejected). Default is "
             "members (live membership required). Set mode=disabled to disable DMs, "
             "or mode=allowlist with recipient_ids to restrict delivery to listed "
-            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+            "members. Deprecated: checked with per-agent DM access on every path, the "
+            "stricter wins; `daimon dm import-policies` copies it into stored access. "
+            "Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
         ),
     )
     table_rendering: dict[uuid.UUID, bool] = Field(

@@ -6,12 +6,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from daimon.adapters.slack import routine_delivery as poster_mod
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
+from daimon.core.native_admins import GroupMembersCache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -54,6 +56,9 @@ def _poster(
     dm_policies: dict | None = None,
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
+    client.token = "xoxb-test"
+    # What Slack's usergroups.users.list answers; a test sets it for its grant.
+    client.user_group_reply = {"ok": True, "users": []}
     client.chat_postMessage = AsyncMock()
     client.users_info = AsyncMock(return_value={"user": {"id": "U1", "team_id": "T_ROUTINES"}})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
@@ -79,6 +84,12 @@ def _poster(
                 direct_message_policies=dm_policies if dm_policies is not None else {}
             ),
             deployment_default=DeploymentDefault(),
+            group_members=GroupMembersCache(),
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(200, json=client.user_group_reply)
+                )
+            ),
         ),
     )
     return make_slack_routine_poster(runtime), client
@@ -231,6 +242,47 @@ async def test_slack_refusing_the_channel_falls_back_to_a_dm(
     outcome = await post(row)
 
     assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:destination_unavailable")
+
+
+@pytest.mark.parametrize(
+    ("user_ids", "group_users", "delivered"),
+    [
+        (["U1"], None, True),
+        (["U9"], None, False),
+        ([], ["U1"], True),
+        ([], ["U9"], False),
+        ([], "missing_scope", False),
+    ],
+)
+async def test_dm_fallback_when_the_routine_agents_grant_decides_then_lookup_errors_deny(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    user_ids: list[str],
+    group_users: list[str] | str | None,
+    delivered: bool,
+) -> None:
+    """A fallback DM needs the routine agent's DM grant; a failed group lookup denies."""
+    from daimon.core.stores.dm_access import set_grant
+
+    row = await _routine(db_session, kind="thread", destination_id="C1")
+    await set_grant(
+        db_session, tenant_id=row.tenant_id, agent_name="daimon", who="listed",
+        user_ids=user_ids, group_ids=[] if group_users is None else ["S1"], set_by=None,
+        now=row.created_at,
+    )  # fmt: skip
+    await db_session.commit()
+    post, client = _poster(db_session_factory, monkeypatch)
+    client.user_group_reply = (
+        {"ok": False, "error": group_users}
+        if isinstance(group_users, str)
+        else {"ok": True, "users": group_users or []}
+    )
+
+    outcome = await post(row)
+
+    assert (outcome.status == "delivered") is delivered, outcome
+    assert client.chat_postMessage.await_count == int(delivered), "the DM only when admitted"
 
 
 @pytest.mark.parametrize(

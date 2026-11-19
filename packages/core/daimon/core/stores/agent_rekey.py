@@ -57,6 +57,7 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         ("github_grant_proposals", "agent_id"),
         ("github_issued_tokens", "agent_id"),
         ("github_router_sessions", "agent_id"),
+        ("held_timers", "agent_id"),
         ("helper_asks", "helper_agent_id"),
         ("host_call_cards", "executing_agent_id"),
         ("host_call_cards", "executing_ma_agent_id"),

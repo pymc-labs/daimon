@@ -142,6 +142,7 @@ async def test_prewrite_source_projection_receives_effective_seal_and_memory_pol
         assert captured.origin_channel_id == "channel" and captured.origin_thread_id == "new"
         assert captured.channel_skills == ()
         assert request.scope.account_id == str(captured.account_id)
+        assert captured.toolset.hidden_daimon_tools, "hides what its turn hides (capabilities Off)"
         seen.append(request)
         raise AdmissionDenied(reason="backend_unsupported")
 

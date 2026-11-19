@@ -4,7 +4,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import ANY, AsyncMock, Mock
 
 import anthropic
 import httpx
@@ -180,7 +180,9 @@ async def test_budget_native_read_preserves_sdk_failure_retry_marker_and_notice(
         "session_preparation.budget_stamp_unreadable",
         session_id=SESSION,
         error=type(before.value).__name__,
+        causes=ANY,
     )
+    assert warning.call_args.kwargs["causes"][0]["status"] == status, "the cause names its status"
     assert row.budget_channel_id == ""
 
 

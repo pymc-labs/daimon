@@ -37,6 +37,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import load_answering_map
 from daimon.core.authz import Subject, build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     authorize_environment_pick,
@@ -220,8 +221,12 @@ class ChannelSettingsDialog:
                     records=self._runtime.sessionmaker,
                     hidden=hidden,
                 )
-            except anthropic.APIError:
-                log.warning("teams.channel_settings.environments_unlisted", exc_info=True)
+            except anthropic.APIError as error:
+                log.warning(
+                    "teams.channel_settings.environments_unlisted",
+                    exc_info=True,
+                    causes=backend_refusal_causes(error),
+                )
                 names = []
             picker = plan_environment_picker(
                 answering_map,
@@ -231,11 +236,12 @@ class ChannelSettingsDialog:
                 max_value_length=_MAX_OPTION_VALUE,
             )
         name = (await self._listed(tenant_id)).get(channel_id)
-        web = web_links(
+        web = await web_links(
             self._runtime,
             tenant_id,
             admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
             foreign=actor.foreign,
+            channel_id=channel_id,
         )
         settings = cards.ChannelSettings(
             channel_id=channel_id,

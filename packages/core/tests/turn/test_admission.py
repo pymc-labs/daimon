@@ -45,6 +45,7 @@ from daimon.core.turn.admission import (
     MissingTurnConfigError,
     admit,
 )
+from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.builders import admit_chat, plain_turn_deps
@@ -533,6 +534,135 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     assert admission.account_id == principal.account_id, (
         "account_id must match the principal resolved for this (platform, external_id)"
     )
+
+
+async def test_admission_limits_follow_their_settings(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Defaults stay 45 minutes and 5 messages; workspace settings change them.
+
+    A retained authority deadline still caps the longer time limit.
+    """
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    async def admitted() -> Admission:
+        admission = await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        assert isinstance(admission, Admission), "the turn is admitted"
+        return admission
+
+    first = await admitted()
+    assert first.answer_message_cap == 5, "an answer may post 5 messages by default"
+    assert first.turn_ceiling_s == TURN_CEILING_S == 45 * 60.0, "the default stays 45 minutes"
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="turn_time_limit",
+        value="30",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="answer_messages",
+        value="10",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    later = await admitted()
+    assert later.answer_message_cap == 10, "a workspace setting raises the answer message cap"
+    shortened = later.turn_ceiling_s
+    assert shortened == 30 * 60.0, "a workspace setting of 30 minutes shortens the turn"
+    capped = turn_deadline(
+        now=_NOW, ceiling_s=shortened, authority_deadline=_NOW + timedelta(minutes=10)
+    )
+    assert capped == _NOW + timedelta(minutes=10), "retained authority still caps the limit"
+
+
+async def test_unattended_turns_read_their_own_time_limit(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A wake or routine follows `unattended_time_limit`, a person's message `turn_time_limit`."""
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    async def ceiling(origin: str, attended: bool | None = None) -> float:
+        admission = await admit(
+            deps,
+            origin=origin,
+            attended=attended,
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        assert isinstance(admission, Admission), "the turn is admitted"
+        return admission.turn_ceiling_s
+
+    for origin in ("chat", "routine", "watch_fired"):
+        assert await ceiling(origin) == TURN_CEILING_S, f"{origin} keeps 45 minutes by default"
+    for minutes, key in (("20", "unattended_time_limit"), ("30", "turn_time_limit")):
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key=key,
+            value=minutes,
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
+    assert await ceiling("chat") == 30 * 60.0, "a person's message follows the answer time limit"
+    assert await ceiling("handoff") == 30 * 60.0, "a hand-over is a person's message"
+    assert await ceiling("routine") == 20 * 60.0, "a routine follows the unattended run limit"
+    for origin in ("timer", "watch_fired", "watch_report", "job_finished"):
+        assert await ceiling(origin, attended=False) == 20 * 60.0, f"a {origin} wake follows it"
+    for origin in ("confirmed_call", "private_input_applied", "github_access_ready"):
+        assert await ceiling(origin, attended=True) == 30 * 60.0, (
+            f"{origin} resumes for a person who is waiting: the answer time limit"
+        )
+    assert await ceiling("chat", attended=False) == 20 * 60.0, "an unattended chat turn follows it"
 
 
 async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(

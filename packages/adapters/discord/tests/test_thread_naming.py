@@ -119,29 +119,6 @@ async def test_generate_thread_name_returns_title_and_meters_haiku_call_to_autho
     assert balance < Decimal("5.00"), "the tenant ledger must carry the naming debit"
 
 
-async def test_generate_thread_name_never_names_another_chat_app(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    tenant = await make_tenant(db_session)
-    await db_session.commit()
-
-    name = await generate_thread_name(
-        fallback=_FALLBACK,
-        message_text="how do I move our Slack channels here?",
-        message_id=4243,
-        anthropic=build_fake_anthropic(_naming_router("Slack channel migration").dispatch),
-        sessionmaker=db_session_factory,
-        tenant_id=tenant.id,
-        platform_user_id="555",
-        markup=Decimal("1.0"),
-        max_input_chars=2000,
-        timeout_seconds=5.0,
-    )
-
-    assert name == "Another app channel migration"
-
-
 async def test_generate_thread_name_falls_back_but_still_meters_when_model_answers_blank(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

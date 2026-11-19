@@ -598,6 +598,11 @@ class ThreadSession(Base):
     active_turn_message_id: Mapped[str | None]
     active_turn_started_at: Mapped[datetime | None]
     active_turn_channel_id: Mapped[str | None]
+    # The running turn's own deadline, so a turn allowed longer than the standard window
+    # is not read as abandoned. NULL keeps the standard window.
+    active_turn_deadline: Mapped[datetime | None]
+    # The model and effort emoji a turn on this session last showed in its thread.
+    model_marks: Mapped[list[str] | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
 
@@ -2542,15 +2547,22 @@ class ThreadModelSetting(Base):
     __tablename__ = "thread_model_settings"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "platform", "thread_id", name="pk_thread_model_settings"),
+        CheckConstraint(
+            "effort IN ('low', 'medium', 'high', 'xhigh', 'max')",
+            name="ck_thread_model_settings_effort",
+        ),
     )
 
     tenant_id: Mapped[TenantFK]
     platform: Mapped[str]
     thread_id: Mapped[str]
-    model: Mapped[str]
+    # Null when only the effort was chosen: the agent's own model runs (0206).
+    model: Mapped[str | None]
     updated_at: Mapped[TsNow]
     # The model's provider; null is a Claude model chosen before providers could be (0197).
     provider: Mapped[str | None]
+    # The chosen effort; null keeps the agent's own (0206).
+    effort: Mapped[str | None]
 
 
 class ThreadModelConsent(Base):
@@ -3620,6 +3632,60 @@ class TagOptOut(Base):
     created_at: Mapped[TsNow]
 
 
+class DmCarryOver(Base):
+    """An earlier private conversation, held for the person's first DM here.
+
+    Keyed by platform user, not account: it is imported before the person has
+    one. Only a private start with `agent_name` takes it, whichever agent a person's
+    DMs route to. Taking it sets `consumed_at` and empties the words.
+    """
+
+    __tablename__ = "dm_carry_overs"
+
+    tenant_id: Mapped[TenantPk]
+    platform: Mapped[str] = mapped_column(primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(primary_key=True)
+    agent_name: Mapped[str]
+    source_name: Mapped[str]
+    exported_at: Mapped[datetime]
+    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
+    context: Mapped[str]
+    imported_at: Mapped[TsNow]
+    consumed_at: Mapped[datetime | None]
+
+
+class HeldTimer(Base):
+    """An imported one-shot timer, held until an operator confirms it for an agent.
+
+    Settling one sets `settled_at` and `outcome` and empties the note; the row stays
+    so a repeated import adds nothing.
+    """
+
+    __tablename__ = "held_timers"
+    __table_args__ = (
+        CheckConstraint("(settled_at IS NULL) = (outcome IS NULL)", name="ck_held_timers_settled"),
+        Index("ix_held_timers_account", "account_id"),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    source_id: Mapped[str] = mapped_column(primary_key=True)
+    #: The agent the import was made for; only its go-live and `--full` runs touch the row.
+    agent_id: Mapped[str]
+    account_id: Mapped[AccountFK]
+    external_user_id: Mapped[str]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str | None]
+    place_type: Mapped[str]
+    fire_at: Mapped[datetime]
+    note: Mapped[str]
+    imported_at: Mapped[TsNow]
+    settled_at: Mapped[datetime | None]
+    outcome: Mapped[str | None]
+    #: Paused where it came from: never scheduled, whatever is confirmed.
+    paused: Mapped[bool] = mapped_column(server_default=text("false"), default=False)
+
+
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 
@@ -3627,6 +3693,58 @@ class DirectMessagePolicy(Base):
     tenant_id: Mapped[TenantPk]
     dm_agent_name: Mapped[str | None]
     enabled: Mapped[FalseFlag]
+
+
+class DmAgentGrant(Base):
+    """Who may start a direct message with one agent. No row: every member."""
+
+    __tablename__ = "dm_agent_grants"
+    __table_args__ = (
+        CheckConstraint("who IN ('members', 'listed', 'excluded')", name="ck_dm_agent_grants_who"),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    agent_name: Mapped[str] = mapped_column(primary_key=True)
+    who: Mapped[str] = mapped_column(server_default="members")
+    user_ids: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    group_ids: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    set_by: Mapped[str | None]
+    updated_at: Mapped[TsNow]
+
+
+class DmRule(Base):
+    """One ordered routing rule: who lands on which agent, optionally locked."""
+
+    __tablename__ = "dm_rules"
+    __table_args__ = (
+        CheckConstraint("subject IN ('user', 'group', 'everyone')", name="ck_dm_rules_subject"),
+        CheckConstraint(
+            "(subject = 'everyone') = (subject_id IS NULL)", name="ck_dm_rules_subject_id"
+        ),
+        CheckConstraint("NOT locked OR agent_name IS NOT NULL", name="ck_dm_rules_locked_agent"),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    position: Mapped[int] = mapped_column(primary_key=True)
+    subject: Mapped[str]
+    subject_id: Mapped[str | None]
+    agent_name: Mapped[str | None]
+    locked: Mapped[FalseFlag]
+    set_by: Mapped[str | None]
+    updated_at: Mapped[TsNow]
+
+
+class DmAgentPick(Base):
+    """The agent a person chose for their direct messages in a workspace."""
+
+    __tablename__ = "dm_agent_picks"
+
+    tenant_id: Mapped[TenantPk]
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str]
+    updated_at: Mapped[TsNow]
 
 
 class DirectMessageConversation(Base):
@@ -3652,7 +3770,10 @@ class DirectMessageConversation(Base):
     memory_read_only: Mapped[bool]
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
     recent_message_ids: Mapped[list[str]]
-    active_until: Mapped[datetime | None]
+    # Set while a delivery's turn holds the conversation: an identity compared on finish
+    # and delivery, written as a time past the longest turn so an older image, which reads
+    # it as a deadline (the column keeps its first name), still sees the claim live.
+    claimed_at: Mapped[datetime | None] = mapped_column("active_until", DateTime(timezone=True))
 
 
 class PlatformUserName(Base):
@@ -4380,12 +4501,13 @@ class Watch(Base):
             "(delivery = 'thread') = (session_id IS NOT NULL)", name="ck_watches_delivery_session"
         ),
         CheckConstraint(
-            "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
+            "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
             name="ck_watches_delivery_source",
         ),
-        # Only an admin-approved polled watch may be permanent (no expiry).
+        # No expiry: an admin-approved polled watch, or a callback watch where the
+        # `callback_watch_lifetime` feature is `0` (permanent).
         CheckConstraint(
-            "expires_at IS NOT NULL OR "
+            "expires_at IS NOT NULL OR source = 'callback' OR "
             "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
             name="ck_watches_permanent",
         ),
@@ -4443,7 +4565,8 @@ class WatchCapability(Base):
     key_id: Mapped[str]
     generation: Mapped[int]
     operation: Mapped[str]
-    expires_at: Mapped[datetime]
+    # None only for the link of a callback watch with no expiry.
+    expires_at: Mapped[datetime | None]
     revoked_at: Mapped[datetime | None]
 
 

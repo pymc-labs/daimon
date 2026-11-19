@@ -54,6 +54,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import identity_enabled_for, queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, UserFacingError
@@ -290,7 +291,12 @@ async def run_new_agent_submission(
                     "Agent creation did not return an identity. Reopen setup and retry."
                 )
         except (DaimonError, anthropic.APIError, SQLAlchemyError) as exc:
-            log.error("slack.agent_setup.new_agent_failed", team_id=team_id, exc_info=exc)
+            log.error(
+                "slack.agent_setup.new_agent_failed",
+                team_id=team_id,
+                exc_info=exc,
+                causes=backend_refusal_causes(exc),
+            )
             _capture(exc)
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
                 view_id=view_id,
@@ -410,7 +416,12 @@ async def run_new_agent_submission(
                 ),
             )
     except (DaimonError, anthropic.APIError, SlackApiError, SQLAlchemyError) as exc:
-        log.error("slack.agent_setup.new_agent_render_failed", team_id=team_id, exc_info=exc)
+        log.error(
+            "slack.agent_setup.new_agent_render_failed",
+            team_id=team_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         _capture(exc)
 
 

@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { api } from "@/lib/api"
 import { useChatAgents } from "@/lib/hooks"
 import { Access, Providers } from "./Access"
+import { WorkspaceDm } from "./DirectMessages"
 import type { SettingsPatch, WorkspaceSettings } from "./types"
 
 // Workspace
@@ -57,6 +58,7 @@ function Settings({ s }: { s: WorkspaceSettings }) {
       }]} />
       <Access access={s.access} save={save.mutate} />
       {s.providers && <Providers providers={s.providers} save={save.mutate} />}
+      <WorkspaceDm />
     </div>
   )
 }

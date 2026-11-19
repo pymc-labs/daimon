@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.context_prompt import TurnContext
 from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import (
@@ -101,6 +102,8 @@ class TurnObservation:
     and logged as `unknown` where none was selected."""
     progress_plans: bool = field(default=False, kw_only=True)
     """Progress plans resolved on for this turn: its card draws the agent's plan."""
+    tool_server_names: bool = field(default=True, kw_only=True)
+    """Whether tool lines name the MCP server a tool belongs to."""
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""
@@ -289,6 +292,7 @@ class TurnObservation:
                 platform=self.platform,
                 reason=resolved.value,
                 error_class=type(terminal_error).__name__ if terminal_error else None,
+                causes=backend_refusal_causes(terminal_error),
                 origin=self.origin,
                 backend=self.backend or "unknown",
                 release=current_release(),
@@ -411,6 +415,12 @@ def observe_turn(
         finally:
             # Normal driver paths already provided their exact terminal reason.
             observation.finish(reason=TerminationReason.UNKNOWN, fallback=True)
+
+
+def tool_server_names_shown() -> bool:
+    """Whether the running turn's tool lines name the MCP server (unless a setting hides it)."""
+    observation = current_outcome.get()
+    return observation is None or observation.tool_server_names
 
 
 def finish_with_error(exc: BaseException) -> None:
