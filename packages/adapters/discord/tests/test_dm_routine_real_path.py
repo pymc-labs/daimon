@@ -31,6 +31,7 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.scheduler.main import _build_fire
 from daimon.core import direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Subject
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     admit_cold_dm,
@@ -53,7 +54,15 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
     set_dm_enabled,
 )
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import (
+    SANDBOX_KEY,
+    AgentSandboxPin,
+    FeatureTarget,
+    Role,
+    RoutineRow,
+    pin_json,
+)
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
 from daimon.core.stores.routines import create_routine, get_routine
@@ -78,6 +87,7 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 # Routine fires collect generated files; skip the real 6 s settle wait.
 pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
@@ -962,7 +972,6 @@ async def test_protected_final_action_is_refused_through_the_driver(
 
 
 async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -989,7 +998,6 @@ async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness)
 async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
     harness: Harness, rule_endpoint: str, rule: str
 ):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -1360,7 +1368,6 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, recovery: bool
 ):
     from daimon.core import ma_resolver
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(
@@ -1824,6 +1831,70 @@ async def test_dm_routine_disables_sandbox_and_gates_all_mcp_calls(harness: Harn
             assert all(
                 config["permission_policy"] == {"type": "always_ask"} for config in body["configs"]
             )
+    assert reply.text == "private answer"
+
+
+def _bash_agent(harness: Harness) -> None:
+    harness.upstream.state.ma.agents["ag_daimon"]["tools"].append(
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    )
+
+
+def _builtins_on(harness: Harness, session_id: str) -> bool:
+    toolsets = [
+        tool.model_dump(mode="json")
+        for tool in harness.upstream.state.sessions[session_id].agent.tools
+        if tool.type == "agent_toolset_20260401"
+    ]
+    return bool(toolsets) and any(body["default_config"]["enabled"] for body in toolsets)
+
+
+@pytest.mark.parametrize(
+    ("environment", "guardrail", "kept"),
+    [
+        ("default", "on", True),
+        ("default", "off", False),
+        ("other", "on", False),
+        (None, "on", False),
+    ],
+    ids=["opted_in", "guardrail_off_wins", "other_environment", "no_opt_in"],
+)
+async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
+    harness: Harness, environment: str | None, guardrail: str, kept: bool
+):
+    """A DM routine's built-ins need the agent-level opt-in, and `unattended_capabilities` caps it."""
+    _bash_agent(harness)
+    async with harness.factory.begin() as db:
+        if environment is not None:
+            await set_feature_value(
+                db, tenant_id=harness.tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
+                target=FeatureTarget("agent", agent_id="ag_daimon"), surface="cli",
+                pin=pin_json(AgentSandboxPin("ag_daimon", environment)),
+            )  # fmt: skip
+        if guardrail == "off":
+            await set_workspace_feature(
+                db,
+                None,
+                tenant_id=harness.tenant.id,
+                platform="discord",
+                key="unattended_capabilities",
+                value="off",
+                account_id=None,
+                surface="cli",
+            )
+    with capture_logs() as logs:
+        reply = await harness.routine()
+    assert _builtins_on(harness, reply.session_id) is kept, (
+        "built-ins stay on only for the opted-in agent in its environment, under the guardrail"
+    )
+    drifted = any(entry["event"] == "routine.sandbox_pin_mismatched" for entry in logs)
+    assert drifted is (environment == "other"), "only another environment is a drift"
     assert reply.text == "private answer"
 
 

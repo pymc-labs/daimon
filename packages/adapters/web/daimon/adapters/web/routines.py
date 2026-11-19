@@ -25,6 +25,7 @@ from daimon.core.cron_words import schedule_words
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.platform_names import UNNAMED_CHANNEL
+from daimon.core.routine_sandbox import opted_in_by_many
 from daimon.core.routine_service import (
     Happened,
     InvalidSchedule,
@@ -336,6 +337,10 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 else {}
             )
             agents = {a.id: _agent_name(a) for a in await usable_agents(db, caller)}
+            sandbox = {
+                rid: by is not None
+                for rid, by in (await opted_in_by_many(db, rows, platform)).items()
+            }
         out: list[Routine] = []
         for row in rows:
             channel = routine_service.destination_channel_of(
@@ -369,7 +374,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     catch_up=row.catch_up_policy,
                     destination=destination,
                     dm=row.destination_kind == "dm",
-                    sandbox_tools=row.sandbox_tools_enabled,
+                    sandbox_tools=sandbox[row.id],
                     next_run=_iso(row.next_fire_at),
                     last_run=_iso(row.last_fired_at),
                     failed=row.last_error is not None,

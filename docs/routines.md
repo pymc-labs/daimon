@@ -30,35 +30,37 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `update_routine(enabled=False)`. The last run is in the `last_*` fields that
 `get_routine` returns.
 
-Chat is simplest: ask the agent ("every weekday at 9am, post the sales
-numbers"). Each platform also has a panel:
+Ask the agent in chat ("every weekday at 9am, post the sales
+numbers"). Each platform has a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
-- **Web app** Routines page: members manage their own, admins all. Creating or
-  changing one needs a linked chat account. **Run now** makes an active routine
+- **Web app** Routines page: members manage their own, admins all. Changing one
+  needs a linked chat account. **Run now** makes an active routine
   due at once.
-- **Discord** `/routines` needs Manage Server. **New** creates a routine for
-  an agent, schedule, timezone and message. The creator or an admin can pause,
-  resume or delete one.
+- **Discord** `/routines` lists your routines, or all for an admin. Admins
+  create; the creator or an admin can pause, resume or delete.
 
-The CLI creates owner-DM routines (`daimon routines create`), sets
+The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools), checks
 [owners' roles](admins.md#limit-an-agent-to-roles) and
 [moves routines in from another system](routine-migration.md).
 
-`create_routine` refuses a caller with no platform user identity (a CLI-only
+`--destination dm|channel|thread` (with `--destination-id`) runs the checks
+below; `--dry-run` saves nothing. The operator may name any agent; it counts as the
+owner's own.
+
+`create_routine` refuses a caller with no platform identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an
-`agent_name` that is not an agent in the tenant. The tenant always comes from
-the caller's verified token.
+`agent_name` that is not an agent in the tenant. The tenant is the caller's.
 
 ### Set a destination
 
 Set `destination_kind` and `destination_id` together on `create_routine` or
 `update_routine`. Remove them with `update_routine(clear_destination=true)`.
-Changing the destination drops a result still pending for the old one. The
-tool checks, before saving, that:
+Changing it drops a result still pending for the old one. Before saving, the
+tool checks that:
 
 - the id has the platform's shape: a Slack thread is `<channel>:<ts>` and a
   Teams thread is `<channel>;messageid=<root>`;
@@ -129,13 +131,13 @@ run survives the run's completion.
 
 A run resolves the tenant, finds or creates the creator's account, checks the
 invoker allowlist and the balance, and resolves the agent. It then creates a
-session the way chat does and drives it with the same turn driver, so
-reconnects and read timeouts behave the same. It is not a chat turn. There is
-no thread binding, continuity, handoff or dead-session recovery.
+session the way chat does and drives it with the same turn driver. It is not
+a chat turn: there is no thread binding, continuity, handoff or dead-session
+recovery.
 
 Nobody can click a confirmation, so tool calls follow the
 [unattended rules](unattended.md#how-tool-calls-are-decided). Built-in sandbox
-tools are off unless an operator opted the routine in.
+tools stay off unless an operator opts in.
 
 A routine with a destination gets a short controls block before its prompt: its
 id, schedule and destination, a line saying nobody is watching, and that Daimon
@@ -228,7 +230,7 @@ below the ceiling. Settings are in [configuration.md](configuration.md#scheduler
 | Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination answers with; any agent for an admin | by asking the agent; admins also in the panel | workspace admin only |
-| list and read last output | admin or the creator | `Manage Server`, the command's invoker only | admin or the creator |
+| list and read last output | admin or the creator | admin or the creator | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | admin or the creator, after a confirmation | admin or the creator |
 | run now | admin or the creator, web app only | not offered | not offered |

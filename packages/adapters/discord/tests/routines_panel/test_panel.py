@@ -26,9 +26,11 @@ from daimon.adapters.discord.routines_panel.state import (
     derive_state,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _make_row(**overrides: Any) -> RoutineRow:
@@ -53,7 +55,7 @@ def _make_row(**overrides: Any) -> RoutineRow:
     return RoutineRow.model_validate(base)
 
 
-def _make_entry(**overrides: Any) -> RoutineEntry:
+def _make_entry(*, sandbox_by: Any = None, **overrides: Any) -> RoutineEntry:
     row = _make_row(**overrides)
     glyph, color = derive_state(row)
     return RoutineEntry(
@@ -62,6 +64,7 @@ def _make_entry(**overrides: Any) -> RoutineEntry:
         glyph=glyph,
         color=color,
         label=row.trigger_message[:60] or row.id.hex[:8],
+        sandbox_by=sandbox_by,
     )
 
 
@@ -73,6 +76,21 @@ def _make_runtime() -> DiscordRuntime:
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.turn_deps = SimpleNamespace(membership_resolver=None)
     return runtime
+
+
+@pytest.fixture(autouse=True)
+def _empty_policy_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock sessions get an empty access policy; a database session gets the real one."""
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+
+    real_policy = panel_mod.load_access_policy
+
+    async def policy(session: Any, **kwargs: Any) -> Any:
+        if isinstance(session, AsyncSession):
+            return await real_policy(session, **kwargs)
+        return TenantAccessPolicy()
+
+    monkeypatch.setattr(panel_mod, "load_access_policy", policy)
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -251,21 +269,32 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
     ("overrides", "line"),
     [
         ({}, "Sandbox tools: off"),
-        ({"sandbox_tools_enabled": True}, "Sandbox tools: on (admin opt-in)"),
+        ({"sandbox_by": "routine"}, "Sandbox tools: on (admin opt-in)"),
         (
             {"destination_kind": "dm", "destination_id": "u1", "created_by_user_id": "u1"},
-            "Sandbox tools: off (DM routines can't use sandbox tools)",
+            "Sandbox tools: off",
+        ),
+        ({"sandbox_by": "agent"}, "Sandbox tools: on for this agent (admin opt-in)"),
+        (
+            {
+                "sandbox_by": "agent",
+                "destination_kind": "dm",
+                "destination_id": "u1",
+                "created_by_user_id": "u1",
+            },
+            "Sandbox tools: on for this agent (admin opt-in)",
         ),
     ],
-    ids=["default", "opted_in", "dm"],
+    ids=["default", "opted_in", "dm", "agent", "agent_dm"],
 )
 def test_panel_shows_the_routine_sandbox_opt_in(overrides: dict[str, Any], line: str) -> None:
+    """The panel names the opt-in that decides: the routine's own or its agent's."""
     state = _make_state([_make_entry(**overrides)])
     container = build_panel_container(state, now=datetime(2026, 5, 14, 12, 0, tzinfo=UTC))
     text = " ".join(
         child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)
     )
-    assert line in text
+    assert line in text, text
 
 
 @pytest.mark.asyncio
@@ -294,8 +323,7 @@ class _SessionCM:
 
 
 def _runtime_with_session(session: Any) -> MagicMock:
-    runtime = MagicMock(spec=DiscordRuntime)
-    runtime.turn_deps = SimpleNamespace(membership_resolver=None)
+    runtime = _make_runtime()
     runtime.sessionmaker = MagicMock(return_value=_SessionCM(session))
     return runtime
 
@@ -901,6 +929,89 @@ async def test_private_delivery_for_a_role_gated_agent_needs_the_owners_live_rol
         interaction.followup.send.assert_awaited_once_with(ROLES_REQUIRED_REFUSAL, ephemeral=True)
 
 
+@pytest.mark.parametrize(
+    ("enabled", "held", "reads_roles", "changed"),
+    [(False, True, True, True), (False, False, True, False), (True, False, False, True)],
+    ids=["resume_with_role", "resume_without_role", "pause_never_checked"],
+)
+async def test_creator_resume_checks_live_roles_after_answering_but_pause_does_not(
+    db_session_factory, monkeypatch, enabled, held, reads_roles, changed
+):
+    """Resume reads the creator's roles live, after the defer; Pause never does."""
+    from daimon.adapters.discord.routines_panel import forms as forms_mod
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.authz import Subject
+    from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.routines import create_routine, get_routine
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="G1")
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="summary",
+            enabled=enabled,
+        )
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("7",))}),
+        )
+    reads: list[bool] = []
+    subject = Subject(
+        platform_user_id="123",
+        role_ids=("7",) if held else (),
+        verified_membership=True,
+        membership_fresh=True,
+    )
+
+    async def resolve(*_args, **_kwargs):
+        reads.append(interaction.response.defer.await_count >= 1)
+        return subject
+
+    monkeypatch.setattr(forms_mod, "resolve_subject", AsyncMock(side_effect=resolve))
+    monkeypatch.setattr(
+        panel_mod,
+        "find_agent_by_daimon_tag",
+        AsyncMock(return_value=SimpleNamespace(id="ag", name="daimon", metadata={})),
+    )
+    monkeypatch.setattr(panel_mod.checks, "is_guild_admin", AsyncMock(return_value=False))
+    monkeypatch.setattr(panel_mod, "_rerender", AsyncMock())
+    glyph, color = derive_state(row)
+    entry = RoutineEntry(
+        routine=row, agent_name="daimon", glyph=glyph, color=color, label="summary"
+    )
+    runtime = _make_runtime()
+    runtime.sessionmaker = db_session_factory
+    runtime.anthropic = MagicMock()
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=123)
+    button = next(child for child in view.walk_children() if isinstance(child, _PauseButton))
+    button._view = view
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user.id = 123
+    interaction.guild_id = "G1"
+    interaction.response.defer = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock()
+    await button.callback(interaction)
+    assert bool(reads) is reads_roles, "only Resume reads the creator's roles"
+    assert all(reads), "the interaction is answered before roles are read"
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.enabled is (not enabled if changed else enabled), "only a role holder resumes"
+    if not changed:
+        interaction.followup.send.assert_awaited_once_with(ROLES_REQUIRED_REFUSAL, ephemeral=True)
+
+
 @pytest.mark.parametrize("clear_first", [False, True])
 @pytest.mark.parametrize("restricted", [False, True])
 async def test_panel_thread_dm_conversion_retains_and_checks_thread(
@@ -1077,10 +1188,11 @@ async def test_resume_race_replies_already_running_without_callback_error(monkey
     interaction = MagicMock()
     interaction.user.id = 42
     interaction.guild_id = "G1"
-    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
     await button.callback(interaction)
-    interaction.response.send_message.assert_awaited_once()
-    sent = interaction.response.send_message.await_args.kwargs
+    interaction.followup.send.assert_awaited_once()
+    sent = interaction.followup.send.await_args.kwargs
     assert sent["embed"].description == "This routine is already on."
     assert sent["ephemeral"] is True
     error.assert_not_awaited()

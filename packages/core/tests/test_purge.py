@@ -1081,6 +1081,35 @@ async def test_purge_principal_cli_skips_slack_user_tokens(
     assert report.db.slack_user_tokens == 0, "CLI principals must not touch slack_user_tokens"
 
 
+async def test_purge_principal_erases_the_sandbox_setter(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A principal purge alone erases the person from the old sandbox opt-in columns."""
+    calls: list[dict[str, Any]] = []
+
+    async def record(_session: AsyncSession, **kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(routines_store, "erase_sandbox_setter", record)
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    pp = await make_platform_principal(
+        db_session, platform="discord", external_id="u-setter", tenant=tenant, account=account
+    )
+    cli = await make_cli_principal(db_session, os_user="cli-setter", tenant=tenant, account=account)
+    await db_session.commit()
+
+    await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
+    await purge_principal(sm=db_session_factory, principal_id=cli.id, kind="cli")
+
+    assert calls == [
+        {"ids": [], "platform_users": [(tenant.id, "u-setter")]},
+        {"ids": [str(cli.id)], "platform_users": []},
+    ], "a platform user only within their tenant; a CLI principal by id"
+
+
 async def test_purge_principal_discord_skips_slack_user_tokens(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

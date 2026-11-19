@@ -13,7 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from daimon.core.features.registry import TIERS, FeatureSpec, Tier
+from daimon.core.features.registry import TIER_ORDER, FeatureSpec, Tier
 
 Decider = Tier | Literal["default"]
 Unavailable = Literal["platform", "backend", "requires", "depends_on"]
@@ -87,7 +87,7 @@ def resolve_feature(
     `default` is the platform's own default where it differs from the spec's."""
     by_tier = {value.tier: value for value in values if value.tier in spec.tiers}
     effective = ResolvedFeature(spec.key, default or spec.default, "default")
-    for tier in TIERS:
+    for tier in TIER_ORDER:
         if effective.locked:
             break
         setting = by_tier.get(tier)
@@ -105,5 +105,5 @@ def resolve_feature(
 
 def resolve_above(spec: FeatureSpec, values: Iterable[TierValue], tier: Tier) -> ResolvedFeature:
     """Resolve only the tiers broader than `tier`: what a write there lives under."""
-    cut = TIERS.index(tier)
-    return resolve_feature(spec, (v for v in values if TIERS.index(v.tier) < cut))
+    cut = TIER_ORDER.index(tier)
+    return resolve_feature(spec, (v for v in values if TIER_ORDER.index(v.tier) < cut))

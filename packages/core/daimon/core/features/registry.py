@@ -16,8 +16,11 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 
-Tier = Literal["deployment", "workspace", "agent", "channel", "thread"]
-TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
+Tier = Literal["deployment", "workspace", "agent", "channel", "thread", "routine"]
+TIER_ORDER: Final[tuple[Tier, ...]] = get_args(Tier)
+"""Every tier, broadest first; a routine's own tier is the most specific of its runs."""
+TIERS: Final[tuple[Tier, ...]] = TIER_ORDER[:-1]
+"""The tiers of a chat place, every feature's unless narrowed."""
 LOCKABLE: Final[frozenset[Tier]] = frozenset({"deployment", "workspace", "agent", "channel"})
 Effect = Literal["model", "display", "capability", "guardrail", "limit"]
 Combine = Literal["most_specific", "ceiling", "stricter", "minimum"]
@@ -132,6 +135,9 @@ class FeatureSpec:
     minimum: float = 0
     """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
     above 0 where 0 would be an unusable limit, not an off switch."""
+    pinned: bool = False
+    """An On at the agent or routine tier holds only for the agent and environment in the
+    `pin` kept with it; a write without one is refused, and no other tier takes On."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -735,11 +741,53 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "Allowed lets an admin turn on built-in tools for one routine. Off keeps them off in "
-            "every routine, even one an admin turned them on for."
+            "Allowed lets an admin turn on built-in tools for an agent's or one routine's runs. "
+            "Off keeps them off in every routine, even one an admin turned them on for."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="routine_sandbox_tools",
+        name="Sandbox tools in routines",
+        category="guardrails",
+        effect="capability",
+        values={"on": "On", "off": "Off"},
+        default="off",
+        tiers=("workspace", "agent", "routine"),
+        binds="turn",
+        doc=(
+            "On gives an agent's or one routine's runs its built-in tools, for the agent and "
+            "environment it was set with. A routine's value beats its agent's; Built-in tools "
+            "in routines set to Off still wins. Only a server admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # Off is the default and the safe value: a ceiling would let a plain Off above stop a
+        # routine's own On. The nearer tier decides; a Lock above still wins.
+        combine_override="most_specific",
+        pinned=True,
+    ),
+    FeatureSpec(
+        key="watch_approval",
+        name="Approval for watches",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card with the destination and duration before the agent makes "
+            "or resumes a watch. Skip makes it without the card, reporting in the same "
+            "thread for the default duration. Editing a watch, long jobs, watch key "
+            "rotation and Fly launches keep asking. Only a server admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # Ask is the default and the strict value, so a stricter-wins rule could never
+        # be loosened. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
     ),
     FeatureSpec(
         key="require_routine_destination",
