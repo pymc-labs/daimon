@@ -34,6 +34,7 @@ def _ci() -> dict[str, Any]:
         ("packages/adapters/web/README.md", "web"),
         ("web/src/App.tsx", "spa"),
         ("tests/parity/test_x.py", "parity"),
+        ("tests/simulated/test_x.py", "simulated"),
         ("tests/golden/turn.json", "golden"),
         ("packages/testing/daimon/testing/asgi.py", "testing"),
         ("packages/core/daimon/core/x.py", "core"),

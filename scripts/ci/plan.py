@@ -66,6 +66,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("tests/parity/", "parity"),
     ("tests/harness_conformance/", "harness"),
     ("tests/golden/", "golden"),
+    ("tests/simulated/", "simulated"),
     ("tests/", "tests"),
     ("qa/", "tests"),
     ("packages/mux/", "mux"),
@@ -96,7 +97,7 @@ RULES: tuple[tuple[str, str], ...] = (
 #: (daimon.testing) import every adapter but web, so those adapters select them all.
 DAIMON = (
     "core", "mcp", "slack", "teams", "web", "parity", "discord",
-    "staging-config", "journeys", "lint", "shard-check",
+    "staging-config", "journeys", "lint", "shard-check", "simulated",
 )  # fmt: skip
 _HOSTS = (*DAIMON, "image-daimon")
 
@@ -121,6 +122,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     "web-links": ("spa", "web", "parity", "image-daimon"),
     "parity": ("parity", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
+    "simulated": ("simulated", "lint"),
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
     "golden": (*DAIMON, "mux"),
     "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
@@ -166,6 +168,8 @@ MATRICES: dict[str, list[Leg]] = {
                 ("teams", "packages/adapters/teams"),
                 ("web", "packages/adapters/web"),
                 ("parity", "tests/parity"),
+                # Whole turns on each provider, from a fresh install, over faked HTTP.
+                ("simulated", "tests/simulated"),
             )
             for leg in _shards(suite, 1, paths, **{"fetch-depth": 1})
         ),
