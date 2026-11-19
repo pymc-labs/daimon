@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,6 +27,7 @@ class FakeGate:
     def __init__(self, *, cooling: bool = False, full: bool = False) -> None:
         self.cooling, self.full = cooling, full
         self.leases: set[uuid.UUID] = set()
+        self.renewed: list[uuid.UUID] = []
         self.cooldowns: list[tuple[ProviderKey, str, float]] = []
 
     async def cooling_until(self, key: ProviderKey, model: str) -> datetime | None:
@@ -37,6 +39,9 @@ class FakeGate:
         lease = uuid.uuid4()
         self.leases.add(lease)
         return lease
+
+    async def renew(self, lease: uuid.UUID) -> None:
+        self.renewed.append(lease)
 
     async def release(self, lease: uuid.UUID) -> None:
         self.leases.discard(lease)
@@ -56,6 +61,7 @@ class Request:
     admission: SimpleNamespace
     tenant_id: uuid.UUID = TENANT
     gate: object = None
+    deadline: datetime = datetime.now(UTC) + timedelta(minutes=45)
 
     def now(self) -> datetime:
         return datetime.now(UTC)
@@ -129,6 +135,31 @@ async def test_the_lease_is_held_until_the_turn_ends_and_freed_when_preparation_
     with pytest.raises(RuntimeError):
         await run(request_for(gate), lambda: KEY, fail)
     assert not gate.leases
+
+
+async def test_a_lease_is_renewed_and_freed_when_its_task_ends_without_running(monkeypatch):
+    """An adapter that fails between preparation and the run never calls the finalizer."""
+    from daimon.core.turn import provider_gate
+
+    monkeypatch.setattr(provider_gate, "RENEW_EVERY_S", 0.01)
+    gate = FakeGate()
+
+    async def prepare():
+        return Prepared()
+
+    async def adapter_turn():
+        prepared = await run(request_for(gate), lambda: KEY, prepare)
+        assert prepared._finalize is not None and len(gate.leases) == 1
+        while not gate.renewed:
+            await asyncio.sleep(0.01)
+        raise RuntimeError("card post failed")
+
+    with pytest.raises(RuntimeError):
+        await asyncio.create_task(adapter_turn())
+    async with asyncio.timeout(1):
+        while gate.leases:
+            await asyncio.sleep(0.01)
+    assert gate.renewed and not gate.leases, "renewed while held, freed once its task ended"
 
 
 @pytest.mark.parametrize("gated", [False, True])

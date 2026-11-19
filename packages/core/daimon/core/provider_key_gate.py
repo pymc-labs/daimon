@@ -1,8 +1,9 @@
 """What one provider API key can take: its rate-limit waits and its running turns.
 
 Every replica shares both through the database. A 429 puts the key's model on a
-cooldown for the wait the provider named; a turn holds a lease on the key until
-it ends, and a key or workspace at its cap makes the next turn wait, then refuse.
+cooldown for the wait the provider named; a turn holds a short lease on the key,
+renewed until it ends, and a key or workspace at its cap makes the next turn
+wait, then refuse.
 """
 
 from __future__ import annotations
@@ -24,11 +25,13 @@ log = structlog.get_logger(__name__)
 _POLL_S = 0.5
 
 
-def lease_ttl() -> timedelta:
-    """A turn that never releases (a crash) frees its slot this long after its ceiling."""
-    from daimon.core.turn.ceiling import TURN_CEILING_S
+#: How often a running turn renews its lease.
+RENEW_EVERY_S = 30.0
 
-    return timedelta(seconds=TURN_CEILING_S + 60)
+
+def lease_ttl() -> timedelta:
+    """A lease outlives its last renewal by this: a crashed holder's slot frees this soon."""
+    return timedelta(seconds=3 * RENEW_EVERY_S)
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,17 @@ class ProviderKeyGate:
             step = min(_POLL_S, self._limits.wait_s - waited)
             await self._sleep(step)
             waited += step
+
+    async def renew(self, lease: uuid.UUID) -> None:
+        """Extend a held lease; a failure only lets it run toward its expiry."""
+        from daimon.core.stores import provider_key_gate as store
+
+        try:
+            async with self._sessions.begin() as session:
+                await store.renew_lease(session, lease, expires_at=self._clock() + lease_ttl())
+        except Exception:
+            # Boundary: a turn already running must not fail on a renewal.
+            log.warning("provider_key_gate.renew_failed", exc_info=True)
 
     async def release(self, lease: uuid.UUID) -> None:
         """Free a slot; a failure only leaves the lease to expire."""

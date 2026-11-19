@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import IO
 
 import structlog
-from daimon.core.provider_key_gate import ProviderKey, ProviderKeyGate, ProviderKeySource
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.provider_key_gate import (
+    RENEW_EVERY_S,
+    ProviderKey,
+    ProviderKeyGate,
+    ProviderKeySource,
+)
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from mux.contracts.errors import ProviderError
@@ -22,12 +29,19 @@ class GateHold:
     """One turn's place in its key's gate, taken once its policy checks have passed.
 
     Preparation calls `enter` after every refusal that needs no provider key, so a
-    denied turn never reads the key.
+    denied turn never reads the key. The lease is short and renewed until the turn's
+    finalizer releases it or the task that took it ends, whichever exit it takes
+    between preparation and the run; a crashed process's lease expires on its own.
     """
 
     def __init__(self, request: ProviderPreparationRequest) -> None:
         self._request = request
-        self._held: tuple[ProviderKeyGate, uuid.UUID] | None = None
+        self._keeper: asyncio.Task[None] | None = None
+        self._ended = asyncio.Event()
+
+    @property
+    def held(self) -> bool:
+        return self._keeper is not None
 
     async def enter(self, source: ProviderKeySource | None) -> None:
         """Refuse a cooling or full key; else take a lease on it.
@@ -47,12 +61,37 @@ class GateHold:
             raise AdmissionDenied(
                 reason="backend_unsupported", cause="provider_busy", provider=key.provider
             )
-        self._held = gate, lease
+        # Past the turn's ceiling nothing is left to hold the slot for.
+        lasts = (self._request.deadline - self._request.now()).total_seconds() + 60
+        ended = self._ended
+        self._keeper = asyncio.create_task(_keep(gate, lease, lasts, ended))
+        owner = asyncio.current_task()
+        if owner is not None:
+            owner.add_done_callback(lambda _: ended.set())
 
     async def release(self) -> None:
-        held, self._held = self._held, None
-        if held is not None:
-            await held[0].release(held[1])
+        keeper, self._keeper = self._keeper, None
+        if keeper is not None:
+            self._ended.set()
+            # Not `await keeper`: a cancelled caller must not cancel the release.
+            await asyncio.wait([keeper])
+
+
+async def _keep(
+    gate: ProviderKeyGate, lease: uuid.UUID, seconds: float, ended: asyncio.Event
+) -> None:
+    """Renew `lease` until `ended` is set or `seconds` pass, then free it."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + seconds
+    try:
+        while (left := end - loop.time()) > 0:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(ended.wait(), min(RENEW_EVERY_S, left))
+            if ended.is_set():
+                return
+            await gate.renew(lease)
+    finally:
+        await gate.release(lease)
 
 
 async def gated_turn(
@@ -66,6 +105,8 @@ async def gated_turn(
     except BaseException:
         await asyncio.shield(hold.release())
         raise
+    if not hold.held:
+        return prepared
     inner = prepared._finalize  # pyright: ignore[reportPrivateUsage]
 
     async def finalize() -> None:
@@ -92,7 +133,11 @@ class CooldownTransport:
                 try:
                     await self._gate.record_cooldown(self._key, self._model, error.retry_after_s)
                 except Exception:
-                    log.warning("provider_key_gate.cooldown_failed", exc_info=True)
+                    log.warning(
+                        "provider_key_gate.cooldown_failed",
+                        causes=backend_refusal_causes(error),
+                        exc_info=True,
+                    )
             raise
 
     async def request(

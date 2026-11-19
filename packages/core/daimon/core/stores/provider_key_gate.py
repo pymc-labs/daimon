@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from daimon.core._models import ProviderKeyCooldown, ProviderKeyLease
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,3 +97,11 @@ async def acquire_lease(
 
 async def release_lease(session: AsyncSession, lease_id: uuid.UUID) -> None:
     await session.execute(delete(ProviderKeyLease).where(ProviderKeyLease.id == lease_id))
+
+
+async def renew_lease(session: AsyncSession, lease_id: uuid.UUID, *, expires_at: datetime) -> None:
+    await session.execute(
+        update(ProviderKeyLease)
+        .where(ProviderKeyLease.id == lease_id)
+        .values(expires_at=expires_at)
+    )
