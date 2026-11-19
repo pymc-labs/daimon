@@ -27,7 +27,12 @@ from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelRule, ChannelWriters
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Subject
-from daimon.core.channel_budget import ChannelBudgetError, ChannelBudgetStatus, parse_budget_spec
+from daimon.core.channel_budget import (
+    ChannelBudgetError,
+    ChannelBudgetStatus,
+    parse_budget_spec,
+    require_alert_destination,
+)
 from daimon.core.channel_changes import (
     BudgetValue,
     ChannelActor,
@@ -58,6 +63,7 @@ from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.platform_names import ChannelStatus
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.agent_tool_rules import list_channel_rule_history
+from daimon.core.stores.channel_budgets import get_channel_budget
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import ChannelSetting
 from daimon.core.stores.platform_names import get_channel_names, mark_channel_status
@@ -77,6 +83,7 @@ _NOT_FOUND = "No such channel."
 _NO_WEB_BUDGET = "Web chat has no channel budget."
 _BAD_BUDGET = "Enter a budget in dollars and pick a window."
 _BAD_ALERT_CHANNEL = "Pick a channel in this workspace for alerts."
+_NO_ALERT_DESTINATION = "Pick an alert channel: this workspace has no support channel to alert in."
 _AUDIT_DETAIL = {
     "default_agent": "Default agent",
     "kept_agents": "Agents kept here",
@@ -251,7 +258,8 @@ class BudgetChange(BaseModel):
     window: Literal["monthly", "total", "fixed"] | None = None
     starts_at: str | None = None
     ends_at: str | None = None
-    on_limit: Literal["stop", "alert"] = "stop"
+    on_limit: Literal["stop", "alert"] | None = None
+    """None keeps the budget's current mode, as the CLI and MCP do."""
     alert_channel_id: str | None = None
     amount_usd: str | None = None
     expected: BudgetExpected | None
@@ -696,17 +704,33 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
                     expected=expected,
                 )
             else:
-                try:
-                    spec = parse_budget_spec(
-                        limit_usd=body.limit_usd or "",
-                        window=body.window or "",
-                        starts_at=body.starts_at,
-                        ends_at=body.ends_at,
-                        on_limit=body.on_limit,
-                        alert_channel_id=body.alert_channel_id,
+                tenant_id = caller.person.tenant_id
+                async with runtime.sessionmaker() as db:
+                    current = await get_channel_budget(
+                        db, tenant_id=tenant_id, platform=platform, channel_id=channel_id
                     )
-                except ChannelBudgetError as exc:
-                    raise HTTPException(422, _BAD_BUDGET) from exc
+                    try:
+                        spec = parse_budget_spec(
+                            limit_usd=body.limit_usd or "",
+                            window=body.window or "",
+                            starts_at=body.starts_at,
+                            ends_at=body.ends_at,
+                            on_limit=body.on_limit,
+                            alert_channel_id=body.alert_channel_id,
+                            current=current,
+                        )
+                    except ChannelBudgetError as exc:
+                        raise HTTPException(422, _BAD_BUDGET) from exc
+                    try:
+                        await require_alert_destination(
+                            db,
+                            spec,
+                            tenant_id=tenant_id,
+                            platform=platform,
+                            settings=runtime.settings,
+                        )
+                    except ChannelBudgetError as exc:
+                        raise HTTPException(422, _NO_ALERT_DESTINATION) from exc
                 if body.alert_channel_id is not None:
                     blocker = await _alert_channel_blocker(
                         runtime, caller, platform, body.alert_channel_id
