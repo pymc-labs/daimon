@@ -454,6 +454,13 @@ _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 # Long jobs spend money in the background: server admins only, no delegation, no owners.
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
+_TIME_LIMITS: Final[Mapping[str, str]] = {
+    "45": "45 minutes",
+    "30": "30 minutes",
+    "20": "20 minutes",
+    "15": "15 minutes",
+}
+"""Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 WEB_MODULES: Final[tuple[str, ...]] = (
@@ -518,6 +525,21 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "The person who asked is pinged when a long answer is finished.",
         legacy_env=("DAIMON_COMPLETION_PINGS",),
         env_map="completion_pings",
+    ),
+    _shown(
+        "model_reactions",
+        "Model reactions",
+        "The first message in a thread, and the first after the model or effort changes, gets "
+        "an emoji for the model and one for the effort it runs on.",
+        tiers=("workspace", "agent"),
+        platforms=frozenset({"discord"}),
+    ),
+    _shown(
+        "tool_server_names",
+        "Tool server names",
+        "Tool lines on the working card name the connected server each tool belongs to.",
+        tiers=("workspace", "agent"),
+        default="on",
     ),
     _shown(
         "table_rendering",
@@ -969,6 +991,36 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         authority=_SERVER_ADMIN,
         minimum=1,
     ),
+    _limit(
+        "turn_time_limit",
+        "Answer time limit",
+        (
+            "The longest one answer may take before it is stopped when someone is talking to "
+            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
+            "or shorter. The smallest setting wins. Routines and watches use "
+            "the unattended run limit."
+        ),
+        _TIME_LIMITS,
+        default="45",
+        tiers=("workspace", "agent"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+    ),
+    _limit(
+        "unattended_time_limit",
+        "Unattended run time limit",
+        (
+            "The longest a run nobody is watching may take before it is stopped: a routine, a "
+            "watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 "
+            "minutes, or shorter. The smallest setting wins. Chats use the "
+            "answer time limit."
+        ),
+        _TIME_LIMITS,
+        default="45",
+        tiers=("workspace", "agent"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+    ),
     _capability(
         "outbound_reach",
         "Posting to others",
@@ -1047,7 +1099,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "
             "covers chat replies only: routines and watches follow the unattended rule whoever "
-            "runs Daimon set. Only an admin of the chat app can change it."
+            "runs Daimon set. Only an admin of the chat app can change it, or the operator at the "
+            "command line, who gives a reason that is audited."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
@@ -1153,7 +1206,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "How many earlier chat messages a new conversation reads, up to 100 from the "
-            "thread and 25 from the channel around it. The smallest setting wins."
+            "thread and from the channel around it. The smallest setting wins."
         ),
         platforms=frozenset({"discord", "slack", "teams"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -1174,6 +1227,52 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),
         platforms=_DM_MEMORY_PLATFORMS,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="channel_history",
+        name="Channel background",
+        category="model_input",
+        effect="display",
+        values={
+            "100": "100 messages",
+            "50": "50 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "0": "None",
+        },
+        default="25",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "How many recent channel messages a new thread reads for background when a message "
+            "in the channel starts it. Chat history still caps it."
+        ),
+        platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="answer_messages",
+        name="Answer messages",
+        category="chat",
+        effect="display",
+        values={
+            "1000": "1000 messages",
+            "100": "100 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "5": "5 messages",
+            "3": "3 messages",
+            "1": "1 message",
+        },
+        default="5",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "The most messages one answer may post in a thread. A longer answer is attached "
+            "as a single file instead."
+        ),
+        platforms=frozenset({"discord"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     *_MODEL_INPUT,

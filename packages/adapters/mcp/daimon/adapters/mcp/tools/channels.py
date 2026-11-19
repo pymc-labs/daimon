@@ -101,7 +101,6 @@ from daimon.adapters.mcp.tools.teams._send import (
     _teams_send_message_impl,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.outbound.reach import ReachPlan
-from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.teams_threads import is_group_chat
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -212,7 +211,6 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         cross-tenant messages.
         """
         auth = await _auth(ctx)
-        content = scrub_other_platforms(content, auth.platform)
         await refuse_dm_to_opted_out(runtime, auth, recipient_id)
         [post] = await prepare_posts(
             runtime, auth, [OutgoingPost(text=content, place=recipient_id)], plan=plan
@@ -460,13 +458,6 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         drafts = [ThreadDraft(name=name, content=content), *(batch or [])]
-        drafts = [
-            ThreadDraft(
-                name=scrub_other_platforms(d.name, auth.platform),
-                content=scrub_other_platforms(d.content, auth.platform),
-            )
-            for d in drafts
-        ]
         rendered = await prepare_posts(
             runtime,
             auth,
@@ -506,9 +497,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("rename_thread")
-        return await _rename_thread_impl(
-            runtime, auth, thread_id=thread_id, name=scrub_other_platforms(name, auth.platform)
-        )
+        return await _rename_thread_impl(runtime, auth, thread_id=thread_id, name=name)
 
     @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
     async def set_display_identity(  # pyright: ignore[reportUnusedFunction]
@@ -538,9 +527,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _set_display_identity_impl(
             runtime,
             auth,
-            display_name=scrub_other_platforms(display_name, auth.platform)
-            if display_name
-            else None,
+            display_name=display_name or None,
             avatar_url=avatar_url or None,
             origin_context_id=origin_context_id or None,
         )
@@ -627,16 +614,8 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         drafts = [
-            MessageDraft(
-                channel_id=channel_id, content=scrub_other_platforms(content, auth.platform)
-            ),
-            *(
-                MessageDraft(
-                    channel_id=d.channel_id,
-                    content=scrub_other_platforms(d.content, auth.platform),
-                )
-                for d in batch or []
-            ),
+            MessageDraft(channel_id=channel_id, content=content),
+            *(batch or []),
         ]
         media = any(is_media(a.get("filename", "")) for a in attachments or []) or bool(
             file_handles and await _any_media_upload(runtime, auth, file_handles)

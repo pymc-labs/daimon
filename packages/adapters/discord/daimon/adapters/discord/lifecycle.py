@@ -49,6 +49,7 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
+from daimon.core.features.model_input import ANSWER_MESSAGES
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -114,8 +115,6 @@ _REPAIR_EDIT_S = 120.0
 # ephemeral draft on the status card. Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
-# Reserve one of the five answer messages for the terminal answer/card.
-_MAX_ANSWER_MESSAGES = 5
 _OUTPUT_COLLAPSED_NOTICE = "Additional output was combined into the attached answer.txt."
 _STOPPED_TITLE = "Stopped."
 _STOPPED_NEXT_STEP = "Send a message to start again."
@@ -386,6 +385,8 @@ class DiscordTurnLifecycle(OutputGate):
         notify_on_completion: bool = False,
         acknowledgment_managed: bool = False,
         render_tables: bool = False,
+        answer_message_cap: int = ANSWER_MESSAGES,
+        model_marks: tuple[str, ...] = (),
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -415,6 +416,10 @@ class DiscordTurnLifecycle(OutputGate):
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
+        # The terminal answer/card takes one of these messages.
+        self._answer_message_cap = answer_message_cap
+        self._model_marks = model_marks
+        self._model_marked = False
         self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
@@ -440,7 +445,6 @@ class DiscordTurnLifecycle(OutputGate):
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
-            platform="discord",
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the message the
@@ -582,7 +586,25 @@ class DiscordTurnLifecycle(OutputGate):
         """
         if self._unprompted:
             return
+        await self._mark_model()
         await self._maybe_flush(initial=True)
+
+    async def _mark_model(self) -> None:
+        """React on the trigger message with the model and effort emoji the bot asked for."""
+        if not self._model_marks or self._trigger_message is None:
+            return
+        for mark in self._model_marks:
+            try:
+                await self._trigger_message.add_reaction(mark)
+            except discord.HTTPException:
+                log.warning("turn.model_reaction_failed", exc_info=True)
+                return
+        self._model_marked = True
+
+    @property
+    def model_marked(self) -> bool:
+        """Every model and effort emoji landed on the trigger message."""
+        return self._model_marked
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -1183,7 +1205,7 @@ class DiscordTurnLifecycle(OutputGate):
                 # thread and attachment. Count actual Discord messages.
                 if (
                     self._deferred_sealed_text
-                    or self._sealed_message_count + len(chunks) >= _MAX_ANSWER_MESSAGES
+                    or self._sealed_message_count + len(chunks) >= self._answer_message_cap
                 ):
                     self._deferred_sealed_text.append(text)
                     self._log_output_limit()
@@ -1203,7 +1225,7 @@ class DiscordTurnLifecycle(OutputGate):
             log.warning(
                 "turn.answer_message_limit",
                 turn_id=str(self._turn_id),
-                limit=_MAX_ANSWER_MESSAGES,
+                limit=self._answer_message_cap,
             )
 
     @staticmethod
@@ -1347,7 +1369,7 @@ class DiscordTurnLifecycle(OutputGate):
         if use_name_prefix:
             collapsed_notice = fallback_name_prefix(self._agent_name, collapsed_notice)
         overflow_files: list[discord.File] = []
-        remaining = _MAX_ANSWER_MESSAGES - self._sealed_message_count
+        remaining = self._answer_message_cap - self._sealed_message_count
         preview_chunks = (
             _split_with_name_prefix(response_text, self._agent_name)
             if use_name_prefix
