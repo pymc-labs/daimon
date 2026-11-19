@@ -45,16 +45,9 @@ def test_j9_every_feature_default_is_on(no_flags):
     assert backend_selection_enabled(settings.turn), "switch tools are offered by default"
 
 
-@pytest.mark.parametrize(
-    ("flag", "stopped"),
-    [
-        ("path", {"turn": TurnSettings()}),
-        ("channel_backends", {"turn": TurnSettings(channel_backends=False)}),
-    ],
-)
-def test_j9_a_turn_flag_only_stops_its_own_feature(no_flags, flag, stopped):
-    """Turning one switch off stops backend selection."""
-    settings = _settings(**stopped)
+def test_j9_the_channel_backends_switch_stops_backend_selection(no_flags):
+    """Turning channel backends off stops backend selection."""
+    settings = _settings(turn=TurnSettings(channel_backends=False))
     assert not backend_selection_enabled(settings.turn)
 
 
