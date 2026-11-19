@@ -665,7 +665,7 @@ async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
         team_owners=owners, group_members=GroupMembersCache(), sessionmaker=db_session_factory
     )
     runtime.settings.teams.tenant_id = ENTRA_TENANT_ID
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     runtime.settings.teams.admin_team_id = team
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
@@ -748,7 +748,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     runtime = MagicMock(
         team_owners=AsyncMock(return_value=frozenset()), group_members=GroupMembersCache()
     )
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     runtime.settings.teams.admin_team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)

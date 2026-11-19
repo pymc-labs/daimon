@@ -153,7 +153,6 @@ async def test_completed_mounted_turn_delivers_its_answer_without_the_token(
                 lifecycle=lifecycle,
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="mux",
                 scope=SCOPE,
                 backend=backend,
                 session_ref=session.ref,

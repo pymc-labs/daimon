@@ -362,7 +362,6 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     origin = request.admission.backend_revision_origin
     if (
         not request.deps.channel_backends
-        or request.deps.turn_path != "mux"
         or origin not in ("channel", "agent")
         or (origin == "agent" and shared is not None)
         or revision.thread_mode != ("shared" if shared is not None else "per_caller")

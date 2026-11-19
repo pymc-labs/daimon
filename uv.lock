@@ -1314,7 +1314,7 @@ provides-extras = ["data"]
 
 [[package]]
 name = "daimon-mux"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/mux" }
 dependencies = [
     { name = "httpx" },

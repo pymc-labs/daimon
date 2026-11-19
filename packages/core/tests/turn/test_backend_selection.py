@@ -642,22 +642,19 @@ async def test_foreign_binding_is_refused_before_retained_config_or_provider_io(
     assert (len(host.wire.requests), len(host.calls)) == before
 
 
-@pytest.mark.parametrize("path,enabled", [("legacy", True), ("legacy", False), ("mux", False)])
-async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
-    selector_host, monkeypatch, path, enabled
-):
+async def test_unconfigured_admission_does_not_read_native_bindings(selector_host, monkeypatch):
     host = selector_host
-    latest = await host.change()
+    await host.change()
 
     async def forbidden(*args):
-        raise AssertionError("legacy/unconfigured admission read a native binding")
+        raise AssertionError("unconfigured admission read a native binding")
 
     monkeypatch.setattr(host.store, "get_binding", forbidden)
     monkeypatch.setattr(channel_backend, "load_backend_agent", forbidden)
     monkeypatch.setattr(channel_backend, "current_agent_backend", forbidden)
     monkeypatch.setattr(channel_backend, "resolve_turn_backend", forbidden)
     current = await admit_impl(
-        replace(host.deps, turn_path=path, channel_backends=enabled),
+        replace(host.deps, channel_backends=False),
         origin="chat",
         tenant_id=TENANT,
         requester_org=RequesterOrg.HOST,
@@ -667,7 +664,7 @@ async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
         thread_id="thread",
         now=datetime.now(UTC),
     )
-    assert current.backend_revision == (latest if enabled else None)
+    assert current.backend_revision is None
     assert host.created == []
 
 

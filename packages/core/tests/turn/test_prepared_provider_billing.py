@@ -223,7 +223,6 @@ async def test_prepared_foreign_failure_reconciles_real_usage_without_anthropic_
     await store.put_binding(binding, expected_generation=0)
     deps = replace(
         _deps(sessionmaker=db_session_factory, router=MARouter()),
-        turn_path="mux",
         state_store=store,
     )
     recorded: list[UsageObservation] = []

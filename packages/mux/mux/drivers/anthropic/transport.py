@@ -1,15 +1,13 @@
-"""Private legacy turn transport during the dual-path rollout.
+"""Anthropic SDK client policy shared by the driver's ports.
 
-This is deliberately outside the neutral ports: its SDK values and exceptions
-belong only to the temporary host compatibility edge. It preserves the old
-request arguments and stream lifetime; idempotent reads have short budgets.
+Mutations get one native attempt and no redirects; failures are classified for
+the host's durable retry policy.
 """
 
 from __future__ import annotations
 
-import asyncio
 import email.utils
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -22,27 +20,14 @@ from anthropic import (
     APIStatusError,
     AsyncAnthropic,
     AsyncCallNext,
-    AsyncStream,
     Middleware,
 )
-from anthropic.types.beta.sessions import (
-    BetaManagedAgentsEventParams,
-    BetaManagedAgentsSessionEvent,
-    BetaManagedAgentsStreamSessionEvents,
-)
 
-from mux.contracts.ids import Scope
-from mux.errors import ScopeViolation
 from mux.state.mutation_retry import UNCLASSIFIED, MutationFailure, parse_retry_after
 
 if TYPE_CHECKING:
     from anthropic._request import APIRequest
     from anthropic._response import AsyncAPIResponse
-
-# Bound the whole operation, including SDK retries and every history page.
-READ_TIMEOUT_S = 60.0
-_REQUEST_TIMEOUT_S = 30.0
-_REQUEST_MAX_RETRIES = 2
 
 _CLAIMED_MUTATION: ContextVar[bool] = ContextVar("anthropic_claimed_mutation", default=False)
 
@@ -230,78 +215,3 @@ def _error_code(body: object) -> str | None:
         return None
     code = cast(Mapping[str, object], details).get("error_code")
     return code if isinstance(code, str) else None
-
-
-class LegacyTurnTransport:
-    def __init__(
-        self, client: AsyncAnthropic, session_id: str, *, scope: Scope | None = None
-    ) -> None:
-        if scope is not None and (
-            scope.is_platform
-            or scope.is_legacy_host_authorized
-            or not scope.tenant_id.strip()
-            or not scope.account_id.strip()
-        ):
-            raise ScopeViolation(session_id, "turn transport requires a real tenant/account scope")
-        self._client = client
-        self._session_id = session_id
-        self._read_client = client.with_options(
-            timeout=_REQUEST_TIMEOUT_S, max_retries=min(client.max_retries, _REQUEST_MAX_RETRIES)
-        )
-        # The host binds this identity from its existing admitted session.
-        # Legacy raw/operator entry points still omit it during the rollout;
-        # no lookup or wire argument is added to obtain an identity.
-        self.scope = scope
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        await mutation_client(self._client, single_attempt=True).beta.sessions.events.send(
-            self._session_id, events=events
-        )
-
-    async def status(self) -> str:
-        async with asyncio.timeout(READ_TIMEOUT_S):
-            return (await self._read_client.beta.sessions.retrieve(self._session_id)).status
-
-    async def open_stream(
-        self, *, read_timeout_s: float
-    ) -> AsyncStream[BetaManagedAgentsStreamSessionEvents]:
-        return await self._client.beta.sessions.events.stream(
-            session_id=self._session_id,
-            timeout=httpx.Timeout(read_timeout_s, connect=5.0),
-        )
-
-    async def latest_idle_is_settled(self) -> bool:
-        """Main's exact filtered history proof for confirmation recovery."""
-        async with asyncio.timeout(READ_TIMEOUT_S):
-            async for event in self._read_client.beta.sessions.events.list(
-                session_id=self._session_id,
-                types=["session.status_idle"],
-                order="desc",
-                limit=1,
-            ):
-                stop_reason = getattr(event, "stop_reason", None)
-                return getattr(stop_reason, "type", None) != "requires_action"
-            return False
-
-    async def replay(
-        self, *, timeout_s: float | None = None
-    ) -> list[BetaManagedAgentsSessionEvent]:
-        async with asyncio.timeout(READ_TIMEOUT_S if timeout_s is None else timeout_s):
-            events: list[BetaManagedAgentsSessionEvent] = []
-            # Every reconnect walks the whole session log; the SDK default page size
-            # would multiply the round trips on a long session fivefold.
-            async for event in self._read_client.beta.sessions.events.list(
-                session_id=self._session_id, limit=100
-            ):
-                events.append(event)
-            return events
-
-    async def open_interrupt_stream(self) -> AsyncStream[BetaManagedAgentsStreamSessionEvents]:
-        # Interrupt waiting historically uses the client's default timeout,
-        # unlike the live turn stream's explicit read timeout.
-        return await self._client.beta.sessions.events.stream(session_id=self._session_id)
-
-    async def archive(self) -> None:
-        await mutation_client(self._client, single_attempt=True).beta.sessions.archive(
-            self._session_id
-        )

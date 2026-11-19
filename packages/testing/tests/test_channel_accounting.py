@@ -177,7 +177,6 @@ async def context(request, db_preflight, db_session_factory, db_clean, monkeypat
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
-        turn_path="legacy" if provider == "anthropic" else "mux",
         state_store=PostgresStateStore(db_session_factory),
         tool_safety=OPEN_TOOL_SAFETY,
     )

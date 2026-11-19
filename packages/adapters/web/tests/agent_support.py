@@ -205,7 +205,7 @@ async def provider_choice(
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     service = make_backend_service(factory, settings.turn, capture_source=NO_CAPTURE)
     policy = await service.tenant_policy(owner.tenant_id)

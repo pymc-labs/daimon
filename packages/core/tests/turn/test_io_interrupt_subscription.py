@@ -1,4 +1,4 @@
-"""Main's instant interrupt acknowledgement also survives the opted-in mux path."""
+"""An instant interrupt acknowledgement is seen: the stream opens before the POST."""
 
 import asyncio
 import json
@@ -12,9 +12,8 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import JsonValue
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 @pytest.mark.parametrize("stop", ["end_turn", "retries_exhausted", "requires_action"])
-async def test_interrupt_subscribes_before_post_and_closes_stream(path, stop):
+async def test_interrupt_subscribes_before_post_and_closes_stream(stop):
     subscribed = False
     closed = False
     requests = []
@@ -60,15 +59,14 @@ async def test_interrupt_subscribes_before_post_and_closes_stream(path, stop):
         authorization_id="interrupt-test",
     )
     async with build_fake_anthropic(handle) as client:
-        result = await turn_io(client, "sesn_test", path=path, scope=scope).interrupt(timeout_s=1.0)
+        result = await turn_io(client, "sesn_test", scope=scope).interrupt(timeout_s=1.0)
     assert result is None or result.stopped
     assert requests == ["GET", "POST"]
     assert closed
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 @pytest.mark.parametrize("exit_kind", ["post_failure", "timeout", "cancelled"])
-async def test_interrupt_closes_subscribed_stream_on_every_failed_exit(path, exit_kind):
+async def test_interrupt_closes_subscribed_stream_on_every_failed_exit(exit_kind):
     from anthropic import APIConnectionError
     from daimon.core.errors import TurnError
 
@@ -105,8 +103,8 @@ async def test_interrupt_closes_subscribed_stream_on_every_failed_exit(path, exi
     )
     async with build_fake_anthropic(handle) as client:
         client.max_retries = 0
-        io = turn_io(client, "sesn_test", path=path, scope=scope)
-        # A lost POST acknowledgement leaves the stream silent, so the mux path
+        io = turn_io(client, "sesn_test", scope=scope)
+        # A lost POST acknowledgement leaves the stream silent, so the interrupt
         # waits out the whole deadline: keep it short. The cancelled exit never
         # reaches its deadline.
         deadline_s = {"timeout": 0.5, "post_failure": 1.0}.get(exit_kind, 10)

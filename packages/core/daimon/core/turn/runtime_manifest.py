@@ -1839,7 +1839,6 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         request.admission.backend_revision_origin != "agent"
         or not request.deps.agent_backends
         or not request.deps.channel_backends
-        or request.deps.turn_path != "mux"
         or revision is None
         or request.scope.tenant_id != str(request.tenant_id)
         or request.scope.account_id != str(request.session_account_id)
@@ -2393,7 +2392,6 @@ def validate_counterpart_request(
             or revision is None
             or not request.deps.channel_backends
             or not request.deps.agent_backends
-            or request.deps.turn_path != "mux"
             or scope.tenant_id != str(request.tenant_id)
             or scope.account_id != preparation_account(request)
             or scope.account_id != str(request.session_account_id)
@@ -2411,7 +2409,6 @@ def validate_counterpart_request(
         request.admission.backend_revision_origin != "agent"
         or revision is None
         or not request.deps.channel_backends
-        or request.deps.turn_path != "mux"
         or scope.tenant_id != str(request.tenant_id)
         or scope.account_id != preparation_account(request)
         or scope.account_id != str(request.session_account_id)

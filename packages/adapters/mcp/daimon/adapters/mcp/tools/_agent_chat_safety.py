@@ -48,7 +48,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.io import LegacyTurnIO
+from daimon.core.turn.io import turn_io
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.unattended import (
@@ -385,8 +385,8 @@ async def _answer(
         require_fresh=True,
     )
     # The session port carries only messages and interrupts; confirmations go
-    # through the turn transport the routine driver answers with.
-    await LegacyTurnIO(single_attempt(runtime), session.id, scope=mcp_scope(auth)).send(
+    # through the turn codec the routine driver answers with.
+    await turn_io(single_attempt(runtime), session.id, scope=mcp_scope(auth)).send(
         build_decision_events(decisions)
     )
 

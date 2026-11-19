@@ -20,7 +20,7 @@ The same split serves the other way a session can end up inheriting a task:
 unexpected loss is told, where nothing was carried and the only honest thing
 to say is what is gone.
 
-Pure: no I/O, no clock. The caller fetches events (``ma.replay_events``) and
+Pure: no I/O, no clock. The caller fetches events (the turn I/O ``replay``) and
 sends the result.
 """
 
@@ -85,7 +85,7 @@ def select_recent_turns(
 ) -> list[TranscriptTurn]:
     """The tail of the conversation, oldest-first, within both budgets.
 
-    `events` is the ordered log from `ma.replay_events` (oldest first). Only
+    `events` is the ordered log from the turn I/O `replay` (oldest first). Only
     `user.message` and `agent.message` count, and only their text blocks:
     images and documents are dropped rather than re-sent, because the
     successor cannot resolve their sources and an image is what poisons a

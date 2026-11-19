@@ -2002,19 +2002,18 @@ class SupportSettings(BaseModel):
 
 
 class TurnSettings(BaseModel):
-    """Neutral turn ports. mux and backend selection are on by default.
+    """Neutral turn ports. Backend selection is on by default.
 
-    `path`, `channel_backends` and `agent_backends` are emergency stops, not setup:
-    a fresh install needs none of them. Setting one off stops new turns at
+    `channel_backends` and `agent_backends` are emergency stops, not setup:
+    a fresh install needs neither. Setting one off stops new turns at
     admission and queued or retried work before it is sent again.
     """
 
-    path: Literal["legacy", "mux"] = Field(
+    path: Literal["mux"] = Field(
         default="mux",
         description=(
-            "Turn I/O path. mux (the default) runs turns through the neutral "
-            "Events/Sessions ports. Emergency stop only: legacy returns every turn "
-            "to the Managed Agents-only path."
+            "Deprecated, no effect: every turn runs through the neutral Events/Sessions "
+            "ports. The legacy value was removed and fails at startup; remove the variable."
         ),
     )
 
@@ -2045,6 +2044,8 @@ class TurnSettings(BaseModel):
     @classmethod
     def _empty_path_is_the_default(cls, value: object) -> object:
         # An empty value is how compose passes an unset variable: the default, not a stop.
+        if value == "legacy":
+            raise ValueError("the legacy turn path was removed; unset DAIMON_TURN__PATH")
         return "mux" if value == "" else value
 
 
@@ -3249,7 +3250,7 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
     (`_env_file=None`) so they only see `monkeypatch.setenv` values.
     """
     settings = Settings(_env_file=_env_file)  # pyright: ignore[reportCallIssue]
-    if settings.turn.path == "mux" and settings.turn.channel_backends:
+    if settings.turn.channel_backends:
         from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
 
         validate_configured_runtime_manifest()
@@ -3316,7 +3317,7 @@ class _TurnSettingsSource(BaseSettings):
 def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
     """Read the same turn flag without unrelated API/database configuration."""
     turn = _TurnSettingsSource(_env_file=_env_file).turn  # pyright: ignore[reportCallIssue]
-    if turn.path == "mux" and turn.channel_backends:
+    if turn.channel_backends:
         from daimon.core.turn.runtime_manifest import validate_configured_runtime_manifest
 
         validate_configured_runtime_manifest()

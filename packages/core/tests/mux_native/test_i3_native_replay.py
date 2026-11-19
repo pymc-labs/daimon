@@ -623,7 +623,6 @@ async def execute(native: Native) -> Capture:
                             backend=backend,
                             backend_request=request,
                             profile=native.profile,
-                            path="mux",
                             user_message=TEXT,
                             lifecycle=surface.lifecycle,
                             cancel=asyncio.Event(),

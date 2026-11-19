@@ -33,7 +33,7 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
 
-from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
+from .turn_io_support import HeadlessIdentity, TurnIOSpy
 
 _run_turn = partial(run_turn, agent_id="agent_x", environment_id="env_x")
 
@@ -157,7 +157,7 @@ def _confirmations(sends: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def test_routine_write_is_denied_when_the_policy_is_on(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+    headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
 ) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -169,10 +169,9 @@ async def test_routine_write_is_denied_when_the_policy_is_on(
         tool_safety=ToolSafetyPolicy(enabled=True),
         tenant_id=headless_identity.tenant_id,
         account_id=headless_identity.account_id,
-        turn_path=turn_path,
     )
 
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
     assert tail == "I could not file it."
     (created,) = creates
     agent = created["agent"]
@@ -189,7 +188,7 @@ async def test_routine_write_is_denied_when_the_policy_is_on(
 
 
 async def test_routine_session_is_unchanged_when_the_policy_is_off(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
+    headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
 ) -> None:
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
@@ -202,10 +201,9 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off(
         tool_safety=OPEN_TOOL_SAFETY,
         tenant_id=headless_identity.tenant_id,
         account_id=headless_identity.account_id,
-        turn_path=turn_path,
     )
 
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
     # The fake keeps serving the frozen snapshot, so every gate rewrites it.
     assert updates

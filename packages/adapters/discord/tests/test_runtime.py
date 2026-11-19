@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -24,7 +23,7 @@ def _make_runtime() -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # stub for structural test
+        turn_deps=deps_for(),  # stub for structural test
     )
 
 

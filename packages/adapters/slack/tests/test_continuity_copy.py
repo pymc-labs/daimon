@@ -1037,7 +1037,7 @@ async def test_mention_turn_admin_cards_read_no_agent_source(
 
     app = _make_app(db_session_factory, tenant_id_str=str(tenant_id))
     app.runtime.settings.crypto.keys = (SecretStr(fernet_key),)
-    app.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    app.runtime.settings.turn = TurnSettings(channel_backends=True)
 
     event = _event(channel=channel, thread_ts=thread_ts, user="U_MENTION_ADMISSION")
     prepared = _prepared_turn(continuity=ContinuityOutcome())

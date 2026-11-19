@@ -204,7 +204,6 @@ async def run_asking_turn(
         defaults_root=tmp_path,
         mcp=McpSettings(public_url=HttpUrl(public_url) if public_url else None),
         markup=Decimal(1),
-        turn_path="mux",
         channel_backends=True,
     )
     admission = await admit_chat(

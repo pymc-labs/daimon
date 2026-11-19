@@ -1,7 +1,6 @@
 """Real SDK headless turns require the caller's actual mux authorization."""
 
 import uuid
-from typing import Literal
 
 import httpx
 import pytest
@@ -16,11 +15,9 @@ from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_headless_turn_uses_authorized_scope_and_original_requests(
-    monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DAIMON_TURN__PATH", path)
     tenant_id, account_id = uuid.UUID(int=23), uuid.UUID(int=24)
     scopes: list[Scope] = []
 
@@ -107,19 +104,16 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         ("POST", "/v1/sessions/session-headless/events"),
     ]
     turn_scopes = [scope for scope in scopes if scope.authorization_id == "headless-turn"]
-    if path == "mux":
-        assert turn_scopes == [
-            Scope(
-                tenant_id=str(tenant_id),
-                account_id=str(account_id),
-                principal_id="daimon",
-                authorization_id="headless-turn",
-            )
-        ]
-        assert not turn_scopes[0].is_platform
-        assert not turn_scopes[0].is_legacy_host_authorized
-    else:
-        assert turn_scopes == []
+    assert turn_scopes == [
+        Scope(
+            tenant_id=str(tenant_id),
+            account_id=str(account_id),
+            principal_id="daimon",
+            authorization_id="headless-turn",
+        )
+    ]
+    assert not turn_scopes[0].is_platform
+    assert not turn_scopes[0].is_legacy_host_authorized
 
 
 @pytest.mark.parametrize(
@@ -130,10 +124,9 @@ async def test_headless_turn_uses_authorized_scope_and_original_requests(
         (None, uuid.UUID(int=24)),
     ],
 )
-async def test_mux_headless_missing_identity_fails_before_provider_io(
-    monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID | None, account_id: uuid.UUID | None
+async def test_headless_missing_identity_fails_before_provider_io(
+    tenant_id: uuid.UUID | None, account_id: uuid.UUID | None
 ) -> None:
-    monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
     transport = ScriptedTransport(router=MARouter())
     async with transport.client() as client:
         with pytest.raises(ScopeViolation, match="authorized tenant/account"):

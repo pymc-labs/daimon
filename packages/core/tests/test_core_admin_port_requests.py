@@ -4,7 +4,7 @@ import contextlib
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -413,9 +413,8 @@ async def test_legacy_identity_lookup_keeps_partial_sdk_reply_and_one_request(
 
 
 @pytest.mark.parametrize("status", [200, 404])
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
-    status: int, path: Literal["legacy", "mux"], monkeypatch: pytest.MonkeyPatch
+    status: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     factory = cast(async_sessionmaker[AsyncSession], SessionFactory())
     conversation = DirectMessageRow(
@@ -460,9 +459,8 @@ async def test_dm_quarantine_keeps_archive_wire_and_sealed_error(
             return resource_ref(backend, "session", session_id, scope=authorized)
 
         deps = replace(
-            deps_for(client if path == "legacy" else unused_client, factory),
-            turn_path=path,
-            backend=backend if path == "mux" else None,
+            deps_for(unused_client, factory),
+            backend=backend,
             backend_session_ref=session_ref,
         )
         with pytest.raises(DaimonError) as caught:

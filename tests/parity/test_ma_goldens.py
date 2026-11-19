@@ -1,4 +1,4 @@
-"""Both turn paths share the immutable integration oracle."""
+"""The turn path matches the immutable integration oracle."""
 
 from __future__ import annotations
 
@@ -16,21 +16,15 @@ SPEC.loader.exec_module(RUNNER)
 
 
 @pytest.mark.parametrize("scenario", tuple(RUNNER.SCENARIOS))
-@pytest.mark.parametrize("turn_path", RUNNER.TURN_PATHS)
-def test_current_path_matches_golden(golden_replays: Any, scenario: str, turn_path: str) -> None:
-    if turn_path == "mux" and not RUNNER.mux_turn_bridge_available():
-        pytest.skip(RUNNER.MUX_PENDING)
-    RUNNER.compare(scenario, golden_replays.transcript(scenario, turn_path))
+def test_current_path_matches_golden(golden_replays: Any, scenario: str) -> None:
+    RUNNER.compare(scenario, golden_replays.transcript(scenario))
 
 
 @pytest.mark.parametrize(("scenario", "mutation"), RUNNER.MUTATIONS)
-@pytest.mark.parametrize("turn_path", RUNNER.TURN_PATHS)
 def test_golden_detects_production_mutation(
-    golden_replays: Any, scenario: str, mutation: str, turn_path: str
+    golden_replays: Any, scenario: str, mutation: str
 ) -> None:
-    if turn_path == "mux" and not RUNNER.mux_turn_bridge_available():
-        pytest.skip(RUNNER.MUX_PENDING)
     # The mutated scenario must still pass; sensitivity comes from its transcript.
-    transcript = golden_replays.transcript(scenario, turn_path, mutation)
+    transcript = golden_replays.transcript(scenario, mutation)
     with pytest.raises(AssertionError, match="Golden changed"):
         RUNNER.compare(scenario, transcript)

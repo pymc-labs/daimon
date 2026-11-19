@@ -131,7 +131,7 @@ async def test_external_key_cannot_drive_human_session_during_stream_open(
 
     client = build_fake_anthropic(transport)
     deps = dataclasses.replace(
-        _deps(sessionmaker=db_session_factory, router=router), anthropic=client, turn_path="legacy"
+        _deps(sessionmaker=db_session_factory, router=router), anthropic=client
     )
     prepared = _prepared_turn(
         deps=deps,

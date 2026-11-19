@@ -13,6 +13,7 @@ from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.config import TurnSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.model_switch import SwitchRefusal
@@ -31,14 +32,15 @@ _THREAD_ID = 777
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
     return DiscordRuntime(
-        settings=MagicMock(),
+        # Backend selection off (the emergency-stop setting); `_with_selection` turns it on.
+        settings=MagicMock(turn=TurnSettings(channel_backends=False)),
         anthropic=MagicMock(),  # pyright: ignore[reportArgumentType]  # /model makes no MA call
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None, membership_resolver=None),
+        turn_deps=replace(deps_for(), membership_resolver=None),
     )
 
 

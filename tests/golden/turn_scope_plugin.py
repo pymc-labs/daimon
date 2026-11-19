@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import importlib
-import os
 import sys
 from collections.abc import Mapping
 from datetime import datetime
@@ -12,21 +11,11 @@ from types import ModuleType
 from typing import Any, cast
 
 import pytest
-from runner import MUX_PENDING, TURN_PATHS, TurnPath, mux_turn_bridge_available
 
 
-def install_turn_path(
-    turn_path: TurnPath,
-    *,
-    source: ModuleType,
-    patch: pytest.MonkeyPatch,
-    clock: type[datetime],
+def install_turn_scope(
+    *, source: ModuleType, patch: pytest.MonkeyPatch, clock: type[datetime]
 ) -> None:
-    if not mux_turn_bridge_available():
-        if turn_path == "mux":
-            raise RuntimeError(MUX_PENDING)
-        return
-
     from daimon.core.turn import driver
     from mux.contracts.ids import Scope
 
@@ -39,11 +28,8 @@ def install_turn_path(
     )
 
     @functools.wraps(original)
-    async def selected_turn(**kwargs: Any) -> Any:
-        if kwargs.get("path") not in (None, turn_path):
-            raise AssertionError("Caller selected a different path from the oracle replay")
-        kwargs["path"] = turn_path
-        if turn_path == "mux" and kwargs.get("scope") is None:
+    async def scoped_turn(**kwargs: Any) -> Any:
+        if kwargs.get("scope") is None:
             kwargs["scope"] = offline_scope
         return await original(**kwargs)
 
@@ -59,24 +45,13 @@ def install_turn_path(
     for module in modules:
         for name, value in tuple(vars(module).items()):
             if value is original:
-                patch.setattr(module, name, selected_turn)
-    if turn_path == "mux":
-        anthropic_turn = importlib.import_module("mux.drivers.anthropic.turn")
-
-        # Absolute deadlines must use the same frozen clock as host fixtures.
-        patch.setattr(anthropic_turn, "datetime", clock)
+                patch.setattr(module, name, scoped_turn)
+    # Absolute deadlines must use the same frozen clock as host fixtures.
+    patch.setattr(importlib.import_module("mux.drivers.anthropic.turn"), "datetime", clock)
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_setup(item: Any) -> None:
     import oracle_plugin
 
-    requested = os.environ.get("DAIMON_ORACLE_TURN_PATH", "legacy")
-    if requested not in TURN_PATHS:
-        raise ValueError("Oracle turn path must be legacy or mux")
-    install_turn_path(
-        requested,
-        source=item.module,
-        patch=oracle_plugin.PATCH,
-        clock=oracle_plugin.Clock,
-    )
+    install_turn_scope(source=item.module, patch=oracle_plugin.PATCH, clock=oracle_plugin.Clock)

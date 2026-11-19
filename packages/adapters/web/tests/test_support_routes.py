@@ -46,20 +46,20 @@ _MENU: dict[str, object] = {"name": "Support", "options": [_OPTION]}
 _SETTINGS = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
     support=SupportSettings(escalation_channel_id="c9"),
 )
 _LOCKED = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
     support=SupportSettings(escalation_channel_id="c9"),
     features={"support_own_channel": "off"},
 )
 _UNSET = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
 )
 _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/support", None),

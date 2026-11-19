@@ -26,7 +26,6 @@ Each test function name carries `discord` so the Slack half of this suite
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -85,7 +84,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(anthropic, sessionmaker), turn_path=None),
+        turn_deps=deps_for(anthropic, sessionmaker),
     )
 
 

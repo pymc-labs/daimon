@@ -250,7 +250,6 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     if (
         revision is None
         or revision.profile == "anthropic.managed_agents"
-        or request.deps.turn_path != "mux"
         or not request.deps.channel_backends
     ):
         raise AdmissionDenied(reason="backend_unsupported")

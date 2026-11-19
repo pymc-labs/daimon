@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -94,7 +93,7 @@ def _runtime(sessionmaker: Any, anthropic: AsyncAnthropic) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DEFAULT,
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 

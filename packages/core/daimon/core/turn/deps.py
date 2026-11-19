@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -40,7 +40,6 @@ from daimon.core.config import (
     TurnSettings,
     WebSettings,
     get_repo_memory_settings,
-    load_turn_settings,
 )
 from daimon.core.context_provider import ContextProviders, ProviderConfig
 from daimon.core.defaults.loader import load_platform_skills
@@ -118,7 +117,6 @@ class TurnDeps:
     messages: AsyncAnthropic | None = None
     backend: ManagedAgents | None = None
     backend_session_ref: Callable[[str, Scope], ResourceRef] | None = None
-    turn_path: Literal["legacy", "mux"] | None = None
     # `DAIMON_TURN__CHANNEL_BACKENDS`: admission reads channel backend configuration.
     channel_backends: bool = False
     agent_backends: bool = False
@@ -171,16 +169,7 @@ class TurnDeps:
     @property
     def backend_selection_enabled(self) -> bool:
         """Use the settings owner's opt-in boundary for every turn stage."""
-        if not self.channel_backends:
-            return False
-        from daimon.core import channel_backend
-
-        return channel_backend.backend_selection_enabled(
-            TurnSettings(
-                path=self.turn_path or load_turn_settings().path,
-                channel_backends=self.channel_backends,
-            )
-        )
+        return self.channel_backends
 
 
 def _reveal(secret: SecretStr | None) -> str | None:
@@ -230,7 +219,6 @@ def build_turn_deps(
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,
-        turn_path=turn_settings.path if isinstance(turn_settings, TurnSettings) else None,
         channel_backends=(
             turn_settings.channel_backends if isinstance(turn_settings, TurnSettings) else False
         ),

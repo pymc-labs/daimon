@@ -131,7 +131,7 @@ def seam(monkeypatch):
             "database": {"url": "postgresql://daimon:daimon@localhost:5432/daimon_test_stub"},
             "anthropic": {"api_key": "offline-owned"},
             "cli": {"local_user": "operator"},
-            "turn": {"path": "mux", "channel_backends": True},
+            "turn": {"channel_backends": True},
         }
     )
     agent = SimpleNamespace(
@@ -285,11 +285,8 @@ def interaction(*, admin=True, user_id=42, guild_id=2001):
     return event
 
 
-@pytest.mark.parametrize("path,enabled", [("legacy", False), ("mux", False), ("legacy", True)])
-async def test_flag_off_panels_and_mcp_registration_do_not_expose_backend_controls(
-    seam, path, enabled
-):
-    seam.settings.turn = TurnSettings(path=path, channel_backends=enabled)
+async def test_flag_off_panels_and_mcp_registration_do_not_expose_backend_controls(seam):
+    seam.settings.turn = TurnSettings(channel_backends=False)
     view = discord_view(seam)
     assert not any(
         isinstance(item, discord.ui.Select) and item.placeholder == "Model"
@@ -473,7 +470,7 @@ async def persisted(
             "database": {"url": str(db_nullpool_engine.url)},
             "anthropic": {"api_key": "offline-owned"},
             "cli": {"local_user": "operator"},
-            "turn": {"path": "mux", "channel_backends": True},
+            "turn": {"channel_backends": True},
         }
     )
     service = cb.make_backend_service(sessions, settings.turn, capture_source=cb.NO_CAPTURE)
@@ -663,9 +660,8 @@ async def test_agent_changed_after_the_preview_still_switches(persisted):
     assert not trace.replies and not trace.violations
 
 
-@pytest.mark.parametrize("path,enabled", [("legacy", False), ("mux", False), ("legacy", True)])
-async def test_cli_disabled_refuses_before_database_or_agent_lookup(seam, path, enabled):
-    seam.settings.turn = TurnSettings(path=path, channel_backends=enabled)
+async def test_cli_disabled_refuses_before_database_or_agent_lookup(seam):
+    seam.settings.turn = TurnSettings(channel_backends=False)
     with pytest.raises(cli.StoreError, match="disabled"):
         await cli.agents_backend_change(
             rt=seam.runtime,
@@ -710,12 +706,10 @@ async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
     assert not trace.replies and not trace.violations
 
 
-def cli_registration_probe(tmp_path, *, path, enabled):
+def cli_registration_probe(tmp_path, *, enabled):
     # A fresh process witnesses the public command tree, with no ambient settings
     # or local .env. Help needs neither a database nor provider credentials.
     env = {"PATH": os.defpath, "LANG": "C.UTF-8", "COLUMNS": "80", "LINES": "24"}
-    if path is not None:
-        env["DAIMON_TURN__PATH"] = path
     if enabled is not None:
         env["DAIMON_TURN__CHANNEL_BACKENDS"] = enabled
     program = """
@@ -750,12 +744,9 @@ print(json.dumps({"groups": [name for name in command.list_commands(context)
     return json.loads(result.stdout)
 
 
-# Unset now means on (the default); each case here is an operator stop.
-@pytest.mark.parametrize(
-    "path,enabled", [("legacy", "false"), ("mux", "false"), ("legacy", "true")]
-)
-def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path, enabled):
-    actual = cli_registration_probe(tmp_path, path=path, enabled=enabled)
+# Unset means on (the default); this is the operator stop.
+def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path):
+    actual = cli_registration_probe(tmp_path, enabled="false")
     # Actual unchanged-parent CliRunner stdout, captured by the independent
     # review at 9152b5a; no runtime dependence on Git history/shallow CI clones.
     reference = json.loads(
@@ -789,7 +780,7 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
 
 
 def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
-    actual = cli_registration_probe(tmp_path, path="mux", enabled="true")
+    actual = cli_registration_probe(tmp_path, enabled="true")
     assert actual["exit"] == actual["root_exit"] == actual["backend_exit"] == 0
     assert actual["groups"] == ["rule", "backend", "owner", "tool-rules"]
     assert "backend" in actual["help"] and "backend" in actual["root_help"]

@@ -84,7 +84,7 @@ from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
+from .turn_io_support import HeadlessIdentity, TurnIOSpy
 
 _NOW = dt.datetime(2026, 4, 1, 12, 0, 0, tzinfo=dt.UTC)
 _SESSION_ID = "ses_test"
@@ -94,28 +94,24 @@ RunTurn = Callable[..., Awaitable[str]]
 
 
 @pytest.fixture
-def run_turn(
-    turn_path: TurnPath, headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy
-) -> RunTurn:
-    """`headless_runner.run_turn` on this leg's turn path, for a real tenant and account.
+def run_turn(headless_identity: HeadlessIdentity, turn_io_used: TurnIOSpy) -> RunTurn:
+    """`headless_runner.run_turn` for a real tenant and account.
 
     A test overrides any of the three by passing it. Every turn it drives must
-    have used the leg's own turn I/O: a turn that never reached the driver
-    (a refusal, a deadline breach during assembly) is held only to not having
-    used the other leg's I/O.
+    have used mux turn I/O: a turn that never reached the driver (a refusal, a
+    deadline breach during assembly) is held only to not having used any other.
     """
 
     async def bound(**kwargs: Any) -> str:
-        kwargs.setdefault("turn_path", turn_path)
         kwargs.setdefault("tenant_id", headless_identity.tenant_id)
         kwargs.setdefault("account_id", headless_identity.account_id)
         kwargs.setdefault("tool_safety", OPEN_TOOL_SAFETY)
         try:
             tail = await headless_runner.run_turn(**kwargs)
         except BaseException:
-            turn_io_used.assert_matches(turn_path)
+            turn_io_used.assert_matches()
             raise
-        turn_io_used.assert_ran(turn_path)
+        turn_io_used.assert_ran()
         return tail
 
     return bound
@@ -856,53 +852,14 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
     )
 
 
-async def test_run_turn_raises_value_error_when_account_id_missing(
-    run_turn: RunTurn, turn_path: TurnPath
-) -> None:
-    """When mcp_settings carries both fields but account_id is None,
-    run_turn must raise ValueError with the exact wording from sessions.py.
-
-    On the mux path the turn is refused earlier still: it never runs without an
-    authorized account (`headless_runner.run_turn_impl`), so the sessions.py guard
-    is not reached.
-    """
-    # The agent/environment retrieve bridge runs before create_session's
-    # ValueError guard, so those two routes must exist even though no
-    # session-create/events call is expected.
-    router = MARouter()
-    _register_agent_environment_routes(router)
-    client = build_fake_anthropic(router.dispatch)
-
-    refusal: tuple[type[Exception], str] = (
-        (ValueError, r"^account_id is required when mcp_settings has public_url and jwt_secret$")
-        if turn_path == "legacy"
-        else (ScopeViolation, r"mux headless turns require the authorized tenant/account")
-    )
-    with pytest.raises(refusal[0], match=refusal[1]):
-        await run_turn(
-            anthropic=client,
-            agent_id="agent_x",
-            environment_id="env_x",
-            trigger_message="hi",
-            mcp_settings=McpSettings(
-                jwt_secret=SecretStr("x" * 32),
-                public_url=HttpUrl("https://mcp.example.local/mcp"),
-            ),
-            account_id=None,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
-
-
 @pytest.mark.parametrize(
     "identity",
     ["no tenant", "no account", "neither"],
 )
-async def test_a_headless_turn_without_its_identity_runs_on_legacy_and_is_refused_on_mux(
-    identity: str, run_turn: RunTurn, turn_path: TurnPath, turn_io_used: TurnIOSpy
+async def test_a_headless_turn_without_its_identity_is_refused(
+    identity: str, run_turn: RunTurn, turn_io_used: TurnIOSpy
 ) -> None:
-    """The mux refusal for an unauthorized turn stays: no tenant or no account
-    means no session is opened and no turn I/O is built. Legacy keeps running
-    such a turn (a tenantless caller is the legacy host)."""
+    """No tenant or no account means no session is opened and no turn I/O is built."""
     session_create_capture: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=session_create_capture)
     missing = {
@@ -920,42 +877,10 @@ async def test_a_headless_turn_without_its_identity_runs_on_legacy_and_is_refuse
             **missing,
         )
 
-    if turn_path == "mux":
-        with pytest.raises(ScopeViolation, match="require the authorized tenant/account"):
-            await attempt()
-        assert session_create_capture == [], "a refused turn must not open a session"
-        assert turn_io_used.classes == [], "a refused turn must not build turn I/O"
-    else:
-        assert await attempt() == "ok"
-        assert len(session_create_capture) == 1
-        turn_io_used.assert_ran("legacy")
-
-
-async def test_the_turn_path_argument_wins_over_settings(
-    headless_identity: HeadlessIdentity,
-    turn_path: TurnPath,
-    turn_io_used: TurnIOSpy,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`turn_path` is read once at the edge and handed down: with settings
-    pointing at the other path, the turn still runs on the one it was given."""
-    other: TurnPath = "mux" if turn_path == "legacy" else "legacy"
-    monkeypatch.setenv("DAIMON_TURN__PATH", other)
-    client = _build_client(_idle_events())
-
-    tail = await headless_runner.run_turn(
-        tool_safety=OPEN_TOOL_SAFETY,
-        anthropic=client,
-        agent_id="agent_x",
-        environment_id="env_x",
-        trigger_message="hi",
-        tenant_id=headless_identity.tenant_id,
-        account_id=headless_identity.account_id,
-        turn_path=turn_path,
-    )
-
-    assert tail == "ok"
-    turn_io_used.assert_ran(turn_path)
+    with pytest.raises(ScopeViolation, match="require the authorized tenant/account"):
+        await attempt()
+    assert session_create_capture == [], "a refused turn must not open a session"
+    assert turn_io_used.classes == [], "a refused turn must not build turn I/O"
 
 
 async def test_run_turn_raises_when_mcp_active_and_agent_uuid_none(run_turn: RunTurn) -> None:
