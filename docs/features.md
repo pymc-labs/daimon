@@ -1048,7 +1048,7 @@ On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card a
 
 ## Connectors on OpenAI and Gemini
 
-An agent's own connectors work on OpenAI and Gemini agents: Daimon calls them for the agent with the person's sign-in, and that provider receives what they return. Off leaves them out there.
+An agent's own connectors work on OpenAI and Gemini agents with the person's sign-in, and that provider receives what they return. Off leaves them out.
 
 | | |
 | --- | --- |
