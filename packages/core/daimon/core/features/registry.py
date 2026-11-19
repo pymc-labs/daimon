@@ -597,10 +597,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "A direct message waits this long for the next one before the agent starts, so a "
-            "burst of messages is answered in one reply instead of several. Off answers each "
-            "message at once. However long the burst goes on, the wait ends ten seconds "
-            "after its first message. A reply to an approval is never held."
+            "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
+            "and never an approval reply."
         ),
         platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
@@ -1177,12 +1175,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         default="12",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
-        doc=(
-            "How many earlier messages of a direct message conversation each reply carries. "
-            "The history is sent again whenever a conversation starts afresh with the agent, so "
-            "a higher setting costs more. "
-            "The smallest setting wins."
-        ),
+        doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),
         platforms=_DM_MEMORY_PLATFORMS,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
