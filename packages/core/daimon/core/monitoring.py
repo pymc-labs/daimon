@@ -350,12 +350,15 @@ async def dismiss_notice(
     conversation: str,
 ) -> bool:
     """Note that a web chat person dismissed the notice above the composer, which counts as
-    told until monitoring is switched on again. True when noted."""
+    told until monitoring is switched on again. True when noted; a repeat is a no-op."""
     async with sessions() as session:
         state = await monitoring_state(
             session, settings, tenant_id=tenant_id, agent_id=agent_id, platform="web"
         )
-    if not state.on:
+        told_at = await _told_at(
+            session, tenant_id=tenant_id, agent_id=agent_id, platform="web", account_id=account_id
+        )
+    if not must_tell(state, told_at):
         return False
     subject = store.MonitoredSubject(tenant_id, agent_id, "web", account_id, conversation)
     return await record_notice(sessions, subject, CHAT_NOTICE)

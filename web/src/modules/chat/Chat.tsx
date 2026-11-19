@@ -137,6 +137,8 @@ export function ChatView() {
   const { data } = detail
   const [closed, setClosed] = useState<string | undefined>()
   const notice = closed === id ? undefined : monitoring ?? data?.monitoring
+  // A notice streamed after a dismiss is a re-tell (monitoring switched on again): show it.
+  useEffect(() => setClosed(undefined), [monitoring])
   // Gone for this person and agent until monitoring is switched on again; the server keeps it.
   const closeNotice = () => {
     setClosed(id)
