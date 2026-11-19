@@ -3,19 +3,21 @@
 Used by the defaults rename step when a seeded agent is renamed in place.
 Rows that reference an agent by id already follow it. Audit and history rows
 (`security_audit_events`, `agent_tool_rule_history`, `channel_changes`,
-`long_job_policy_history`, `routine_sandbox_history`) and the immutable
-neutral catalog keep the name they recorded.
+`long_job_policy_history`, `routine_sandbox_history`), settled or retired
+`task_continuations` and the immutable neutral catalog keep the name they
+recorded.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from daimon.core._models import Base, TenantAccessPolicyRecord
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.stores.agent_avatars import normalize_agent_name
+from daimon.core.stores.domain import ContinuationReason
 from sqlalchemy import (
     ColumnElement,
     Row,
@@ -81,6 +83,19 @@ def _table(name: str) -> Table:
     return Base.metadata.tables[name]
 
 
+def _live_rows(table: Table) -> list[ColumnElement[bool]]:
+    """Wakes settled or with a retired reason are history: no dispatcher reads them.
+
+    A retired reason also fails the NOT VALID reason check (0169, 0194) on any
+    UPDATE, which would roll back the whole rename. `turn_outcomes.origin`, the
+    only other NOT VALID check, is on a table this module never updates.
+    """
+    if table.name != "task_continuations":
+        return []
+    reasons = get_args(ContinuationReason)
+    return [table.c.status.in_(("pending", "claimed")), table.c.reason.in_(reasons)]
+
+
 def _matches(column: ColumnElement[Any], name: str) -> ColumnElement[bool]:
     """`normalize_agent_name` in SQL: NFKC, then lower (casefold for agent names)."""
     return func.lower(func.normalize(column, literal_column("NFKC"))) == normalize_agent_name(name)
@@ -93,11 +108,8 @@ async def rename_agent_references(
     for table_name, column_name in _LIVE_NAME_COLUMNS:
         table = _table(table_name)
         column = table.c[column_name]
-        await session.execute(
-            update(table)
-            .where(table.c.tenant_id == tenant_id, _matches(column, old))
-            .values({column_name: new})
-        )
+        where = [table.c.tenant_id == tenant_id, _matches(column, old), *_live_rows(table)]
+        await session.execute(update(table).where(*where).values({column_name: new}))
     for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
         table = _table(table_name)
         column = table.c[column_name]
