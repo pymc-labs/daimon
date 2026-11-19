@@ -289,7 +289,7 @@ live calls are discovered or scheduled by this harness.
 ## F1: default capability scenario
 
 This supplementary scenario is separate from the eighteen standard cases. It
-uses the actual `defaults/agents/daimon.yaml` name/system, all twelve skill trees
+uses the actual `defaults/agents/default.yaml` name/system, all twelve skill trees
 and six logical builtin capabilities. Only the probe model is overridden;
 production defaults are unchanged. The reserved `daimon-mcp` server and matching
 MCP toolset are attached explicitly to the disposable agent.

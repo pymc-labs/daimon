@@ -11,10 +11,11 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
-from daimon.core.defaults.apply import apply_defaults
+from daimon.core.defaults.apply import apply_defaults, rename_selfhosted_defaults
 from daimon.core.defaults.owned import owned_defaults_possible
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import list_tenants_by_platform
 from rich.console import Console
 from rich.table import Table
@@ -90,16 +91,23 @@ async def defaults_apply(
     as_json: bool,
     defaults_root: Path,
 ) -> None:
-    if rt.settings.anthropic.api_key is None and not owned_defaults_possible():
+    client = None if rt.settings.anthropic.api_key is None else rt.anthropic
+    local = {derive_tenant_uuid(platform="cli", workspace_id="local")}
+    if client is None and not owned_defaults_possible():
         console.print(
             "defaults apply: no Anthropic, OpenAI or Gemini key is configured, so there is "
             "nothing to run the default agents on. Set a provider key and run it again."
         )
-        report = ApplyReport()
+        # Self-hosted records need only Postgres, so they still move.
+        report = await rename_selfhosted_defaults(
+            rt.sessionmaker, None, defaults_root, dry_run=dry_run, only_tenant_ids=local
+        )
     else:
         public_url = (
             str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
         )
+        # Apply goes first: it renames cli:local itself, after its pre-flight and
+        # spec checks, so a failure there leaves every self-hosted record untouched.
         report = await apply_defaults(
             rt.sessionmaker,
             rt.anthropic,
@@ -107,11 +115,19 @@ async def defaults_apply(
             dry_run=dry_run,
             public_url=public_url,
         )
+    # Other tenants' renames are reported but never fail the boot: one tenant's
+    # error must not stop every container from starting.
+    failed = report.is_failure()
+    others = await rename_selfhosted_defaults(
+        rt.sessionmaker, client, defaults_root, dry_run=dry_run, skip_tenant_ids=local
+    )
+    for outcome in others.agents:
+        report.add(outcome)
     if as_json:
         _format_report_json(console, report)
     else:
         _format_report_table(console, report)
-    if report.is_failure():
+    if failed:
         raise typer.Exit(code=1)
 
 

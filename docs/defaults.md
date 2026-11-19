@@ -41,7 +41,7 @@ A `skills:` entry is a reference. Use `{type: custom, skill_id: <name>}` for a
 skill in `defaults/skills/`, with the bare authoring name and never a provider
 id. Use `{type: anthropic, skill_id: ...}` for a built-in.
 
-The seeded `daimon` agent always carries `team-etiquette`, with no `platforms`
+The seeded `default` agent always carries `team-etiquette`, with no `platforms`
 limit. It guides posts that reach other people.
 
 An entry may add `platforms: [teams]`, any of `discord`, `slack` and `teams`,

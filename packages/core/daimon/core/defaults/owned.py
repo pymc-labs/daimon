@@ -11,8 +11,10 @@ import uuid
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.defaults.builtin_agent import builtin_lookup_names, resolve_builtin_agent_name
 from daimon.core.defaults.metadata import (
-    SEEDED_AGENT_RENAME,
+    BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     build_metadata,
     is_renamed_seeded_record,
 )
@@ -113,25 +115,44 @@ async def resolve_owned_agent(
     *,
     seeded_rename: bool = True,
 ) -> Agent:
-    """The live Daimon record `name` answers to; `daimon` falls back to its renamed seed.
+    """The live Daimon record `name` answers to, the built-in name by `builtin_agent`'s rule.
 
-    A miss on the seeded name finds the tenant's defaults-managed record named
-    `default` instead (`SEEDED_AGENT_RENAME`), so code from before that rename
-    neither loses the record nor creates a second `daimon` beside it. A record
-    named `daimon` always wins; a workspace's own `default` never matches.
-    `seeded_rename=False` is for a caller creating a workspace's own agent.
-    Raises `ProviderError` (`not_found`) when neither exists.
+    `default` reaches the seeded record not yet renamed from `daimon`, and a
+    self-hosted workspace's own `daimon` while it has no `default`. `daimon`
+    falls back to the managed `default` once renamed (`LEGACY_BUILTIN_AGENT_NAME`).
+    `seeded_rename=False` is for a caller adopting a workspace's own agent.
+    Raises `ProviderError` (`not_found`) when nothing answers.
     """
     agents = SelfHostedAgents(sessions)
+    if seeded_rename and builtin_lookup_names(name):
+        name = await builtin_record_name(agents, scope, name)
     try:
         return await agents.resolve(scope, name)
     except ProviderError as miss:
-        if miss.category != "not_found" or not seeded_rename or name != SEEDED_AGENT_RENAME[0]:
+        if miss.category != "not_found" or not seeded_rename or name != LEGACY_BUILTIN_AGENT_NAME:
             raise
-        renamed = await agents.resolve(scope, SEEDED_AGENT_RENAME[1])
+        renamed = await agents.resolve(scope, BUILTIN_AGENT_NAME)
         if not is_renamed_seeded_record(renamed.spec.name, renamed.spec.metadata):
             raise miss from None
         return renamed
+
+
+async def builtin_record_name(agents: SelfHostedAgents, scope: Scope, name: str) -> str:
+    """The record name a request for the built-in `name` resolves under.
+
+    A `daimon` record counts whether managed or not: `selfhosted init` used to
+    name a workspace's agent that.
+    """
+    live: list[str] = []
+    for candidate in builtin_lookup_names(name):
+        try:
+            await agents.resolve(scope, candidate)
+        except ProviderError as error:
+            if error.category != "not_found":
+                raise
+        else:
+            live.append(candidate)
+    return resolve_builtin_agent_name(name, live, tenant_id=scope.tenant_id, surface="owned_record")
 
 
 async def reconcile_owned_agent(
@@ -150,7 +171,10 @@ async def reconcile_owned_agent(
     """
     scope = owned_scope(tenant_id, account_id)
     try:
-        existing = await resolve_owned_agent(sessions, scope, spec.name, seeded_rename=managed)
+        # A create counts the built-in under either name as taken.
+        existing = await resolve_owned_agent(
+            sessions, scope, spec.name, seeded_rename=managed or create_only
+        )
     except ProviderError as error:
         if error.category != "not_found":
             raise

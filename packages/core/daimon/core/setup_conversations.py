@@ -7,12 +7,13 @@ from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_renamed_seeded_agent
+from daimon.core.defaults.builtin_agent import route_builtin_agent
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
-    is_renamed_seeded_agent,
 )
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
@@ -34,6 +35,9 @@ EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
 _MAX_SETUP_THREAD_NAME_CHARS: Final = 100
+
+# A setup thread opened before the built-in agent's rename keeps its responder.
+_RESPONDER_NAMES = BUILTIN_AGENT_NAMES
 
 
 def setup_thread_name(target_name: str | None) -> str:
@@ -109,9 +113,9 @@ async def get_setup_responder(
             "This setup conversation's Daimon agent is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
-    if not is_renamed_seeded_agent(responder.metadata) and (
+    if (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
-        or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
+        or responder.metadata.get(MA_METADATA_KEY_NAME) not in _RESPONDER_NAMES
     ):
         raise UserFacingError(
             "This conversation's agent is no longer the built-in Daimon. "
@@ -127,17 +131,11 @@ async def resolve_setup_agents(
     target_ma_agent_id: str | None = None,
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
-    responders = [
-        agent
-        for agent in await find_agents_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name="daimon", records=records
-        )
-        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ] or [
-        ag
-        for ag in [await find_renamed_seeded_agent(anthropic, tenant_id=tenant_id, records=records)]
-        if ag
-    ]
+    responders = route_builtin_agent(
+        await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records),
+        tenant_id=tenant_id,
+        surface="setup_conversation",
+    )
     if len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."

@@ -19,21 +19,28 @@ from anthropic.types.beta import (
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.anthropic_guard import AnthropicUnconfigured, anthropic_configured
 from daimon.core.config import Settings
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_seeded_agents
+from daimon.core.defaults.ma_index import (
+    find_agents_by_daimon_tag,
+    find_seeded_agents,
+    match_agents_by_daimon_tag,
+    pick_renamed_seeded_agent,
+)
 from daimon.core.defaults.mcp_merge import (
     is_corrupted_daimon_mcp_entry,
     merge_default_mcp_server,
     merge_default_mcp_toolset,
 )
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_SPEC_HASH,
-    SEEDED_AGENT_RENAME,
     build_metadata,
     compute_spec_fingerprint,
 )
 from daimon.core.defaults.owned import AgentNameTaken, reconcile_owned_agent
+from daimon.core.defaults.rename_agents import AgentRenameBlocked
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.defaults.spec_merge import (
@@ -47,6 +54,7 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
+from daimon.core.stores.agent_avatars import normalize_agent_name
 
 _log = structlog.get_logger(__name__)
 
@@ -65,8 +73,12 @@ async def reconcile_agent(
     create_only: bool = False,
     sessions: Sessions | None = None,
     settings: Settings | None = None,
+    agents: list[BetaManagedAgentsAgent] | None = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    `agents` is the tenant's live listing, read under the caller's reconcile
+    lock, to match against instead of listing again.
 
     With `sessions`, the agent's features (the `guidance` the prompt carries) are read
     from the store and `spec.features` is saved as the agent's own level.
@@ -131,13 +143,30 @@ async def reconcile_agent(
         skills_view=skills_view if dry_run else None,
     )
     renamed = None
-    if managed and spec.name == SEEDED_AGENT_RENAME[0]:
+    seeded_name = (managed or create_only) and spec.name == LEGACY_BUILTIN_AGENT_NAME
+    if agents is not None:
+        matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=spec.name)
+        renamed = pick_renamed_seeded_agent(agents) if seeded_name else None
+    elif seeded_name:
         matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id)
     else:
         matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
+    if create_only and (matches or renamed is not None):
+        raise AgentNameTaken(spec.name)  # the renamed seeded agent still answers `daimon`
+    if create_only and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
+        # The seeded `daimon` not yet renamed answers `default` and moves into it.
+        legacy = (
+            match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=LEGACY_BUILTIN_AGENT_NAME)
+            if agents is not None
+            else await find_agents_by_daimon_tag(
+                client, tenant_id=tenant_id, name=LEGACY_BUILTIN_AGENT_NAME
+            )
+        )
+        if any(m.metadata.get(MA_METADATA_KEY_MANAGED) == "true" for m in legacy):
+            raise AgentNameTaken(spec.name)
     # Leave the seeded agent renamed in place alone: creating `daimon` would
     # fork it, updating it would rename it back, and adopting a workspace's
-    # own `daimon` would overwrite that agent (see `SEEDED_AGENT_RENAME`).
+    # own `daimon` would overwrite that agent (see `LEGACY_BUILTIN_AGENT_NAME`).
     if renamed is not None and not any(
         m.metadata.get(MA_METADATA_KEY_MANAGED) == "true" for m in matches
     ):
@@ -146,8 +175,20 @@ async def reconcile_agent(
             kind="agent", name=spec.name, action=Action.SKIPPED, anthropic_id=renamed.id
         )
     ma_match = matches[0] if matches else None
-    if create_only and ma_match is not None:
-        raise AgentNameTaken(spec.name)
+    if managed and ma_match is not None and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
+        # Never adopt (and re-stamp as managed) a workspace's own agent that
+        # holds the built-in's name: prefer the seeded one, else defer, which
+        # never fails the apply (it runs at every boot).
+        seeded = [m for m in matches if m.metadata.get(MA_METADATA_KEY_MANAGED) == "true"]
+        if not seeded:
+            _log.warning("reconcile.unmanaged_builtin_skipped", tenant_id=str(tenant_id))
+            error = str(AgentRenameBlocked(old=LEGACY_BUILTIN_AGENT_NAME, new=spec.name))
+            return ResourceOutcome(
+                kind="agent", name=spec.name, action=Action.DEFERRED, error=error
+            )
+        if len(seeded) < len(matches):
+            _log.warning("reconcile.unmanaged_builtin_skipped", tenant_id=str(tenant_id))
+        matches, ma_match = seeded, seeded[0]
     # Dedup: when MA holds multiple agents with the same daimon_name (the
     # multi_match condition), keep the canonical one (max
     # created_at, returned first by find_agents_by_daimon_tag) and archive

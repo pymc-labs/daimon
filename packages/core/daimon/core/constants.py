@@ -36,7 +36,7 @@ MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
 # prefill and every "no model supplied" fallback reads this one value. It used
 # to be a bare literal repeated across the Discord panel, the Discord section
 # modal and the Slack submit path, which is how three surfaces ended up a
-# generation behind `defaults/agents/daimon.yaml` while each looked correct in
+# generation behind `defaults/agents/default.yaml` while each looked correct in
 # isolation. Keep it equal to the model that file pins.
 DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 

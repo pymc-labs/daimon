@@ -22,7 +22,6 @@ from decimal import Decimal
 from typing import Literal
 
 import pytest
-from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_sessions import (
@@ -125,11 +124,9 @@ async def test_dead_session_recreates_marks_old_row_dead_and_bills_new_session(
     assert posted, f"expected the recovered turn's reply to be posted, got: {posted}"
 
     # A dead-session recovery adds no system line: what was lost is the
-    # agent's to say, so the reply is exactly the agent's text.
-    expected_reply = (
-        fallback_name_prefix("test-agent", AGENT_TEXT) if platform == "discord" else AGENT_TEXT
-    )
-    assert posted == [expected_reply], f"expected only the agent's reply, got: {posted}"
+    # agent's to say, so the reply is exactly the agent's text. The agent is the
+    # deployment default, so it posts under the app's own name on every platform.
+    assert posted == [AGENT_TEXT], f"expected only the agent's reply, got: {posted}"
 
     # The stale mapping is marked dead.
     dead_row = await get_thread_session_by_id(db_session, id=old_row.id)

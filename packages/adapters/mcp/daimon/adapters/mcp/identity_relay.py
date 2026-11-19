@@ -16,8 +16,11 @@ from datetime import datetime
 
 import httpx
 import structlog
+from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.core.config import SignedIdentityServer
+from daimon.core.defaults.builtin_agent import find_agent_or_builtin
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
@@ -35,6 +38,7 @@ from daimon.core.mcp_identity import (
     routine_conversation,
     stamp_requester,
 )
+from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import RoutineRow, TurnOriginRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
@@ -162,6 +166,42 @@ async def _routine_run(
     return row
 
 
+async def _listed_as_builtin(
+    anthropic: AsyncAnthropic | None,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    server: SignedIdentityServer,
+    binding: RelayBinding,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> bool:
+    """Whether the seeded agent signs one built-in name and the allowlist the other.
+
+    Its rename changes the name a credential carries; a workspace's own agent
+    of either name never passes this way.
+    """
+    if normalize_agent_name(binding.agent_name) not in BUILTIN_AGENT_NAMES or not any(
+        normalize_agent_name(name) in BUILTIN_AGENT_NAMES for name in server.agents
+    ):
+        return False
+    try:
+        agent = await find_agent_or_builtin(
+            anthropic,
+            tenant_id=tenant_id,
+            name=binding.agent_name,
+            records=sessionmaker,
+            surface="identity_relay",
+        )
+    except Exception as exc:  # boundary: an unverified agent is refused
+        log.warning("mcp_identity.relay_builtin_lookup_failed", error_type=type(exc).__name__)
+        return False
+    return (
+        agent is not None
+        and agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
+        and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id) == agent_id
+    )
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -171,6 +211,7 @@ def build_identity_relay_route(
     clients: Mapping[str, httpx.AsyncClient],
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
+    anthropic: AsyncAnthropic | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
     the key of each server whose auth is bearer. A server with neither is refused (503)."""
@@ -204,7 +245,13 @@ def build_identity_relay_route(
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
             return Response(status_code=403)
         # An allowlist names the agents that may use a server (a bearer server always has one).
-        if server.agents and binding.agent_name not in server.agents:
+        if (
+            server.agents
+            and binding.agent_name not in server.agents
+            and not await _listed_as_builtin(
+                anthropic, sessionmaker, server, binding, tenant_id=tenant_id, agent_id=agent_id
+            )
+        ):
             return Response(status_code=403)
         bearer = keys.get(server.name)
         if (server.auth == "bearer" and bearer is None) or (

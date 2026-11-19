@@ -15,9 +15,11 @@ from daimon.core.access_policy import (
     place_thread_id,
 )
 from daimon.core.defaults.metadata import (
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
     MA_METADATA_KEY_READER_SOURCE,
+    is_renamed_seeded_record,
 )
 from daimon.core.permissions import (
     AgentPermissions,
@@ -945,6 +947,12 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
     also carries the source's names (stamped as `daimon_reader_source`; a
     reader written before that stamp falls back to its name without the
     ``-reader`` suffix): a rule on the source holds for its reader.
+
+    The seeded agent renamed to `default` also carries `daimon`, for rules its
+    rename has not moved yet or a rollback wrote; every matching rule must hold.
+    Nothing else gets a built-in alias: a rule on the other name may be a
+    workspace's own agent's, and the rename moves rules only once the provider
+    name follows, so the seeded `daimon` never needs `default`'s.
     """
     config_name = metadata.get(MA_METADATA_KEY_NAME)
     names: list[str | None] = [name, config_name]
@@ -958,6 +966,8 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
                 for candidate in (name, config_name)
                 if candidate and candidate.endswith(_READER_SUFFIX)
             )
+    if any(n and is_renamed_seeded_record(n, metadata) for n in (name, config_name)):
+        names.append(LEGACY_BUILTIN_AGENT_NAME)
     return tuple(names)
 
 

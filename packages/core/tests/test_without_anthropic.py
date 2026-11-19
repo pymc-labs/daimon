@@ -108,9 +108,9 @@ async def test_defaults_create_and_edit_without_anthropic(db_session, db_session
     actions = {(o.kind, o.name): o.action for o in [*report.environments, *report.agents]}
     assert actions == {
         ("environment", "default"): Action.CREATED,
-        ("agent", "daimon"): Action.CREATED,
+        ("agent", "default"): Action.CREATED,
     }, f"keyless defaults must seed Daimon records: {report}"
-    seeded = await SelfHostedAgents(db_session_factory).resolve(scope, "daimon")
+    seeded = await SelfHostedAgents(db_session_factory).resolve(scope, "default")
     default_model = selectable_models(only_key)[0]  # type: ignore[arg-type]
     assert (seeded.spec.model.provider, seeded.spec.model.id) == (only_key, default_model), (
         "the seeded agent runs on the keyed provider's default model"
@@ -184,11 +184,11 @@ async def test_fork_archive_and_purge_without_anthropic(
         client,
         db_session_factory,
         tenant_id=tenant.id,
-        source_name="daimon",
+        source_name="default",
         new_name="helper",
         public_url=None,
         subject=Subject(is_admin=True),
-        default_agent_name="daimon",
+        default_agent_name="default",
     )
     assert copy.agent.id.startswith("dm_agent_"), "a fork of a Daimon record is a Daimon record"
     forked = await SelfHostedAgents(db_session_factory).resolve(scope, "helper")
@@ -211,7 +211,7 @@ async def test_fork_archive_and_purge_without_anthropic(
     assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"
 
 
-async def _keyless_tenant(db_session, provider: str, agent_name: str = "daimon"):
+async def _keyless_tenant(db_session, provider: str, agent_name: str = "default"):
     tenant = await make_tenant(db_session)
     await make_account(db_session, tenant=tenant, id=derive_guild_account_uuid(tenant.id))
     await make_tenant_config(
@@ -328,7 +328,7 @@ async def test_routine_rule_and_roster_on_an_owned_agent(
     await make_account(db_session, tenant=tenant, id=derive_guild_account_uuid(tenant.id))
     await db_session.commit()
     await reconcile_tenant_defaults(client, db_session_factory, DEFAULTS_ROOT, tenant_id=tenant.id)
-    default = DeploymentDefault(agent_name="daimon")
+    default = DeploymentDefault(agent_name="default")
 
     async def view() -> CallView:
         return CallView(viewer=RuleViewer(policy=OPEN_ACCESS_POLICY))
@@ -344,7 +344,7 @@ async def test_routine_rule_and_roster_on_an_owned_agent(
         env,
         caller,
         NewRoutine(
-            agent_name="daimon", cron_expr="0 9 * * *", timezone="UTC", trigger_message="report"
+            agent_name="default", cron_expr="0 9 * * *", timezone="UTC", trigger_message="report"
         ),
     )
     assert row.agent_id.startswith("dm_agent_"), (
@@ -356,7 +356,7 @@ async def test_routine_rule_and_roster_on_an_owned_agent(
         db_session_factory,
         tenant_id=tenant.id,
         platform=tenant.platform,
-        agent_name="daimon",
+        agent_name="default",
         runs_in=("c1",),
         subject=Subject(is_admin=True),
         default=default,
@@ -373,7 +373,7 @@ async def test_routine_rule_and_roster_on_an_owned_agent(
         default=default,
         records=db_session_factory,
     )
-    assert [agent.name for agent in roster.rows] == ["daimon"], (
+    assert [agent.name for agent in roster.rows] == ["default"], (
         f"the roster lists the Daimon-owned agent: {roster.rows}"
     )
     assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"

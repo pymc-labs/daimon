@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import httpx
 import jwt as pyjwt
 import pytest
+from anthropic import AsyncAnthropic
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -37,6 +38,8 @@ from daimon.core.stores.routines import create_routine
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.testing.factories import make_platform_principal, make_tenant
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -165,6 +168,7 @@ def _relay(
     key: SigningKey | None,
     server: SignedIdentityServer = SERVER,
     bearers: dict[str, SecretStr] | None = None,
+    anthropic: AsyncAnthropic | None = None,
 ) -> httpx.AsyncClient:
     app = Starlette()
     app.add_route(
@@ -175,6 +179,7 @@ def _relay(
             sessionmaker=factory,
             tokens=IdentityTokenCache(key) if key is not None else None,
             bearers=bearers,
+            anthropic=anthropic,
             clients={
                 server.name: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handle))
             },
@@ -802,3 +807,44 @@ async def test_a_signed_server_does_not_stamp_unless_asked(
     async with _relay(db_session_factory, upstream, generate_signing_key()) as client:
         await _post(client, token, body)
     assert upstream.requests[0].content == body.encode(), "bodies pass byte for byte by default"
+
+
+@pytest.mark.parametrize(
+    ("signed", "listed", "managed", "relayed"),
+    [
+        ("default", "daimon", True, True),
+        ("daimon", "default", True, True),
+        ("default", "daimon", False, False),
+    ],
+    ids=["renamed-seeded", "old-credential", "own-default"],
+)
+async def test_an_allowlist_naming_the_builtin_when_its_name_changed_then_admits_only_seeded(
+    signed: str,
+    listed: str,
+    managed: bool,
+    relayed: bool,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _token(db_session_factory, person, RelayBinding(signed))
+    agent = ma_agent(
+        id="agent_a",
+        name="default",
+        tenant_id=person.tenant_id,
+        metadata={"daimon_managed": "true"} if managed else None,
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, m: list_response([agent.model_dump(mode="json")]))
+    server = BEARER_SERVER.model_copy(update={"agents": (listed,)})
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory,
+        upstream,
+        None,
+        server,
+        bearers=_BEARERS,
+        anthropic=build_fake_anthropic(router.dispatch),
+    ) as client:
+        response = await _post(client, token, _tool_call())
+    assert (response.status_code != 403) is relayed, "the rename keeps the seeded agent listed"
+    assert bool(upstream.requests) is relayed, "a workspace's own namesake is never relayed"
