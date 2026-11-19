@@ -589,8 +589,13 @@ async def _keep_monitored_replies(
     except _anthropic.RateLimitError:
         raise
     # Billing goes on without the kept reply: the question stays open for a later settle.
-    except (TimeoutError, _anthropic.APIError, SQLAlchemyError):
-        log.warning("monitoring.capture_failed", kind="answer", exc_info=True)
+    except (TimeoutError, _anthropic.APIError, SQLAlchemyError) as error:
+        log.warning(
+            "monitoring.capture_failed",
+            kind="answer",
+            causes=backend_refusal_causes(error),
+            exc_info=True,
+        )
         return False
     return True
 
