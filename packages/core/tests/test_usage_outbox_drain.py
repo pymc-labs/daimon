@@ -178,6 +178,38 @@ async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch
     assert await _pending(sm) == 1 and await _debited(sm) == 0
 
 
+async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is_read(
+    sm, monkeypatch
+):
+    """The cut-off row waits out its backoff instead of taking the next pass's whole budget."""
+    from daimon.core.turn import openai_deployment
+    from daimon.core.turn.openai_late_usage import DurableRereads
+    from mux.drivers.openai import OpenAIUsage
+
+    first: list[str] = []
+
+    async def reconcile_turn(self, scope, session, turn_id):
+        first.append(session.id)
+        if session.id == first[0]:  # the first row read is the slow one
+            await asyncio.Event().wait()
+        return (pending.model_copy(update=measured | {"session": session}),)
+
+    monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
+    monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
+    for _ in range(2):
+        await pending_usage(sm, provider="openai", unknown=True)
+    async with sm() as db:
+        pending = (await mux_state.pending_outbox(db))[0].observation
+    measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
+    measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
+    rereads, now = DurableRereads(budget_s=0.05), datetime.now(UTC)
+    assert await rereads.run(sm, markup=Decimal(1), now=now) == 1, "the slow read is cut off"
+    assert await _debited(sm) == 0, "nothing was read through"
+    later = now + timedelta(seconds=1)
+    assert await rereads.run(sm, markup=Decimal(1), now=later) == 1, "only the other row is due"
+    assert await _debited(sm) < 0, "the row behind the slow one was read"
+
+
 async def test_unknown_openai_usage_is_given_up_a_day_after_it_was_seen(sm, monkeypatch):
     reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(days=2))
     assert reads == 0 and read == []

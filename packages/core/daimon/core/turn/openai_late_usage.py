@@ -113,7 +113,7 @@ class DurableRereads:
     Rows are durable, so a restart only resets the backoff: each turn is read again
     after `delays_s` (the last repeating) until its usage is final, the thread moved,
     or `give_up_after` passed since the usage was seen. A pass stops at `budget_s`; the
-    read it cuts off is retried next pass without backing off.
+    read it cuts off backs off like a failed one, so a slow read cannot hold the rows behind it.
     """
 
     def __init__(
@@ -169,8 +169,6 @@ class DurableRereads:
                 async with budget:
                     done = await _reread(sessionmaker, settlement, markup=markup, now=now)
             except Exception as error:  # a busy thread or failed read: retry later
-                if budget.expired():
-                    break
                 log.info(
                     "openai_late_usage.retry",
                     causes=backend_refusal_causes(error),
@@ -185,6 +183,8 @@ class DurableRereads:
             else:
                 delay = self._delays[min(attempt, len(self._delays) - 1)]
                 self._due[key] = (attempt + 1, now + timedelta(seconds=delay))
+            if budget.expired():
+                break
         return reads
 
 
