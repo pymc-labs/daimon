@@ -414,9 +414,9 @@ class MuxTurnIO:
         """Ask the session to stop without waiting for it.
 
         Confirmation recovery has no stream open, so it polls for the settle
-        (`latest_idle_is_settled`) instead. The journal kind and request are
-        the ones the earlier native recovery recorded, so a turn in flight
-        across an upgrade finds its own operation.
+        (`latest_idle_is_settled`) instead. A turn whose recovery interrupt
+        was journaled by the earlier recovery holds a send receipt, which
+        fails `CancelReceipt` validation, so that turn fails recovery once.
         """
         _, deliver = self._cancel()
         try:
