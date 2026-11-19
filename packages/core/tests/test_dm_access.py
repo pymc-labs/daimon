@@ -785,12 +785,12 @@ async def test_purge_account_when_admin_set_dm_rows_then_set_by_is_cleared(
         agent_name="a", locked=False, set_by=str(admin.id), now=NOW,
     )  # fmt: skip
     await store.set_grant(
-        db_session, tenant_id=tenant.id, agent_name="a", who="members",
-        user_ids=[], group_ids=[], set_by=str(admin.id), now=NOW,
+        db_session, tenant_id=tenant.id, agent_name="a", who="excluded",
+        user_ids=["5"], group_ids=[], set_by=str(admin.id), now=NOW,
     )  # fmt: skip
     await store.set_grant(
-        db_session, tenant_id=tenant.id, agent_name="b", who="members",
-        user_ids=[], group_ids=[], set_by=str(other.id), now=NOW,
+        db_session, tenant_id=tenant.id, agent_name="b", who="excluded",
+        user_ids=["5"], group_ids=[], set_by=str(other.id), now=NOW,
     )  # fmt: skip
     await db_session.commit()
 
