@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.discord.commands.routines as routines_cmd
@@ -39,7 +38,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
     )
 
 
