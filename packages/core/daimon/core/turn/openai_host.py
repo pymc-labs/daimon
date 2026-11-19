@@ -651,9 +651,10 @@ async def _prepare_with_runtime(
 
     scope, tenant_id, binding_id = request.scope, request.tenant_id, binding.id
     sessionmaker, markup = request.deps.sessionmaker, request.deps.markup
+    # Debited to the channel whose budget the turn counts against, as on Anthropic.
     user_id, channel_id, agent_id = (
         request.external_user_id,
-        revision.channel.channel_id,
+        current.budget_channel_id,
         current.agent.id,
     )
     late, read_timeout_s = runtime.late_usage, runtime.late_read_timeout_s

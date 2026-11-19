@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **GPT spend counts against the right channel budget.** A GPT reply was debited
+  to the channel it ran in, not the channel whose budget the turn counts
+  against, so a direct message or an agent with its own budget channel charged
+  the wrong one. It now uses the same budget channel as a Claude reply.
+
 - **GPT replies are charged.** Usage of an OpenAI persistent workspace waited
   for a container cost no meter reports, so it stayed pending and never reached
   the ledger, and signup credit never ran down. It now settles at its token cost
