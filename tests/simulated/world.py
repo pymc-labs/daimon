@@ -29,6 +29,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import (
@@ -87,7 +88,7 @@ class World:
     def start(self) -> None:
         # The client build_runtime makes; only its socket layer is simulated.
         self.anthropic = AsyncAnthropic(
-            api_key="sim",
+            api_key=self.settings.anthropic.resolved_api_key(),
             max_retries=0,
             http_client=DefaultAsyncHttpxClient(transport=SkillsRateLimitedTransport(600)),
         )
@@ -230,14 +231,19 @@ def _compressed_waits() -> Iterator[None]:
 
 @asynccontextmanager
 async def world(
-    sessions: async_sessionmaker[AsyncSession], **overrides: Any
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    keyed: tuple[Provider, ...] = ("anthropic", *DEFAULT_KEY_ENV),
+    **overrides: Any,
 ) -> AsyncIterator[World]:
-    """`overrides` replace whole top-level settings, e.g. a surface's own block."""
+    """`overrides` replace whole top-level settings, e.g. a surface's own block.
+
+    `keyed` names the providers whose deployment key the install holds."""
     base: dict[str, Any] = {
         "database": DatabaseSettings(
             url=PostgresDsn("postgresql+asyncpg://sim:sim@localhost:5432/daimon_test_nc_sim")
         ),
-        "anthropic": AnthropicSettings(api_key=SecretStr("sim")),
+        "anthropic": AnthropicSettings(api_key=SecretStr("sim") if "anthropic" in keyed else None),
         "discord": DiscordSettings(bot_token=SecretStr("sim"), thread_open_notice_after_s=0),
         "mcp": McpSettings(public_url=HttpUrl("https://daimon.example.com/mcp")),
         "turn": turn_settings(),
@@ -247,9 +253,8 @@ async def world(
     script = Script()
     api, openai, gemini = AnthropicAPI(script), OpenAIAPI(script=script), GeminiAPI(script=script)
     network = ProviderNetwork({fake.host: fake for fake in (api, openai, gemini)})
-    keys = {"DAIMON_CHANNEL_OPENAI_KEY": "sim", "DAIMON_CHANNEL_GEMINI_KEY": "sim"}
-    saved = {k: os.environ.get(k) for k in keys}
-    os.environ.update(keys)
+    saved = {env: os.environ.pop(env, None) for env in DEFAULT_KEY_ENV.values()}
+    os.environ.update({env: "sim" for p, env in DEFAULT_KEY_ENV.items() if p in keyed})
     sim = World(settings, sessions, script, network, api, openai, gemini)
     try:
         with network.installed(), _compressed_waits():
@@ -261,6 +266,6 @@ async def world(
     finally:
         for key, value in saved.items():
             if value is None:
-                os.environ.pop(key)
+                os.environ.pop(key, None)
             else:
                 os.environ[key] = value
