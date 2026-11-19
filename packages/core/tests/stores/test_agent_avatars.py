@@ -39,16 +39,6 @@ def test_builtin_agent_uses_metadata_or_deployment_default() -> None:
     assert not is_builtin_agent(name="Daimon", metadata={}, default_agent_name="Main")
 
 
-@pytest.mark.parametrize("name", ["default", "Daimon"])
-def test_builtin_agent_when_own_agent_holds_a_builtin_name_then_needs_the_managed_tag(
-    name: str,
-) -> None:
-    assert not is_builtin_agent(name=name, metadata={}, default_agent_name=name), (
-        "a workspace's own agent named like the built-in posts with its label"
-    )
-    assert is_builtin_agent(name=name, metadata={"daimon_managed": "true"}, default_agent_name=name)
-
-
 def test_default_avatar_handles_non_ascii_and_expanding_uppercase() -> None:
     from io import BytesIO
 

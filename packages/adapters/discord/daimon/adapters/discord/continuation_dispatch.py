@@ -15,9 +15,6 @@ from daimon.core.agent_identity import AgentIdentity, is_builtin_agent, resolve_
 from daimon.core.continuity.continuation import ContinuationDecision
 from daimon.core.continuity.dispatch import ContinuationContextUnavailable
 from daimon.core.continuity.dispatch import dispatch_pending_continuations as dispatch_core
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES
-from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.errors import AdmissionDenied
@@ -120,16 +117,6 @@ async def dispatch_pending_continuations(
                 await thread.send(embed=build_notice_embed(text))
             else:
                 try:
-                    agent = (
-                        await find_agent_by_daimon_tag(
-                            anthropic,
-                            tenant_id=tenant_id,
-                            name=row.target_name,
-                            records=sessionmaker,
-                        )
-                        if normalize_agent_name(row.target_name) in BUILTIN_AGENT_NAMES
-                        else None  # only a built-in name needs the managed tag to tell
-                    )
                     async with sessionmaker.begin() as session:
                         identity = await resolve_agent_identity(
                             session,
@@ -137,7 +124,7 @@ async def dispatch_pending_continuations(
                             agent_name=row.target_name,
                             is_builtin=is_builtin_agent(
                                 name=row.target_name,
-                                metadata=agent.metadata if agent is not None else None,
+                                metadata=None,
                                 default_agent_name=default_agent_name,
                             ),
                             public_base_url=public_base_url,
