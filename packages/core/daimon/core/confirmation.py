@@ -563,6 +563,8 @@ def prompt_for_tool_call(
         )
     if call.tool_name == "request_agent_backend_switch" and own_server:
         return _backend_switch_prompt(data, requester_platform_user_id, now + timeout)
+    if call.tool_name == "set_thread_model" and own_server:
+        return _thread_move_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "approve_reach" and own_server:
         return _reach_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "create_notebook_upload_url" and publishing:
@@ -804,6 +806,27 @@ def _backend_switch_prompt(
         action=f"Move {agent} to {provider}",
         denied_action=f"{agent} not moved",
         detail_lines=(f"Agent: {agent}", f"Provider: {provider}"),
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
+def _thread_move_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    """The card for moving one conversation to another provider's model."""
+    from daimon.core.thread_model_switch import pick_value
+    from daimon.core.turn.notices import provider_name
+
+    value = pick_value(str(data.get("model") or ""))
+    provider = provider_name(value.partition(":")[0] if ":" in value else None)
+    return ConfirmationPrompt(
+        title=f"Move this conversation to {provider}?",
+        consequence=f"Its next replies use {provider}. {provider} receives this conversation "
+        "and the connector data it uses.",
+        action=f"Move to {provider}",
+        denied_action="Conversation not moved",
+        detail_lines=(f"Model: {_one_line(value, limit=64)}", f"Provider: {provider}"),
         requester_platform_user_id=requester_platform_user_id,
         expires_at=expires_at,
     )

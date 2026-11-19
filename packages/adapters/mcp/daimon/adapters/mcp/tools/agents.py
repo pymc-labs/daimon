@@ -2143,45 +2143,45 @@ async def _request_agent_backend_switch_impl(
                     summary=f"{agent_name} already uses {uses_phrase(target_backend, model)}. "
                     "Nothing changed.",
                 )
-        if on_now != target_backend:
-            # Another provider receives this agent's conversations: a person confirms on
-            # the card, which names it. The preview hands out the revision that asks.
-            if expected_revision is None:
-                return AgentBackendSwitchInfo(
-                    status="preview",
-                    agent_name=agent.name,
-                    target_backend=preview.target_backend,
-                    model=preview.target_model,
-                    models=selectable_models(preview.target_backend),
-                    expected_revision=preview.setting_revision,
-                    unsupported_skills=preview.unsupported_skills,
-                    unsupported_mcps=preview.unsupported_mcps,
-                    unsupported_capabilities=preview.unsupported_capabilities,
-                    shared_thread_limits=preview.shared_thread_limits,
-                    cost_line=preview.cost_line,
-                    summary=" ".join(
-                        (
-                            f"Nothing changed yet. Moving {agent.name} to "
-                            f"{uses_phrase(target_backend, model)} sends its conversations, and "
-                            "the connector data they use, to that provider. Call again with the "
-                            "same arguments and this expected_revision; the person confirms on "
-                            "the card.",
-                            *switch_lines(preview),
-                        )
-                    ),
-                    declared_drops=tuple(agent_loss_word(d) for d in preview.declared_drops),
-                    agent_settings=settings_line(preview.target_settings)
-                    if preview.target_settings
-                    else None,
-                )
-            from daimon.adapters.mcp.tools._session_gate import session_card_gap
+        from daimon.adapters.mcp.tools._card import provider_move_applies, provider_move_line
 
-            if await session_card_gap(
-                runtime, auth, origin, tool_name="request_agent_backend_switch"
-            ):
-                raise ToolError(
-                    "This conversation cannot verify the confirmation card. Nothing changed."
-                )
+        if not await provider_move_applies(
+            runtime,
+            auth,
+            origin,
+            tool_name="request_agent_backend_switch",
+            moves=on_now != target_backend,
+            confirming=expected_revision is not None,
+        ):
+            # The preview hands out the revision that asks.
+            return AgentBackendSwitchInfo(
+                status="preview",
+                agent_name=agent.name,
+                target_backend=preview.target_backend,
+                model=preview.target_model,
+                models=selectable_models(preview.target_backend),
+                expected_revision=preview.setting_revision,
+                unsupported_skills=preview.unsupported_skills,
+                unsupported_mcps=preview.unsupported_mcps,
+                unsupported_capabilities=preview.unsupported_capabilities,
+                shared_thread_limits=preview.shared_thread_limits,
+                cost_line=preview.cost_line,
+                summary=" ".join(
+                    (
+                        provider_move_line(
+                            agent.name,
+                            uses_phrase(target_backend, model),
+                            sends="its conversations",
+                            field="expected_revision",
+                        ),
+                        *switch_lines(preview),
+                    )
+                ),
+                declared_drops=tuple(agent_loss_word(d) for d in preview.declared_drops),
+                agent_settings=settings_line(preview.target_settings)
+                if preview.target_settings
+                else None,
+            )
         try:
             revision = await _write_backend_model(
                 runtime,

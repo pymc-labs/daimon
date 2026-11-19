@@ -9862,8 +9862,11 @@
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.
         <blank line>
-        A pick applies at once. What the new provider can't carry is off
-        there; the note says what.
+        A pick within the conversation's provider applies at once. A pick on
+        another provider changes nothing yet and returns a ``revision``: call
+        again with the same arguments and that ``revision``, and the person
+        confirms on a card that names the provider. What the new provider can't
+        carry is off there; the note says what.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

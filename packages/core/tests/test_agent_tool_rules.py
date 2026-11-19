@@ -65,8 +65,8 @@ def test_rule_decision(rule: str, attended: bool, scope: str, expected: str) -> 
 
 @pytest.mark.parametrize("attended", [True, False])
 @pytest.mark.parametrize("proxied", [False, True])
-def test_a_stored_ask_on_a_retired_gate_runs(attended: bool, proxied: bool) -> None:
-    """A session started before a gate was lifted still stores its ask; the call runs."""
+def test_a_stored_ask_on_a_provider_move_preview_runs(attended: bool, proxied: bool) -> None:
+    """A harness asks on every confirmed tool; a move's preview changes nothing, so it runs."""
     policy = ToolSafetyPolicy(enabled=True)
     trusted = frozenset({"daimon-mcp"})
     name = "set_thread_model"
@@ -78,7 +78,13 @@ def test_a_stored_ask_on_a_retired_gate_runs(attended: bool, proxied: bool) -> N
         permission="ask",
     )
     verdict = decide_tool_call(policy, call, attended=attended, trusted_servers=trusted)
-    assert verdict.outcome == "allow", f"a retired gate's stored ask must not pause: {verdict}"
+    assert verdict.outcome == "allow", f"a preview's stored ask must not pause: {verdict}"
+    confirm = {"revision": 0}
+    confirming = call.model_copy(
+        update={"input": {"name": name, "arguments": confirm} if proxied else confirm}
+    )
+    asked = decide_tool_call(policy, confirming, attended=attended, trusted_servers=trusted)
+    assert asked.outcome == ("ask" if attended else "deny"), f"the move itself asks: {asked}"
     other = call.model_copy(update={"server_name": "remote", "tool_name": name, "input": {}})
     kept = decide_tool_call(policy, other, attended=True, trusted_servers=trusted)
     assert kept.outcome == "ask", "a stored ask on another server's tool of that name still asks"

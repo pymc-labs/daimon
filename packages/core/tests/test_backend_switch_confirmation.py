@@ -1,8 +1,8 @@
 """Backend controls on the confirmation gate.
 
-Admin settings cards ask, and so does a move to another provider once it carries
-its revision; a thread's model pick never does. A switch card posted before
-switches applied at once still answers its press.
+Admin settings cards ask, and so does a move to another provider, an agent's or one
+conversation's, once it carries its revision. A switch card posted before switches
+applied at once still answers its press.
 """
 
 from datetime import UTC, datetime
@@ -36,31 +36,28 @@ def _call(**changes: object) -> ToolCall:
     )
 
 
-@pytest.mark.parametrize(
-    "policy",
-    [ToolSafetyPolicy(), ToolSafetyPolicy(enabled=True, unattended_writes=("*",))],
-    ids=["safety-off", "safety-on"],
-)
-@pytest.mark.parametrize("attended", [False, True])
-def test_a_thread_model_pick_is_never_gated_whoever_is_watching(attended, policy) -> None:
-    """A thread's model pick runs like a model change: even an old digest asks for no card."""
-    from daimon.core.tool_safety import backend_switch_tools, confirmation_gated_tools
+#: Each tool that moves conversations to another provider: a preview call, its
+#: confirming call, and the card's title for that move.
+_MOVES = {
+    "request_agent_backend_switch": (
+        {"agent_name": "Researcher", "target_backend": "openai"},
+        {"expected_revision": 0},
+        "Move Researcher to OpenAI?",
+    ),
+    "set_thread_model": (
+        {"origin_context_id": "o", "model": "openai:gpt-6-luna"},
+        {"revision": 0},
+        "Move this conversation to OpenAI?",
+    ),
+}
 
-    call = ToolCall(
-        tool_use_id="switch",
-        server_name=DAIMON_SERVER_NAME,
-        tool_name="set_thread_model",
-        input={"agent_name": "Researcher", "preview_digest": "a" * 64, "digest": "a" * 64},
-    )
-    verdict = decide_tool_call(
-        policy,
-        call,
-        attended=attended,
-        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-        confirmed_tools=backend_switch_tools(enabled=True),
-    )
-    assert verdict.outcome == "allow", f"a thread pick runs without a card: {verdict}"
-    assert "set_thread_model" not in confirmation_gated_tools()
+
+def test_every_provider_move_tool_is_listed_here_and_asked() -> None:
+    """A new tool that moves conversations joins this contract and the shared helper's type."""
+    from daimon.core.tool_safety import PROVIDER_MOVE_TOOLS, backend_switch_tools
+
+    assert set(_MOVES) == PROVIDER_MOVE_TOOLS, "every move tool is checked here"
+    assert backend_switch_tools(enabled=True) >= PROVIDER_MOVE_TOOLS, "a session asks on each"
 
 
 @pytest.mark.parametrize(
@@ -69,16 +66,19 @@ def test_a_thread_model_pick_is_never_gated_whoever_is_watching(attended, policy
     ids=["safety-off", "safety-on"],
 )
 @pytest.mark.parametrize("attended", [False, True])
-def test_a_provider_switch_asks_only_once_it_carries_the_revision(attended, policy) -> None:
+@pytest.mark.parametrize("tool", sorted(_MOVES))
+def test_a_provider_move_asks_only_once_it_carries_the_revision(attended, policy, tool) -> None:
     """The preview carries no revision and changes nothing; the confirming call needs the card."""
     from daimon.core.tool_safety import backend_switch_tools
+
+    preview, confirming, title = _MOVES[tool]
 
     def verdict(data):
         call = ToolCall(
             tool_use_id="switch",
             server_name=DAIMON_SERVER_NAME,
-            tool_name="request_agent_backend_switch",
-            input={"agent_name": "Researcher", "target_backend": "openai", **data},
+            tool_name=tool,
+            input={**preview, **data},
         )
         return decide_tool_call(
             policy,
@@ -89,9 +89,19 @@ def test_a_provider_switch_asks_only_once_it_carries_the_revision(attended, poli
         ).outcome
 
     assert verdict({}) == "allow", "the preview changes nothing"
-    assert verdict({"expected_revision": 0}) == ("ask" if attended else "deny"), (
+    assert verdict(confirming) == ("ask" if attended else "deny"), (
         "the confirming call waits for the card, and an unattended run is refused"
     )
+    call = ToolCall(
+        tool_use_id="switch",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name=tool,
+        input={**preview, **confirming},
+    )
+    card = prompt_for_tool_call(call, requester_platform_user_id="1", now=datetime.now(UTC))
+    assert card.title == title, card.title
+    assert "OpenAI receives" in (card.consequence or ""), "the card says who gets the data"
+    assert "connector data" in (card.consequence or ""), card.consequence
 
 
 _DEPS = SimpleNamespace()

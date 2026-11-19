@@ -37,8 +37,8 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
+    PROVIDER_MOVE_TOOLS,
     REACH_APPROVAL_TOOLS,
-    RETIRED_GATES,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -290,12 +290,14 @@ async def _recorded_as_gated(
         before_pin_set,
         before_pin_clear,
     )
-    # A bind from before the thread-model pick stopped asking holds it gated, and one
-    # from while provider switches didn't ask holds that tool ungated; each still
-    # proves every other card, never a provider switch.
+    # A bind from before the thread pick asked holds only the agent switch gated, and one
+    # from while provider moves applied at once holds neither; each still proves every
+    # other card it gated.
     if selection:
-        candidates += tuple(candidate | RETIRED_GATES for candidate in candidates) + tuple(
-            candidate - {"request_agent_backend_switch"} for candidate in candidates
+        candidates += tuple(
+            candidate - ungated
+            for ungated in ({"set_thread_model"}, PROVIDER_MOVE_TOOLS)
+            for candidate in candidates
         )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and

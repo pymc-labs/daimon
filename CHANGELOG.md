@@ -39,13 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the connector data they use. A server that already saved a list keeps it. The
   web admin page still offers every keyed provider. Connector relay to another
   provider (`mcp_connector_relay`) is now off until an operator turns it on.
-- **Moving an agent to another provider asks first.** Prompt text can no
-  longer switch an agent, or the server's default agent for everyone, to
-  OpenAI or Gemini on its own. The first request returns a preview that
-  changes nothing, the second posts a card in the thread naming the provider
-  and who it moves, and the switch runs only when the person approves it.
-  Everyone in the thread sees the card. A model change within the same
-  provider applies at once, as before.
+- **Moving an agent or a conversation to another provider asks first.**
+  Prompt text can no longer switch an agent, the server's default agent for
+  everyone, or one conversation's model to OpenAI or Gemini on its own. The
+  first request returns a preview that changes nothing, the second posts a
+  card in the thread naming the provider and who it moves, and the move runs
+  only when the person approves it. Everyone in the thread sees the card. A
+  model change within the same provider applies at once, as before.
 - **Privacy names every provider that stores your conversations, and Delete
   reaches OpenAI.** The privacy panel on Discord, Slack and Teams and the
   privacy policy name OpenAI and Google (Gemini) on servers where an admin

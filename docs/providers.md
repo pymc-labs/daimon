@@ -80,9 +80,10 @@ provider can't carry is off there and named after the pick, until you switch
 back. Earlier messages carry over, and so do saved files where the new provider
 keeps a workspace. A refusal names its cause and changes nothing.
 
-Asking an agent in chat to move to another provider is different: the tool
-`request_agent_backend_switch` previews first, then posts a card in the thread
-that names the provider and who it moves. It runs only when the person approves.
+Asking an agent in chat to move itself or the conversation to another provider
+is different: `request_agent_backend_switch` and `set_thread_model` preview first,
+then post a card in the thread that names the provider. It runs only when the
+person approves.
 
 Picking a model for one conversation, in chat or with the MCP tool
 `set_thread_model`, leaves the agent on its own model everywhere else. Only the
