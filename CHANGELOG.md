@@ -93,9 +93,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scheduler's next passes, each row once.
 
 - **Long GPT-6 Luna replies are billed.** A Luna reply whose prompt passed 272k
-  input tokens had no price, so it never reached the ledger. It now settles at
-  OpenAI's published long-context rates: twice the input and cache rates and 1.5
-  times the output rate for the whole request.
+  input tokens had no price, so it never reached the ledger. OpenAI reports a
+  reply as the total of its requests, so a reply past 272k now settles at the
+  base rates; only a single request known to pass 272k takes the long-context
+  rates. GPT-6 Astra and GPT-6.2 Astra and Sol replies are no longer billed
+  wholly at long-context rates once their total passes 272k.
 
 - **A busy or rate-limited provider key now says so and recovers.** One GPT or
   Gemini API key serves at most 16 turns at once across every replica and 4 per

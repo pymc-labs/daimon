@@ -91,11 +91,15 @@ def test_luna_long_context_rates_and_unknown_write_keep_exact_actual_pending():
         )
         is not None
     )
-    # Past 272k input the official rule applies: 2x input and cache, 1.5x output.
+    # Past 272k input one request takes the official rule: 2x input and cache, 1.5x output.
     aggregate = usage(price, input_tokens=272_001)
-    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) == Decimal(
+    request = usage(price, input_tokens=272_001, grain="model_request")
+    assert pricing.provider_cost_of(request, price, infrastructure_usd=Decimal(0)) == Decimal(
         ".0544134"
-    ), "a long prompt settles at the long-context rates"
+    ), "a long request settles at the long-context rates"
+    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".0272092"
+    ), "a total of many requests keeps the base rates"
     # OpenAI's turn meter never counts cache writes (ROOT D2=B): an unknown write is
     # priced as no write, an estimate marked on its debit, never above the counts.
     unreported = usage(price, input_cache_write_tokens=None)

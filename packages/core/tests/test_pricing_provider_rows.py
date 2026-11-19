@@ -80,14 +80,16 @@ def test_a_stored_row_costs_what_its_settlement_charged(
     )
     limit = PROVIDER_PRICED_INPUT_LIMITS[model]
     charged = provider_cost_of(observation, price, infrastructure_usd=Decimal(0))
-    shown = provider_cost_of_bucket(tokens, price, long_prompt=limit is not None and prompt > limit)
+    # A turn total is settled at the base rates; only one known request takes the tier.
+    long_prompt = observation.grain == "model_request" and limit is not None and prompt > limit
+    shown = provider_cost_of_bucket(tokens, price, long_prompt=long_prompt)
     assert shown == charged, f"{model} {counts}: display must equal the settled debit"
 
 
 def test_a_row_above_an_unpriced_limit_has_no_cost() -> None:
-    """A tariff with no long-context multipliers refuses such a turn, and so does display."""
+    """A tariff with no long-context multipliers refuses such a request, and so does display."""
     price = replace(_price("gpt-6-luna"), long_context_multipliers=None)
-    observation = _observation(price, input_tokens=300_000)
+    observation = _observation(price, input_tokens=300_000, grain="model_request")
     tokens = provider_usage_tokens(observation, price)
     assert tokens is not None
     assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) is None

@@ -90,12 +90,14 @@ def test_unknown_counts_stay_unpriced():
         assert provider_cost_of(usage, price, infrastructure_usd=Decimal(0)) is None
 
 
-def test_above_the_long_context_threshold_astra_keeps_its_long_context_rates():
+def test_above_the_long_context_threshold_only_one_request_takes_astras_long_rates():
     price = PRICES[("openai", "gpt-6-astra")]
-    # 272,001 uncached at $20 + 10k out at $75 per million (the whole aggregate, 2x/1.5x).
-    assert provider_cost_of(
-        turn("gpt-6-astra", 272_001, 0, 10_000), price, infrastructure_usd=Decimal(0)
-    ) == Decimal("6.19002")
+    long = turn("gpt-6-astra", 272_001, 0, 10_000)
+    # A turn total may sum many short requests: 272,001 at $10 + 10k out at $50 per million.
+    assert provider_cost_of(long, price, infrastructure_usd=Decimal(0)) == Decimal("3.22001")
+    # One request past 272k: $20 in and $75 out per million (2x/1.5x).
+    request = long.model_copy(update={"grain": "model_request"})
+    assert provider_cost_of(request, price, infrastructure_usd=Decimal(0)) == Decimal("6.19002")
 
 
 def test_a_provider_without_a_cache_write_rate_is_never_an_estimate():

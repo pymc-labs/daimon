@@ -245,7 +245,8 @@ ambiguous. Unknown fields, a stale digest or a missing resource are refused too.
 An optional `spend_limit_usd_cents` caps each reply, not the whole session. OpenAI
 refuses a native session spend limit, so the host enforces it: it prices the reply's
 usage while it runs (container time not counted), stops it once the limit is passed
-and tells the agent next time. Past 272k input tokens a reply counts at the model's
+and tells the agent next time. A reply sums its requests, so it counts at the base
+rates past 272k input tokens; only one request known to pass that takes the model's
 long-context rates. The host refuses `OPENAI_CUSTOM_HEADERS` for configured OpenAI
 runtimes so ambient headers cannot replace the channel's key or project.
 

@@ -317,8 +317,8 @@ class ProviderPrice:
     cache_write: Decimal | None = None
     verified: bool = True
     max_priced_input_tokens: int | None = None
-    # (input and cache, output) multipliers above max_priced_input_tokens. Applied
-    # to a whole aggregate, which may mix tiers, so the cost is an upper bound.
+    # (input and cache, output) multipliers for one request above max_priced_input_tokens.
+    # A turn or session total may sum many short requests, so it is priced at the base rates.
     long_context_multipliers: tuple[Decimal, Decimal] | None = None
     valid_before: date | None = None
     admitted_on: date | None = None
@@ -428,11 +428,13 @@ def provider_cost_of(
         or infrastructure_usd is None
     ):
         return None
-    above = price.max_priced_input_tokens is not None and (
-        usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
+    # The tier is per request: no request of an aggregate is known to cross the limit.
+    above = (
+        usage.grain == "model_request"
+        and price.max_priced_input_tokens is not None
+        and (usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens)
     )
     if above and (usage.input_tokens is None or price.long_context_multipliers is None):
-        # An aggregate cannot establish the pricing tier of its requests.
         return None
     if above:
         price = _long_context_price(price)
@@ -680,9 +682,8 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 long_context_multipliers=(Decimal(2), Decimal("1.5")),
                 web_search=_OPENAI_SEARCH,
             ),
-            # Checked 2026-10-22 (official model page). Above 272k input tokens
-            # input/cache double and output is 1.5x; an aggregate above it is
-            # priced wholly at those rates, an upper bound.
+            # Checked 2026-10-22 (official model page). A request above 272k input
+            # tokens has input/cache doubled and output at 1.5x.
             ProviderPrice(
                 PERSISTENT_WORKSPACE.provider,
                 "gpt-6-astra",
