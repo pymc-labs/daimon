@@ -1,4 +1,4 @@
-"""Gemini durable Records decode and encode run off the event loop."""
+"""Large Gemini durable Records decode and encode off the event loop."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from mux.drivers.gemini import Records
 
 
 @pytest.mark.asyncio
-async def test_records_codec_runs_off_the_event_loop(
+async def test_only_large_records_use_the_codec_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A large body must not hold the loop: load and dump run on the codec pool."""
+    """A small body decodes on the loop; a large one loads and saves on the codec pool."""
     threads: list[str] = []
     load, dump = gemini_state._load, gemini_state._dump  # pyright: ignore[reportPrivateUsage]
 
@@ -30,11 +30,13 @@ async def test_records_codec_runs_off_the_event_loop(
     monkeypatch.setattr(gemini_state, "_load", traced_load)
     monkeypatch.setattr(gemini_state, "_dump", traced_dump)
     storage = SQLiteGeminiStorage(tmp_path / "records.sqlite", namespace="ns")
-    async with storage.transaction():
-        pass
-    async with storage.transaction():
-        pass
-    assert len(threads) == 4, "each transaction loads then saves"
-    assert all(name.startswith("gemini-records") for name in threads), (
-        f"codec ran on {threads}, not the dedicated pool"
+    async with storage.transaction() as records:
+        records.creations["t", "a", "first"] = "p", "digest", "id"
+    assert threads == ["MainThread", "MainThread"], "a small body loads and saves inline"
+    threads.clear()
+    monkeypatch.setattr(gemini_state, "POOL_BYTES", 1)
+    async with storage.transaction() as records:
+        records.creations["t", "a", "second"] = "p", "digest", "id"
+    assert len(threads) == 2 and all(n.startswith("gemini-records") for n in threads), (
+        f"a large body ran on {threads}, not the dedicated pool"
     )

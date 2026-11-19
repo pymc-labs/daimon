@@ -566,6 +566,9 @@ ignore_imports = [
     # Generic names (`segment`, `usage`) that stay on their submodule.
     "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.events",
     "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.normalize",
+    # The Gemini records-row contract, for the storage backends that implement it.
+    "daimon.core.turn.gemini_state -> mux.drivers.gemini.storage",
+    "daimon.core.stores.gemini_runtime_state -> mux.drivers.gemini.storage",
 ]
 
 [tool.pytest.ini_options]

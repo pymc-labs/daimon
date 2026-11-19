@@ -15,32 +15,62 @@ import base64
 import json
 import os
 import sqlite3
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import structlog
 from daimon.core.stores.gemini_runtime_state import (
+    GeminiRecordRow,
     Payload,
     PayloadDatabase,
     PostgresPayloadDatabase,
+    PostgresRecordsDatabase,
+    RecordWrite,
     complete,
 )
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.resources import Agent, Environment
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import ATTEMPT_MODELS, FlashAttempt, Records
+from mux.drivers.gemini.storage import (
+    ALL,
+    AccountRow,
+    ArtifactRecord,
+    Keys,
+    RowBody,
+    RowKey,
+    SessionRow,
+    SkillRecord,
+    adopt_legacy,
+    changes,
+    records_of,
+    rows_of,
+    scoped,
+    view,
+)
 from mux.state.lease import Slot
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _RECORDS = TypeAdapter(Records)
+_ROW_ADAPTERS: dict[str, TypeAdapter[RowBody]] = {
+    "account": TypeAdapter[RowBody](AccountRow),
+    "session": TypeAdapter[RowBody](SessionRow),
+    "agent": TypeAdapter[RowBody](Agent),
+    "environment": TypeAdapter[RowBody](Environment),
+    "skill": TypeAdapter[RowBody](SkillRecord),
+    "artifact": TypeAdapter[RowBody](ArtifactRecord),
+}
 _JSON = TypeAdapter[JsonValue](JsonValue)
 _ROWS = TypeAdapter(dict[str, JsonValue])
 log = structlog.get_logger(__name__)
@@ -238,39 +268,226 @@ class _Database:
         connection.commit()
 
 
-class _GeminiStorage:
-    """Full Records transactions scoped to the authorized provider account."""
+async def _codec[T](large: bool, function: Callable[..., T], *args: object) -> T:
+    """Encode or decode on the loop when small; a large body (the drain, a long
+    session, a cold scan) runs on the codec pool so it never stalls other turns."""
+    if not large:
+        return function(*args)
+    return await asyncio.get_running_loop().run_in_executor(_CODEC, function, *args)
 
-    def __init__(self, database: PayloadDatabase) -> None:
-        self._database = database
+
+def _row_adapter(kind: str) -> TypeAdapter[RowBody]:
+    adapter = _ROW_ADAPTERS.get(kind)
+    if adapter is None:
+        raise ValueError("invalid Gemini records row kind")
+    return adapter
+
+
+def load_row(kind: str, body: str) -> RowBody:
+    return _row_adapter(kind).validate_python(_decode(_JSON.validate_json(body)))
+
+
+def dump_row(kind: str, row: RowBody) -> str:
+    return json.dumps(_encode(_row_adapter(kind).dump_python(row)), allow_nan=False)
+
+
+def _write_of(key: RowKey, row: RowBody) -> RecordWrite:
+    kind, id_ = key
+    body = dump_row(kind, row)
+    if isinstance(row, SessionRow):
+        return RecordWrite(
+            kind,
+            id_,
+            body,
+            binding_id=row.record.session.binding.id,
+            refs=tuple(f"{k}:{i}" for k, i in row.record.refs),
+        )
+    if isinstance(row, ArtifactRecord) and row.artifact.session is not None:
+        return RecordWrite(kind, id_, body, session_id=row.artifact.session.id)
+    return RecordWrite(kind, id_, body)
+
+
+def _drained_rows(body: str | None) -> list[RecordWrite]:
+    records = _load(body)
+    adopt_legacy(records)
+    return [_write_of(key, row) for key, row in rows_of(records).items()]
+
+
+def _blob_view(
+    body: str | None, keys: Keys
+) -> tuple[Records, dict[RowKey, RowBody], Keys, dict[RowKey, RowBody]]:
+    records = _load(body)
+    adopt_legacy(records)
+    rows = rows_of(records)
+    loaded, resolved = scoped(rows, keys)
+    return view(loaded, resolved), loaded, resolved, rows
+
+
+class SQLiteGeminiStorage:
+    """Records in the explicitly selected local SQLite file: one blob, one process,
+    seen through the same strict row view as PostgreSQL."""
+
+    def __init__(self, path: Path, *, namespace: str) -> None:
+        self._database = _Database(path, namespace)
 
     @asynccontextmanager
-    async def read(self) -> AsyncIterator[Records]:
-        """The last committed Records for a pure read (mux `read_records`); never saved.
-
-        A database with no committed-snapshot read (SQLite, one local process) serves
-        it from its transaction.
-        """
-        reader = getattr(self._database, "read", None)
-        if not callable(reader):
-            async with self.transaction() as records:
-                yield records
-            return
-        body = await cast(Callable[[], Awaitable[str | None]], reader)()
-        yield await asyncio.get_running_loop().run_in_executor(_CODEC, _load, body)
-
-    @asynccontextmanager
-    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
-        async with self._database.transaction(after_dispatch=after_dispatch) as payload:
-            loop = asyncio.get_running_loop()
-            records = await loop.run_in_executor(_CODEC, _load, payload.body)
+    async def read(self, keys: Keys = ALL) -> AsyncIterator[Records]:
+        """A pure read, served from a transaction (one local process)."""
+        async with self.transaction(keys) as records:
             yield records
+
+    @asynccontextmanager
+    async def transaction(
+        self, keys: Keys = ALL, *, after_dispatch: bool = False
+    ) -> AsyncIterator[Records]:
+        async with self._database.transaction(after_dispatch=after_dispatch) as payload:
+            large = len(payload.body or "") >= POOL_BYTES
+            records, loaded, resolved, rows = await _codec(large, _blob_view, payload.body, keys)
+            yield records
+            written = changes(records, loaded, resolved)
+            if not written.upserts and not written.deletes:
+                return
+            for key in written.deletes:
+                del rows[key]
+            rows.update(written.upserts)
 
             async def save() -> None:
                 # One uncancellable unit: an encoded body always reaches its save.
-                await payload.save(await loop.run_in_executor(_CODEC, _dump, records))
+                await payload.save(await _codec(large, _dump, records_of(rows)))
 
             await complete(save())
+
+
+POOL_BYTES = 256 * 1024
+"""Rows at least this large encode and decode on the codec pool, not the loop."""
+TOMBSTONE = json.dumps({"moved": "gemini_records@1"})
+"""The legacy blob after its drain. Older code's `_decode` rejects it ("invalid
+durable Gemini tag") before any save, so it can never write a drained account."""
+_CACHE_ROWS = 64
+
+
+@dataclass
+class _ProcessRecords:
+    """Per-process memo: accounts already drained, and decoded rows for reads.
+
+    A read reuses a row decoded at the same (version, touched_at); read paths
+    never mutate what they are given. Correctness never depends on it.
+    """
+
+    drained: set[tuple[UUID, UUID, str]] = field(default_factory=set[tuple[UUID, UUID, str]])
+    rows: OrderedDict[tuple[UUID, UUID, str, str, str], tuple[int, datetime, RowBody]] = field(
+        default_factory=OrderedDict[tuple[UUID, UUID, str, str, str], tuple[int, datetime, RowBody]]
+    )
+
+    def decoded(self, owner: tuple[UUID, UUID, str], row: GeminiRecordRow) -> RowBody | None:
+        cached = self.rows.get((*owner, row.kind, row.id))
+        if cached is None or cached[:2] != (row.version, row.touched_at):
+            return None
+        self.rows.move_to_end((*owner, row.kind, row.id))
+        return cached[2]
+
+    def keep(self, owner: tuple[UUID, UUID, str], row: GeminiRecordRow, body: RowBody) -> None:
+        self.rows[(*owner, row.kind, row.id)] = (row.version, row.touched_at, body)
+        self.rows.move_to_end((*owner, row.kind, row.id))
+        while len(self.rows) > _CACHE_ROWS:
+            self.rows.popitem(last=False)
+
+
+_PROCESS = _ProcessRecords()
+
+
+def _resolved(keys: Keys, named: tuple[tuple[str, str], ...]) -> Keys:
+    if keys.everything:
+        return keys
+    locked = set(keys.lock)
+    return replace(
+        keys,
+        read=tuple(cast(RowKey, k) for k in named if k not in locked),
+        refs=False,
+    )
+
+
+class PostgresGeminiStorage:
+    """Records as `gemini_records` rows on the application state database.
+
+    The first touch of an account in each process drains its legacy blob.
+    """
+
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        scope: Scope,
+        project: str,
+        shared_slot: Slot | None = None,
+        process: _ProcessRecords = _PROCESS,
+    ) -> None:
+        self._database = PostgresRecordsDatabase(
+            sessions,
+            scope=scope,
+            project=project,
+            empty_account=dump_row("account", AccountRow()),
+            shared_slot=shared_slot,
+        )
+        self._process = process
+
+    async def _drain_once(self) -> None:
+        owner = self._database.owner
+        if owner in self._process.drained:
+            return
+
+        async def convert(body: str | None) -> list[RecordWrite]:
+            return await _codec(True, _drained_rows, body)
+
+        await self._database.drain(TOMBSTONE, convert)
+        self._process.drained.add(owner)
+
+    async def _decode(
+        self, rows: dict[tuple[str, str], GeminiRecordRow], *, cached: bool
+    ) -> dict[RowKey, RowBody]:
+        owner = self._database.owner
+        decoded: dict[RowKey, RowBody] = {}
+        for key, row in rows.items():
+            body = self._process.decoded(owner, row) if cached else None
+            if body is None:
+                body = await _codec(len(row.body) >= POOL_BYTES, load_row, row.kind, row.body)
+                if cached:
+                    self._process.keep(owner, row, body)
+            decoded[cast(RowKey, key)] = body
+        return decoded
+
+    @asynccontextmanager
+    async def read(self, keys: Keys = ALL) -> AsyncIterator[Records]:
+        """The last committed rows for a pure read (mux `Storage.read`); never saved."""
+        await self._drain_once()
+        loaded = await self._database.read(keys)
+        rows = await self._decode(loaded.rows, cached=True)
+        yield view(rows, _resolved(keys, loaded.named), copy_rows=False)
+
+    @asynccontextmanager
+    async def transaction(
+        self, keys: Keys = ALL, *, after_dispatch: bool = False
+    ) -> AsyncIterator[Records]:
+        await self._drain_once()
+        async with self._database.transaction(keys, after_dispatch=after_dispatch) as loaded:
+            # Writes always decode the locked bodies, never a cached copy.
+            rows = await self._decode(loaded.rows, cached=False)
+            resolved = _resolved(keys, loaded.named)
+            records = view(rows, resolved)
+            yield records
+            written = changes(records, rows, resolved)
+            sizes = {key: len(row.body) for key, row in loaded.rows.items()}
+
+            async def save() -> None:
+                # One uncancellable unit: encoded rows always reach their save.
+                writes = [
+                    await _codec(sizes.get(key, 0) >= POOL_BYTES, _write_of, key, row)
+                    for key, row in written.upserts.items()
+                ]
+                await loaded.save(writes, written.deletes)
+
+            if written.upserts or written.deletes:
+                await complete(save())
 
 
 @runtime_checkable
@@ -453,31 +670,6 @@ class _FlashAccounting:
 
         await self._update(apply)
         return released
-
-
-class SQLiteGeminiStorage(_GeminiStorage):
-    """Full Records transactions in the explicitly selected local SQLite file."""
-
-    def __init__(self, path: Path, *, namespace: str) -> None:
-        super().__init__(_Database(path, namespace))
-
-
-class PostgresGeminiStorage(_GeminiStorage):
-    """Full Records transactions on the existing application state database."""
-
-    def __init__(
-        self,
-        sessions: async_sessionmaker[AsyncSession],
-        *,
-        scope: Scope,
-        project: str,
-        shared_slot: Slot | None = None,
-    ) -> None:
-        super().__init__(
-            PostgresPayloadDatabase(
-                sessions, scope=scope, project=project, kind="records", shared_slot=shared_slot
-            )
-        )
 
 
 class SQLiteFlashAccounting(_FlashAccounting):

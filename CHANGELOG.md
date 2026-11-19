@@ -113,6 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context, for every call. Reading a GPT conversation's history from OpenAI
   happens once per read rather than once per page, in pages of a thousand
   events, so a conversation past 5,000 events no longer fails to resume.
+- **Busy Gemini threads no longer slow the others in an account.** Each
+  conversation, agent, environment, skill and file is saved as its own row,
+  and a turn saves only what changed. The first start moves stored state over;
+  older releases refuse it after that, so roll forward rather than back.
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's

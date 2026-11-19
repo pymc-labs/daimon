@@ -5119,6 +5119,42 @@ class GeminiRuntimeState(Base):
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class GeminiRecord(Base):
+    """One Gemini driver record row: an account's operation log, a session, a resource.
+
+    Split from the one `gemini_runtime_state` blob per account, so a turn locks and
+    rewrites only its own session. `version` and `touched_at` change on every write.
+    """
+
+    __tablename__ = "gemini_records"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "account_id", "project", "kind", "id"),
+        CheckConstraint(
+            "kind IN ('account', 'session', 'agent', 'environment', 'skill', 'artifact')",
+            name="ck_gemini_records_kind",
+        ),
+        Index("ix_gemini_records_kind_touched_at", "kind", "touched_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    project: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    touched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # A session's binding; an artifact's session (workspace snapshot files).
+    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A session's `kind:id` refs: its agent, environment, pinned skills and files.
+    refs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+
+
 class Watch(Base):
     """Owner-registered source and immutable conversation binding."""
 

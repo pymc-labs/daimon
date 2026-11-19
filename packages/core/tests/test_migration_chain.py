@@ -171,6 +171,7 @@ TAIL = (
     "0207_skill_manifest_bytes",
     "0208_outbox_attribution",
     "0209_provider_key_gate",
+    "0210_gemini_records",
 )
 HEAD = TAIL[-1]
 
