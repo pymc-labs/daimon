@@ -74,9 +74,9 @@ ROLES_REQUIRED_REFUSAL = (
     "This agent is limited to certain roles, so only someone who holds all of them "
     "right now can schedule it. Nothing was saved."
 )
-ROLES_FROM_DISCORD_REFUSAL = (
-    "This agent is limited to certain roles, so its routines can only be scheduled "
-    "from Discord. Nothing was saved."
+ROLES_UNCHECKABLE_REFUSAL = (
+    "This agent is limited to certain roles, which cannot be checked here, so its "
+    "routines cannot be scheduled from here. Nothing was saved."
 )
 """For a surface that cannot read roles live (`RoutineCaller.fresh_subject` unset)."""
 
@@ -462,7 +462,7 @@ def _check_agent_pin(
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
     if decision.reason == "invoker_not_allowed":
         raise RoutineRefused(
-            ROLES_REQUIRED_REFUSAL if caller.fresh_subject else ROLES_FROM_DISCORD_REFUSAL
+            ROLES_REQUIRED_REFUSAL if caller.fresh_subject else ROLES_UNCHECKABLE_REFUSAL
         )
     if decision.reason == "own_agents_only":
         if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):

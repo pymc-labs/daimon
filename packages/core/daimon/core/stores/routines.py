@@ -980,7 +980,9 @@ async def pause_for_lapsed_role(session: AsyncSession, row: RoutineRow, *, error
         .where(
             Routine.id == row.id,
             Routine.tenant_id == row.tenant_id,
-            Routine.last_fired_at.is_not_distinct_from(row.last_fired_at),
+            Routine.last_fired_at.is_not(None),
+            Routine.last_fired_at == row.last_fired_at,
+            Routine.last_finished_claim_at.is_distinct_from(Routine.last_fired_at),
         )
         .values(last_finished_at=datetime.now(UTC), last_finished_claim_at=Routine.last_fired_at)
     )
