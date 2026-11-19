@@ -7,9 +7,9 @@ from collections.abc import Callable, Mapping, Sequence
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.adapters.web import channel_visibility
 from daimon.adapters.web.channel_visibility import forget_visibility, request_channel_check
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import channel_post_check
 from daimon.core.config import DiscordSettings, Settings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.support_channel_check import ChannelCheck
@@ -51,10 +51,10 @@ async def _check(
     *,
     discord: bool = True,
 ) -> ChannelCheck:
-    async def token(_runtime: object, _team: str) -> str:
+    async def token(*_args: object) -> str:
         return "xoxb"
 
-    monkeypatch.setattr(channel_visibility, "_slack_token", token)
+    monkeypatch.setattr(channel_post_check, "slack_token", token)
     forget_visibility()
     runtime, http = _runtime(handler, discord=discord)
     async with http:
