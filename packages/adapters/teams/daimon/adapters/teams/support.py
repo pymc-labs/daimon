@@ -961,7 +961,7 @@ async def _post_in_support_channel(
     """
     channel = destination.channel_id
     try:
-        if direct is None or not await _may_post_to(runtime, channel):
+        if direct is None or not await may_post_to(runtime, channel):
             return None
         return await send(direct, channel)
     except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
@@ -969,7 +969,7 @@ async def _post_in_support_channel(
         return None
 
 
-async def _may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
+async def may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
     """Whether the deployment's organisation lets this bot post in `channel`."""
     teams = runtime.settings.teams
     if teams is None:

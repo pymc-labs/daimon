@@ -12,10 +12,12 @@ import structlog
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, send_error_details
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.support import may_post_to
 from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.channel_budget_notice import (
+    AlertOutcome,
     BudgetAlert,
     BudgetAlerter,
     BudgetNotice,
@@ -64,16 +66,23 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
     return send
 
 
-def teams_budget_alerter(direct: DirectChats) -> BudgetAlerter:
-    """Post the alert into its channel; False when Teams refuses the post."""
+def teams_budget_alerter(runtime: TeamsRuntime, direct: DirectChats) -> BudgetAlerter:
+    """Post the alert as a neutral card where the access policy lets Daimon post.
 
-    async def send(alert: BudgetAlert) -> bool:
+    `refused` for a protected channel or a 403/404 from Teams; other errors may pass later.
+    """
+
+    async def send(alert: BudgetAlert) -> AlertOutcome:
+        if not await may_post_to(runtime, alert.destination_id):
+            return "refused"
+        text = alert.text(alert.channel_ref(alert.channel_label))
         try:
-            await direct.post(alert.destination_id, alert.text(alert.channel_label))
+            await direct.post_card(alert.destination_id, notice_card(text, error=False))
         except TEAMS_SEND_ERRORS as exc:
-            log.info("channel_budget.alert_undelivered", err_type=type(exc).__name__)
-            return False
-        return True
+            status, _ = send_error_details(exc)
+            log.info("channel_budget.alert_undelivered", err_type=type(exc).__name__, status=status)
+            return "refused" if status in (403, 404) else "failed"
+        return "sent"
 
     return send
 
@@ -90,7 +99,6 @@ def with_budget_notifier(runtime: TeamsRuntime, direct: DirectChats | None) -> T
         turn_deps=replace(
             deps,
             budget_notifier=notifier,
-            budget_alerter=teams_budget_alerter(direct),
             server_admins=live_admin_ids(real),
         ),
     )

@@ -11,6 +11,7 @@ ORM access for test setup.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -37,6 +38,7 @@ from daimon.core._models import (
     TenantLedger,
     UsageEvent,
 )
+from daimon.core.channel_budget_notice import BudgetAlert
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantConfigRow, TenantScopeRef
 from daimon.core.stores import (
@@ -825,3 +827,25 @@ async def make_github_removal_notice(
         )
     )
     await session.flush()
+
+
+def budget_alert(**given: object) -> BudgetAlert:
+    """An alert-only budget's first alert, for adapter delivery tests."""
+    alert = BudgetAlert(
+        tenant_id=uuid.uuid4(),
+        workspace_id="W1",
+        platform="slack",
+        channel_id="C1",
+        destination_id="C9",
+        slack_team_id="W1",
+        spent_line="$6.00",
+        limit_line="$5.00",
+        window_text="monthly",
+        level=1,
+        budget_id=uuid.uuid4(),
+        window_key="window",
+        prior_key=None,
+        prior_level=0,
+        channel_name="general",
+    )
+    return dataclasses.replace(alert, **given)

@@ -58,6 +58,16 @@ async def list_channel_budgets(
     return [ChannelBudgetRow.model_validate(row) for row in rows]
 
 
+async def list_alert_budgets(session: AsyncSession, *, platform: str) -> list[ChannelBudgetRow]:
+    """Every tenant's alert-only budgets on `platform`, for the alert poller."""
+    rows = await session.scalars(
+        select(ChannelBudget).where(
+            ChannelBudget.platform == platform, ChannelBudget.on_limit == "alert"
+        )
+    )
+    return [ChannelBudgetRow.model_validate(row) for row in rows]
+
+
 async def set_channel_budget(
     session: AsyncSession,
     *,

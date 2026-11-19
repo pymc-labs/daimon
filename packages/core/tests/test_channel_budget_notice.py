@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from daimon.core import channel_budget_notice
 from daimon.core.channel_budget_notice import (
+    AlertOutcome,
     BudgetAlert,
     BudgetNotice,
     claim_budget_alert_post,
@@ -18,11 +20,13 @@ from daimon.core.channel_budget_notice import (
     notice_recipients,
     notify_budget_alert,
     notify_budget_exhausted,
+    poll_budget_alerts_once,
 )
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores import accounts, channel_budgets
 from daimon.core.stores.domain import Platform, Role, TenantRow
 from daimon.testing.factories import (
+    budget_alert,
     make_account,
     make_channel_budget,
     make_ledger_entry,
@@ -254,11 +258,11 @@ async def _alert(
     tenant: TenantRow,
     sent: list[BudgetAlert],
     *,
-    lands: bool = True,
+    outcome: AlertOutcome = "sent",
 ) -> None:
-    async def alerter(alert: BudgetAlert) -> bool:
+    async def alerter(alert: BudgetAlert) -> AlertOutcome:
         sent.append(alert)
-        return lands
+        return outcome
 
     await notify_budget_alert(
         sessionmaker=factory,
@@ -308,14 +312,20 @@ async def test_an_alert_posts_once_per_multiple_of_the_limit(
     assert [a.level for a in sent] == [1, 2], "a repeat at the same level posts nothing"
 
 
-async def test_an_alert_that_does_not_land_is_retried_and_a_stop_budget_never_alerts(
+async def test_an_alert_that_fails_is_retried_a_refused_one_is_not_and_a_stop_budget_never_alerts(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await _alert_budget(db_session, spent="6")
     sent: list[BudgetAlert] = []
-    await _alert(db_session_factory, tenant, sent, lands=False)
+    await _alert(db_session_factory, tenant, sent, outcome="failed")
     await _alert(db_session_factory, tenant, sent)
-    assert [a.level for a in sent] == [1, 1], "a failed post frees the claim for the next turn"
+    assert [a.level for a in sent] == [1, 1], "a failed post frees the claim for the next poll"
+
+    refused = await _alert_budget(db_session, spent="6")
+    gone: list[BudgetAlert] = []
+    await _alert(db_session_factory, refused, gone, outcome="refused")
+    await _alert(db_session_factory, refused, gone)
+    assert len(gone) == 1, "a channel Daimon cannot post in keeps the claim: no retry loop"
 
     stopper = await make_tenant(db_session)
     await make_ledger_entry(
@@ -325,6 +335,36 @@ async def test_an_alert_that_does_not_land_is_retried_and_a_stop_budget_never_al
     await db_session.commit()
     await _alert(db_session_factory, stopper, sent)
     assert len(sent) == 2, "a stop budget posts no alert"
+
+
+async def test_the_poller_alerts_whatever_path_spent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _alert_budget(db_session, spent="6")
+    sent: list[BudgetAlert] = []
+
+    async def alerter(alert: BudgetAlert) -> AlertOutcome:
+        sent.append(alert)
+        return "sent"
+
+    for _ in range(2):
+        await poll_budget_alerts_once(
+            db_session_factory,
+            platform=tenant.platform,
+            alerter=alerter,
+            settings=bare_settings(),
+            now=_NOW,
+        )
+    mine = [a.level for a in sent if a.tenant_id == tenant.id]
+    assert mine == [1], "the ledger's spend alerts once, with no turn running"
+
+
+def test_an_alert_in_another_workspace_names_the_channel_and_its_workspace() -> None:
+    alert = budget_alert()
+    assert alert.channel_ref("<#C1>", "Ops") == "<#C1>", "its own workspace gets a mention"
+    foreign = replace(alert, own=False)
+    assert foreign.channel_ref("<#C1>", "Ops") == "#general in Ops", "elsewhere, label and name"
+    assert foreign.channel_ref("<#C1>") == "#general", "no name read: the label alone"
 
 
 async def test_an_alert_without_a_destination_claims_nothing(

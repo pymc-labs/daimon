@@ -14,6 +14,7 @@ import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import (
+    AlertOutcome,
     BudgetAlert,
     BudgetAlerter,
     BudgetNotice,
@@ -82,22 +83,27 @@ def discord_budget_notifier(
 
 
 def discord_budget_alerter(client: discord.Client) -> BudgetAlerter:
-    """Post the alert into its channel; False when the channel is gone or Daimon cannot post."""
+    """Post the alert as a neutral card; `refused` when the channel is gone or closed to Daimon."""
 
-    async def send(alert: BudgetAlert) -> bool:
+    async def send(alert: BudgetAlert) -> AlertOutcome:
         try:
             channel_id = int(alert.destination_id)
             channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
             if not isinstance(channel, discord.abc.Messageable):
-                return False
+                return "refused"
+            guild = client.get_guild(int(alert.workspace_id))
+            ref = alert.channel_ref(f"<#{alert.channel_id}>", guild.name if guild else None)
             await channel.send(
-                alert.text(f"<#{alert.channel_id}>"),
+                embed=build_notice_embed(alert.text(ref), neutral=True),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (discord.HTTPException, ValueError) as exc:
+        except (discord.Forbidden, discord.NotFound, ValueError) as exc:
+            log.info("channel_budget.alert_refused", err_type=type(exc).__name__)
+            return "refused"
+        except discord.HTTPException as exc:
             log.info("channel_budget.alert_undelivered", err_type=type(exc).__name__)
-            return False
-        return True
+            return "failed"
+        return "sent"
 
     return send
 
@@ -110,8 +116,7 @@ def with_budget_notifier(
 ) -> DiscordRuntime:
     """`runtime` whose turns send the notice; a stand-in test runtime comes back unchanged.
 
-    With `client`, a recipient matched by a stored role must still hold it, and an
-    alert-only budget's alerts post.
+    With `client`, a recipient matched by a stored role must still hold it.
     """
     real = cast(object, runtime)
     deps = cast(object, runtime.turn_deps)
@@ -122,7 +127,6 @@ def with_budget_notifier(
         turn_deps=replace(
             deps,
             budget_notifier=discord_budget_notifier(real, open_dm, is_closed),
-            budget_alerter=None if client is None else discord_budget_alerter(client),
         ),
     )
 

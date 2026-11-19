@@ -4,9 +4,11 @@ When chat admission refuses a turn for the channel budget, the first refusal
 of each window claims the budget notice and DMs the server admins. The claim
 commits before any DM is sent. A tenant opts out with `budget_notices`.
 
-An alert-only budget never refuses; instead admission claims an alert for each
-full multiple of the limit (once each per window) and posts it to the budget's
-alert channel, else the workspace's support destination.
+An alert-only budget never refuses. Each chat adapter runs `run_budget_alert_poller`,
+which reads every alert-only budget's spend from the ledger, so spend from any path
+(chat, routines, watches, MCP, web) alerts. It claims an alert for each full multiple
+of the limit (once each per window) and posts it to the budget's alert channel, else
+the workspace's support destination.
 """
 
 from __future__ import annotations
@@ -15,8 +17,8 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
-from typing import Final
+from datetime import UTC, datetime
+from typing import Final, Literal
 
 import structlog
 from daimon.core.channel_budget import get_channel_budget_status
@@ -26,6 +28,7 @@ from daimon.core.stores.accounts import list_platform_user_ids
 from daimon.core.stores.channel_budgets import (
     claim_budget_alert,
     claim_exhausted_notice,
+    list_alert_budgets,
     release_budget_alert,
     release_exhausted_notice,
 )
@@ -40,6 +43,7 @@ log = structlog.get_logger()
 
 MAX_RECIPIENTS: Final = 10
 NOTICE_TIMEOUT_S: Final = 15.0
+ALERT_POLL_INTERVAL_S: Final = 60.0
 
 RecipientCheck = Callable[[str], Awaitable[bool]]
 """Whether a DM grant admits this recipient (`dm_access.sender_admits`)."""
@@ -293,11 +297,19 @@ class BudgetAlert:
     prior_level: int
     """The claim before this one, restored when the post does not land."""
     channel_name: str | None = None
+    own: bool = True
+    """False when the destination is the deployment's channel, in another workspace."""
 
     @property
     def channel_label(self) -> str:
         """The budgeted channel where the platform cannot mention it."""
         return f"#{self.channel_name}" if self.channel_name else self.channel_id
+
+    def channel_ref(self, mention: str, workspace_name: str | None = None) -> str:
+        """`mention` in the budget's own workspace; elsewhere the label and the workspace."""
+        if self.own:
+            return mention
+        return f"{self.channel_label} in {workspace_name}" if workspace_name else self.channel_label
 
     def text(self, channel_ref: str) -> str:
         reached = "reached" if self.level == 1 else f"reached {self.level}x"
@@ -308,8 +320,12 @@ class BudgetAlert:
         )
 
 
-BudgetAlerter = Callable[[BudgetAlert], Awaitable[bool]]
-"""Posts the alert and says whether it landed."""
+AlertOutcome = Literal["sent", "refused", "failed"]
+"""`refused`: the platform definitely won't take it (gone, no access), so the claim stays
+and the next multiple tries again; `failed` may pass, so the claim is freed."""
+
+BudgetAlerter = Callable[[BudgetAlert], Awaitable[AlertOutcome]]
+"""Posts the alert as a neutral card and says what happened."""
 
 
 async def _alert_destination(
@@ -378,6 +394,7 @@ async def claim_budget_alert_post(
         prior_key=budget.alert_window_key,
         prior_level=budget.alert_level,
         channel_name=names.get(channel_id),
+        own=destination.own,
     )
 
 
@@ -392,7 +409,7 @@ async def _claim_and_post_alert(
     settings: Settings,
 ) -> None:
     alert: BudgetAlert | None = None
-    landed = False
+    outcome: AlertOutcome = "failed"
     try:
         async with asyncio.timeout(NOTICE_TIMEOUT_S):
             # Committed before the post, so a slow platform call holds no lock.
@@ -407,12 +424,11 @@ async def _claim_and_post_alert(
                 )
             if alert is None:
                 return
-            landed = await alerter(alert)
-            if landed:
-                log.info("channel_budget.alert_sent", tenant_id=str(tenant_id), level=alert.level)
+            outcome = await alerter(alert)
+            log.info("channel_budget.alert_posted", tenant_id=str(tenant_id), outcome=outcome)
     finally:
-        # Freed when nothing posted, so the next turn tries again.
-        if alert is not None and not landed:
+        # Freed when the post may pass on a later poll; a refusal keeps the claim.
+        if alert is not None and outcome == "failed":
             async with sessionmaker() as session, session.begin():
                 await release_budget_alert(
                     session,
@@ -451,30 +467,48 @@ async def notify_budget_alert(
         )
 
 
-def spawn_budget_alert(
-    *,
+async def poll_budget_alerts_once(
     sessionmaker: async_sessionmaker[AsyncSession],
-    alerter: BudgetAlerter | None,
-    tenant_id: uuid.UUID,
+    *,
     platform: str,
-    channel_id: str | None,
+    alerter: BudgetAlerter,
+    settings: Settings,
     now: datetime,
-    settings: Settings | None,
 ) -> None:
-    """Check for a due alert off the turn's path: an alert never delays or fails a turn."""
-    if alerter is None or channel_id is None or settings is None:
-        return
-    task = asyncio.create_task(
-        notify_budget_alert(
+    """Post each due alert of `platform`'s alert-only budgets, whatever path spent."""
+    async with sessionmaker() as session:
+        budgets = await list_alert_budgets(session, platform=platform)
+    for budget in budgets:
+        await notify_budget_alert(
             sessionmaker=sessionmaker,
             alerter=alerter,
-            tenant_id=tenant_id,
+            tenant_id=budget.tenant_id,
             platform=platform,
-            channel_id=channel_id,
+            channel_id=budget.channel_id,
             now=now,
             settings=settings,
-        ),
-        name="channel_budget.alert",
-    )
-    _PENDING.add(task)
-    task.add_done_callback(_PENDING.discard)
+        )
+
+
+async def run_budget_alert_poller(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    platform: str,
+    alerter: BudgetAlerter,
+    settings: Settings,
+    should_stop: Callable[[], bool],
+    interval_s: float = ALERT_POLL_INTERVAL_S,
+) -> None:
+    """Poll until `should_stop`, one `poll_budget_alerts_once` per interval."""
+    while not should_stop():
+        try:
+            await poll_budget_alerts_once(
+                sessionmaker,
+                platform=platform,
+                alerter=alerter,
+                settings=settings,
+                now=datetime.now(UTC),
+            )
+        except Exception:  # poller boundary: a failed poll is logged, the next one runs
+            log.exception("channel_budget.alert_poll_failed", platform=platform)
+        await asyncio.sleep(interval_s)
