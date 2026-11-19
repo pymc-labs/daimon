@@ -264,7 +264,7 @@ async def test_a_personal_chat_message_queued_behind_other_work_waits_for_the_pi
     """A message that queued while saved work held the chat opens a burst once the chat
     frees, so the pick answers it with what was sent meanwhile, as a first message does."""
     teams = _app(db_session_factory, FakeSender())
-    monkeypatch.setattr(app_module, "debounce_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(app_module, "debounce_seconds", AsyncMock(return_value=0.05))
     busy, free = asyncio.Event(), asyncio.Event()
     ran: list[str] = []
 
