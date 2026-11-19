@@ -135,9 +135,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name and picture stay, and its reader variant is `default-reader`. On upgrade,
   `daimon defaults apply` renames each workspace's seeded agent and its managed
   self-hosted record in place, keyless or not, so sessions, threads, routines,
-  defaults, tool and access rules keep working; audit history keeps the old name
-  and `daimon` stays taken by the renamed agent. A workspace with its own
-  `default` keeps it, and requests for `default` reach that agent: apply reports
+  defaults, tool and access rules keep working; audit history and settled
+  queued wakes keep the old name and `daimon` stays taken by the renamed agent.
+  A workspace with its own `default` keeps it, and requests for `default` reach that agent: apply reports
   the rename as deferred, exits zero and tries again next time. Another
   workspace's rename error is reported without failing apply. A workspace's own
   unmanaged `daimon` record is not renamed. Copies such as `daimon-copy` keep
@@ -309,6 +309,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
   with no model, written by a new pod, makes old pods fail turns in that conversation
   until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+  To roll back to an earlier image, downgrade `thread_model_effort` first: it drops
+  those picks, and an old pod fails every turn in a conversation that keeps one.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.

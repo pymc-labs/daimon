@@ -347,6 +347,8 @@ async def _purge_principal_in_session(
     microsoft_user_tokens_count = 0
     lead_intakes_count = 0
     host_call_cards_count = 0
+    dm_rules_count = 0
+    dm_grant_users_count = 0
     # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
     is_platform = isinstance(principal, PlatformPrincipalRow)
     await routines_store.erase_sandbox_setter(
@@ -464,6 +466,13 @@ async def _purge_principal_in_session(
             platform=principal.platform,
             platform_user_id=principal.external_id,
         )
+        # The person's own routing rules and listed-grant entries, as the account purge does.
+        dm_keys = [(principal.tenant_id, principal.external_id)]
+        dm_now = datetime.now(UTC)
+        dm_rules_count = await dm_access_store.delete_user_rules(session, keys=dm_keys, now=dm_now)
+        dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
+            session, keys=dm_keys, now=dm_now
+        )
     else:
         routines_count = 0
         kind = "cli"
@@ -571,6 +580,8 @@ async def _purge_principal_in_session(
         teams_messages=teams_messages_count,
         microsoft_user_tokens=microsoft_user_tokens_count,
         host_call_cards=host_call_cards_count,
+        dm_rules=dm_rules_count,
+        dm_grant_users=dm_grant_users_count,
     )
 
 
@@ -788,6 +799,8 @@ async def _purge_account_transaction(
     dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
         session, keys=platform_user_keys, now=dm_now
     )
+    # An admin's account id stays in the rows they set; the settings are the workspace's.
+    await dm_access_store.clear_setter(session, setter=str(account_id))
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)

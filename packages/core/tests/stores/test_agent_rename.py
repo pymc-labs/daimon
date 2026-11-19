@@ -16,7 +16,12 @@ from daimon.core.stores.agent_rename import (
     rename_selfhosted_agent,
 )
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
-from daimon.testing.factories import make_account, make_routine, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_routine,
+    make_task_continuation,
+    make_tenant,
+)
 from sqlalchemy import String, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,6 +45,63 @@ async def test_rename_references_when_names_differ_in_case_then_renames_only_tha
     assert names[mine.id] == "default", "a live reference matches case-insensitively"
     assert names[copy.id] == "daimon-copy", "a copy with a longer name keeps it"
     assert names[theirs.id] == "daimon", "another tenant's references are untouched"
+
+
+@pytest.mark.fresh_schema
+async def test_rename_references_when_historical_continuation_breaks_check_then_keeps_it_and_renames(
+    db_session: AsyncSession,
+) -> None:
+    """Settled wakes and wakes with a retired reason keep their name; live wakes move."""
+    tenant = await make_tenant(db_session, workspace_id="guild-1")
+    account = await make_account(db_session, tenant=tenant)
+
+    async def continuation() -> uuid.UUID:
+        row = await make_task_continuation(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="c",
+            thread_id=f"t-{uuid.uuid4()}",
+            requester_account_id=account.id,
+            requester_external_user_id="u",
+            target_ma_agent_id="agent_1",
+            target_name="daimon",
+            reason="timer",
+            idempotency_key=uuid.uuid4(),
+        )
+        return row.id
+
+    history, retired, live = await continuation(), await continuation(), await continuation()
+    # Migrations 0169 and 0194 leave the check NOT VALID, so a retired reason can survive.
+    await db_session.execute(
+        text("ALTER TABLE task_continuations DROP CONSTRAINT ck_task_continuations_reason")
+    )
+    await db_session.execute(
+        text("UPDATE task_continuations SET reason = 'worker_finished' WHERE id IN (:a, :b)"),
+        {"a": history, "b": retired},
+    )
+    await db_session.execute(
+        text("UPDATE task_continuations SET status = 'cancelled' WHERE id = :id"), {"id": history}
+    )
+    await db_session.execute(
+        text(
+            "ALTER TABLE task_continuations ADD CONSTRAINT ck_task_continuations_reason "
+            "CHECK (reason IN ('task_handoff', 'private_input_applied', 'timer', "
+            "'github_access_ready', 'watch_fired', 'job_finished', 'watch_report', "
+            "'confirmed_call')) NOT VALID"
+        )
+    )
+
+    await rename_agent_references(db_session, tenant_id=tenant.id, old="daimon", new="default")
+
+    names = dict(
+        (await db_session.execute(text("SELECT id, target_name FROM task_continuations")))
+        .tuples()
+        .all()
+    )
+    assert names[history] == "daimon", "a cancelled continuation is history and keeps its name"
+    assert names[retired] == "daimon", "a pending wake with a retired reason never runs"
+    assert names[live] == "default", "a pending continuation follows the renamed agent"
 
 
 async def test_rename_references_when_new_avatar_exists_then_keeps_both_rows(

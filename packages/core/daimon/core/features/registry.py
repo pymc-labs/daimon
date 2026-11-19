@@ -624,7 +624,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
+            "Holds a direct message for more, so a burst gets one reply; at most five seconds, "
             "and never an approval reply."
         ),
         platforms=_DM_PLATFORMS | {"teams"},

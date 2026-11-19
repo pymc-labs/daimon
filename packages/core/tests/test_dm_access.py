@@ -29,6 +29,7 @@ from daimon.core.dm_access import (
     permits_dm,
     resolve_groups,
     roles_by_membership,
+    sender_admission,
     sender_admits,
 )
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
@@ -38,7 +39,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.privacy import collect_purge_preview, held_lines
-from daimon.core.purge import purge_account
+from daimon.core.purge import purge_account, purge_principal
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, set_dm_agent_name, set_dm_enabled
@@ -514,6 +515,25 @@ async def test_sender_admits_by_the_sending_agents_grant(
     assert admitted is expected, f"{who} {user_ids} {group_ids} {groups}"
 
 
+async def test_sender_admission_when_the_group_lookup_fails_is_unknown_not_refused(
+    db_session_factory,
+):
+    """A failed lookup is None for callers that can retry; `sender_admits` still refuses."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=[], group_ids=["g1"], set_by=None, now=NOW,
+        )  # fmt: skip
+
+    async def failing(_user: str, _wanted: frozenset[str]) -> frozenset[str]:
+        raise GroupLookupFailed("boom")
+
+    ask = dict(tenant_id=tenant.id, agent_name="ada", user_id="999", groups=failing)
+    assert await sender_admission(db_session_factory, **ask) is None, "unknown"
+    assert await sender_admits(db_session_factory, **ask) is False, "other callers fail closed"
+
+
 async def test_sender_admits_ignores_a_lock_for_another_agent(db_session_factory):
     """A lock decides who answers; it does not stop an agent from messaging the person."""
     tenant, _, _ = await seed(db_session_factory, "ada", "bob")
@@ -718,3 +738,68 @@ async def test_purge_account_when_person_has_dm_rows_then_they_are_erased_and_co
         )
     assert [r.subject_id for r in rules] == ["88"], "only the other person's rule stays"
     assert (grant.user_ids, grant.group_ids) == (("88",), ("g1",)), "only the entry is removed"
+
+
+async def test_purge_principal_when_platform_user_has_dm_rows_then_rules_and_entries_go(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Purging one platform user removes their rule and grant entry; others' stay."""
+    tenant = await make_tenant(db_session, workspace_id="G_DM_PURGE_PRINCIPAL")
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="77", tenant=tenant
+    )
+    for who in ("77", "88"):
+        await store.add_rule(
+            db_session, tenant_id=tenant.id, subject="user", subject_id=who,
+            agent_name="a", locked=False, set_by=None, now=NOW,
+        )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="a", who="listed",
+        user_ids=["77", "88"], group_ids=[], set_by=None, now=NOW,
+    )  # fmt: skip
+    await db_session.commit()
+
+    report = await purge_principal(
+        sm=db_session_factory, principal_id=principal.id, kind="platform"
+    )
+
+    assert (report.db.dm_rules, report.db.dm_grant_users) == (1, 1), "the purge reports each"
+    async with db_session_factory() as fresh:
+        rules = await store.list_rules(fresh, tenant_id=tenant.id)
+        grant = (await store.list_grants(fresh, tenant_id=tenant.id))["a"]
+    assert [r.subject_id for r in rules] == ["88"], "only the other person's rule stays"
+    assert grant.user_ids == ("88",), "only the purged id leaves the grant"
+
+
+async def test_purge_account_when_admin_set_dm_rows_then_set_by_is_cleared(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The admin's account id leaves `set_by` on grants and rules; the settings stay."""
+    tenant = await make_tenant(db_session, workspace_id="G_DM_PURGE_SETBY")
+    admin = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await store.add_rule(
+        db_session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+        agent_name="a", locked=False, set_by=str(admin.id), now=NOW,
+    )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="a", who="excluded",
+        user_ids=["5"], group_ids=[], set_by=str(admin.id), now=NOW,
+    )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="b", who="excluded",
+        user_ids=["5"], group_ids=[], set_by=str(other.id), now=NOW,
+    )  # fmt: skip
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=admin.id)
+
+    async with db_session_factory() as fresh:
+        rules = await store.list_rules(fresh, tenant_id=tenant.id)
+        grants = await store.list_grants(fresh, tenant_id=tenant.id)
+    assert [r.set_by for r in rules] == [None], "the rule stays without its setter"
+    assert (grants["a"].set_by, grants["b"].set_by) == (None, str(other.id)), (
+        "only the purged admin leaves a grant"
+    )
