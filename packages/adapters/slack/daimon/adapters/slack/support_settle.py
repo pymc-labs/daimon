@@ -45,6 +45,7 @@ from daimon.core.support import (
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
     LIMIT_GONE,
+    OWN_REQUEST,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
@@ -196,6 +197,9 @@ async def _finish(
         return
     if outcome.status == "not_here":
         await _notice(client, post, SETTLE_ELSEWHERE, error=True, view_id=view_id)
+        return
+    if outcome.status == "own_request":
+        await _notice(client, post, OWN_REQUEST, error=True, view_id=view_id)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)

@@ -37,6 +37,7 @@ from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import (
     CHARGE_FIELD,
     LIMIT_GONE,
+    OWN_REQUEST,
     REQUEST_GONE,
     SETTLE_ELSEWHERE,
     SupportError,
@@ -185,6 +186,8 @@ class TeamsSupportSettle:
             return toast(LIMIT_GONE)
         if outcome.status == "not_here":
             return toast(SETTLE_ELSEWHERE)
+        if outcome.status == "own_request":
+            return toast(OWN_REQUEST)
         if outcome.status in ("invalid", "over_balance"):
             return toast(
                 settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
