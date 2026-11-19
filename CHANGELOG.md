@@ -107,8 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wait (the `Retry-After` header, or Gemini's retry delay), that key and model
   rest for that long, defaulting to 30 seconds and at most ten minutes. Turns on
   it are refused at once with a "try again shortly" message that names the
-  provider, so a rate limit no longer turns into a retry storm. Requires the new
-  `provider_key_cooldowns` and `provider_key_leases` tables.
+  provider, so a rate limit no longer turns into a retry storm. A timer, watch
+  report or follow-up that meets either refusal is offered again shortly
+  instead of being dropped. Requires the new `provider_key_cooldowns` and
+  `provider_key_leases` tables.
 - **GPT and Gemini calls share one connection per key, and long GPT histories
   load.** Each process now builds one provider client per key and reuses its
   connections, instead of opening and closing a client, with its own TLS
