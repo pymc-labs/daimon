@@ -50,6 +50,7 @@ typo is silent — check the spelling here.
 - [Report Host](#report-host)
 - [Sentry](#sentry)
 - [Billing Policy](#billing-policy)
+- [Provider Daily Ceiling Usd](#provider-daily-ceiling-usd)
 - [Support](#support)
 - [Turn](#turn)
 - [Thread Naming](#thread-naming)
@@ -1603,6 +1604,35 @@ Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at
 price, counted across every agent turn. OpenAI sessions carry no native spend limit on
 this project, so this is the guard. Checked as each turn starts, never mid-turn; a model
 with no current tariff is refused. It resets at midnight UTC. 0 allows no OpenAI turns.
+
+## Provider Daily Ceiling Usd
+
+Read from `daimon.core.config.ProviderDailyCeilingSettings`. Prefix
+`DAIMON_PROVIDER_DAILY_CEILING_USD__`.
+
+The most every tenant together may spend each UTC day on one model provider.
+
+Each tenant's own daily model cap bounds one tenant; tenants are free to create, so only
+this bounds the deployment's provider bill. The default, $200, lets ten tenants each use
+up a $20 model cap in a day and holds the worst case near $6,000 a month per provider.
+Checked with the daily model cap as each turn starts, from today's observed usage at
+list price, re-read at most once a minute per worker.
+
+### `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI`
+
+`Decimal` · optional · default `200`
+
+Most all tenants together may spend each UTC day on OpenAI, in provider USD at list
+price. Once reached, OpenAI turns are refused until midnight UTC. 0 allows no OpenAI
+turns.
+
+### `DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`
+
+`Decimal` · optional · default `200`
+
+Most all tenants together may spend each UTC day on Gemini, in provider USD at list
+price. Once reached, Gemini turns are refused until midnight UTC. 0 allows no Gemini
+turns.
 
 ## Support
 

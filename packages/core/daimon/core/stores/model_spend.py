@@ -8,10 +8,15 @@ from decimal import Decimal
 
 import structlog
 from daimon.core._models import UsageObservation
-from daimon.core.pricing import ProviderPrice, minimum_cost_of, provider_cost_of
+from daimon.core.pricing import (
+    ProviderPrice,
+    minimum_cost_of,
+    provider_cost_of,
+    provider_price_on,
+)
 from mux.state.usage_ledger import AppliedUsage
 from pydantic import ValidationError
-from sqlalchemy import DateTime, cast, select
+from sqlalchemy import ColumnElement, DateTime, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
@@ -45,12 +50,45 @@ async def model_spend_today(
     if rates is None or not rates.current_on(now.date()):
         raise SpendUnpriced(model)
     observation = UsageObservation.applied["observation"]
+    rows = await _latest_today(
+        session,
+        now,
+        UsageObservation.tenant_id == tenant_id,
+        observation["session"]["provider"].astext == provider,
+        observation["model"]["id"].astext == model,
+    )
+    return sum((_cost(usage, rates) for usage in rows), Decimal(0))
+
+
+async def provider_spend_today(session: AsyncSession, *, provider: str, now: datetime) -> Decimal:
+    """Every tenant's observed usage today on `provider`'s models, at list price.
+
+    Priced as `model_spend_today` prices one model. A model with no tariff current
+    today is skipped and logged: no such model is run (`CappedFlashAccounting`, the
+    OpenAI daily cap), so only usage from before its tariff lapsed is left out.
+    """
+    observation = UsageObservation.applied["observation"]
+    rows = await _latest_today(session, now, observation["session"]["provider"].astext == provider)
+    spent = Decimal(0)
+    for usage in rows:
+        model = usage.observation.model.id if usage.observation.model is not None else None
+        rates = provider_price_on(model, now.date()) if model is not None else None
+        if rates is None:
+            log.warning("model_spend.unpriced_usage_skipped", provider=provider, model=model)
+            continue
+        spent += _cost(usage, rates)
+    return spent
+
+
+async def _latest_today(
+    session: AsyncSession, now: datetime, *where: ColumnElement[bool]
+) -> list[AppliedUsage]:
+    """The newest revision of each observation observed since `now`'s UTC midnight."""
+    observation = UsageObservation.applied["observation"]
     latest = (
         select(UsageObservation.applied)
         .where(
-            UsageObservation.tenant_id == tenant_id,
-            observation["session"]["provider"].astext == provider,
-            observation["model"]["id"].astext == model,
+            *where,
             cast(observation["observed_at"].astext, DateTime(timezone=True)) >= utc_midnight(now),
         )
         .distinct(UsageObservation.binding_id, UsageObservation.observation_id)
@@ -60,19 +98,23 @@ async def model_spend_today(
             UsageObservation.revision.desc(),
         )
     )
-    spent = Decimal(0)
+    rows: list[AppliedUsage] = []
     for applied in (await session.execute(latest)).scalars():
         try:
-            usage = AppliedUsage.model_validate(applied)
+            rows.append(AppliedUsage.model_validate(applied))
         except ValidationError:
             continue
-        effective = usage.observation.model_copy(update=dict(usage.tokens))
-        try:
-            cost = provider_cost_of(effective, rates, infrastructure_usd=Decimal(0))
-            if cost is None:
-                cost = minimum_cost_of(effective, rates)
-        except ValueError:
-            log.warning("model_spend.usage_row_skipped", tenant_id=str(tenant_id), model=model)
-            continue
-        spent += cost or Decimal(0)
-    return spent
+    return rows
+
+
+def _cost(usage: AppliedUsage, rates: ProviderPrice) -> Decimal:
+    """Upper bound of one observation, else its token floor while partial; 0 if malformed."""
+    effective = usage.observation.model_copy(update=dict(usage.tokens))
+    try:
+        cost = provider_cost_of(effective, rates, infrastructure_usd=Decimal(0))
+        if cost is None:
+            cost = minimum_cost_of(effective, rates)
+    except ValueError:
+        log.warning("model_spend.usage_row_skipped", model=rates.model)
+        return Decimal(0)
+    return cost or Decimal(0)

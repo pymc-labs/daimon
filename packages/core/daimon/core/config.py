@@ -1809,6 +1809,36 @@ class SelfhostedBillingSettings(BaseModel):
         return self
 
 
+class ProviderDailyCeilingSettings(BaseModel):
+    """The most every tenant together may spend each UTC day on one model provider.
+
+    Each tenant's own daily model cap bounds one tenant; tenants are free to create,
+    so only this bounds the deployment's provider bill. The default, $200, lets ten
+    tenants each use up a $20 model cap in a day and holds the worst case near $6,000
+    a month per provider. Checked with the daily model cap as each turn starts, from
+    today's observed usage at list price, re-read at most once a minute per worker.
+    """
+
+    openai: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on OpenAI, in provider "
+            "USD at list price. Once reached, OpenAI turns are refused until midnight "
+            "UTC. 0 allows no OpenAI turns."
+        ),
+    )
+    gemini: Decimal = Field(
+        default=Decimal("200"),
+        ge=0,
+        description=(
+            "Most all tenants together may spend each UTC day on Gemini, in provider "
+            "USD at list price. Once reached, Gemini turns are refused until midnight "
+            "UTC. 0 allows no Gemini turns."
+        ),
+    )
+
+
 class BillingSettings(BaseModel):
     """Money policy: markup multiplier and trial credit seed.
 
@@ -2903,6 +2933,9 @@ class Settings(BaseSettings):
     report_host: ReportHostSettings = Field(default_factory=ReportHostSettings)
     sentry: SentrySettings = Field(default_factory=SentrySettings)
     billing: BillingSettings = Field(default_factory=BillingSettings)
+    provider_daily_ceiling_usd: ProviderDailyCeilingSettings = Field(
+        default_factory=ProviderDailyCeilingSettings
+    )
     support: SupportSettings = Field(default_factory=SupportSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)

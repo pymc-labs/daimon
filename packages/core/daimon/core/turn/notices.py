@@ -246,6 +246,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "Today's {model} budget for this {scope} is used up.",
         "It resets at midnight UTC; use another model until then.",
     ),
+    "provider_daily_ceiling_reached": _Copy(
+        "Today's {provider} budget for this Daimon install is used up.",
+        "It resets at midnight UTC; use another provider until then.",
+    ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
 _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {

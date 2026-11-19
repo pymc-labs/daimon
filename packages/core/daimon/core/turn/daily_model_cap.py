@@ -1,13 +1,18 @@
-"""The daily spend cap per tenant per native model (OpenAI, Gemini).
+"""The daily spend cap per tenant per native model (OpenAI, Gemini), and the
+deployment's daily ceiling per provider across every tenant.
 
-Native OpenAI and Gemini usage reaches no ledger debit today, so the balance,
-user and channel gates can't see it. This cap is the guard: checked before any
-native call of an agent turn, from today's (UTC) observed usage
-at list price (`stores.model_spend`).
+The balance, allowance and channel gates count settled debits, which can trail a
+turn and miss usage still pending. These caps count today's (UTC) observed usage
+at list price (`stores.model_spend`), and are checked before any native call of an
+agent turn.
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -16,11 +21,10 @@ from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.errors import AdmissionDenied
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from mux.contracts.ids import ModelRef
     from mux.drivers.gemini import FlashAccounting, FlashAttempt
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -41,6 +45,10 @@ async def check_daily_model_cap(
     """
     from daimon.core.stores.model_spend import SpendUnpriced, model_spend_today
 
+    if request.deps.provider_ceiling is not None:
+        await request.deps.provider_ceiling.check(
+            request.deps.sessionmaker, provider=provider, now=request.now()
+        )
     chosen = request.admission.resolved("daily_model_cap")
     if chosen is not None and chosen.tier != "default":
         # A tier can only lower the operator's provider cap.
@@ -68,6 +76,43 @@ async def check_daily_model_cap(
             cap_usd=str(cap),
         )
         raise AdmissionDenied(reason="provider_daily_cap_reached", provider=model)
+
+
+@dataclass
+class ProviderCeiling:
+    """The deployment's daily spend ceiling per provider, summed across every tenant.
+
+    Today's spend is re-read at most every `ttl_s` per provider, so a turn start costs
+    one scan of the day's usage a minute, not one per turn; turns admitted within that
+    window may pass the ceiling by what they spend.
+    """
+
+    limits_usd: Mapping[str, Decimal]
+    ttl_s: float = 60.0
+    clock: Callable[[], float] = time.monotonic
+    _read: dict[str, tuple[float, Decimal]] = field(
+        default_factory=dict[str, tuple[float, Decimal]], init=False, repr=False
+    )
+
+    async def check(
+        self, sessionmaker: async_sessionmaker[AsyncSession], *, provider: str, now: datetime
+    ) -> None:
+        """Refuse once every tenant's spend today on `provider` reaches its ceiling."""
+        from daimon.core.stores.model_spend import provider_spend_today
+
+        limit = self.limits_usd.get(provider)
+        if limit is None:
+            return
+        read = self._read.get(provider)
+        if read is None or self.clock() >= read[0]:
+            async with sessionmaker() as session:
+                spent = await provider_spend_today(session, provider=provider, now=now)
+            read = self._read[provider] = (self.clock() + self.ttl_s, spent)
+        if read[1] >= limit:
+            log.warning(
+                "turn.provider_daily_ceiling_reached", provider=provider, ceiling_usd=str(limit)
+            )
+            raise AdmissionDenied(reason="provider_daily_ceiling_reached", provider=provider)
 
 
 class CappedFlashAccounting:

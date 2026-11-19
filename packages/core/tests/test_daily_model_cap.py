@@ -162,7 +162,12 @@ def _request(
         tenant_id=TENANT,
         worker=SimpleNamespace() if worker else None,
         now=lambda: NOW,
-        deps=SimpleNamespace(openai_daily_model_cap_usd=cap, sessionmaker=sm, markup=Decimal(1)),
+        deps=SimpleNamespace(
+            openai_daily_model_cap_usd=cap,
+            sessionmaker=sm,
+            markup=Decimal(1),
+            provider_ceiling=None,
+        ),
     )
 
 
@@ -227,6 +232,35 @@ def test_the_refusal_names_the_model_and_when_it_resets():
     )
     assert "Today's GPT-6 Astra budget for this server is used up." in text
     assert "midnight UTC" in text and "DAIMON_" not in text
+
+
+async def test_the_provider_ceiling_sums_every_tenant_and_refuses_at_its_limit(sessions):
+    """The deployment's ceiling counts today's usage of every tenant on one provider."""
+    from daimon.core.pricing import provider_price_on
+    from daimon.core.stores.model_spend import provider_spend_today
+    from daimon.core.turn.daily_model_cap import ProviderCeiling
+
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
+    await record(sessions, "other", usage(BINDINGS["other"][1], "gpt-6-astra"))
+    tariff = provider_price_on("gpt-6-astra", NOW.date())
+    assert tariff is not None, "Astra has a current tariff"
+    one = minimum_cost_of(usage(BINDINGS["astra"][1], "gpt-6-astra"), tariff)
+    assert one is not None and one > 0
+    async with sessions() as db:
+        total = await provider_spend_today(db, provider="openai", now=NOW)
+    assert total == 2 * one, "both tenants count"
+
+    await ProviderCeiling({"openai": total + 1}).check(sessions, provider="openai", now=NOW)
+    with pytest.raises(AdmissionDenied) as refused:
+        await ProviderCeiling({"openai": total}).check(sessions, provider="openai", now=NOW)
+    assert (refused.value.reason, refused.value.provider) == (
+        "provider_daily_ceiling_reached",
+        "openai",
+    ), refused.value
+    text = admission_refusal_text(
+        "provider_daily_ceiling_reached", RefusalNouns.for_platform("discord"), provider="openai"
+    )
+    assert "Today's OpenAI budget for this Daimon install is used up." in text, text
 
 
 async def test_an_expired_or_missing_tariff_refuses_instead_of_counting_nothing(sessions):

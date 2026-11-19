@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **A daily spend ceiling per provider for the whole install.** Each tenant's
+  daily model cap bounded one tenant, but tenants are free to create, so
+  nothing bounded what the install spent on OpenAI or Gemini in a day. GPT and
+  Gemini turns are now refused once every tenant together has spent the
+  provider's ceiling today, at list price: $200 each by default, set with
+  `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and `__GEMINI`. It
+  resets at midnight UTC.
+
 - **Usage settled late counts against the person and the right channel.** Usage
   that stayed pending and was settled later by the scheduler named no person
   and fell back to the thread's channel, so it never counted against the

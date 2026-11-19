@@ -78,6 +78,14 @@ budget, allowance.
    that governs them, if one does. [Long jobs](#long-jobs) add a separate
    per-job limit.
 
+GPT and Gemini turns pass two more checks as they start, both counted from
+today's (UTC) usage at list price and reset at midnight UTC: each tenant's
+daily cap per model (`DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD` and
+`DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, $20 each), and the install's
+daily ceiling per provider across every tenant
+(`DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and
+`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each).
+
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
 routine runs and wakes pass the same gates. Unprompted thread participation skips silently when one refuses.

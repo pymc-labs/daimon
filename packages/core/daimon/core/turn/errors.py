@@ -39,6 +39,9 @@ AdmissionDenialReason = Literal[
     # A tenant's daily spend cap on one OpenAI model is used up; it resets at
     # midnight UTC. `AdmissionDenied.provider` carries the model id for the copy.
     "provider_daily_cap_reached",
+    # Every tenant together used up the deployment's daily spend ceiling on one
+    # provider; it resets at midnight UTC. `provider` carries the provider id.
+    "provider_daily_ceiling_reached",
     # No tariff is current for the model, so its spend can't be counted against the
     # daily cap: refused rather than run uncounted. `provider` carries the model id.
     "provider_price_unavailable",

@@ -53,6 +53,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.daily_model_cap import ProviderCeiling
 from daimon.core.turn.mcp_context import TurnContextFetch, build_turn_context_fetch
 from daimon.core.turn.running import RunningTurns
 from daimon.core.turn.runtimes import RuntimeFactory, build_channel_runtime
@@ -134,6 +135,9 @@ class TurnDeps:
     openai_daily_model_cap_usd: Decimal | None = None
     # `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, the same cap for Gemini models.
     gemini_daily_model_cap_usd: Decimal | None = None
+    # `DAIMON_PROVIDER_DAILY_CEILING_USD__*`: each provider's daily spend across every
+    # tenant. None (a bundle built by hand) checks nothing.
+    provider_ceiling: ProviderCeiling | None = None
     # `DAIMON_MCP_CONTEXT__ENABLED`: asks the agent's MCP servers about each chat
     # message (`daimon.core.turn.mcp_context`). None asks nothing.
     turn_context: TurnContextFetch | None = None
@@ -245,6 +249,7 @@ def build_turn_deps(
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
+        provider_ceiling=ProviderCeiling(settings.provider_daily_ceiling_usd.model_dump()),
         turn_context=(
             build_turn_context_fetch(
                 context,
