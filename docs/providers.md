@@ -36,9 +36,8 @@ A provider that cannot meet a channel's requirements refuses the reply.
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
 - **OpenAI and Gemini:** routines (one whose agent or channel is on them stops
-  with a message saying so), and a channel or thread that switches a built-in
-  tool off (the reply is refused, since only the agent's own tool settings
-  apply). An agent with an `ask` rule or a channel-scoped `deny` on a Daimon
+  with a message saying so). A channel or thread that switches a built-in
+  tool off is refused, since only the agent's own tool settings apply. An agent with an `ask` rule or a channel-scoped `deny` on a Daimon
   tool is refused, and so is workspace export and import. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
   is off there, and so is a web search that must ask first.

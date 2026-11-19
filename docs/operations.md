@@ -241,14 +241,13 @@ These events carry identifiers, counts and durations, never message text:
 `turn.user_failure` covers upstream errors, lost connections, the turn
 ceiling, failed recovery and queue-full shedding. Its `backend` names the
 backend and profile, such as `gemini/gemini.inline_reuse`, or `unknown`
-when it fails before one is known; it is set as soon as admission reads the
-channel's or agent's choice. `provider` is its first part (`gemini`), the
-label for a per-provider count or alert. Lines logged while a
-chat or routine turn's reply is driven and finalized also carry `backend`,
-`profile` and `model`. It is not logged for
-completed turns, stops the user asked for, model refusals, admission refusals
-such as an empty balance, or missing setup. An uncaught exception is logged
-as `process.uncaught_exception` at critical.
+when it fails before one is known. `provider` is its first part (`gemini`),
+the label for a per-provider count or alert. Lines logged while a chat or
+routine turn's reply runs also carry `backend`, `profile` and `model`. It is
+not logged for completed turns, stops the user asked for, model refusals,
+admission refusals such as an empty balance, or missing setup.
+
+An uncaught exception is logged as `process.uncaught_exception` at critical.
 
 `release` is the commit the image was built from, set by the `DAIMON_RELEASE`
 build argument. An image built without it reports the package version.

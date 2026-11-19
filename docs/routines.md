@@ -130,9 +130,9 @@ run survives the run's completion.
 
 A run resolves the tenant, finds or creates the creator's account, checks the
 invoker allowlist and the balance, and resolves the agent. It then creates a
-session the way chat does and drives it with the same turn driver, so
-reconnects and read timeouts behave the same. It is not a chat turn. There is
-no thread binding, continuity, handoff or dead-session recovery.
+session the way chat does and drives it with the same turn driver. It is not a
+chat turn: there is no thread binding, continuity, handoff or dead-session
+recovery.
 
 Nobody can click a confirmation, so tool calls follow the
 [unattended rules](unattended.md#how-tool-calls-are-decided). Built-in sandbox
@@ -195,8 +195,9 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim is not posted again, as the poster may have posted already. A raising poster is not retried. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
-the agent. On Discord a reply to any delivered message starts a turn.
+An expired claim is not posted again, and neither is a post that raised. An
+empty result is skipped. With [agent identity](agent-identity.md) on, Slack and
+Discord post as the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files
 
@@ -222,8 +223,7 @@ files. Failure notices never carry files.
 | Read timeout per call | 120 s |
 
 The 45-minute ceiling covers session assembly and the run. The dispatch
-timeout is an outer guard for a run that hangs outside it, and cannot be set
-below the ceiling. Settings are in [configuration.md](configuration.md#scheduler).
+timeout cannot be set below it. Settings are in [configuration.md](configuration.md#scheduler).
 
 ## Who may do what
 
@@ -282,6 +282,3 @@ only the creator's stored admin role exempts them from the allowlist.
 
 An agent limited to [invoker roles](admins.md#limit-an-agent-to-roles) cannot
 run routines at all.
-
-A Discord thread destination saved before channel budgets existed has no
-channel until its destination is set again.

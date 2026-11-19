@@ -19,11 +19,10 @@ daimon tenants funding-mode slack <team-id> prepaid
 daimon tenants list --json
 ```
 
-Usage, debits, markup and allowances still apply, so the balance can go negative as a
-spend signal. Each admission at a depleted balance logs the warning
-`billing.operator_funded_balance_alert` with `tenant_id` and `balance_usd`.
-Route it to your log alerting. Switching
-back to `prepaid` restores the gate at once and adds no credit.
+Usage and debits still apply, so the balance can go negative. Each admission
+at a depleted balance logs `billing.operator_funded_balance_alert` with
+`tenant_id` and `balance_usd`; route it to your alerting. Switching back to
+`prepaid` restores the gate and adds no credit.
 
 ## What is metered
 
@@ -62,8 +61,8 @@ the ledger and to a finished turn's summary line. Usage panels and
 > **Warning:** An Anthropic model with no pricing row runs free: the debit is
 > zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
 > self-hosted turns on an unpriced model are refused instead. Token rates
-> exclude container and storage charges: an OpenAI workspace's hosted
-> container fee is not passed on to the tenant.
+> exclude container and storage charges, such as an OpenAI workspace's
+> hosted container fee.
 
 ## The gates
 
@@ -78,14 +77,14 @@ budget, allowance.
    that governs them, if one does. [Long jobs](#long-jobs) add a separate
    per-job limit.
 
-GPT and Gemini turns pass two more checks as they start, both counted from
-today's (UTC) usage at list price and reset at midnight UTC: each tenant's
-daily cap per model (`DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD` and
-`DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, $20 each), and the install's
-daily ceiling per provider across every tenant
-(`DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and
-`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each). While a reply runs,
-its row's `spend_limit_usd_cents` stops it once passed: 50 cents on built-in rows.
+GPT and Gemini turns pass two more checks as they start, counted from today's
+(UTC) usage at list price. Each tenant has a daily cap per model
+(`DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`,
+`DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, $20 each). The install has a daily
+ceiling per provider across tenants (`DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI`,
+`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each). Both reset at midnight
+UTC. A row's `spend_limit_usd_cents` stops a running reply once passed: 50
+cents on built-in rows.
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,
@@ -98,20 +97,18 @@ was debited and the money left, for example `Ada  12s  $0.042 used  $41.20
 left`. The money left is the channel budget's remainder, else the prepaid
 balance.
 
-An admin can hide that line for the whole server under Cost footer in
-`/settings` (`settings` on Teams), the web app's Settings section, or by asking
-Daimon. Failure notices still show, and billing is unchanged.
+An admin can hide that line under Cost footer in `/settings` (`settings` on
+Teams), the web app's Settings section, or by asking Daimon. Failure notices still show, and billing is unchanged.
 
 ### Overdraft bound
 
-The gates run once, before the turn, and debits land per model call. Nothing
-re-checks mid-turn, so one long turn can take a balance negative. Concurrent
-turns compound this: every turn admitted while the balance was positive runs
-to completion, so a chat tenant can overdraw by up to its concurrent-turn cap
-times one turn's cost. The cap is the adapter's
+The gates run once, before the turn, and debits land per model call, so one
+long turn can take a balance negative. Every turn admitted while the balance
+was positive runs to completion, so a chat tenant can overdraw by up to its
+concurrent-turn cap times one turn's cost. The cap is the adapter's
 `max_concurrent_turns_per_tenant` (default 3), or the tenant's override from
-`daimon tenants turn-cap`. A turn over the cap waits in the queue and runs the
-balance gate again once it holds a slot.
+`daimon tenants turn-cap`. A turn over the cap queues and runs the balance gate
+again once it holds a slot.
 
 MCP `start_turn` sessions are worse. Their spend reaches the ledger only when
 a read or the sweep settles it, and they have no concurrency cap.
@@ -171,8 +168,7 @@ Set it to `0` to require payment before first use
 
 Admins buy credit with Stripe Checkout, as one-time payments. `/billing`
 offers fixed amounts, each labelled with an estimated number of turns. Admin
-status is checked at click time. The checkout takes the tenant from a verified
-token and the amount from Stripe, and a repeated completion event cannot add a
+status is checked at click time. A repeated completion event cannot add a
 second top-up. Refunds and disputes debit the ledger, never more than the
 original credit.
 
@@ -231,8 +227,6 @@ Five refused redemptions in 15 minutes pause that person's attempts only. Every
 attempt is audited. Revoking stops new redemptions only, and credit already
 redeemed stays.
 
-Issuing, listing and revoking codes uses the local `daimon promo` CLI only.
-
 Budgets, caps, promo redemption and checkout need a platform admin acting
 directly, never a chat turn, routine, agent key or operator token. See
 [admins](admins.md#changes-that-need-a-person).
@@ -248,9 +242,8 @@ calendar month.
   person** picker.
 - **Expiry dates** list timed credit with its end date, soonest first.
 
-Panel figures are before markup and leave out exempt usage. For one finished turn,
-`get_turn_cost` returns a raw, pre-markup figure, and `None` rather than zero
-for an unpriced model.
+Panel figures leave out exempt usage. `get_turn_cost` returns `None` rather
+than zero for an unpriced model.
 
 To list measured turns, without prompts or answers:
 
@@ -328,7 +321,5 @@ daimon usage pending <tenant-uuid> --limit 1000 --json
 
 Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 `admission_missing`, `model_mismatch` or `tariff_context_invalid`. Pass
-`--cursor <next-cursor>` for the next page. The command is read-only. The
-runtime repairs gaps by replaying the harness's measured usage, and a tariff
-added after a request cannot repair it. The scheduler re-reads a GPT turn's
-unknown usage for a day after the turn. Never treat pending turns as free.
+`--cursor <next-cursor>` for the next page. The command is read-only. The scheduler re-reads a GPT turn's
+unknown usage for a day after the turn.
