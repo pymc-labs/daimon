@@ -262,9 +262,12 @@ async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) 
         assert repeated == first
         put = partial(mux_state.put_config_revision, session, first, origin="agent")
         assert await put(agent_revision=held) == first
+        retained = await mux_state.get_config_agent_revision(
+            session, first, agent_id=agent.agent_id
+        )
+        assert retained == held, "the agent's revision is retained with its association"
         assert (
-            await mux_state.put_agent_config_revision(session, first, agent_id=agent.agent_id)
-            == held
+            await mux_state.put_agent_config_revision(session, first, retained=retained) == first
         ), "a host re-puts the agent's revision with its association"
         with pytest.raises(ConfigRevisionConflict):
             await mux_state.put_config_revision(session, first)

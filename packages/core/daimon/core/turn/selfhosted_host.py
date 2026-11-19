@@ -406,13 +406,14 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     if origin == "agent":
         # A generic write drops the agent's or the conversation's association and conflicts.
         async with request.deps.sessionmaker.begin() as session:
-            await mux_state.put_agent_config_revision(
+            retained = await mux_state.get_config_agent_revision(
                 session,
                 revision,
                 agent_id=derive_agent_uuid(
                     tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
                 ),
             )
+            await mux_state.put_agent_config_revision(session, revision, retained=retained)
     else:
         await store.put_config_revision(revision)
     slot = Slot(
