@@ -151,3 +151,42 @@ async def test_an_unreadable_policy_refuses(db_session: AsyncSession) -> None:
     agent = ma_agent(id="ag_acme", name="acme-project", tenant_id=tenant_id)
     row = _row(tenant_id=tenant_id, account_id=account_id, channel=_ACME, target_name=None)
     assert await request_pin_refusal(db_session, row=row, agent=agent) == POLICY_UNREADABLE_REFUSAL
+
+
+async def test_an_admin_form_for_a_private_channels_agent_needs_a_verified_place(
+    db_session: AsyncSession,
+) -> None:
+    """Admin forms change a sealed agent only from its own channel, and only when the adapter
+    checked the click came from where the form was posted (`location_verified`)."""
+    from daimon.core.access_policy import AgentRule, ChannelRule
+    from daimon.core.permissions import SEALED_REFUSAL
+
+    tenant_id, account_id = await _setup(db_session, pins=None, role=Role.ADMIN)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_id,
+        policy=TenantAccessPolicy(
+            channel_rules={_ACME: ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme-config": AgentRule(runs_in=(_ACME,))},
+        ),
+    )
+    agent = ma_agent(
+        id="ag_acme",
+        name="acme-config",
+        tenant_id=tenant_id,
+        metadata={"daimon_name": "acme-config"},
+    )
+    here = _row(tenant_id=tenant_id, account_id=account_id, channel=_ACME, target_name=None)
+    elsewhere = _row(
+        tenant_id=tenant_id, account_id=account_id, channel=_CLIENT_B, target_name=None
+    )
+
+    assert (
+        await request_pin_refusal(db_session, row=here, agent=agent, location_verified=True) is None
+    )
+    unchecked = await request_pin_refusal(db_session, row=here, agent=agent)
+    assert unchecked is not None, "no checked place: outside"
+    verified_elsewhere = await request_pin_refusal(
+        db_session, row=elsewhere, agent=agent, location_verified=True
+    )
+    assert unchecked == verified_elsewhere == SEALED_REFUSAL

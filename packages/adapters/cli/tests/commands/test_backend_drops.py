@@ -1,8 +1,10 @@
-"""The operator confirms the real source preview, never a guessed loss list."""
+"""The operator switches on the real source preview: what is off is shown, never asked for."""
 
 from __future__ import annotations
 
+import inspect
 import json
+import typing
 from dataclasses import replace
 from io import StringIO
 
@@ -89,7 +91,7 @@ async def operator(db_preflight, db_nullpool_engine, db_clean, request):
             ),
         )
         service = make_backend_service(sessions, settings.turn, capture_source=NO_CAPTURE)
-        actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True))
+        actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True, operator=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
             tenant.id, ("anthropic", "openai", "gemini"), policy.revision, actor
@@ -122,29 +124,77 @@ async def revisions(operator):
     ).current(source)
 
 
-@pytest.mark.parametrize(
-    "accepted",
-    [
-        None,
-        "",
-        "memory",
-        "sandbox",
-        "memory,sandbox,files",
-        "memory,memory,sandbox",
-        "credentials",
-        "*",
-        "Memory,sandbox",
-    ],
-)
-async def test_yes_never_substitutes_for_exact_drop_acceptance(operator, accepted):
-    with pytest.raises(typer.BadParameter, match="memory,sandbox"):
-        await run(operator, accept_drops=accepted)
-    assert await revisions(operator) is None
-    assert all(r.method == "GET" for r in operator[-1])
+async def audited(operator) -> str:
+    """The last switch's audit line, which names what is off on the new provider."""
+    rt, tenant, *_ = operator
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_backend")
+    return rows[-1].reason
+
+
+async def test_a_lossy_switch_applies_with_yes_alone(operator):
+    """--yes is the only confirmation: what the provider can't carry is shown, then off."""
+    text = await run(operator)
+    assert "Won't be available on openai: memory, sandbox" in text, text
+    revision = await revisions(operator)
+    assert revision.backend == "openai", "the switch was written"
+    assert await audited(operator) == "completed; declared_drops=memory,sandbox", (
+        "the losses are audited"
+    )
+    assert all(r.method == "GET" for r in operator[-1]), "the agent itself is never edited"
+
+
+def test_older_scripts_passing_accept_drops_still_parse() -> None:
+    """--accept-drops is hidden and ignored on every command that took it."""
+    from daimon.adapters.cli.commands import agents
+
+    for command in (
+        agents.agents_create_command,
+        agents.agents_update_command,
+        agents.agents_backend_set_command,
+        agents.agents_backend_settings_command,
+    ):
+        default = inspect.signature(command).parameters["_accept_drops"].default
+        hint = typing.get_type_hints(command, include_extras=True)["_accept_drops"]
+        assert default is None, f"{command.__name__} needs no value"
+        assert agents.IGNORED_ACCEPT_DROPS in hint.__metadata__, command.__name__
+    assert agents.IGNORED_ACCEPT_DROPS.hidden, "the flag is out of the help"
+    assert "accept_drops" not in inspect.signature(agents.agents_backend_change).parameters
+
+
+def test_an_older_script_passing_accept_drops_runs_the_switch_unchanged(monkeypatch) -> None:
+    """The command runs with --accept-drops and the value reaches nothing."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from daimon.adapters.cli.commands import agents
+    from daimon.adapters.cli.main import app
+    from typer.testing import CliRunner
+
+    seen: list[dict[str, object]] = []
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield SimpleNamespace()
+
+    async def change(**kwargs):
+        seen.append(kwargs)
+
+    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(agents.channel_backend, "backend_selection_enabled", lambda _turn: True)
+    monkeypatch.setattr(agents, "build_runtime", runtime)
+    monkeypatch.setattr(agents, "agents_backend_change", change)
+    result = CliRunner().invoke(
+        app, ["agents", "backend", "set", "Research", "openai", "--yes", "--accept-drops", "x"]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1, "the switch ran once"
+    assert "x" not in seen[0].values(), "the flag's value reaches nothing"
+    assert not any("drop" in key for key in seen[0]), "the change takes no drops argument"
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
-async def test_actual_source_gets_and_exact_consent_reach_cas_readback(operator, backend):
+async def test_actual_source_gets_and_its_losses_reach_the_readback(operator, backend):
     rt, tenant, agent, _, requests = operator
     output = StringIO()
     await agents_backend_change(
@@ -154,12 +204,11 @@ async def test_actual_source_gets_and_exact_consent_reach_cas_readback(operator,
         backend=backend,
         yes=True,
         as_json=True,
-        accept_drops=" sandbox , memory ",
     )
     result = json.loads(output.getvalue())
-    assert result["preview"]["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    assert result["preview"]["declared_drops"] == ["memory", "sandbox"]
     revision = await revisions(operator)
-    assert revision.backend == backend and revision.declared_drops == ("memory", "sandbox")
+    assert revision.backend == backend, "the switch was written"
     async with rt.sessionmaker() as db:
         rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_backend")
     assert rows[-1].reason == "completed; declared_drops=memory,sandbox"
@@ -189,17 +238,16 @@ async def test_public_cli_can_switch_a_named_nondefault_agent_without_rerouting(
         backend=backend,
         yes=not dry_run,
         as_json=True,
-        accept_drops="memory,sandbox",
         dry_run=dry_run,
     )
     result = json.loads(output.getvalue())
     preview = result if dry_run else result["preview"]
-    assert preview["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    assert preview["declared_drops"] == ["memory", "sandbox"]
     current = await revisions(changed)
     if dry_run:
         assert current is None
     else:
-        assert current.backend == backend and current.declared_drops == ("memory", "sandbox")
+        assert current.backend == backend, "the switch was written"
     async with rt.sessionmaker() as db:
         config = await resolve(
             db,
@@ -291,14 +339,13 @@ async def test_nonexplicit_chat_capture_keeps_the_stored_configuration_target_pa
     assert await revisions(operator) is None
 
 
-@pytest.mark.parametrize("accepted", [None, "memory,sandbox", "*", "credentials"])
-async def test_dry_run_returns_before_confirmation_and_writer_even_with_yes(operator, accepted):
-    text = await run(operator, accept_drops=accepted, dry_run=True)
+async def test_dry_run_returns_before_confirmation_and_writer_even_with_yes(operator):
+    text = await run(operator, dry_run=True)
     assert "Won't be available on openai: memory, sandbox" in text
     assert await revisions(operator) is None
 
 
-async def test_json_dry_run_needs_no_yes_or_drop_consent(operator):
+async def test_json_dry_run_needs_no_yes(operator):
     rt, *_ = operator
     output = StringIO()
     await agents_backend_change(
@@ -310,21 +357,24 @@ async def test_json_dry_run_needs_no_yes_or_drop_consent(operator):
         as_json=True,
         dry_run=True,
     )
-    assert json.loads(output.getvalue())["drop_consent"]["declared_drops"] == ["memory", "sandbox"]
+    assert json.loads(output.getvalue())["declared_drops"] == ["memory", "sandbox"]
     assert await revisions(operator) is None
 
 
-async def test_same_category_source_drift_refuses_before_any_revision(operator, monkeypatch):
+async def test_a_source_edited_while_confirming_still_switches(operator, monkeypatch):
+    """The write reads the source again: an edit made meanwhile switches with it."""
     from daimon.adapters.cli.commands import agents
-    from daimon.core.channel_backend import AgentBackendRefused
 
     def changed(*args, **kwargs):
         operator[2].system = "Changed instructions, with the same capability categories"
 
     monkeypatch.setattr(agents, "confirm_or_abort", changed)
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await run(operator, accept_drops="memory,sandbox")
-    assert await revisions(operator) is None
+    await run(operator)
+    revision = await revisions(operator)
+    assert revision.backend == "openai", "the switch applies over the edit"
+    assert await audited(operator) == "completed; declared_drops=memory,sandbox", (
+        "the same parts are off"
+    )
     assert all(r.method == "GET" for r in operator[-1])
 
 
@@ -336,7 +386,7 @@ async def test_cancelled_confirmation_does_not_change_the_setting(operator, monk
 
     monkeypatch.setattr(agents, "confirm_or_abort", cancelled)
     with pytest.raises(typer.Abort):
-        await run(operator, accept_drops="memory,sandbox")
+        await run(operator)
     assert await revisions(operator) is None
 
 
@@ -347,7 +397,7 @@ async def test_first_switch_revert_restores_default_or_only_previews_it(
     from daimon.adapters.cli.commands import agents
 
     rt, tenant, *_ = operator
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     before = await revisions(operator)
     assert before.local == 1 and before.previous_local is None
     async with rt.sessionmaker() as db:
@@ -383,41 +433,41 @@ async def test_first_switch_revert_restores_default_or_only_previews_it(
     else:
         assert result["backend"] is None and result["revision"] == before.local + 1
         assert restored.backend is None and restored.previous_local == before.local
-        assert restored.declared_drops == () and restored.drop_consent is None
         assert len(audit_after) == len(audit_before) + 1
     assert all(request.method == "GET" for request in operator[-1])
 
 
-async def test_first_switch_revert_keeps_fresh_source_digest_guard(operator, monkeypatch):
+async def test_first_switch_revert_applies_over_a_source_edit(operator, monkeypatch):
+    """A source edited while a revert is confirmed reverts all the same."""
     from daimon.adapters.cli.commands import agents
-    from daimon.core.channel_backend import AgentBackendRefused
 
     rt, _, native, *_ = operator
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     before = await revisions(operator)
 
     def changed(*args, **kwargs):
         native.system = "Source changed while confirming the first revert"
 
     monkeypatch.setattr(agents, "confirm_or_abort", changed)
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await agents_backend_change(
-            rt=rt,
-            console=Console(file=StringIO()),
-            name="Research",
-            backend=None,
-            yes=True,
-            as_json=False,
-            revert=True,
-        )
-    assert await revisions(operator) == before
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        revert=True,
+    )
+    restored = await revisions(operator)
+    assert restored.local == before.local + 1, "the revert was written"
+    assert restored.backend is None, "back on Claude"
 
 
 async def test_first_switch_revert_keeps_owner_revision_cas(operator, monkeypatch):
     from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService
 
     rt, *_ = operator
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     before = await revisions(operator)
     original = AgentBackendService.revert
 
@@ -426,7 +476,6 @@ async def test_first_switch_revert_keeps_owner_revision_cas(operator, monkeypatc
             agent,
             options["expected_revision"],
             actor,
-            expected_preview_digest=options["expected_preview_digest"],
         )
         return await original(self, agent, actor, **options)
 
@@ -449,7 +498,7 @@ async def test_revert_refuses_an_explicitly_referenced_missing_revision(operator
     from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService
 
     rt, *_ = operator
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     await agents_backend_change(
         rt=rt,
         console=Console(file=StringIO()),
@@ -457,7 +506,6 @@ async def test_revert_refuses_an_explicitly_referenced_missing_revision(operator
         backend="gemini",
         yes=True,
         as_json=False,
-        accept_drops="memory,sandbox",
     )
     before = await revisions(operator)
     assert before.previous_local is not None
@@ -482,7 +530,7 @@ async def test_revert_refuses_an_explicitly_referenced_missing_revision(operator
 
 async def test_revert_restores_the_real_previous_setting_through_the_owner(operator):
     rt, *_ = operator
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     await agents_backend_change(
         rt=rt,
         console=Console(file=StringIO()),
@@ -490,7 +538,6 @@ async def test_revert_restores_the_real_previous_setting_through_the_owner(opera
         backend="gemini",
         yes=True,
         as_json=False,
-        accept_drops="memory,sandbox",
     )
     before = await revisions(operator)
     await agents_backend_change(
@@ -505,10 +552,12 @@ async def test_revert_restores_the_real_previous_setting_through_the_owner(opera
     restored = await revisions(operator)
     assert restored.backend == "openai" and restored.local == before.local + 1
     assert restored.previous_local == before.local
-    assert restored.declared_drops == ("memory", "sandbox")
+    assert await audited(operator) == "completed; declared_drops=memory,sandbox", (
+        "OpenAI's losses again"
+    )
 
 
-async def test_revert_drift_and_missing_history_are_owner_refusals(operator):
+async def test_missing_history_refuses_and_a_drifted_source_still_reverts(operator):
     from daimon.core.channel_backend import AgentBackendRefused
 
     rt, _, native, *_ = operator
@@ -522,7 +571,7 @@ async def test_revert_drift_and_missing_history_are_owner_refusals(operator):
             as_json=False,
             revert=True,
         )
-    await run(operator, accept_drops="memory,sandbox")
+    await run(operator)
     await agents_backend_change(
         rt=rt,
         console=Console(file=StringIO()),
@@ -530,21 +579,20 @@ async def test_revert_drift_and_missing_history_are_owner_refusals(operator):
         backend="gemini",
         yes=True,
         as_json=False,
-        accept_drops="memory,sandbox",
     )
     before = await revisions(operator)
-    native.system = "The source changed since the retained consent"
-    with pytest.raises(AgentBackendRefused, match="re confirm"):
-        await agents_backend_change(
-            rt=rt,
-            console=Console(file=StringIO()),
-            name="Research",
-            backend=None,
-            yes=True,
-            as_json=False,
-            revert=True,
-        )
-    assert await revisions(operator) == before
+    native.system = "The source changed since the first switch"
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        revert=True,
+    )
+    restored = await revisions(operator)
+    assert (restored.backend, restored.local) == ("openai", before.local + 1), "reverted"
 
 
 async def capture(operator, **changes):
@@ -569,7 +617,7 @@ async def capture(operator, **changes):
     )
     args = dict(
         context=ScopeContext(tenant_id=tenant.id, account_id=principal.account_id, platform="cli"),
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         place=Place(),
         is_dm=False,
         slack_turn_context_id=None,
@@ -626,13 +674,12 @@ async def test_unknown_target_or_environment_refuses_without_default_provisionin
                 backend="openai",
                 yes=True,
                 as_json=False,
-                accept_drops="memory,sandbox",
             )
     else:
         settings = rt.deployment_default.model_copy(update={"environment_name": "Unknown"})
         changed = (replace(rt, deployment_default=settings), *operator[1:])
         with pytest.raises(AgentBackendRefused, match="source unavailable"):
-            await run(changed, accept_drops="memory,sandbox")
+            await run(changed)
     assert await revisions(operator) is None
     assert all(r.method == "GET" for r in operator[-1])
 
@@ -663,14 +710,13 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     rt = replace(rt, settings=rt.settings.model_copy(update={"turn": stopped}))
     operator[-1].clear()
     with pytest.raises(StoreError, match="disabled"):
-        await run((rt, *rest), accept_drops="memory,sandbox")
+        await run((rt, *rest))
     assert not operator[-1]
 
 
 async def test_real_encrypted_key_is_lost_only_when_declared_without_any_secret_read(
     operator, monkeypatch
 ):
-    import click
     from cryptography.fernet import Fernet
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_files
@@ -691,10 +737,9 @@ async def test_real_encrypted_key_is_lost_only_when_declared_without_any_secret_
         pytest.fail("A switch preview must not resolve a secret")
 
     monkeypatch.setattr(agent_files, "get_agent_file", forbidden_read)
-    # The saved key is a declared `credentials` loss: accepting less changes nothing.
-    with pytest.raises(click.BadParameter, match="credentials"):
-        await run(operator, accept_drops="memory,sandbox")
-    assert await revisions(operator) is None
+    # The saved key is a declared `credentials` loss: off on OpenAI, never read.
+    await run(operator)
+    assert "credentials" in await audited(operator), "the key is off"
 
 
 @pytest.mark.parametrize(
@@ -754,7 +799,7 @@ async def test_actual_sdk_unreadable_or_foreign_source_is_a_typed_refusal(operat
             else "source unavailable"
         )
         with pytest.raises(AgentBackendRefused, match=reason):
-            await run(changed, accept_drops="memory,sandbox")
+            await run(changed)
     assert await revisions(operator) is None
 
 
@@ -773,7 +818,7 @@ async def test_public_cli_refuses_a_captured_identity_mismatch(operator, monkeyp
 
     monkeypatch.setattr(runtime_manifest, "capture_preparation_source", mismatched)
     with pytest.raises(AgentBackendRefused, match="source unavailable"):
-        await run(operator, accept_drops="memory,sandbox")
+        await run(operator)
     assert await revisions(operator) is None
 
 
@@ -784,8 +829,10 @@ async def test_cli_guild_selection_uses_its_real_local_operator_principal(operat
     rt, tenant, *_ = operator
     # An explicit tenant selection exercises the same CLI-principal convention;
     # it must not create or promote a Discord platform principal.
-    await run(operator, accept_drops="memory,sandbox", selector=TenantSelector(guild_id="2001"))
-    assert (await revisions(operator)).declared_drops == ("memory", "sandbox")
+    await run(operator, selector=TenantSelector(guild_id="2001"))
+    assert await audited(operator) == "completed; declared_drops=memory,sandbox", (
+        "switched as the operator"
+    )
 
 
 async def test_default_denial_observation_keeps_the_real_external_user_id(operator):
@@ -862,19 +909,15 @@ def test_disabled_revert_command_refuses_before_runtime_construction(monkeypatch
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
-async def test_recorded_portable_model_controls_are_visible_and_require_exact_consent(
-    operator, backend
-):
+async def test_recorded_portable_model_controls_are_shown_and_switched_off(operator, backend):
     from anthropic.types.beta import BetaManagedAgentsModelConfig
 
     rt, _, agent, _, _ = operator
     agent.model = BetaManagedAgentsModelConfig.model_validate(
-        {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+        {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}}
     )
     text = await run(operator, dry_run=True)
-    assert "Won't be available on openai: memory, model_controls, sandbox" in text
-    with pytest.raises(typer.BadParameter, match="memory,model_controls,sandbox"):
-        await run(operator, accept_drops="memory,sandbox")
+    assert "Won't be available on openai: fast_mode, memory, sandbox" in text
     output = StringIO()
     await agents_backend_change(
         rt=rt,
@@ -883,19 +926,16 @@ async def test_recorded_portable_model_controls_are_visible_and_require_exact_co
         backend=backend,
         yes=True,
         as_json=True,
-        accept_drops="memory,model_controls,sandbox",
     )
     result = json.loads(output.getvalue())
-    assert result["preview"]["drop_consent"]["declared_drops"] == [
-        "memory",
-        "model_controls",
-        "sandbox",
-    ]
-    assert (await revisions(operator)).declared_drops == ("memory", "model_controls", "sandbox")
+    lost = ["fast_mode", "memory", "sandbox"]
+    if backend == "gemini":
+        lost = ["effort_setting", *lost]
+    assert result["preview"]["declared_drops"] == lost
+    assert await audited(operator) == f"completed; declared_drops={','.join(lost)}"
 
 
-@pytest.mark.parametrize("accepted", [None, "", " "])
-async def test_native_no_drop_switch_binds_empty_consent_without_loss_flags(operator, accepted):
+async def test_native_no_drop_switch_records_no_losses(operator):
     from anthropic.types.beta import BetaManagedAgentsModelConfig
 
     rt, _, agent, _, requests = operator
@@ -910,16 +950,15 @@ async def test_native_no_drop_switch_binds_empty_consent_without_loss_flags(oper
         backend="anthropic",
         yes=True,
         as_json=True,
-        accept_drops=accepted,
     )
-    assert json.loads(output.getvalue())["preview"]["drop_consent"]["declared_drops"] == []
+    assert "declared_drops" not in json.loads(output.getvalue())["preview"], "nothing is off"
     revision = await revisions(operator)
-    assert revision.backend == "anthropic" and revision.drop_consent is not None
-    assert revision.declared_drops == ()
+    assert revision.backend == "anthropic"
+    assert await audited(operator) == "completed", "no losses audited"
     assert all(request.method == "GET" for request in requests)
 
 
-async def test_revert_restores_the_previous_model_through_its_own_preview_digest(operator):
+async def test_revert_restores_the_previous_model(operator):
     rt, *_ = operator
 
     async def change(**options):
@@ -934,12 +973,12 @@ async def test_revert_restores_the_previous_model_through_its_own_preview_digest
         )
         return json.loads(output.getvalue())
 
-    argon = await change(backend="gemini", model="gemini-4-argon", accept_drops="memory,sandbox")
+    argon = await change(backend="gemini", model="gemini-4-argon")
     assert argon["model"] == "gemini-4-argon"
     assert argon["preview"]["target_model"] == "gemini-4-argon"
-    await change(backend="openai", accept_drops="memory,sandbox")
+    await change(backend="openai")
     reverted = await change(backend=None, revert=True)
-    # The revert's preview is the previous model's, so its digest matches the write.
+    # The revert's preview is the previous model's.
     assert reverted["preview"]["target_model"] == "gemini-4-argon"
     restored = await revisions(operator)
     assert (restored.backend, restored.model) == ("gemini", "gemini-4-argon")
@@ -995,19 +1034,9 @@ async def test_agent_settings_are_previewed_written_and_reverted(operator):
         as_json=False,
         settings=AgentSettings(),
     )
-    await run(operator, accept_drops="memory,sandbox")
-    # On OpenAI a settings change names the provider's drops again.
+    await run(operator)
+    # On OpenAI a settings change applies like a switch: nothing to accept.
     needs = AgentSettings(requires={"tool_loop": CapabilityRequirement(level="required")})
-    with pytest.raises(typer.BadParameter, match="memory,sandbox"):
-        await agents_backend_change(
-            rt=rt,
-            console=Console(file=StringIO()),
-            name="Research",
-            backend=None,
-            yes=True,
-            as_json=False,
-            settings=needs,
-        )
     await agents_backend_change(
         rt=rt,
         console=Console(file=StringIO()),
@@ -1016,7 +1045,6 @@ async def test_agent_settings_are_previewed_written_and_reverted(operator):
         yes=True,
         as_json=False,
         settings=needs,
-        accept_drops="memory,sandbox",
     )
     required = await revisions(operator)
     assert required.backend == "openai" and required.requires == needs.requires

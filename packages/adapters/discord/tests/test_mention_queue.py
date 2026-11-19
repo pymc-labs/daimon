@@ -1396,14 +1396,16 @@ async def test_a_backend_refusal_is_logged_as_one_not_as_over_cap(queued_bot):
     from structlog.testing import capture_logs
 
     message = _make_thread_message()
-    refused = AdmissionDenied(reason="backend_unsupported", cause="re_confirm", provider="gemini")
+    refused = AdmissionDenied(
+        reason="backend_unsupported", cause="provider_not_configured", provider="gemini"
+    )
     with capture_logs() as logs, patch("daimon.adapters.discord.bot.admit", side_effect=refused):
         await queued_bot._handle_mention(message, "123456", uuid.uuid4())
     events = [row for row in logs if row["event"].startswith("turn.skipped.")]
     assert [row["event"] for row in events] == ["turn.skipped.backend_unsupported"], (
         "one event that names the refusal"
     )
-    assert (events[0]["cause"], events[0]["provider"]) == ("re_confirm", "gemini"), (
+    assert (events[0]["cause"], events[0]["provider"]) == ("provider_not_configured", "gemini"), (
         "the cause says what to fix"
     )
 

@@ -63,6 +63,27 @@ def test_rule_decision(rule: str, attended: bool, scope: str, expected: str) -> 
     )
 
 
+@pytest.mark.parametrize("attended", [True, False])
+@pytest.mark.parametrize("proxied", [False, True])
+def test_a_stored_ask_on_a_retired_gate_runs(attended: bool, proxied: bool) -> None:
+    """A session started before a gate was lifted still stores its ask; the call runs."""
+    policy = ToolSafetyPolicy(enabled=True)
+    trusted = frozenset({"daimon-mcp"})
+    name = "request_agent_backend_switch"
+    call = ToolCall(
+        tool_use_id="one",
+        server_name="daimon-mcp",
+        tool_name="call_tool" if proxied else name,
+        input={"name": name, "arguments": {}} if proxied else {},
+        permission="ask",
+    )
+    verdict = decide_tool_call(policy, call, attended=attended, trusted_servers=trusted)
+    assert verdict.outcome == "allow", f"a retired gate's stored ask must not pause: {verdict}"
+    other = call.model_copy(update={"server_name": "remote", "tool_name": name, "input": {}})
+    kept = decide_tool_call(policy, other, attended=True, trusted_servers=trusted)
+    assert kept.outcome == "ask", "a stored ask on another server's tool of that name still asks"
+
+
 def test_rule_precedence_and_own_tools() -> None:
     allow = ResolvedAgentToolRule(rule="allow")
     denied = ToolSafetyPolicy(enabled=True, agent_rules=True, denied=("remote/append_note",))

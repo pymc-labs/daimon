@@ -78,8 +78,8 @@ def test_j9_a_new_tenant_has_every_keyed_provider_and_its_code_default_rows(monk
 
 
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
-async def test_j9_a_never_seen_tenant_previews_a_switch_with_zero_setup(fresh_chat, backend):
-    """J1/J2's first step on a tenant created just now: the copy's switch previews."""
+async def test_j9_a_never_seen_tenant_switches_with_zero_setup(fresh_chat, backend):
+    """J1/J2's first step on a tenant created just now: the copy's switch applies."""
     copy = await _fork_agent_impl(
         fresh_chat.runtime,
         fresh_chat.auth,
@@ -94,12 +94,12 @@ async def test_j9_a_never_seen_tenant_previews_a_switch_with_zero_setup(fresh_ch
         origin_context_id=str(fresh_chat.origin.id),
         agent_id=copy.id,
     )
-    preview = await _request_agent_backend_switch_impl(
+    switched = await _request_agent_backend_switch_impl(
         fresh_chat.runtime,
         fresh_chat.auth,
         agent_name=copy.name,
         target_backend=backend,
         origin_context_id=str(fresh_chat.origin.id),
     )
-    assert preview.status == "preview" and preview.preview_digest
-    assert preview.target_backend == backend
+    assert switched.status == "changed", "applied on the first call, nothing to confirm"
+    assert switched.target_backend == backend, switched

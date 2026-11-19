@@ -1331,6 +1331,7 @@ gemini = [
 ]
 openai = [
     { name = "openai" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -1341,6 +1342,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.54.0,<3" },
     { name = "pydantic", specifier = ">=2.8" },
+    { name = "pyyaml", marker = "extra == 'openai'", specifier = ">=6.0" },
 ]
 provides-extras = ["anthropic", "openai", "gemini"]
 

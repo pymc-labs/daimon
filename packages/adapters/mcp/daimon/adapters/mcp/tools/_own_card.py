@@ -1,6 +1,6 @@
-"""Post a card Daimon answers itself (a host call or a provider switch) into the turn's thread.
+"""Post a card Daimon answers itself (a host call) into the turn's thread.
 
-One poster for every platform, so the call gate and the switch tool reach the same places
+One poster for every platform, so the call gate and the connector relay reach the same places
 with the same visibility and write checks as the credential card.
 """
 

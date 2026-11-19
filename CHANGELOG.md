@@ -24,6 +24,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed Discord members out of being tagged. `daimon dm import-history` holds
   each person's earlier private conversation for their first DM here with the
   agent it names, which starts from it once, without saying so.
+- **GPT threads start with skills whose description spans lines.** A SKILL.md
+  block scalar (`description: >`) made OpenAI refuse the session. `name` and
+  `description` now upload as one line, an invalid name such as
+  `marimo_notebooks` uploads as `marimo-notebooks`, and older copies upload again.
+- **Provider failures log the provider's reason.** Turn, session and sync
+  failure logs carry the redacted provider code, field and message.
+- **The first GPT or Gemini turn after a restart no longer stalls other turns.**
+  Workers load provider runtimes at startup, and log the blocking code's stack
+  when anything holds the event loop over a second.
+
+- **An agent's page shows it is loading.** While a slow agent loaded, the page
+  stayed blank.
+- **Switching a Gemini conversation's model no longer times out.** The switch
+  reads the agent's setup once instead of twice, and its reads run together.
+- **Agents switched to GPT or Gemini answer again.** A new conversation with
+  one was refused with "Something went wrong on our side".
+- **The Web app setting (`web_awareness`, was "Web app links") turns off every
+  mention of the web app at its place.** Off at the deployment, workspace,
+  agent, channel or thread leaves the web address out of routine runs and tool
+  results, hides and refuses the web invite, visitor link and web access tools
+  (on Claude, OpenAI and Gemini turns alike), leaves the web app rows out of
+  the agent's settings list and drops the "Open in web" buttons from Discord,
+  Slack and Teams cards there, as well as from a message's own controls. A card
+  in a channel follows the agent assigned there, an agent key its own agent, and
+  a routine's links the channel or thread it posts in. The people and group
+  lookups stay, since allowances and owners take their ids. Tool descriptions
+  and the setup skill no longer name the web app.
+- **Approval-gated tools work on OpenAI and Gemini turns as on Claude.** Each
+  one, reach approvals included, asks on the same card with the same checks,
+  and a tool Claude runs without asking runs at once. Claude's default speed
+  and effort are no longer reported as lost, an effort the new provider offers
+  carries over, and each setting that is lost is named.
+
+- **A sealed channel's conversations and its own agent stay in the channel,
+  admins included.** Admins no longer read another person's conversation from a
+  sealed or limited channel through the hub, even after the channel is opened
+  again. No hub lists a channel's own agent, and an admin can't run it from a DM
+  or the hub. Admins keep hub reads of open channels. Admins who used a home
+  channel's agent from a DM now use it in its channel.
+- **A private channel's settings change only from inside the channel, for admins
+  too.** In every install, an admin can't change a channel with limited readers,
+  or the agent that channel keeps to itself, from the web app, the hub or a DM.
+  That covers rules, prompt, tools and connections, budget, skills and
+  environments, feature switches including memory, coding keys, and reading the
+  agent's memory text. Use the settings panel or the chat tool in the channel.
+  An agent key, a resumed turn or a routine can't make these changes either.
+  Archiving an agent or environment that such a channel picks waits until the
+  channel picks another one, from inside. The operator CLI is unchanged, and so
+  are members and open channels.
+- **OpenAI turns record their tokens and cost when usage arrives late.** OpenAI
+  can end a turn before its turn resource reports usage, and fill it in up to
+  half an hour later. Daimon takes the usage the turn's completion event carries,
+  else the last usage the turn reported while it ran. A turn with neither is
+  billed from that value at first and re-read in the background for about an
+  hour, until the turn resource itself reports usage; what it reports is billed
+  then and counts toward spend caps. No turn waits for its usage, a replayed
+  turn keeps the counts already recorded, and a restart within that hour leaves
+  the turn unfinished.
+- **Switching an agent's or a thread's provider applies at once, like a model
+  change.** No card asks to confirm it on Discord, Slack, Teams or the web app,
+  and the switch tool and the CLI apply on the first call. What the new provider
+  can't run, such as some skills, MCP servers or tools, is off there and said once
+  as information; it comes back on a switch back. Creating an agent on an OpenAI
+  or Gemini model sets its provider. Who may switch, the provider allowlist,
+  prices and daily caps are unchanged, and a switch button posted earlier applies
+  the switch when pressed.
+- **An agent with a signed-identity MCP server stays in its channel and keeps no
+  memory.** Its channel turns run held: they post only in their channel and its
+  threads, send no DMs and have no admin tools. It keeps no long-term memory, and
+  its sessions are sealed to the channel: each channel turn starts a fresh session,
+  and it cannot read stored compute or job output. It neither hands work off nor
+  receives a handoff summary or carried work, and its helpers inherit these limits.
+  Agents without such a server are unchanged.
+- **An agent switched to OpenAI keeps answering there after its prompt or tools
+  change.** An agent whose Daimon tool list was long no longer fails to start on
+  OpenAI, and a provider that is set up is never reported as missing.
+- **Chat sessions keep notebook and report tools the MCP server is set up for.**
+  In a deployment where only the MCP server carries the notebook host, report host,
+  Gemini, cloud computer or Microsoft 365 settings, the worker running a chat turn no
+  longer drops those tools from the session. The MCP server judges that setup with
+  its own settings: without it, the tools leave every tool list it serves and a call
+  is refused as not set up yet. A capability turned Off still removes
+  its tools from the session. A settings panel on such a worker still lists the
+  feature as Not set up, but it can be turned Off, locked Off or reset to Default.
+- **Agents and threads can use GPT-6.2 Astra and GPT-6.2 Sol on OpenAI.** Pick
+  `gpt-6.2-astra` or `gpt-6.2-sol` as an agent's or a thread's model; `gpt-6-luna`
+  stays the default and `gpt-6-astra` stays available. GPT-6.2 Astra costs $8
+  input, $40 output, $0.40 cached input and $10 cache writes per million tokens;
+  GPT-6.2 Sol costs $2, $10, $0.10 and $2.50. Like GPT-6 Astra, a request above
+  272k input tokens is priced wholly at twice the input and cache rates and 1.5x
+  the output rate, an upper bound, and each model has its own daily cap. "astra"
+  names GPT-6.2 Astra and "gpt 6 astra" GPT-6 Astra; "sol" names GPT-6.2 Sol.
+- **Agents Daimon stores itself keep working when the built-in agent is
+  named `default`.** On an install that runs agents from its own records (for
+  example with an OpenAI or Gemini key and no Anthropic key), asking for
+  `daimon` now answers with the workspace's built-in agent renamed to
+  `default`. Defaults sync no longer creates a second `daimon` beside it, and
+  setup conversations find it. A user's own agent named `default` is never
+  taken for it.
+- **Admin > Support follows the order an admin sets Ask a person up.** Turn it
+  on for the workspace, choose where it shows, pick the request channel, then
+  set credit limits and menus in one list. The later steps stay open when it is
+  on but something is missing, and say what. Thumbs-down feedback has its
+  switch beside the request channel and in a channel's own settings. Adding a
+  limit for a person who already has one opens it. A menu in use says where it
+  is used. Requests no channel received open from **Not delivered**, where an
+  admin settles one with a charge within its price or declines it; the person
+  is not told.
+- **Admins manage credit limits, menus and the request channel for Ask a
+  person.** A limit sets credits for the workspace, an agent or a channel, for
+  everyone there, each person, or both. A request is charged at the most
+  specific place with a limit. One person's own limit sets their cap at a place
+  or everywhere. Start and end dates are set by hand. Menus of priced options,
+  and the channel that receives requests, are set under **Admin** > **Support**
+  in the web app, with `daimon support` and with the `support_*` MCP tools. See
+  [Ask a person](docs/support.md).
+- **A thumbs-down form can also be posted where Ask a person requests go.**
+  The `support_feedback` feature, off by default, posts a submitted form with
+  its reasons, text, person, agent and a link to the answer to the support
+  channel, and the form says so first. It spends no credits. See
+  [Ask a person](docs/support.md).
+- **A workspace can send Ask a person requests to its own channel.** The
+  `support_own_channel` feature, on by default, lets an admin pick the channel
+  instead of the deployment's one; off sends every request to the default
+  channel and locks the choice. See [Ask a person](docs/support.md).
+- **Ask a person offers a menu in Discord, Slack and Teams.** A
+  person picks an option, fills in its fields and sees what it costs and what is
+  left. A request priced by staff holds its minimum until someone in the support
+  channel sets the charge or declines it from the request's post. On Teams the
+  charge box and buttons are on the post itself. The person who asked is not told
+  the final charge. Workspace admins' requests are sent but charged nowhere.
+  Ask a person can be turned off for an agent or a channel as well as the
+  workspace, and locked. See [Ask a person](docs/support.md).
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
@@ -48,6 +181,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started earlier. A skill's own files stay out even if the agent edits them;
   files the agent makes beside them, and input files it changes, are sent. The first
   answer after switching an agent to Gemini carries no skill files.
+- **Switching an agent to Gemini keeps its large skills.** A skill with fonts,
+  images or other binary files, or over Gemini's 2 MiB inline limit, is
+  uploaded into the agent's sandbox, up to 28 MiB each. Only its `SKILL.md`
+  counts toward the 2 MiB that small skills share. A skill whose upload fails
+  is left out of that conversation, and the agent is told.
 - **Switching an agent with many skills to OpenAI or Gemini finishes its preview.**
   The preview gets 90 seconds to read the agent's skills, and each skill it
   reads is kept even when the preview runs out of time, so a retry picks up

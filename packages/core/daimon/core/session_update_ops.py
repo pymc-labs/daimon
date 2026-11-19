@@ -47,6 +47,7 @@ from daimon.core.agent_mcp_credentials import (
     resync_mounted_shared_vault,
     sync_agent_mcp_credentials,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
@@ -216,7 +217,12 @@ async def _replace_env_file(
             anthropic, session_id, file_id=file_id, mount_path=op.mount_path, scope=scope
         )
     except APIStatusError as error:
-        log.warning("session_update.env_mount_lost", session_id=session_id, error=str(error))
+        log.warning(
+            "session_update.env_mount_lost",
+            session_id=session_id,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         raise EnvMountLost(snapshot=cleared, session_id=session_id) from error
 
     return snapshot.model_copy(
@@ -368,7 +374,11 @@ async def apply_update_ops(
                 except APIStatusError as error:
                     if not _is_session_running(error):
                         raise
-                    log.info("session_update.deferred_busy", session_id=session_id)
+                    log.info(
+                        "session_update.deferred_busy",
+                        session_id=session_id,
+                        causes=backend_refusal_causes(error),
+                    )
                     return SessionBusy(snapshot=snapshot, applied=tuple(applied))
                 snapshot = snapshot.model_copy(
                     update={

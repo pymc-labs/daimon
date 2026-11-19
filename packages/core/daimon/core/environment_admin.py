@@ -12,6 +12,7 @@ from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_target import ChangeRecorder
 from daimon.core.channel_environments import (
     archive_needs_confirm,
+    archive_sealed_refusal,
     build_archive_environment_note,
     build_limited_channels_confirm,
     has_open_network,
@@ -255,6 +256,12 @@ async def archive(
     env = await _find(deps, actor, environment_id)
     _editable(env)
     name = env.metadata.get(MA_METADATA_KEY_NAME) or env.name
+    async with deps.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session, tenant_id=actor.tenant_id, environment_name=name, subject=actor.subject
+        )
+    if refusal is not None:
+        raise AgentEditError(refusal, kind="forbidden")
     if not confirmed:
         async with deps.session_factory() as session:
             needed = await archive_needs_confirm(

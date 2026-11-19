@@ -22,8 +22,8 @@ from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.resources import Environment, EnvironmentFilter, EnvironmentSpec
 from mux.state.memory import MemoryStateStore
 
-from .test_declared_drop_preparation import consent_request as consent_request
 from .test_declared_drop_preparation import owned as owned
+from .test_declared_drop_preparation import switched_request as switched_request
 
 TENANT = "11111111-1111-4111-8111-111111111111"
 PROJECT = "proj_test"
@@ -170,8 +170,8 @@ def test_the_refusal_copy_says_to_try_again():
 
 
 @pytest.fixture
-def provisioning(consent_request, monkeypatch, tmp_path):
-    request, *_ = consent_request
+def provisioning(switched_request, monkeypatch, tmp_path):
+    request, *_ = switched_request
     request = replace(
         request,
         deps=replace(request.deps, state_store=PostgresStateStore(request.deps.sessionmaker)),
@@ -389,7 +389,7 @@ async def test_the_setup_refusal_reaches_the_person_through_preparation(provisio
 
 
 @pytest.fixture
-async def fresh_tenant(consent_request, monkeypatch, tmp_path):
+async def fresh_tenant(switched_request, monkeypatch, tmp_path):
     from daimon.core.turn.prepare import admitted_session_scope
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
     from daimon.core.turn.runtimes import build_channel_runtime
@@ -397,7 +397,7 @@ async def fresh_tenant(consent_request, monkeypatch, tmp_path):
     from .test_openai_full_source import FullWire
     from .test_openai_runtime_transport import clients_for
 
-    request, *_ = consent_request
+    request, *_ = switched_request
     sessions = request.deps.sessionmaker
     request = replace(
         request,

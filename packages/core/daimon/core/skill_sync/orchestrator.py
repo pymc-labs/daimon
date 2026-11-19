@@ -49,6 +49,7 @@ from anthropic.types.beta import (
     BetaManagedAgentsSkillParams,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     find_attach_mount_collision,
@@ -723,6 +724,7 @@ async def sync_agent_skills(
                         "skill_sync.orphan_delete_already_gone",
                         name=row.name,
                         anthropic_id=row.anthropic_id,
+                        causes=backend_refusal_causes(err),
                     )
                 else:
                     _log.warning(
@@ -730,6 +732,7 @@ async def sync_agent_skills(
                         name=row.name,
                         anthropic_id=row.anthropic_id,
                         error=str(err),
+                        causes=backend_refusal_causes(err),
                     )
                     async with report_lock:
                         report.failed_uploads.append((row.name, str(err)))
@@ -894,6 +897,7 @@ async def sync_agent_skills(
             agent_id=agent.id,
             requested=len(row_ids),
             error=err.message,
+            causes=backend_refusal_causes(err),
         )
         async with report_lock:
             report.attach_failures.append((agent_name, err.message or "skill cap exceeded"))

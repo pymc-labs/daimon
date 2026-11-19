@@ -13,9 +13,11 @@ from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Artifact, Skill, SkillUpload, SkillVersion
 from mux.drivers.gemini.bundles import (
     SKILL_SOURCE,
+    fits_inline,
     mounted_files,
     owned_skill,
     relative_path,
+    upload_manifest,
     validate_bundle,
 )
 from mux.drivers.gemini.core import Base, now, page_values, refuse
@@ -105,9 +107,18 @@ class GeminiSkills(Base):
         account_scope_id: str,
         *,
         publisher: SkillBundlePublisher | None = None,
+        uploads: bool = False,
     ) -> None:
         super().__init__(transport, storage, account_scope_id)
         self._publisher = publisher
+        # A bundle past the inline limits is uploaded at session start (GeminiSessions).
+        self._uploads = uploads and publisher is None
+
+    def _store(self, record: SkillRecord, version: str, bundle: SkillUpload) -> None:
+        if self._uploads and not fits_inline(bundle):
+            record.uploads[version] = upload_manifest(bundle)
+        else:
+            record.bundles[version] = bundle
 
     async def _deploy(
         self, scope: Scope, record: SkillRecord, version: str, bundle: SkillUpload
@@ -121,7 +132,9 @@ class GeminiSkills(Base):
         record.deployments[version] = deployment
 
     async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
-        version = validate_bundle(bundle, external=self._publisher is not None)
+        version = validate_bundle(
+            bundle, external=self._publisher is not None, upload=self._uploads
+        )
         digest = request_digest({"kind": "skill", "account": self._account, "bundle": version})
         async with self._storage.transaction() as records:
             prior = self._creation(records, scope, key, digest)
@@ -145,13 +158,15 @@ class GeminiSkills(Base):
                 native={
                     "deployment": "gcs_on_interaction"
                     if self._publisher is not None
+                    else "upload_on_session"
+                    if self._uploads and not fits_inline(bundle)
                     else "inline_on_interaction",
                     "provider_upload": False,
                 },
             )
             record = SkillRecord(owner(scope), self._account, skill)
             await self._deploy(scope, record, version, bundle)
-            record.bundles[version] = bundle
+            self._store(record, version, bundle)
             record.versions[version] = SkillVersion(
                 ref=ref, version=version, created_at=skill.created_at
             )
@@ -162,7 +177,9 @@ class GeminiSkills(Base):
     async def publish_version(
         self, scope: Scope, skill_id: str, bundle: SkillUpload, *, key: str
     ) -> SkillVersion:
-        version = validate_bundle(bundle, external=self._publisher is not None)
+        version = validate_bundle(
+            bundle, external=self._publisher is not None, upload=self._uploads
+        )
         digest = request_digest(
             {
                 "kind": "skill_version",
@@ -181,7 +198,8 @@ class GeminiSkills(Base):
                 ref=ref, version=version, created_at=now()
             )
             await self._deploy(scope, record, version, bundle)
-            record.bundles[version], record.versions[version] = bundle, item
+            self._store(record, version, bundle)
+            record.versions[version] = item
             record.skill = record.skill.model_copy(
                 update={
                     "latest_version": ref,

@@ -36,7 +36,7 @@ from daimon.core.defaults.ma_index import (
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.permissions import home_of, limited_ids
+from daimon.core.permissions import SEALED_REFUSAL, home_of, limited_ids, sealed_outside
 from daimon.core.platform_words import NEUTRAL_ADMIN, NEUTRAL_SPACE
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import (
@@ -51,6 +51,7 @@ from daimon.core.scope import (
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
 from daimon.core.stores.domain import ChangeSurface
+from daimon.core.stores.platform_names import get_channel_name_any_platform
 from daimon.core.stores.scoped_config_read import (
     get_scope,
     list_propagations_for_tenant,
@@ -686,6 +687,69 @@ async def archive_needs_confirm(
         change=lambda picks: picks.without(environment_name),
     )
     return await _any_open(client, tenant_id=tenant_id, names=moves, records=records)
+
+
+async def archive_sealed_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    environment_name: str,
+    subject: Subject,
+) -> str | None:
+    """Why `subject` may not archive `environment_name`, or None when it may.
+
+    Archiving clears every channel pick of the environment, which changes those
+    channels' settings. A private channel's settings change only from inside it
+    (`sealed_outside`), so the archive is refused, before any write, while a
+    channel the caller is outside of picks the environment. The words name the
+    channel to change first. Call it before the first write of every archive path.
+    """
+    picks = await _load_picks(session, tenant_id=tenant_id)
+    return await sealed_pick_refusal(
+        session,
+        tenant_id=tenant_id,
+        channels=[c for c, picked in picks.channels.items() if picked == environment_name],
+        subject=subject,
+        picks=f"the {environment_name} environment",
+        change="its environment",
+    )
+
+
+async def sealed_pick_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    channels: Iterable[str],
+    subject: Subject,
+    picks: str,
+    change: str,
+) -> str | None:
+    """Why `subject` may not clear a pick that `channels` hold, or None when it may.
+
+    Archiving an environment or an agent clears every channel's pick of it. A
+    private channel's settings change only from inside it (`sealed_outside`), so
+    the first of `channels` the caller is outside of refuses the archive. The words
+    name that channel. Call it before the first write of every archive path.
+    """
+    policy = await load_access_policy(session, tenant_id=tenant_id)
+    sealed = next(
+        (
+            channel
+            for channel in sorted(set(channels))
+            if sealed_outside(
+                policy, subject.inside, channel_ids=(channel,), operator=subject.operator
+            )
+        ),
+        None,
+    )
+    if sealed is None:
+        return None
+    name = await get_channel_name_any_platform(session, tenant_id=tenant_id, channel_id=sealed)
+    where = f"#{name}" if name else sealed
+    return (
+        f"{SEALED_REFUSAL} {where} picks {picks}. "
+        f"Change {change} from inside {where} first. Nothing changed."
+    )
 
 
 LIMITED_OPEN_NETWORK_WARNING: Final = (

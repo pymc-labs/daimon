@@ -180,11 +180,11 @@ async def install_poll_ports(session: AsyncSession) -> None:
             text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar")
         )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
-    # 0206 adds the token-link callback port, installed and owned like the page port.
+    # 0208 adds the token-link callback port, installed and owned like the page port.
     callback = runpy.run_path(
         str(
             Path(__file__).resolve().parents[3]
-            / "core/alembic/versions/0206_callback_watch_imports.py"
+            / "core/alembic/versions/0208_callback_watch_imports.py"
         )
     )
     signature = cast(str, callback["SIGNATURE"])

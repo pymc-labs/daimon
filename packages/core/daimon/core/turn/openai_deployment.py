@@ -30,6 +30,7 @@ from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
+from daimon.core.turn.openai_late_usage import LATE_USAGE
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
@@ -618,6 +619,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         account_scope_id=deployment.project,
         price=price,
         spend_guard=guard,
+        late_usage=LATE_USAGE,
         # A conversation-only session runs no container: its usage settles at $0
         # infrastructure. A persistent workspace's container cost stays unknown.
         session_plan=plan,

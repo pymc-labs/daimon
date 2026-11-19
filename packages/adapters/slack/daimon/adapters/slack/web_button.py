@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from daimon.core.config import WebSettings
-from daimon.core.web_links import OPEN_IN_WEB, panel_links
+from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, TenantLinks, links_at, panel_links
 
 
 def open_in_web_button(url: str) -> dict[str, Any]:
@@ -19,7 +20,31 @@ def open_in_web_button(url: str) -> dict[str, Any]:
     }
 
 
-def spend_url(web: WebSettings | None, tenant_id: uuid.UUID) -> str | None:
-    """The workspace's spend page, or None with no web app. Any member may open it."""
-    links = panel_links(web, tenant_id, admin=False)
+async def web_links_at(
+    runtime: SlackRuntime,
+    tenant_id: uuid.UUID,
+    *,
+    admin: bool,
+    channel_id: str | None,
+    thread_id: str | None = None,
+    agent_id: str | None = None,
+) -> TenantLinks | None:
+    """The links a card may offer: None with no web app or where `web_awareness` is Off at
+    the card's place (a workspace-wide card passes the channel it was opened in)."""
+    place = FeaturePlace.of(tenant_id, "slack", channel_id, thread_id, agent_id=agent_id)
+    return await links_at(
+        runtime.sessionmaker,
+        runtime.settings,
+        place,
+        panel_links(runtime.settings.web, tenant_id, admin=admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
+    )
+
+
+async def spend_url(
+    runtime: SlackRuntime, tenant_id: uuid.UUID, channel_id: str | None
+) -> str | None:
+    """The workspace's spend page, or None with no web app or where it is Off. Any member
+    may open it."""
+    links = await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id)
     return None if links is None else links.spend()

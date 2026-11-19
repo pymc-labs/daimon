@@ -32,6 +32,7 @@ from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_ownership import record_agent_creator
 from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.authz import Action, Subject, authorize, build_agent_ref
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import (
     download_skill_version,
     find_agent_by_daimon_tag,
@@ -214,6 +215,7 @@ async def _copy_own_skills(
                 tenant_id=str(tenant_id),
                 skill_id=skill.skill_id,
                 error=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
             )
             failed.append(skill.body)
             continue
@@ -400,6 +402,7 @@ async def copy_agent(
             tenant_id=str(tenant_id),
             agent_id=created.id,
             error=type(exc).__name__,
+            causes=backend_refusal_causes(exc),
         )
         agent = created
     return AgentCopy(agent, (*split.dropped, *failed), tuple(copied))

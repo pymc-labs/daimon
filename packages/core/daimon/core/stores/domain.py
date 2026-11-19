@@ -15,6 +15,8 @@ from typing import Annotated, Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
+from daimon.core.windows import BudgetWindow as BudgetWindow
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
@@ -26,7 +28,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -115,6 +117,8 @@ class SkillSizeRow(BaseModel):
     largest_file_bytes: int
     file_count: int
     text_only: bool
+    manifest_bytes: int | None = None
+    """The SKILL.md's bytes; -1: not text; None: measured before they were kept, or unreadable."""
 
 
 class SkillCopyRow(BaseModel):
@@ -638,9 +642,6 @@ class UsageEventRow(BaseModel):
     observation_revision: int | None = None
     channel_id: str | None = None
     agent_id: str | None = None
-
-
-BudgetWindow = Literal["monthly", "total", "fixed"]
 
 
 class ChannelBudgetRow(BaseModel):
@@ -1270,24 +1271,6 @@ class FileUploadRow(BaseModel):
     created_at: datetime
 
 
-class SupportEscalationRow(BaseModel):
-    """Pydantic row for SupportEscalation — one human-support request."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    account_id: uuid.UUID | None
-    platform: str
-    platform_user_id: str
-    channel_id: str
-    message_id: str
-    ma_session_id: str | None
-    note: str
-    delivered_at: datetime | None
-    created_at: datetime
-
-
 FeatureTier = Literal["workspace", "agent", "channel", "thread"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
 FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
@@ -1513,30 +1496,7 @@ class TenantBackendPolicy(_Facts):
     explicit: bool = True
 
 
-class _BackendDropConsent(_Facts):
-    declared_drops: tuple[str, ...]
-    source_pin: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-    target_digest: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-
-    @field_validator("declared_drops")
-    @classmethod
-    def _labels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return TypeAdapter(
-            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
-        ).validate_python(value)
-
-
-class _BackendConsentFacts(_Facts):
-    drop_consent: _BackendDropConsent | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @property
-    def declared_drops(self) -> tuple[str, ...]:
-        return self.drop_consent.declared_drops if self.drop_consent is not None else ()
-
-
-class AgentBackendRevision(_BackendConsentFacts):
+class AgentBackendRevision(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     local: int = Field(ge=1)
@@ -1553,9 +1513,16 @@ class AgentBackendRevision(_BackendConsentFacts):
     digest: str
     previous_local: int | None
     created_at: datetime
+    # Read and ignored: the losses a switch was confirmed with, before switches applied at once.
+    drop_consent: dict[str, JsonValue] | None = Field(default=None, exclude=True)
+
+    @property
+    def born(self) -> bool:
+        """`record_born_backend`'s row: where a record created there runs, not a switch."""
+        return self.preview_digest == self.digest
 
 
-class CompatibilityPreview(_BackendConsentFacts):
+class CompatibilityPreview(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     target_backend: Provider
@@ -1568,6 +1535,8 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # What the target can't carry, from a captured source (`AgentSpec.declared_drops`).
+    declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # Run by the host in place of the native feature, never lost (`source_translations`).
     translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # The name each lost skill shows; its `skill:` drop keys it by id.

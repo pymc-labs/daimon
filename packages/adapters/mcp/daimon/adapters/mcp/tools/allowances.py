@@ -112,7 +112,7 @@ async def _list_impl(
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     shown, total, next_page = paged(list(reversed(rows)), after)
     return Allowances(
         await _lines(runtime, actor.tenant_id, shown),
@@ -156,7 +156,7 @@ async def _create_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -178,7 +178,7 @@ async def _set_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -220,7 +220,7 @@ def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expires_at: datetime | None = None,
         cap: bool = False,
     ) -> AllowanceChanged:
-        """Set an allowance for a person (web person id), a group (name, or ``everyone``) or
+        """Set an allowance for a person (person id), a group (name, or ``everyone``) or
         an invite (id): a limit in billed dollars, monthly or in total, for every agent
         or one. A cap is monthly, for everyone or one person, with no agent or end date."""
         return await _create_impl(

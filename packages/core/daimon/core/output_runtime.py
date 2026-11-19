@@ -14,6 +14,7 @@ from typing import Protocol
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.output_ports_compat import (
     delete_output_record,
     list_output_records,
@@ -95,6 +96,7 @@ class AnthropicOutputRuntime:
                 session_id=self.session_id,
                 file_id=output_id,
                 error=str(exc)[:300],
+                causes=backend_refusal_causes(exc),
             )
 
 

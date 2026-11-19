@@ -167,7 +167,9 @@ TAIL = (
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
     "0205_web_search_usage",
-    "0206_callback_watch_imports",
+    "0206_support_plans",
+    "0207_skill_manifest_bytes",
+    "0208_callback_watch_imports",
 )
 HEAD = TAIL[-1]
 

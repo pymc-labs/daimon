@@ -49,6 +49,7 @@ from daimon.core.stores import routines as routines_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
@@ -108,6 +109,9 @@ class PurgePreview(BaseModel):
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    support_requests_anonymized: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_person_limits: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -460,6 +464,21 @@ async def collect_purge_preview(
             )
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+        # Limit rows are anonymized, not deleted, so the preview names them apart; the
+        # own limits and the settled-by rows match purge's principal and account passes.
+        support_anonymized_count = await support_escalation_store.count_limit_requests_for_account(
+            session,
+            account_id=account_id,
+            platform_user_keys=message_feedback_platform_user_keys,
+        )
+        support_person_limits_count = await support_store.count_person_limits_for_people(
+            session, platform_user_keys=message_feedback_platform_user_keys
+        )
+        support_settlers_count = await support_escalation_store.count_settled_by(
+            session,
+            account_id=account_id,
+            settler_keys=[(pp.platform, pp.external_id) for pp in pp_list],
+        )
 
         # 16. daimon_admins — the grants that list this person's id.
         from daimon.core.stores.daimon_admins import count_user_rows
@@ -571,6 +590,9 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        support_requests_anonymized=PurgePreviewRow(count=support_anonymized_count, example=None),
+        support_person_limits=PurgePreviewRow(count=support_person_limits_count, example=None),
+        support_settlers_cleared=PurgePreviewRow(count=support_settlers_count, example=None),
         daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),

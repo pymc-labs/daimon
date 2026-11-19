@@ -337,12 +337,6 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
             'Ask an admin to say "switch churn-explorer to Anthropic", or to finish setting up'
             " Gemini.",
         ),
-        (
-            "re_confirm",
-            "gemini",
-            "churn-explorer's model-provider switch needs to be confirmed again.",
-            "In a new conversation, ask churn-explorer to switch to Gemini again, then Confirm.",
-        ),
     ],
 )
 def test_a_provider_refusal_names_its_real_cause_and_the_chat_fix(cause, provider, title, fix):

@@ -22,7 +22,6 @@ from daimon.core.channel_budget import (
     ChannelBudgetStatus,
     get_channel_budget_status,
     list_channel_budget_statuses,
-    window_label,
 )
 from daimon.core.config import McpSettings
 from daimon.core.errors import DaimonError
@@ -40,6 +39,7 @@ from daimon.core.stores.usage_events import (
     turn_count_for_user_in_tenant_since,
     turns_by_user_in_tenant_since,
 )
+from daimon.core.windows import window_label
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

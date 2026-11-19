@@ -909,6 +909,7 @@ async def _start_turn_impl(
                 backend=MANAGED_AGENTS.provider,
             ),
             ma_agent,
+            server_setup=True,
         )
         session = await create_session(
             runtime.client,
