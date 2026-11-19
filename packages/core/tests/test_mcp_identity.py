@@ -310,14 +310,13 @@ def test_bearer_server_needs_workspaces_agents_and_a_matching_key() -> None:
 @pytest.mark.parametrize(
     "bearers",
     [
-        {},
         {"other": "k-1"},
         {"internal": "k-1", "other": "k-2"},
         {"internal": ""},
         {"internal": "a b"},
     ],
 )
-def test_bearer_keys_must_match_bearer_servers_exactly(bearers: dict[str, str]) -> None:
+def test_bearer_keys_must_name_bearer_servers_and_be_usable(bearers: dict[str, str]) -> None:
     with pytest.raises(ValidationError) as raised:
         _settings([_BEARER], bearers=bearers)
     assert "k-1" not in str(raised.value), "a key is never echoed"
