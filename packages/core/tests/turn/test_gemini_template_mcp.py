@@ -206,6 +206,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
     request = replace(request, admission=replace(request.admission, backend_revision=linked))
     calls.clear()
     yield request, quote, native, calls, posts
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
 
 
