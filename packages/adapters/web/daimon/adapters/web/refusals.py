@@ -10,7 +10,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import WebRefusalCard
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.errors import SessionBusyError
-from daimon.core.turn.notices import provider_name
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_lines, provider_name
 
 # Every way spending is stopped reads the same to the person: ask an admin for credit.
 _OUT_OF_CREDIT = frozenset(
@@ -27,6 +27,14 @@ def _refusal(
 
 
 _NO_ANSWER = "No answer was given."
+
+
+def _shared(err: AdmissionDenied) -> WebRefusalCard:
+    """The card for a refusal worded once in core, so the web says what chat says."""
+    title, help = admission_refusal_lines(
+        err.reason, RefusalNouns.for_caller("web"), cause=err.cause, provider=err.provider
+    )
+    return _refusal(title, _NO_ANSWER, help)
 
 
 def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> WebRefusalCard:
@@ -104,6 +112,8 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
             )
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
+        case "session_lost":
+            return _shared(err)
         case None:
             return _refusal(f"{named} can't run this chat here.", _NO_ANSWER, ask, way_back)
 

@@ -45,7 +45,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import compile_environment
-from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
+from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -63,6 +63,10 @@ async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTu
         return await gated_turn(request, _prepare_gemini_turn)
     except UnsupportedCapability as err:
         raise AdmissionDenied(reason="backend_unsupported") from err
+    except ContinuityLost as err:
+        # Retention pruned the conversation or its workspace expired: a retry fails
+        # the same way, so the person is told to start a new thread.
+        raise AdmissionDenied(reason="backend_unsupported", cause="session_lost") from err
 
 
 async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:

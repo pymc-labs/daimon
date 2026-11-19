@@ -79,6 +79,9 @@ BackendRefusalCause = Literal[
     "provider_busy",
     # The provider asked for a pause on this key and model: "try again shortly".
     "provider_cooling",
+    # The provider no longer holds this thread's conversation or files (it sat idle
+    # too long): "start a new thread", never a retry.
+    "session_lost",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

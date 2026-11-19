@@ -296,6 +296,11 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
         " Daimon to add the Anthropic key.",
     ),
+    # The provider no longer holds this thread's conversation or files (idle too long).
+    "session_lost": _Copy(
+        "This conversation can't be continued.",
+        "Start a new thread to keep going.",
+    ),
     "tool_limits": _Copy(
         "This {scope} limits the agent's tools, and {provider} can't apply that limit.",
         'Ask {who} to turn those tools back on, or to say "switch {agent_mid} to {default}".',
@@ -400,7 +405,31 @@ def admission_refusal_text(
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
 ) -> str:
-    """Two approved lines for an admission refusal.
+    """Two approved lines for an admission refusal, as one text."""
+    return "\n\n".join(
+        admission_refusal_lines(
+            reason,
+            nouns,
+            bot_name=bot_name,
+            agent_name=agent_name,
+            in_dm=in_dm,
+            cause=cause,
+            provider=provider,
+        )
+    )
+
+
+def admission_refusal_lines(
+    reason: AdmissionDenialReason,
+    nouns: RefusalNouns,
+    *,
+    bot_name: str | None = None,
+    agent_name: str | None = None,
+    in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
+) -> tuple[str, str]:
+    """The two approved lines for an admission refusal: what happened, what to do.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
@@ -433,7 +462,7 @@ def admission_refusal_text(
         "who": nouns.who,
         "Who": _capitalised(nouns.who),
     }
-    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
+    return copy.title.format(**words), copy.next_step.format(**words)
 
 
 @dataclass(frozen=True, slots=True)
