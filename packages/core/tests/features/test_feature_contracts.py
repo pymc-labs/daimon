@@ -557,6 +557,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,
     "SignedIdentityServer.requester_meta": _SHAPE,
+    "SignedIdentityServer.channel_scoped": _OPS,  # how a server scopes its answers, a per-server trust setting
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
     "NotebookSettings.allow_editable": _OPS,
