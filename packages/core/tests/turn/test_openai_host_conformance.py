@@ -1,8 +1,8 @@
 """Openai host wake/pump controls, isolated from the other provider cut."""
 
 import pytest
+from daimon.core.turn.hosted_codec import OPENAI, display_event
 from daimon.core.turn.io import TurnEvent
-from daimon.core.turn.openai_codec import display_event
 
 from .native_conformance_support import (
     test_c17_real_wake_takeover_binding_generation_and_driver_lease as test_c17_real_wake_takeover_binding_generation_and_driver_lease,
@@ -20,7 +20,7 @@ class OfflineIO(HostIO):
         super().__init__(
             event,
             persistence,
-            frame=TurnEvent(display_event(event, session_id=event.session_id), event),
+            frame=TurnEvent(display_event(event, session_id=event.session_id, codec=OPENAI), event),
         )
 
 

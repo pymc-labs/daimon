@@ -49,6 +49,8 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from ..harness import auth_identity
+
 # Load patch_discord_http directly from the sibling conftest.py by file path —
 # same trick test_credential_requests.py uses to dodge the "from conftest
 # import ..." collision with the parent tests/conftest.py.
@@ -98,14 +100,14 @@ def _auth_identity(
     platform_user_id: str | None = "42",
     is_admin: bool = False,
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
+        is_admin=is_admin,
         platform=platform,
         external_id=external_id,
         platform_user_id=platform_user_id,
-        is_admin=is_admin,
     )
 
 

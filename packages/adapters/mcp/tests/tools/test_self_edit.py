@@ -25,7 +25,7 @@ from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import seed_tenant
+from ..harness import auth_identity, seed_tenant
 
 
 def _runtime(
@@ -115,12 +115,12 @@ def _auth_identity(
     ``is_admin`` defaults to True — these tests exercise admin-context tool flows.
     Pass ``is_admin=False`` to test the admin gate.
     """
-    return AuthIdentity(
-        account_id=account_id or uuid.uuid4(),
-        tenant_id=tenant_id or uuid.uuid4(),
+    return auth_identity(
+        account_id or uuid.uuid4(),
+        tenant_id or uuid.uuid4(),
         role=Role.USER,
-        agent_id=uuid.uuid4() if agent_id is _UNSET else agent_id,
         is_admin=is_admin,
+        agent_id=uuid.uuid4() if agent_id is _UNSET else agent_id,
     )
 
 

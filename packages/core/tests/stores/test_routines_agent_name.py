@@ -10,11 +10,11 @@ import uuid
 
 import pytest_asyncio
 from daimon.core.stores.routines import (
-    create_routine,
     get_routine,
     update_routine,
     update_routine_agent_id,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,15 +28,8 @@ async def tenant_id(db_session: AsyncSession) -> uuid.UUID:
 async def test_create_routine_persists_agent_name(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id="u1",
-        agent_id="agt_live",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="hi",
+    row = await new_routine(
+        db_session, tenant_id, created_by_user_id="u1", agent_id="agt_live", trigger_message="hi"
     )
     assert row.agent_name == "daimon", (
         "create_routine should persist agent_name on the returned row"
@@ -51,16 +44,7 @@ async def test_update_routine_writes_agent_name(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     """update_routine should overwrite agent_name to a new value (e.g. rename path)."""
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agt_x",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="hi",
-    )
+    row = await new_routine(db_session, tenant_id, agent_id="agt_x", trigger_message="hi")
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
     updated = await update_routine(
@@ -78,16 +62,7 @@ async def test_update_routine_writes_agent_name(
 async def test_update_routine_omits_agent_name_when_none(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    row = await create_routine(
-        db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
-        agent_id="agt_x",
-        agent_name="daimon",
-        cron_expr="* * * * *",
-        timezone_="UTC",
-        trigger_message="hi",
-    )
+    row = await new_routine(db_session, tenant_id, agent_id="agt_x", trigger_message="hi")
     assert row.agent_name == "daimon", "precondition: row was created with agent_name='daimon'"
 
     # Update only cron_expr; agent_name=None should mean "no change" (PATCH semantics).
@@ -113,14 +88,12 @@ async def test_update_routine_agent_id_only_changes_agent_id(
     Must only touch ``agent_id`` — everything else (cron_expr, timezone,
     trigger_message, enabled, agent_name, next_fire_at) stays put.
     """
-    row = await create_routine(
+    row = await new_routine(
         db_session,
-        tenant_id=tenant_id,
+        tenant_id,
         created_by_user_id="u1",
         agent_id="ag_old",
-        agent_name="daimon",
         cron_expr="*/15 * * * *",
-        timezone_="UTC",
         trigger_message="ping",
     )
     await db_session.flush()

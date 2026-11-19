@@ -2,26 +2,32 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import Literal
 from unittest.mock import MagicMock
 
 import httpx
 import jwt as pyjwt
 import pytest
+from daimon.core import ui
 from daimon.core.billing_panel import (
+    BillingMarks,
     BillingPanelState,
+    MemberRow,
     admin_summary,
+    billing_screen,
     caller_line,
     channel_budget_phrase,
     create_checkout,
     credit_headline,
-    estimate_turns,
     expiry_rows,
+    expiry_screen,
     fmt_usd,
     load_billing_snapshot,
     lookup_line,
@@ -45,6 +51,7 @@ from daimon.testing.factories import (
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
+    make_usage_event,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
@@ -55,6 +62,9 @@ _CALLER_ID = "U_CALLER"
 _OTHER_ID = "U_OTHER"
 _SINCE = datetime(2025, 1, 1, tzinfo=UTC)
 _NOW = datetime(2025, 1, 15, tzinfo=UTC)
+
+_load_billing_snapshot = partial(load_billing_snapshot, since=_SINCE, now=_NOW)
+
 _CHECKOUT_URL = "https://checkout.example/abc"
 
 
@@ -197,11 +207,100 @@ def test_channel_budget_phrase_follows_the_window(status: ChannelBudgetStatus, p
     assert channel_budget_phrase(status, now=_NOW) == phrase
 
 
-def test_estimate_turns_uses_the_tenant_average_or_the_fallback() -> None:
-    assert estimate_turns(10.0, guild_spend=0.0, guild_turns=0) == 100, "$0.10/turn fallback"
-    assert estimate_turns(10.0, guild_spend=20.0, guild_turns=4) == 2, "$5/turn average"
-    assert estimate_turns(10.0, guild_spend=0.0, guild_turns=5) == 100, (
-        "zero spend with turns falls back rather than dividing by zero cost"
+_MARKS = BillingMarks(
+    person=lambda row: row.display_name or "?",
+    channel=lambda channel_id: f"#{channel_id}",
+    date=lambda moment: f"{moment:%b} {moment.day}",
+)
+_STATE = BillingPanelState(
+    is_admin=True,
+    caller_user_id="u1",
+    caller_spend=0.0,
+    caller_turns=0,
+    caller_cap=None,
+    guild_balance_usd=Decimal("62.4"),
+    guild_spend=48.17,
+    guild_turns=300,
+    guild_distinct_members=9,
+    member_rows=tuple(MemberRow(f"u{i}", f"P{i}", float(9 - i), 1, i == 1) for i in range(7)),
+    over_cap_count=1,
+)
+
+
+def _screen(marks: BillingMarks = _MARKS, **overrides: object) -> ui.Panel:
+    state = dataclasses.replace(_STATE, **overrides)  # pyright: ignore[reportArgumentType]
+    return billing_screen(state, since=_SINCE, now=_NOW, marks=marks)
+
+
+def test_billing_screen_admin_view_is_credit_channel_spenders_and_budgets() -> None:
+    timed = (
+        ActiveTimedCredit(Decimal("20"), _ends(30)),
+        ActiveTimedCredit(Decimal("5"), _ends(20)),
+    )
+    budgets = tuple(dataclasses.replace(_budget("monthly"), spent_usd=Decimal(i)) for i in range(7))
+    panel = _screen(timed_credit=timed, channel_budget=_budget("monthly"), channel_budgets=budgets)
+    assert (panel.title, panel.subtitle) == (
+        "Billing",
+        ("January 2025", "$48.17 spent by 9 people"),
+    )
+    assert panel.tone == "warning", "timed credit expires within a week"
+    credit, channel, spenders, channel_budgets = panel.sections
+    assert credit == ui.Section(
+        (
+            ui.Figure("$62.40", "total credit left"),
+            ui.Muted(("Includes $25.00 that expires. It's used first.",)),
+        )
+    ), "an admin is not told to ask an admin"
+    assert channel == ui.titled("This channel", "$1.20 of $5.00 used this month")
+    assert spenders == ui.titled(
+        "Top spenders",
+        *("1. P0  $9.00", "2. P1 (you)  $8.00", "3. P2  $7.00", "4. P3  $6.00", "5. P4  $5.00"),
+        more="+ 3 more",
+    ), "five named, then the two unshown rows and the one over the cap counted"
+    assert channel_budgets.title == "Channel budgets"
+    assert channel_budgets.blocks[0] == ui.Text(
+        tuple(f"#C1  ${i}.00 of $5.00 used this month" for i in range(5))
+    )
+    assert channel_budgets.blocks[1] == ui.Muted(("+ 2 more",))
+
+
+def test_billing_screen_member_view_is_own_use_and_credit_only() -> None:
+    panel = _screen(is_admin=False, caller_spend=11.5, caller_cap=Decimal("25"), channel_budgets=())
+    assert panel.subtitle == ("January 2025",), "a member's subtitle is the month alone"
+    assert panel.sections == (
+        ui.titled("You", "$11.50 of your $25.00 this month"),
+        ui.Section(
+            (ui.Figure("$62.40", "total credit left"), ui.Muted(("Ask an admin to add credit.",)))
+        ),
+    ), "no spenders or channel budgets for a member"
+    assert _screen(is_admin=False).sections[0].blocks == (ui.Text(("Nothing used this month",)),)
+
+
+def test_billing_screen_states_and_platform_differences() -> None:
+    over = {"is_admin": False, "caller_spend": 30.0, "caller_cap": Decimal("25")}
+    assert _screen(**over).sections[0].flag == "⚠️ Over your monthly limit"
+    accented = dataclasses.replace(_MARKS, accent=True, more_spenders=". Look one up below.")
+    assert _screen(accented, **over).sections[0].flag is None, "the accent shows it instead"
+    assert _screen(accented, **over).tone == "alert"
+    spenders = _screen(accented).sections[1].blocks[-1]
+    assert spenders == ui.Muted(("+ 3 more. Look one up below.",))
+    assert _screen(member_rows=(), over_cap_count=0).sections[1].blocks == (
+        ui.Text(("Nothing used this month",)),
+    )
+    broke = _screen(guild_balance_usd=Decimal("-3.1")).sections[0].blocks[0]
+    assert broke == ui.Figure("No credit left", "$3.10 spent beyond it")
+    timed = (ActiveTimedCredit(Decimal("5"), _ends(20)), ActiveTimedCredit(Decimal("1"), _ends(18)))
+    inline = dataclasses.replace(_MARKS, expiry_inline=True)
+    expiry = _screen(inline, timed_credit=timed).sections[-1]
+    assert expiry == ui.Section(
+        (ui.Text(("$1.00 on Jan 18", "$5.00 on Jan 20")),),
+        title="Unused credit expires:",
+        element_id="billing-expiry",
+        hidden=True,
+    ), "soonest first, hidden until the toggle reveals it"
+    assert expiry_screen(timed, marks=_MARKS) == ui.Panel(
+        "Expiry dates",
+        (ui.Section((ui.Text(("Unused credit expires:", "$1.00 on Jan 18", "$5.00 on Jan 20")),)),),
     )
 
 
@@ -209,13 +308,8 @@ async def test_load_billing_snapshot_member_reads_only_caller_data(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=False
     )
 
     assert state.is_admin is False, "a member gets the member snapshot"
@@ -230,13 +324,8 @@ async def test_load_billing_snapshot_admin_sorts_members_by_spend(
     db_session: AsyncSession,
 ) -> None:
     tenant_id = await _tenant_with_usage(db_session)
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
     )
 
     assert state.is_admin is True, "an admin gets the admin snapshot"
@@ -271,13 +360,11 @@ async def test_load_billing_snapshot_names_rows_from_the_stored_names(
         names={_CALLER_ID: KnownName(display_name="Wrong platform")},
     )
 
-    state = await load_billing_snapshot(
+    state = await _load_billing_snapshot(
         db_session,
         tenant_id=tenant_id,
         platform_user_id=_CALLER_ID,
         is_admin=True,
-        since=_SINCE,
-        now=_NOW,
         platform="slack",
     )
 
@@ -300,13 +387,8 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncS
         )
     await db_session.commit()
 
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="U_MANY_000",
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id="U_MANY_000", is_admin=True
     )
 
     assert len(state.member_rows) == 25, "member rows are capped at 25"
@@ -316,18 +398,74 @@ async def test_load_billing_snapshot_admin_caps_at_25_members(db_session: AsyncS
 async def test_load_billing_snapshot_empty_period_is_well_formed(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_BILLING_EMPTY")
     await db_session.commit()
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant.id,
-        platform_user_id="U_EMPTY",
-        is_admin=False,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id="U_EMPTY", is_admin=False
     )
 
     assert (state.caller_spend, state.caller_turns, state.member_rows) == (0.0, 0, ()), (
         "an empty month reads as zeros, not an error"
     )
+
+
+async def test_load_billing_snapshot_leaves_unattributed_usage_out_of_the_members(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant_with_usage(db_session)
+    tenant = await tenants.get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    await make_usage_event(db_session, tenant=tenant, platform_user_id=None, input_tokens=5_000_000)
+    await db_session.commit()
+
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
+    )
+
+    assert state.guild_distinct_members == 2, "usage with no user is not a member"
+    assert [row.platform_user_id for row in state.member_rows] == [_OTHER_ID, _CALLER_ID]
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_load_billing_snapshot_carries_the_balance_for_members_and_admins(
+    db_session: AsyncSession, is_admin: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_BAL_{is_admin}")
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
+    )
+    assert state.guild_balance_usd == Decimal("0"), "no ledger rows is a zero balance"
+
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("75.50"))
+    await db_session.commit()
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
+    )
+    assert state.guild_balance_usd == Decimal("75.50")
+
+
+@pytest.mark.parametrize("is_admin", [False, True])
+async def test_load_billing_snapshot_reads_the_invoking_channels_budget(
+    db_session: AsyncSession, is_admin: bool
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CHAN_{is_admin}")
+    await make_channel_budget(db_session, tenant=tenant, channel_id="c1", limit_usd=Decimal("5"))
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=Decimal("-2"), channel_id="c1", occurred_at=_NOW
+    )
+    await db_session.commit()
+
+    async def snapshot(channel_id: str) -> BillingPanelState:
+        return await _load_billing_snapshot(
+            db_session,
+            tenant_id=tenant.id,
+            platform_user_id=_CALLER_ID,
+            is_admin=is_admin,
+            platform="slack",
+            channel_id=channel_id,
+        )
+
+    budget = (await snapshot("c1")).channel_budget
+    assert budget is not None and budget.spent_usd == Decimal("2")
+    assert (await snapshot("c2")).channel_budget is None, "a channel without a budget shows none"
 
 
 def _mcp_settings() -> MagicMock:
@@ -444,13 +582,8 @@ async def test_load_billing_snapshot_flags_the_codes_each_viewer_may_redeem(
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PROMO")
 
     async def snapshot(is_admin: bool) -> bool:
-        state = await load_billing_snapshot(
-            db_session,
-            tenant_id=tenant.id,
-            platform_user_id=_CALLER_ID,
-            is_admin=is_admin,
-            since=_SINCE,
-            now=_NOW,
+        state = await _load_billing_snapshot(
+            db_session, tenant_id=tenant.id, platform_user_id=_CALLER_ID, is_admin=is_admin
         )
         return state.has_redeemable_promo_code
 
@@ -478,13 +611,8 @@ async def test_load_billing_snapshot_hides_redemption_when_the_lookup_fails(
     monkeypatch.setattr("daimon.core.billing_panel.has_redeemable_promo_code", failing_lookup)
     tenant_id = await _tenant_with_usage(db_session)
 
-    state = await load_billing_snapshot(
-        db_session,
-        tenant_id=tenant_id,
-        platform_user_id=_CALLER_ID,
-        is_admin=True,
-        since=_SINCE,
-        now=_NOW,
+    state = await _load_billing_snapshot(
+        db_session, tenant_id=tenant_id, platform_user_id=_CALLER_ID, is_admin=True
     )
 
     assert state.is_admin and not state.has_redeemable_promo_code, (
@@ -514,13 +642,11 @@ async def test_load_billing_snapshot_lists_channel_budgets_for_admins_only(
     await db_session.commit()
 
     async def snapshot(is_admin: bool) -> BillingPanelState:
-        return await load_billing_snapshot(
+        return await _load_billing_snapshot(
             db_session,
             tenant_id=tenant_id,
             platform_user_id=_CALLER_ID,
             is_admin=is_admin,
-            since=_SINCE,
-            now=_NOW,
             platform="slack",
         )
 

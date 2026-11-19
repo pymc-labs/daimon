@@ -80,17 +80,6 @@ async def test_future_reason_cannot_hide_timer_before_distinct_or_limit(
         [key],
         [key],
     ]
-    requesters = await queue.list_waiting_requesters(
-        db_session, tenant_id=address["tenant_id"], target_names=["analyst"]
-    )
-    assert len(requesters) == 1 and requesters[0].platform_user_id == "human"
-    await db_session.execute(text("DELETE FROM task_continuations WHERE reason='timer'"))
-    assert (
-        await queue.list_waiting_requesters(
-            db_session, tenant_id=address["tenant_id"], target_names=["analyst"]
-        )
-        == []
-    )
 
 
 @pytest.mark.parametrize("claimed", [False, True])

@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from daimon.adapters.discord.agent_setup import add_skill as add_skill_mod
 from daimon.adapters.discord.agent_setup.add_skill import (
     ADD_LABEL,
@@ -40,6 +39,7 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
@@ -87,14 +87,11 @@ class _World:
         found = re.search(rb'name="display_title"\r\n\r\n([^\r]+)', request.content)
         assert found is not None
         self.created.append(found.group(1).decode())
-        skill = SkillListResponse(
+        skill = skill_listed(
             id=f"skill_{len(self.skills)}",
-            type="custom",
             display_title=self.created[-1],
-            latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
-            source="custom",
         ).model_dump(mode="json")
         self.skills.append(skill)
         return httpx.Response(200, json=skill)

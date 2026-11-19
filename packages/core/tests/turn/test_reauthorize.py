@@ -15,8 +15,8 @@ import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
-from daimon.core.turn.admission import AdmissionDenied, admit, reauthorize
-from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn.admission import AdmissionDenied, reauthorize
+from daimon.testing.builders import admit_chat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import (
@@ -44,14 +44,10 @@ async def _admit(db_session_factory, tmp_path: Path, tenant, *, role=Role.USER, 
     from dataclasses import replace
 
     deps = replace(deps, membership_resolver=CachedMembershipResolver(member))
-    admission = await admit(
+    admission = await admit_chat(
         deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        requester_org=RequesterOrg.HOST,
-        platform="discord",
+        tenant,
         external_user_id="member-1",
-        channel_id="chan-1",
         thread_id="thr-1",
         now=_NOW,
         role=role,
@@ -288,16 +284,7 @@ async def test_role_removed_after_admission_refuses_reauthorization(
         ),
         membership_resolver=resolver,
     )
-    admission = await admit(
-        deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="member-1",
-        channel_id="chan-1",
-        now=_NOW,
-        requester_org=RequesterOrg.HOST,
-    )
+    admission = await admit_chat(deps, tenant, external_user_id="member-1", now=_NOW)
     facts[0] = Membership(is_member=True)
     resolver.invalidate(tenant.id, tenant.external_id, "member-1")
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
@@ -331,19 +318,7 @@ async def test_concurrent_role_admissions_do_not_need_nested_pool_connections(
     )
     async with asyncio.timeout(10):
         admissions = await asyncio.gather(
-            *(
-                admit(
-                    deps,
-                    origin="chat",
-                    tenant_id=tenant.id,
-                    platform="discord",
-                    external_user_id=user,
-                    channel_id="chan-1",
-                    now=_NOW,
-                    requester_org=RequesterOrg.HOST,
-                )
-                for user in ("one", "two")
-            )
+            *(admit_chat(deps, tenant, external_user_id=user, now=_NOW) for user in ("one", "two"))
         )
     assert len(admissions) == 2
 
@@ -419,16 +394,8 @@ async def test_agent_role_revoked_without_cache_invalidation_denies_every_rechec
         ),
         membership_resolver=Resolver(fetch),
     )
-    admission = await admit(
-        deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="member-1",
-        channel_id="chan-1",
-        thread_id="thr-1",
-        now=_NOW,
-        requester_org=RequesterOrg.HOST,
+    admission = await admit_chat(
+        deps, tenant, external_user_id="member-1", thread_id="thr-1", now=_NOW
     )
     assert admission.grant is not None
     assert admission.grant.subject.role_ids == ("123",)
@@ -437,17 +404,7 @@ async def test_agent_role_revoked_without_cache_invalidation_denies_every_rechec
         if checkpoint == "queued_send":
             await decide_before_send(deps, admission)()
         elif checkpoint == "continuation":
-            await admit(
-                deps,
-                origin="chat",
-                tenant_id=tenant.id,
-                platform="discord",
-                external_user_id="member-1",
-                channel_id="chan-1",
-                thread_id="thr-1",
-                now=_NOW,
-                requester_org=RequesterOrg.HOST,
-            )
+            await admit_chat(deps, tenant, external_user_id="member-1", thread_id="thr-1", now=_NOW)
         else:
             await reauthorize(deps, admission)
     assert fresh[-1] is True
@@ -468,15 +425,11 @@ async def test_agent_role_gate_denies_missing_resolver_on_new_turn(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
     with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
-        await admit(
+        await admit_chat(
             deps,
-            origin="chat",
-            tenant_id=tenant.id,
-            platform="discord",
+            tenant,
             external_user_id="member-1",
-            channel_id="chan-1",
             now=_NOW,
-            requester_org=RequesterOrg.HOST,
             role=Role.ADMIN,
             role_ids=("123",),
             verified_membership=True,
@@ -529,13 +482,10 @@ async def test_nonhuman_origins_admit_gated_agent_only_for_an_owner_holding_the_
     )
 
     async def run() -> object:
-        return await admit(
+        return await admit_chat(
             deps,
-            tenant_id=tenant.id,
-            requester_org=RequesterOrg.HOST,
-            platform="discord",
+            tenant,
             external_user_id="member-1",
-            channel_id="chan-1",
             thread_id="thr-1",
             now=_NOW,
             origin=origin,

@@ -8,7 +8,6 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.core.config import RepoMemorySettings
@@ -18,8 +17,10 @@ from daimon.core.stores.domain import Role
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.ma_models import ma_agent
 
+from .harness import auth_identity
+
 TENANT = uuid.UUID(int=1)
-AUTH = AuthIdentity(tenant_id=TENANT, account_id=uuid.UUID(int=2), role=Role.USER)
+AUTH = auth_identity(uuid.UUID(int=2), TENANT, role=Role.USER)
 POLICY = ToolSafetyPolicy(enabled=True, agent_rules=True)
 AGENT = ma_agent(
     id="agent",

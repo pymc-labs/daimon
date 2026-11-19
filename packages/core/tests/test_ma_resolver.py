@@ -14,6 +14,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 import pytest
@@ -57,6 +58,9 @@ def _env_payload(env: BetaEnvironment) -> dict[str, object]:
 async def _noop_apply() -> object:
     """No-op apply_callable for tests that don't exercise the miss path."""
     return object()
+
+
+_resolve_environment = partial(resolve_environment, apply_callable=_noop_apply, daimon_tag="daimon")
 
 
 # ---------------------------------------------------------------------------
@@ -579,12 +583,8 @@ async def test_environment_listing_populates_all_tenant_tags(
     client = build_fake_anthropic(router.dispatch)
     for n in range(3):
         assert (
-            await resolve_environment(
-                client,
-                tenant_id=tenant_id,
-                daimon_tag=f"env-{n}",
-                apply_callable=_noop_apply,
-                cache=resolver_cache,
+            await _resolve_environment(
+                client, tenant_id=tenant_id, daimon_tag=f"env-{n}", cache=resolver_cache
             )
             == f"env_{n}"
         )
@@ -1013,13 +1013,8 @@ async def test_resolve_environment_404_falls_through_to_tag_lookup(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    out = await resolve_environment(
-        client,
-        tenant_id=tenant_id,
-        daimon_tag="daimon",
-        cached_id="env_gone",
-        apply_callable=_noop_apply,
-        cache=resolver_cache,
+    out = await _resolve_environment(
+        client, tenant_id=tenant_id, cached_id="env_gone", cache=resolver_cache
     )
 
     assert out == "env_fresh", "404 on cached env id should re-resolve via tag"
@@ -1051,13 +1046,8 @@ async def test_resolve_environment_400_invalid_falls_through_to_tag_lookup(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    out = await resolve_environment(
-        client,
-        tenant_id=tenant_id,
-        daimon_tag="daimon",
-        cached_id="env_pending",
-        apply_callable=_noop_apply,
-        cache=resolver_cache,
+    out = await _resolve_environment(
+        client, tenant_id=tenant_id, cached_id="env_pending", cache=resolver_cache
     )
 
     assert out == "env_fresh", "400 on cached env id should re-resolve via tag"
@@ -1088,13 +1078,8 @@ async def test_resolve_environment_archived_falls_through_to_tag_lookup(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    out = await resolve_environment(
-        client,
-        tenant_id=tenant_id,
-        daimon_tag="daimon",
-        cached_id="env_old",
-        apply_callable=_noop_apply,
-        cache=resolver_cache,
+    out = await _resolve_environment(
+        client, tenant_id=tenant_id, cached_id="env_old", cache=resolver_cache
     )
 
     assert out == "env_fresh", (
@@ -1123,13 +1108,8 @@ async def test_resolve_environment_cached_id_wrong_tenant_falls_through_to_tag_l
     )
     client = build_fake_anthropic(router.dispatch)
 
-    out = await resolve_environment(
-        client,
-        tenant_id=tenant_id,
-        daimon_tag="daimon",
-        cached_id="env_other",
-        apply_callable=_noop_apply,
-        cache=resolver_cache,
+    out = await _resolve_environment(
+        client, tenant_id=tenant_id, cached_id="env_other", cache=resolver_cache
     )
 
     assert out == "env_fresh", (
@@ -1159,12 +1139,8 @@ async def test_resolve_environment_total_miss_invokes_apply_defaults(
         applied = True
         return object()
 
-    out = await resolve_environment(
-        client,
-        tenant_id=tenant_id,
-        daimon_tag="daimon",
-        apply_callable=fake_apply,
-        cache=resolver_cache,
+    out = await _resolve_environment(
+        client, tenant_id=tenant_id, apply_callable=fake_apply, cache=resolver_cache
     )
 
     assert applied, "env resolver must invoke apply_callable on total miss"

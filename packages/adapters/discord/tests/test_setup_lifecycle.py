@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import discord
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -41,12 +40,10 @@ async def test_raw_archive_reopen_delete_preserve_setup_identities(
     anthropic = build_stub_anthropic()
     defaults = DeploymentDefault()
     cache = new_resolver_cache()
-    runtime = DiscordRuntime(
+    runtime = discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=db_session_factory,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=defaults,
         resolver_cache=cache,
         turn_deps=build_turn_deps(

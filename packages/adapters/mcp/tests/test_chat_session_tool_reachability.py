@@ -53,7 +53,7 @@ from daimon.core.tool_safety import (
 )
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -181,16 +181,12 @@ def _build_client() -> AsyncAnthropic:
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_agent(name="demo-new-agent").model_dump(mode="json")
-        ),
+        lambda _r, _m: httpx.Response(200, json=ma_agent_payload(name="demo-new-agent")),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_agent(name="demo-new-agent").model_dump(mode="json")
-        ),
+        lambda _r, _m: httpx.Response(200, json=ma_agent_payload(name="demo-new-agent")),
     )
     return build_fake_anthropic(router.dispatch)
 

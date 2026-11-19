@@ -54,6 +54,8 @@ from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 ROOM = "111111111111111111"
 CHAT_THREAD = "555555555555555555"
 USER = "444444444444444444"
@@ -272,12 +274,8 @@ async def test_capability_for_another_channel_adds_no_configuration_read() -> No
     from daimon.core.stores.domain import TurnOriginRow
 
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    auth = AuthIdentity(
-        tenant_id=tenant,
-        account_id=account,
-        role=Role.USER,
-        platform="discord",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        account, tenant, role=Role.USER, platform="discord", chat_session_id="test-session"
     )
     origin = cast(
         TurnOriginRow,
@@ -302,13 +300,12 @@ async def test_capability_for_another_channel_adds_no_configuration_read() -> No
 async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[Case]:
     require_owned_sessionmaker(db_session_factory)
     world = await world_for(db_session_factory)
-    auth = AuthIdentity(
-        account_id=world.account_id,
-        tenant_id=world.tenant_id,
+    auth = auth_identity(
+        world.account_id,
+        world.tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id=USER,
-        is_admin=False,
         chat_session_id="test-session",
     )
     wire = NativeWire()

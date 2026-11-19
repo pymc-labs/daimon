@@ -32,6 +32,7 @@ from daimon.core.stores.file_uploads import create_upload, store_upload_content
 from daimon.core.teams_file_offers import UploadOffer, sign_offer
 from daimon.core.teams_graph import GraphClient, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
+from daimon.testing.builders import file_meta
 from microsoft_teams.api import Attachment, FileConsentCard, FileConsentInvokeActivity
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -188,14 +189,8 @@ def _consent(
 
 
 def _csv(file_id: str = "file_csv", size: int = 4, filename: str = "data.csv") -> FileMetadata:
-    return FileMetadata(
-        id=file_id,
-        created_at=NOW,
-        filename=filename,
-        mime_type="text/csv",
-        size_bytes=size,
-        type="file",
-        downloadable=True,
+    return file_meta(
+        id=file_id, created_at=NOW, filename=filename, mime_type="text/csv", size_bytes=size
     )
 
 

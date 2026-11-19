@@ -8,17 +8,17 @@ import os
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.selfhosted_codec import PROFILE
-from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_host
+from daimon.core.turn.selfhosted_host import HOST, SelfHostedHostRuntime
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, SessionSpec
@@ -30,18 +30,16 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
-    ValidationError,
 )
 
 if TYPE_CHECKING:
     from daimon.core.config import SelfHostedSettings
+    from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.tool_safety import ToolSafetyPolicy
     from mux.drivers.selfhosted import HarnessConfig
 
-_ROWS = TypeAdapter(list[dict[str, JsonValue]])
-_MAX_BYTES = 1_048_576
+PROFILE = SELFHOSTED.profile
 
 
 class EntraTokenProvider:
@@ -152,7 +150,7 @@ class SelfHostedDeployment(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    profile: Literal["selfhosted.loop"] = PROFILE
+    profile: Literal["selfhosted.loop"] = "selfhosted.loop"
     tenant_id: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     channel_id: str = Field(min_length=1)
@@ -191,21 +189,9 @@ def agent_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
 
 
 def _all_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not path:
-        return ()
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            return ()
-        return tuple(
-            SelfHostedDeployment.model_validate(row)
-            for row in _ROWS.validate_json(raw)
-            if row.get("profile") == PROFILE and row.get("tenant_id") == tenant_id
-        )
-    except (OSError, ValidationError):
-        return ()
+    from daimon.core.turn.runtime_manifest import tenant_deployments
+
+    return tenant_deployments(SelfHostedDeployment, PROFILE, tenant_id)
 
 
 def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedHostRuntime:
@@ -882,20 +868,11 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     )
 
 
-def register_runtime() -> None:
+def _tariffs() -> Mapping[tuple[str, str], ProviderPrice]:
     from daimon.core.config import load_billing_settings
     from daimon.core.selfhosted_usage import selfhosted_prices
-    from daimon.core.turn.runtimes import register_channel_runtime
 
-    register_host()
-    register_channel_runtime(
-        PROFILE,
-        build_selfhosted_runtime,
-        authorizations=authorized_deployments,
-        tariffs=lambda: selfhosted_prices(load_billing_settings().selfhosted),
-        fallback=True,
-        agent_grants=agent_deployments,
-    )
+    return selfhosted_prices(load_billing_settings().selfhosted)
 
 
 async def _require_pinned_environment(
@@ -912,3 +889,12 @@ async def _require_pinned_environment(
     pinned = setting if setting is not None else request.admission.backend_agent_revision
     if pinned is None or pinned.environment != deployment.environment_id:
         raise AdmissionDenied(reason="backend_unsupported")
+
+
+BACKEND = replace(
+    HOST,
+    runtime=build_selfhosted_runtime,
+    authorizations=authorized_deployments,
+    tariffs=_tariffs,
+    agent_grants=agent_deployments,
+)

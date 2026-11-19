@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -48,6 +49,10 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_lookup_channel_names = partial(
+    platform_names.lookup_channel_names, platform="discord", external_id="g1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -827,21 +832,11 @@ async def test_a_channel_name_is_asked_for_once_and_remembered(
         asked.append(channel_id)
         return {"c1": " general "}.get(channel_id)
 
-    first = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=tenant,
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c1", "c2"],
-        lookup=lookup,
+    first = await _lookup_channel_names(
+        MagicMock(), tenant_id=tenant, channel_ids=["c1", "c2"], lookup=lookup
     )
-    again = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=tenant,
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c2"],
-        lookup=lookup,
+    again = await _lookup_channel_names(
+        MagicMock(), tenant_id=tenant, channel_ids=["c2"], lookup=lookup
     )
 
     assert first.names == {"c1": "general"} and remembered == [{"c1": "general"}]
@@ -870,13 +865,8 @@ async def test_a_deleted_channel_is_answered_from_memory_and_never_stored(
         }.get(channel_id)
 
     async def ask() -> platform_names.LookedUpChannels:
-        return await platform_names.lookup_channel_names(
-            MagicMock(),
-            tenant_id=tenant,
-            platform="discord",
-            external_id="g1",
-            channel_ids=["gone", "dm"],
-            lookup=lookup,
+        return await _lookup_channel_names(
+            MagicMock(), tenant_id=tenant, channel_ids=["gone", "dm"], lookup=lookup
         )
 
     first, again = await ask(), await ask()
@@ -905,13 +895,8 @@ async def test_a_channel_not_answered_in_time_is_asked_again_a_minute_later(
         return platform_names.ChannelStatus.GONE
 
     async def ask() -> platform_names.LookedUpChannels:
-        return await platform_names.lookup_channel_names(
-            MagicMock(),
-            tenant_id=tenant,
-            platform="discord",
-            external_id="g1",
-            channel_ids=["c1"],
-            lookup=lookup,
+        return await _lookup_channel_names(
+            MagicMock(), tenant_id=tenant, channel_ids=["c1"], lookup=lookup
         )
 
     tenant = uuid.uuid4()
@@ -933,13 +918,8 @@ async def test_a_channel_lookup_that_raises_names_nothing() -> None:
     async def broken(_guild: str, _channel_id: str) -> str | None:
         raise RuntimeError("boom")
 
-    found = await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=uuid.uuid4(),
-        platform="discord",
-        external_id="g1",
-        channel_ids=["c1"],
-        lookup=broken,
+    found = await _lookup_channel_names(
+        MagicMock(), tenant_id=uuid.uuid4(), channel_ids=["c1"], lookup=broken
     )
     assert found.labels() == {}, "a failed lookup names nothing"
 
@@ -1006,13 +986,8 @@ async def test_a_channel_lookup_asks_for_a_capped_number_at_a_bounded_pace() -> 
         running -= 1
         return None
 
-    await platform_names.lookup_channel_names(
-        MagicMock(),
-        tenant_id=uuid.uuid4(),
-        platform="discord",
-        external_id="g1",
-        channel_ids=[f"c{n}" for n in range(50)],
-        lookup=lookup,
+    await _lookup_channel_names(
+        MagicMock(), tenant_id=uuid.uuid4(), channel_ids=[f"c{n}" for n in range(50)], lookup=lookup
     )
 
     assert len(asked) == 20, "no more than 20 channels are asked about per call"

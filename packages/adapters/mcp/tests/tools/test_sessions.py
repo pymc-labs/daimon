@@ -12,15 +12,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
     BetaManagedAgentsUserMessageEvent,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.sessions import (
     SessionEventOut,
@@ -34,7 +25,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import render_turn_origin
 from daimon.testing.asgi import call_mcp_tool
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -42,6 +33,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, lis
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from ..harness import auth_identity, production_identity_middleware
 
 
 @pytest.fixture(autouse=True)
@@ -83,17 +76,7 @@ def _sessions_mcp_app(client: AsyncAnthropic, token: str, claims: dict[str, str]
     behind the real auth + identity middleware pipeline."""
     mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
     mcp = FastMCP(name="sessions-schema-test", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=mock_sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(mock_sessionmaker))
     register_sessions_tools(mcp, _runtime(client))
     return mcp.http_app()
 
@@ -166,13 +149,7 @@ async def test_get_session_admits_novel_status_string_through_fastmcp() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -227,13 +204,7 @@ async def test_list_session_events_admits_thread_status_events_through_fastmcp()
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -283,13 +254,7 @@ async def test_list_sessions_returns_only_tenant_scoped_sessions() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -305,12 +270,11 @@ async def test_list_sessions_returns_only_tenant_scoped_sessions() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     result = await _list_sessions_impl(_runtime(client), auth, page=None, agent_name=None)
@@ -330,12 +294,11 @@ async def test_list_sessions_with_unknown_agent_name_raises() -> None:
     router.add("GET", r"/v1/agents", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     with pytest.raises(ToolError, match="not found"):
@@ -352,13 +315,7 @@ async def test_get_session_raises_when_session_belongs_to_other_tenant() -> None
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -373,12 +330,11 @@ async def test_get_session_raises_when_session_belongs_to_other_tenant() -> None
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     with pytest.raises(ToolError, match="conversation not found"):
@@ -394,13 +350,7 @@ async def test_get_session_returns_session_info_when_owned() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -417,12 +367,11 @@ async def test_get_session_returns_session_info_when_owned() -> None:
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     result = await _get_session_impl(_runtime(client), auth, "ses_1")
@@ -449,13 +398,7 @@ async def test_list_session_events_returns_page_envelope() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -475,12 +418,11 @@ async def test_list_session_events_returns_page_envelope() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     result = await _list_session_events_impl(
@@ -541,13 +483,7 @@ async def test_list_session_events_never_returns_a_turn_origin_id() -> None:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -566,12 +502,11 @@ async def test_list_session_events_never_returns_a_turn_origin_id() -> None:
         lambda _r, _m: httpx.Response(200, json={"data": [user_event, tool_event]}),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        account_id,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
 
@@ -597,13 +532,7 @@ def _agents_router(tenant_id: uuid.UUID) -> MARouter:
         "GET",
         r"/v1/agents",
         lambda _r, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_a",
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_a", name="demo", tenant_id=tenant_id)]
         ),
     )
     return router
@@ -625,7 +554,7 @@ async def test_get_session_refuses_a_session_opened_by_another_member() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=other_account, tenant_id=tenant_id, role=Role.USER)
+    auth = auth_identity(other_account, tenant_id, role=Role.USER)
 
     with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_1")
@@ -646,14 +575,7 @@ async def test_get_session_refuses_another_members_session_even_for_an_admin() -
     )
     client = build_fake_anthropic(router.dispatch)
 
-    admin = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        token_kind="cli",
-    )
+    admin = auth_identity(uuid.uuid4(), tenant_id, token_kind="cli")
 
     with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), admin, "ses_1")
@@ -671,7 +593,7 @@ async def test_get_session_refuses_an_unattributable_session() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER)
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
 
     with pytest.raises(ToolError, match="conversation not found"):
         await _get_session_impl(_runtime(client), auth, "ses_1")
@@ -697,12 +619,11 @@ async def test_list_sessions_hides_other_members_sessions() -> None:
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=mine,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        mine,
+        tenant_id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         token_kind="cli",
     )
     results = await _list_sessions_impl(_runtime(client), auth, None, None)

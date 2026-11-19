@@ -60,6 +60,8 @@ from mcp.types import TextContent
 from pydantic import HttpUrl, PostgresDsn, PrivateAttr, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 _SECRET = "s" * 32
 _URL = "https://mcp.example.com/mcp"
 _USER = "user-1"
@@ -89,9 +91,9 @@ class Rig:
     extra: tuple[str, ...] = ()
 
     def identity(self, **changes: Any) -> AuthIdentity:
-        base = AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        base = auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform="discord",
             chat_agent_id=self.agent_id,

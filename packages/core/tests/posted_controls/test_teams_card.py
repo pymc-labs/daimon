@@ -7,6 +7,7 @@ import json
 import pytest
 from daimon.core.posted_controls.teams_card import CREDENTIAL_DIALOG, build_adaptive_card
 
+from ..shared_fakes import control_card as _control_card
 from .test_cards import AGENT, KINDS, STATES, TOKEN, build
 
 
@@ -66,27 +67,4 @@ def test_a_control_card_answers_through_one_execute_verb(kind: str) -> None:
     ], "every button presses through the one verb with its own custom id"
     assert [a.get("style") for a in actions["actions"]] == [None, "positive"], (  # type: ignore[union-attr]
         "only the rightmost button, the card's own action, is filled"
-    )
-
-
-def _control_card(kind: str, requester: str):
-    """A posted control card with Cancel and the filled action rightmost, as posted cards are."""
-    import datetime as dt
-    import uuid
-
-    from daimon.core.posted_controls import FOOTER_TEMPLATE, CardButton, PostedCard
-
-    card_id = uuid.uuid4()
-    return PostedCard(
-        kind=kind,  # pyright: ignore[reportArgumentType]
-        state="requested",
-        headline="Change the model?",
-        facts=("Researcher moves to OpenAI.",),
-        buttons=(
-            CardButton(label="Cancel", style="secondary", custom_id=f"bsw:{card_id}:cancel"),
-            CardButton(label="Switch", style="primary", custom_id=f"bsw:{card_id}:confirm"),
-        ),
-        footer=FOOTER_TEMPLATE,
-        requester_platform_user_id=requester,
-        expires_at_unix=int((dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)).timestamp()),
     )

@@ -50,9 +50,10 @@ from daimon.core.session_update_ops import (
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores.agent_files import list_agent_files, put_agent_file
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
@@ -230,14 +231,7 @@ async def test_env_replacement_deletes_the_old_resource_before_adding_the_new_on
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="TOGGL_TOKEN",
-        content="tok",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="TOGGL_TOKEN", content="tok")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -299,14 +293,7 @@ async def test_env_replacement_enqueues_the_new_file_for_ttl_deletion(
 ) -> None:
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -339,14 +326,7 @@ async def test_env_replacement_finds_the_mounted_env_when_no_resource_id_was_rec
     """A backfilled snapshot may not name the resource; the session does."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -382,14 +362,7 @@ async def test_env_replacement_that_keeps_nothing_only_removes_the_mount(
     """`agent_env_file` Off: the saved keys stay, the session's `.env` goes."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -425,14 +398,7 @@ async def test_env_replacement_clears_the_recorded_env_when_the_add_fails_after_
     mounting the secrets the caller saved."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())
@@ -505,14 +471,7 @@ async def test_update_defers_as_session_busy_when_ma_refuses_a_running_session(
     it must still be reported, or the caller would redo it."""
     tenant = await make_tenant(db_session)
     agent_uuid = uuid.uuid4()
-    await put_agent_file(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id=agent_uuid,
-        key="KEY",
-        content="v",
-        set_by_account_id=None,
-    )
+    await new_agent_file(db_session, tenant, agent_id=agent_uuid, key="KEY", content="v")
     await db_session.commit()
 
     state = FakeSessionsState(ma=FakeMAState())

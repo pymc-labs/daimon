@@ -20,12 +20,12 @@ from daimon.adapters.discord.agent_setup.roster_view import RosterView
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, setup_target_label
 from daimon.core.stores.tenants import set_provision_status
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.exc import SQLAlchemyError
@@ -75,9 +75,7 @@ def _make_interaction(runtime: DiscordRuntime, *, guild_id: int, channel_id: int
 async def _provision(
     db_session_factory: async_sessionmaker[AsyncSession], *, guild_id: int, status: str
 ) -> uuid.UUID:
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=str(guild_id)
-    )
+    result = await provision_workspace(db_session_factory, str(guild_id))
     await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status=status)
     return result.tenant_id
 

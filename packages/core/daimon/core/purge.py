@@ -4,26 +4,9 @@ Single core entry point that deletes every row referencing a principal (or all
 principals under an account) across stores, in FK-safe order, inside a single
 transaction. Idempotent on re-run; rolls back fully on any helper raise.
 
-Registry note: the per-store delete sequence is hardcoded inside
-`_purge_principal_in_session`. Adding a new principal-scoped table means
-appending one helper call here plus one int field on `PurgeReport`. Current
-sequence: user_skills -> github_credentials -> agent_github_binding ->
-github_oauth_states (both kinds where the table permits) -> credential_requests
-(both kinds, platform-user-scoped like github_oauth_states) -> wizard_session
-(both kinds, platform-user-scoped like credential_requests) -> message_feedback
-(platform only, platform-user-scoped) -> routines (platform only) ->
-principal_links -> principal row -> platform_user_names (platform only,
-platform-user-scoped, after the principal row on purpose: see the call) ->
-teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
-Entra user)).
-Account-level deletes (mcp_tokens, connector_tokens, GitHub connect requests and click intents,
-message_feedback, tag_opt_outs, monitored_events, user_configs, accounts)
-run in `purge_account` after all principal rows are gone; mcp_tokens and
-message_feedback are keyed by account_id and are deleted before delete_account
-so their CASCADE FKs to accounts.id are satisfied. message_feedback is deleted
-by an account-id predicate OR'd with the account's (tenant, platform-user)
-keys, because a vote cast before the person had an account row carries a null
-account id.
+Registry note: the tables and their FK-safe order live in `daimon.core.erasure.ERASABLE`,
+which the privacy preview counts from too. Each principal runs the principal pass; the
+account pass runs after every principal and before the account row goes.
 
 message_feedback is the one table deleted on BOTH paths, because it is the
 one table whose rows can carry either identity key. The principal path
@@ -44,12 +27,6 @@ TTL-bounded relevance) — erasure therefore rides this purge path exactly like
 the OAuth handshake table, rather than a scheduled job. Precedent sweepers
 (`mcp_credential_sweep.py`, `pending_file_sweeper.py`) exist if volume ever
 justifies one instead.
-
-Divergent helper signatures: identity-store `delete_for_principal` is keyed by
-UUID; routines `delete_for_principal` is keyed by `(platform, external_id)`
-because routines reference platform users by their external id, not the
-principal UUID. The orchestrator dispatches manually rather than via a unified
-Protocol.
 
 Long-job records are erased through the accounts.id ON DELETE CASCADE; their
 cancellation audit rows cascade from the job. Worker sessions carry the same
@@ -137,8 +114,7 @@ import asyncio
 import random
 import uuid
 from collections.abc import Iterable
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import fields, replace
 from typing import Literal
 
 import structlog
@@ -146,6 +122,7 @@ from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.erasure import ERASABLE, Principal, Subject
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
@@ -154,53 +131,23 @@ from daimon.core.memory_resource import (
 )
 from daimon.core.provider_purge import ProviderSessionDeleter, delete_provider_sessions
 from daimon.core.stores import accounts as accounts_store
-from daimon.core.stores import agent_posts as agent_posts_store
-from daimon.core.stores import coding_key_claims as coding_key_claims_store
-from daimon.core.stores import connector_tokens as connector_tokens_store
-from daimon.core.stores import credential_requests as credential_requests_store
-from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import dm_access as dm_access_store
-from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
-from daimon.core.stores import gemini_runtime_state as gemini_state_store
-from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
-from daimon.core.stores import held_timers as held_timers_store
-from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
-from daimon.core.stores import lead_intake as lead_intake_store
-from daimon.core.stores import mcp_tokens as mcp_tokens_store
-from daimon.core.stores import message_feedback as message_feedback_store
-from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
-from daimon.core.stores import monitoring as monitoring_store
 from daimon.core.stores import mux_erasure as mux_erasure_store
-from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import security_audit as security_audit_store
-from daimon.core.stores import selfhosted_resources as selfhosted_store
-from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
-from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
-from daimon.core.stores import support as support_store
-from daimon.core.stores import support_escalation as support_escalation_store
-from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
-from daimon.core.stores import teams_message_admissions as teams_admissions_store
-from daimon.core.stores import tenants as tenants_store
-from daimon.core.stores import user_skills as user_skills_store
 from daimon.core.stores import watches as watches_store
-from daimon.core.stores import web_people as web_people_store
-from daimon.core.stores import web_roles as web_roles_store
-from daimon.core.stores import wizard_session as wizard_session_store
-from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
+from daimon.core.stores.domain import PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
-
-Principal = CliPrincipalRow | PlatformPrincipalRow
 
 
 class PurgeReport(BaseModel):
@@ -261,61 +208,8 @@ class PurgeReport(BaseModel):
     host_call_cards: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
-        return PurgeReport(
-            watches=self.watches + other.watches,
-            lead_intakes=self.lead_intakes + other.lead_intakes,
-            routines=self.routines + other.routines,
-            principal_links=self.principal_links + other.principal_links,
-            cli_principals=self.cli_principals + other.cli_principals,
-            platform_principals=self.platform_principals + other.platform_principals,
-            user_configs=self.user_configs + other.user_configs,
-            accounts=self.accounts + other.accounts,
-            user_skills=self.user_skills + other.user_skills,
-            github_connect_requests=self.github_connect_requests + other.github_connect_requests,
-            github_connect_click_intents=(
-                self.github_connect_click_intents + other.github_connect_click_intents
-            ),
-            github_user_links=self.github_user_links + other.github_user_links,
-            mcp_tokens=self.mcp_tokens + other.mcp_tokens,
-            connector_tokens=self.connector_tokens + other.connector_tokens,
-            gemini_records=self.gemini_records + other.gemini_records,
-            selfhosted_operations=self.selfhosted_operations + other.selfhosted_operations,
-            slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
-            slack_turn_contexts=self.slack_turn_contexts + other.slack_turn_contexts,
-            direct_message_conversations=(
-                self.direct_message_conversations + other.direct_message_conversations
-            ),
-            dm_carry_overs=self.dm_carry_overs + other.dm_carry_overs,
-            held_timers=self.held_timers + other.held_timers,
-            tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
-            dm_picks=self.dm_picks + other.dm_picks,
-            dm_rules=self.dm_rules + other.dm_rules,
-            dm_grant_users=self.dm_grant_users + other.dm_grant_users,
-            credential_requests=self.credential_requests + other.credential_requests,
-            wizard_sessions=self.wizard_sessions + other.wizard_sessions,
-            message_feedback=self.message_feedback + other.message_feedback,
-            support_escalations=self.support_escalations + other.support_escalations,
-            support_requests_anonymized=(
-                self.support_requests_anonymized + other.support_requests_anonymized
-            ),
-            support_person_limits=self.support_person_limits + other.support_person_limits,
-            support_settlers_cleared=self.support_settlers_cleared + other.support_settlers_cleared,
-            daimon_admins=self.daimon_admins + other.daimon_admins,
-            agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
-            platform_user_names=self.platform_user_names + other.platform_user_names,
-            teams_messages=self.teams_messages + other.teams_messages,
-            microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
-            web_people=self.web_people + other.web_people,
-            monitored_events=self.monitored_events + other.monitored_events,
-            web_admin_grants=self.web_admin_grants + other.web_admin_grants,
-            mux_slots=self.mux_slots + other.mux_slots,
-            mux_binding_generations=self.mux_binding_generations + other.mux_binding_generations,
-            mux_journal_sessions=self.mux_journal_sessions + other.mux_journal_sessions,
-            mux_journal_events=self.mux_journal_events + other.mux_journal_events,
-            mux_leases=self.mux_leases + other.mux_leases,
-            mux_release_requests=self.mux_release_requests + other.mux_release_requests,
-            mux_operations=self.mux_operations + other.mux_operations,
-            host_call_cards=self.host_call_cards + other.host_call_cards,
+        return PurgeReport.model_validate(
+            {name: getattr(self, name) + getattr(other, name) for name in PurgeReport.model_fields}
         )
 
 
@@ -333,25 +227,14 @@ class AccountPurgeResult(BaseModel):
     )
 
 
-# FK-safe order: routines -> principal_links -> principal row. Append new
-# principal-scoped helpers above the principal-row delete; account-level
-# deletes happen in `purge_account` after this returns.
 async def _purge_principal_in_session(
     session: AsyncSession, *, principal: Principal
 ) -> PurgeReport:
-    """Delete every row referencing `principal` on the given open session.
+    """Delete every row referencing `principal` on the given open session, in `ERASABLE` order.
 
     Does NOT open a transaction — caller owns the begin() block. Failures
     propagate so the caller's transaction rolls back.
     """
-    agent_post_requesters_count = 0
-    platform_user_names_count = 0
-    teams_messages_count = 0
-    microsoft_user_tokens_count = 0
-    lead_intakes_count = 0
-    host_call_cards_count = 0
-    dm_rules_count = 0
-    dm_grant_users_count = 0
     # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
     is_platform = isinstance(principal, PlatformPrincipalRow)
     await routines_store.erase_sandbox_setter(
@@ -359,232 +242,8 @@ async def _purge_principal_in_session(
         ids=[] if is_platform else [str(principal.id)],
         platform_users=[(principal.tenant_id, principal.external_id)] if is_platform else [],
     )
-    if isinstance(principal, PlatformPrincipalRow):
-        lead_intakes_count = await lead_intake_store.erase_actor(
-            session, principal.tenant_id, principal.external_id
-        )
-        routines_count = await routines_store.delete_for_principal(
-            session,
-            tenant_id=principal.tenant_id,
-            external_id=principal.external_id,
-        )
-        kind: Literal["cli", "platform"] = "platform"
-        # credential_requests carries the same non-globally-unique
-        # platform_user_id caveat as oauth_states above — always tenant-scoped.
-        credential_requests_count = (
-            await credential_requests_store.delete_credential_requests_for_platform_user(
-                session,
-                platform_user_id=principal.external_id,
-                tenant_id=principal.tenant_id,
-            )
-        )
-        # wizard_session carries the same non-globally-unique platform_user_id
-        # caveat as credential_requests above — always tenant-scoped.
-        wizard_sessions_count = await wizard_session_store.delete_wizard_sessions_for_platform_user(
-            session,
-            platform_user_id=principal.external_id,
-            tenant_id=principal.tenant_id,
-        )
-        # message_feedback carries the SAME (tenant, platform-user) identity key
-        # as the three tables above, so it must be purged on this path too:
-        # a vote row can carry account_id = NULL (the reaction path never mints
-        # a principal), leaving votes AND their attached free text behind if
-        # only the account-level pass in purge_account deleted them.
-        # Deliberately the narrow platform-user-keyed helper, not the
-        # account-keyed one: purging ONE principal must not erase the same
-        # account's votes under another tenant.
-        message_feedback_count = (
-            await message_feedback_store.delete_message_feedback_for_platform_user(
-                session,
-                tenant_id=principal.tenant_id,
-                platform_user_id=principal.external_id,
-            )
-        )
-        # An imported earlier conversation is keyed by this same platform user.
-        dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
-            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
-        )
-        # An imported timer is keyed by the same platform user, and keeps who it was for.
-        held_timers_count = await held_timers_store.delete_for_users(
-            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
-        )
-        # support_escalations carries the SAME (tenant, platform-user) key and
-        # the same account_id = NULL hazard: somebody can ask for help without
-        # ever having taken a turn, so an account-keyed pass alone would leave
-        # the request AND its free-text note behind. The note is unsolicited
-        # personal text, so this is the same erasure obligation the vote text
-        # carries, not a bookkeeping nicety.
-        support_escalations_count = (
-            await support_escalation_store.delete_support_escalations_for_platform_user(
-                session,
-                tenant_id=principal.tenant_id,
-                platform_user_id=principal.external_id,
-            )
-        )
-        # A limit row is the shared ledger too: the person leaves it, the charge stays.
-        support_anonymized_count = (
-            await support_escalation_store.anonymize_limit_requests_for_platform_user(
-                session,
-                tenant_id=principal.tenant_id,
-                platform_user_id=principal.external_id,
-            )
-        )
-        support_person_limits_count = await support_store.delete_person_limits_for_people(
-            session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
-        )
-        # A support post may sit in another tenant, so a settler matches in any.
-        support_settlers_count = await support_escalation_store.clear_settler(
-            session, settler_keys=[(principal.platform, principal.external_id)]
-        )
-        # A channel admin grant names the person by platform user id; the row
-        # itself is the tenant's, so only their id leaves it.
-        from daimon.core.stores.daimon_admins import erase_user
-        from daimon.core.stores.security_audit import erase_admin_subject
-
-        daimon_admins_count = await erase_user(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
-        await erase_admin_subject(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
-        # A turn's posts and an auto-opened thread name who asked; the posts
-        # are the agent's, so only the person's id leaves them.
-        agent_post_requesters_count = await agent_posts_store.clear_requester(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
-        # A gated call's card holds the args the person asked for; account erasure
-        # cascades, so this path covers a principal purged on its own.
-        host_call_cards_count = await host_call_cards_store.delete_for_platform_user(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
-        # The person's own routing rules and listed-grant entries, as the account purge does.
-        dm_keys = [(principal.tenant_id, principal.external_id)]
-        dm_now = datetime.now(UTC)
-        dm_rules_count = await dm_access_store.delete_user_rules(session, keys=dm_keys, now=dm_now)
-        dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
-            session, keys=dm_keys, now=dm_now
-        )
-    else:
-        routines_count = 0
-        kind = "cli"
-        # CLI principals never own credential_requests rows in practice (the
-        # credential button flow is Discord-only), so this always reports 0 —
-        # kept for symmetry with the platform branch and future-proofing.
-        credential_requests_count = (
-            await credential_requests_store.delete_credential_requests_for_platform_user(
-                session,
-                platform_user_id=principal.os_user,
-                tenant_id=principal.tenant_id,
-            )
-        )
-        # CLI principals never own wizard_session rows in practice (the wizard
-        # flow is chat-platform-only), so this always reports 0 — kept for
-        # symmetry with the platform branch and future-proofing.
-        wizard_sessions_count = await wizard_session_store.delete_wizard_sessions_for_platform_user(
-            session,
-            platform_user_id=principal.os_user,
-            tenant_id=principal.tenant_id,
-        )
-        # A vote is always cast by a platform user reacting in a guild, so a
-        # CLI principal owns no message_feedback rows — nothing to delete, and
-        # no symmetric call here: os_user is not a reaction identity, and
-        # running one would risk deleting an unrelated platform user's rows
-        # that happen to share the string.
-        dm_carry_overs_count = 0
-        held_timers_count = 0
-        message_feedback_count = 0
-        # Escalation is a reaction-then-modal path in a guild, so a CLI
-        # principal owns no support_escalations rows — same reasoning, and the
-        # same refusal to match on os_user, as message_feedback above.
-        support_escalations_count = 0
-        support_anonymized_count = support_person_limits_count = support_settlers_count = 0
-        daimon_admins_count = 0
-
-    user_skills_count = await user_skills_store.delete_user_skills_for_principal(
-        session, principal_id=principal.id
-    )
-
-    # slack_user_tokens is keyed by (team_id, slack_user_id), not principal_id.
-    # team_id = Tenant.external_id (the folded workspace_id) resolved at
-    # runtime via principal.tenant_id — derive_tenant_uuid can't be reversed.
-    # Gated to Slack platform principals; CLI principals never own this row.
-    slack_user_tokens_count = 0
-    if isinstance(principal, PlatformPrincipalRow) and principal.platform == "slack":
-        tenant = await tenants_store.get_tenant(session, principal.tenant_id)
-        if tenant is not None:
-            slack_user_tokens_count = await slack_user_tokens_store.delete_slack_user_token(
-                session, team_id=tenant.external_id, slack_user_id=principal.external_id
-            )
-
-    links_count = await identity_store.delete_principal_links_for_principal(
-        session, principal_id=principal.id, kind=kind
-    )
-    principal_count = await identity_store.delete_for_principal(
-        session, principal_id=principal.id, kind=kind
-    )
-    if isinstance(principal, PlatformPrincipalRow):
-        # The name the platform last gave for them (the billing panel's
-        # fallback), keyed by (tenant, platform, platform user) like the grants
-        # above. Deleted AFTER the principal row: a name write locks that row,
-        # so one racing this purge has either committed (and is deleted here)
-        # or will find no principal and store nothing. The caller drops the
-        # in-process queue once the transaction has committed (`_forget_queued_names`):
-        # a rolled-back or retried purge must not discard names for a person it did
-        # not delete.
-        platform_user_names_count = await platform_names_store.delete_user_names_for_platform_user(
-            session,
-            tenant_id=principal.tenant_id,
-            platform=principal.platform,
-            platform_user_id=principal.external_id,
-        )
-        if principal.platform == "teams":
-            # Their message receipts lose the person and any unhandled words but stay as the
-            # duplicate guard: deleted, a later catch-up would run the message again.
-            teams_messages_count = await teams_admissions_store.forget_teams_messages_for_user(
-                session, tenant_id=principal.tenant_id, user_id=principal.external_id
-            )
-            # Their Connect Microsoft refresh token; sign-in links cascade with the account.
-            microsoft_user_tokens_count = await microsoft_tokens_store.delete_microsoft_user_token(
-                session, tenant_id=principal.tenant_id, user_id=principal.external_id
-            )
-
-    return PurgeReport(
-        lead_intakes=lead_intakes_count,
-        routines=routines_count,
-        principal_links=links_count,
-        cli_principals=principal_count if kind == "cli" else 0,
-        platform_principals=principal_count if kind == "platform" else 0,
-        user_skills=user_skills_count,
-        slack_user_tokens=slack_user_tokens_count,
-        credential_requests=credential_requests_count,
-        wizard_sessions=wizard_sessions_count,
-        message_feedback=message_feedback_count,
-        dm_carry_overs=dm_carry_overs_count,
-        held_timers=held_timers_count,
-        support_escalations=support_escalations_count,
-        support_requests_anonymized=support_anonymized_count,
-        support_person_limits=support_person_limits_count,
-        support_settlers_cleared=support_settlers_count,
-        daimon_admins=daimon_admins_count,
-        agent_post_requesters=agent_post_requesters_count,
-        platform_user_names=platform_user_names_count,
-        teams_messages=teams_messages_count,
-        microsoft_user_tokens=microsoft_user_tokens_count,
-        host_call_cards=host_call_cards_count,
-        dm_rules=dm_rules_count,
-        dm_grant_users=dm_grant_users_count,
+    return PurgeReport.model_validate(
+        {e.key: await e.principal(session, principal) for e in ERASABLE if e.principal}
     )
 
 
@@ -702,9 +361,6 @@ async def _purge_account_transaction(
         sub = await _purge_principal_in_session(session, principal=principal)
         report = report.merge(sub)
 
-    # Conversation/artifact records are purged. Conservative holds contain
-    # financial attempt metadata, not conversation payload; retain them as
-    # audit evidence rather than replenishing a cap when an account is erased.
     # The account's private provider slots, journal, leases, operations and release
     # requests. Shared conversations and settlement evidence stay (the retained
     # counts say so). Before the account row goes: operations are also matched by
@@ -720,98 +376,13 @@ async def _purge_account_transaction(
     mux_erased = await mux_erasure_store.erase(
         session, account_id=account_id, principal_ids=principal_ids
     )
-    gemini_records_count = await gemini_state_store.delete_records_for_account(
-        session, account_id=account_id
-    )
-    connector_tokens_count = await connector_tokens_store.delete_connector_tokens_for_account(
-        session, account_id=account_id
-    )
-    selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
-        session, account_id=account_id
-    )
-    # Account-scoped (keyed by account_id, not principal): delete the
-    # per-agent MCP token rows BEFORE delete_account — they reference
-    # accounts.id, so leaving them trips the FK and rolls back the purge.
-    # The pending codes that trade for a key count with the tokens they would make.
-    mcp_tokens_count = await coding_key_claims_store.delete_claims_for_account(
-        session, account_id=account_id
-    )
-    mcp_tokens_count += await mcp_tokens_store.delete_tokens_for_account(
-        session, account_id=account_id
-    )
-    github_connect_requests_count = await github_connect_store.delete_requests_for_account(
-        session, account_id=account_id
-    )
-    github_connect_click_intents_count = (
-        await github_connect_store.delete_click_intents_for_account(session, account_id=account_id)
-    )
-    # message_feedback: account-id-keyed OR'd with the account's
-    # (tenant, platform-user) keys — a vote cast before the person had an
-    # accounts row carries a null account_id and is only reachable via the
-    # platform-user key. CLI principals contribute no keys: reactions only
-    # ever come from a platform user, so cli_list is not walked here.
-    platform_user_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
-    message_feedback_count = await message_feedback_store.delete_message_feedback_for_account(
-        session, account_id=account_id, platform_user_keys=platform_user_keys
-    )
-    # Same account_id = NULL hazard, same obligation: the note is
-    # unsolicited personal text, so an account erasure that missed these
-    # rows would leave it behind.
-    support_escalations_count = (
-        await support_escalation_store.delete_support_escalations_for_account(
-            session, account_id=account_id, platform_user_keys=platform_user_keys
-        )
-    )
-    support_anonymized_count = await support_escalation_store.anonymize_limit_requests_for_account(
-        session, account_id=account_id, platform_user_keys=platform_user_keys
-    )
-    support_settlers_count = await support_escalation_store.clear_settler(
-        session, account_id=account_id
-    )
-
-    # slack_turn_contexts: keyed by (tenant_id, account_id), not
-    # principal_id. Loop every tenant the account's principals belong to —
-    # mirrors the upstream session-deletion loop below.
-    slack_turn_contexts_count = 0
-    for tenant_id in tenant_ids:
-        slack_turn_contexts_count += (
-            await slack_turn_contexts_store.delete_turn_contexts_for_account(
-                session, tenant_id=tenant_id, account_id=account_id
-            )
-        )
-    user_cfg_count = await accounts_store.delete_user_config_for_account(
-        session, account_id=account_id
-    )
-    direct_message_count = await direct_messages_store.delete_conversations_for_account(
-        session, account_id=account_id
-    )
-    # Imported before the person had an account, so keyed by platform user, not account.
-    dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
-        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
-    )
-    held_timers_count = await held_timers_store.delete_for_users(
-        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
-    )
-    tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
-    # The person's agent picks, personal routing rules and listed-grant entries.
-    dm_now = datetime.now(UTC)
-    dm_picks_count = await dm_access_store.delete_picks_for_account(session, account_id=account_id)
-    dm_rules_count = await dm_access_store.delete_user_rules(
-        session, keys=platform_user_keys, now=dm_now
-    )
-    dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
-        session, keys=platform_user_keys, now=dm_now
-    )
-    # An admin's account id stays in the rows they set; the settings are the workspace's.
+    # What the principal passes left: account-keyed rows, and rows keyed by any of the
+    # account's platform users (a vote cast before the account existed). All of them
+    # reference accounts.id, so they go before the account row.
+    subject = Subject(account_id, tuple(cli_list), tuple(pp_list))
+    counts = {e.key: await e.account(session, subject) for e in ERASABLE if e.account}
+    # An admin's account id stays in the DM settings they set; the settings are the workspace's.
     await dm_access_store.clear_setter(session, setter=str(account_id))
-    # The web app's people (identities, tokens and browser sessions go with them) and
-    # admin grants cascade from accounts.id; deleted here so the report counts them.
-    web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
-    web_admin_grants_count = await web_roles_store.delete_admin_grants_for_account(
-        session, account_id=account_id
-    )
-    # What the person asked monitored agents, in every workspace; cascades too, but counted.
-    monitored_count = await monitoring_store.delete_for_account(session, account_id=account_id)
     await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
     # Revoke the person's GitHub router bearers before SET NULL detaches them.
     await github_router_sessions_store.close_for_account(session, account_id=account_id)
@@ -827,40 +398,16 @@ async def _purge_account_transaction(
         await mux_erasure_store.mark_erased(
             session, account_id=account_id, principal_ids=principal_ids
         )
+    mux_counts = {f"mux_{f.name}": getattr(mux_erased, f.name) for f in fields(mux_erased)}
     db_report = report.merge(
-        PurgeReport(
-            watches=watches_count,
-            mux_slots=mux_erased.slots,
-            mux_binding_generations=mux_erased.binding_generations,
-            mux_journal_sessions=mux_erased.journal_sessions,
-            mux_journal_events=mux_erased.journal_events,
-            mux_leases=mux_erased.leases,
-            mux_release_requests=mux_erased.release_requests,
-            mux_operations=mux_erased.operations,
-            mcp_tokens=mcp_tokens_count,
-            connector_tokens=connector_tokens_count,
-            gemini_records=gemini_records_count,
-            selfhosted_operations=selfhosted_operations_count,
-            github_connect_requests=github_connect_requests_count,
-            github_connect_click_intents=github_connect_click_intents_count,
-            message_feedback=message_feedback_count,
-            support_escalations=support_escalations_count,
-            support_requests_anonymized=support_anonymized_count,
-            support_settlers_cleared=support_settlers_count,
-            user_configs=user_cfg_count,
-            accounts=account_count,
-            github_user_links=github_user_links_count,
-            slack_turn_contexts=slack_turn_contexts_count,
-            direct_message_conversations=direct_message_count,
-            dm_carry_overs=dm_carry_overs_count,
-            held_timers=held_timers_count,
-            tag_opt_outs=tag_opt_outs_count,
-            dm_picks=dm_picks_count,
-            dm_rules=dm_rules_count,
-            dm_grant_users=dm_grant_users_count,
-            web_people=web_people_count,
-            web_admin_grants=web_admin_grants_count,
-            monitored_events=monitored_count,
+        PurgeReport.model_validate(
+            {
+                **counts,
+                **mux_counts,
+                "watches": watches_count,
+                "accounts": account_count,
+                "github_user_links": github_user_links_count,
+            }
         )
     )
     return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list)), provider_sessions

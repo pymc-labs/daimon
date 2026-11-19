@@ -25,6 +25,7 @@ from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.shared_helpers import vault_obj as _vault_obj
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
@@ -41,17 +42,6 @@ def _session_body(*, session_id: str, agent_id: str, environment_id: str) -> dic
         agent=ma_session_agent(id=agent_id, name="discord-agent", model="claude-opus-4-7"),
         environment_id=environment_id,
     ).model_dump(mode="json")
-
-
-def _vault_obj(vault_id: str, display_name: str, created_at: str) -> dict[str, Any]:
-    return {
-        "id": vault_id,
-        "type": "vault",
-        "display_name": display_name,
-        "metadata": None,
-        "archived_at": None,
-        "created_at": created_at,
-    }
 
 
 def _credential_obj(credential_id: str, vault_id: str) -> dict[str, Any]:

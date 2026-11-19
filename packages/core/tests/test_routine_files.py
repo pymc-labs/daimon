@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from anthropic.types.beta import FileMetadata
 from daimon.core.output_delivery import MAX_BYTES_CEILING
 from daimon.core.routine_files import collect_routine_files, decode_payload, deliver_routine_files
+from daimon.testing.builders import file_meta
 from daimon.testing.ma import MARouter
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 
@@ -18,14 +18,12 @@ def file_client(sizes: list[int]):
         r"/v1/files",
         lambda r, m: list_response(
             [
-                FileMetadata(
+                file_meta(
                     id=f"file_{i}",
                     created_at=datetime.now(UTC),
                     filename=f"{i}.csv",
                     mime_type="text/csv",
                     size_bytes=size,
-                    type="file",
-                    downloadable=True,
                 ).model_dump(mode="json")
                 for i, size in enumerate(sizes)
             ]

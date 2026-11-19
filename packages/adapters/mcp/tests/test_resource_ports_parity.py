@@ -50,12 +50,14 @@ from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel, PostgresDsn, SecretStr
 
+from .harness import auth_identity
+
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
 AGENT = ma_agent(id="agent", tenant_id=TENANT)
-AUTH = AuthIdentity(
-    tenant_id=TENANT,
-    account_id=ACCOUNT,
+AUTH = auth_identity(
+    ACCOUNT,
+    TENANT,
     role=Role.USER,
     agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id="agent"),
 )

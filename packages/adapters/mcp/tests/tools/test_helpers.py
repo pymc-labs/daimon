@@ -20,7 +20,7 @@ from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import create_origin, mark_serving_helpers
 from daimon.testing.factories import make_account, make_tenant, make_web_person
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
@@ -28,6 +28,8 @@ from mux.profiles.selfhosted import LOOP
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 class _World:
@@ -88,19 +90,15 @@ async def _setup(
     world = _World(sessionmaker)
     for agent_id, name in (("ag_lead", "lead"), ("ag_argon", "argon"), ("ag_other", "other")):
         world.agents.append(
-            ma_agent(
+            ma_agent_payload(
                 id=agent_id,
                 name=name,
                 description="Reads papers" if name == "argon" else None,
                 metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: name},
-            ).model_dump(mode="json")
+            )
         )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="slack",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        account.id, tenant.id, role=Role.USER, platform="slack", chat_session_id="test-session"
     )
     return world, auth, origin
 

@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core import agent_skill_files
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
@@ -18,6 +18,7 @@ from daimon.core.authz import Subject, Surface
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_drafts, agent_owners
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -67,14 +68,12 @@ class _FakeSkills:
         return router
 
     def _listed(self) -> dict[str, Any]:
-        return SkillListResponse(
+        return skill_listed(
             id="sk_1",
-            type="custom",
             display_title=self.title,
             latest_version=max(self.versions),
             created_at=_TS,
             updated_at=_TS,
-            source="custom",
         ).model_dump(mode="json")
 
     def _listed_versions(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:

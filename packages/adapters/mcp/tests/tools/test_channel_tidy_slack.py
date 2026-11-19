@@ -63,6 +63,8 @@ from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL
 
+from ..harness import auth_identity
+
 _TEAM = "T_TIDY"
 _CHANNEL = "C1"
 _CALLER = "U_CALLER"
@@ -108,9 +110,9 @@ class _World:
                 now=now,
                 chat_session_id="test-session",
             )
-        auth = AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        auth = auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform="slack",
             external_id=_TEAM,
@@ -149,11 +151,7 @@ async def _world(
     )
     router = MARouter()
     agents = [
-        ma_agent(
-            id=agent_id,
-            name=agent_id,
-            metadata={"daimon_tenant": str(tenant.id), "daimon_name": agent_id},
-        )
+        ma_agent(id=agent_id, name=agent_id, tenant_id=tenant.id)
         for agent_id in (_AGENT, _OTHER_AGENT)
     ]
     for agent in agents:

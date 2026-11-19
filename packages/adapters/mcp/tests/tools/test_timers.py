@@ -26,6 +26,8 @@ from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import discord_turn_origin
+
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     return McpRuntime(
@@ -133,20 +135,7 @@ async def test_create_timer_refuses_a_time_without_an_offset(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id="agt_daimon",
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with pytest.raises(ToolError, match="UTC offset"):
             await _create_timer_impl(
                 runtime,

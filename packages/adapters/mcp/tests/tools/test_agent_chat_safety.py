@@ -59,6 +59,8 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _TENANT_ID = uuid.uuid4()
 _MA_AGENT_ID = "ag_safety"
 _AGENT_UUID = derive_agent_uuid(tenant_id=_TENANT_ID, ma_agent_id=_MA_AGENT_ID)
@@ -340,9 +342,9 @@ def _runtime(
 def _auth(
     account: uuid.UUID = _OWNER, *, bound: str | None = None, platform: str | None = None
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=account,
-        tenant_id=_TENANT_ID,
+    return auth_identity(
+        account,
+        _TENANT_ID,
         role=Role.USER,
         agent_id=_AGENT_UUID,
         bound_channel_id=bound,

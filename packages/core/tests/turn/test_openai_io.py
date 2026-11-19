@@ -13,8 +13,8 @@ import httpx
 import pytest
 from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.host_spend_cap import SpendGuard, priced_cents
+from daimon.core.turn.hosted_io import OpenAITurnIO
 from daimon.core.turn.io import TurnConnectionLost
-from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TextBlock, TurnState
 from mux.contracts.events import Event
@@ -431,7 +431,7 @@ def test_foreign_account_cannot_construct_host_codec():
 
 @pytest.mark.asyncio
 async def test_conflicting_root_outcome_is_refused_before_journal_mutation(host):
-    from daimon.core.turn.openai_codec import display_event
+    from daimon.core.turn.hosted_codec import OPENAI, display_event
     from mux.drivers.openai.normalize import EventNormalizer
 
     _, backend, _, persistence = host
@@ -440,7 +440,7 @@ async def test_conflicting_root_outcome_is_refused_before_journal_mutation(host)
     cancelled = EventNormalizer("session").saved_turn(turn("root", "cancelled"))
     assert completed is not None and cancelled is not None
     await io.accept_record(completed)
-    assert display_event(completed, session_id="session") is not None
+    assert display_event(completed, session_id="session", codec=OPENAI) is not None
     before = list(persistence.records)
     with pytest.raises(ProviderError):
         await io.accept_record(cancelled)
@@ -678,7 +678,7 @@ async def test_usage_when_the_turn_resource_lacks_it_then_the_terminal_event_pri
 async def test_history_reads_more_than_five_thousand_events_in_large_pages():
     from types import SimpleNamespace
 
-    from daimon.core.turn.openai_codec import PROFILE
+    from daimon.core.turn.hosted_codec import OPENAI
 
     total, requested = 6500, []
 
@@ -695,7 +695,7 @@ async def test_history_reads_more_than_five_thousand_events_in_large_pages():
         return SimpleNamespace(data=data, has_more=more, next_cursor=data[-1].id if more else None)
 
     backend = SimpleNamespace(
-        capabilities=lambda: SimpleNamespace(profile_id=PROFILE),
+        capabilities=lambda: SimpleNamespace(profile_id=OPENAI.profile),
         events=SimpleNamespace(list=list_events),
     )
     io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=Persistence())

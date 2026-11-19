@@ -217,7 +217,7 @@ from daimon.core.turn.admission import (
     admit,
     backend_facts,
 )
-from daimon.core.turn.bookkeeping import release_turn_markers
+from daimon.core.turn.bookkeeping import orphan_scope, release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -1873,14 +1873,7 @@ class DaimonBot(commands.Bot):
                     interrupted = await interrupt_orphaned_session(
                         self.runtime.anthropic,
                         session_id=locked.ma_session_id,
-                        scope=Scope(
-                            tenant_id=str(locked.tenant_id),
-                            account_id=str(locked.account_id),
-                            principal_id="daimon",
-                            authorization_id="discord-orphan-sweep",
-                        )
-                        if locked.account_id is not None
-                        else None,
+                        scope=orphan_scope(locked, platform="discord"),
                     )
                     if not interrupted:
                         await mark_dead(session, id=locked.id)

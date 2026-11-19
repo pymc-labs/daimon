@@ -6,26 +6,20 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import _request_agent_backend_switch_impl
 from daimon.core.stores.domain import Role
 from daimon.testing.db import db_nullpool_engine  # noqa: F401
 from fastmcp.exceptions import ToolError
 
+from ..harness import auth_identity
+
 
 async def test_a_missing_active_origin_never_resolves_or_switches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auth = AuthIdentity(
-        tenant_id=uuid4(),
-        account_id=uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="123",
-        chat_session_id="test-session",
+    auth = auth_identity(
+        uuid4(), uuid4(), platform="discord", platform_user_id="123", chat_session_id="test-session"
     )
     runtime = MagicMock()
     origin = AsyncMock(return_value=None)
@@ -181,12 +175,9 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             settings,
             DeploymentDefault(agent_name="Daimon", environment_name="default"),
         )
-        auth = AuthIdentity(
-            tenant_id=tenant.id,
-            account_id=account.id,
-            role=Role.ADMIN,
-            is_admin=True,
-            is_platform_admin=True,
+        auth = auth_identity(
+            account.id,
+            tenant.id,
             platform="discord",
             platform_user_id="123",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
@@ -866,15 +857,7 @@ async def test_a_copy_switches_from_a_thread_another_agent_answers(active_chat, 
 
 
 def _admin_auth():
-    return AuthIdentity(
-        tenant_id=uuid4(),
-        account_id=uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="123",
-    )
+    return auth_identity(uuid4(), uuid4(), platform="discord", platform_user_id="123")
 
 
 @pytest.mark.parametrize(

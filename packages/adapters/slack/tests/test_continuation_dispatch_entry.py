@@ -20,6 +20,7 @@ import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,6 +53,11 @@ from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import register_conversations_info
+
+_get_or_create_platform_principal = partial(
+    get_or_create_platform_principal, platform="slack", external_id="U_REQUESTER"
+)
+
 
 _AGENT_ID = "agent_continuation_entry"
 _ENV_ID = "env_continuation_entry"
@@ -141,9 +147,7 @@ async def _seed_pending_row(
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
     """Seed one pending continuation; return (tenant_id, account_id, key)."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
 
     idempotency_key = uuid.uuid4()
@@ -349,9 +353,7 @@ async def _run_continuation_and_capture_controls(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     if prior_role is not None:
         await set_role(db_session, requester.account_id, prior_role)
     await db_session.commit()
@@ -635,9 +637,7 @@ async def test_continuation_whose_requester_lookup_failed_is_denied_and_runs_not
     written, no session bound.
     """
     tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CONT_DENIED_{reason}")
-    principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    principal = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await set_role(db_session, principal.account_id, Role.USER)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
@@ -702,9 +702,7 @@ async def test_continuation_runs_with_the_requesters_organisation_from_users_inf
     """An external requester's queued follow-up is admitted as another organisation
     (held, never an admin) instead of being denied; a host member keeps running as one."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_CONT_ENTRY")
-    principal = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    principal = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     register_conversations_info(fake_slack_web_client.mock, is_ext_shared=True)
@@ -800,9 +798,7 @@ async def _run_continuation_with_card_intent(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1200,9 +1196,7 @@ async def test_a_timer_set_with_another_agent_is_refused_before_bind(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1262,9 +1256,7 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
     """A continuation owed to a private DM conversation must be admitted as a DM:
     outside every pin and under the DM memory rule."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_DM_{is_dm}")
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
-    )
+    requester = await _get_or_create_platform_principal(db_session, tenant_id=tenant.id)
     await db_session.commit()
     app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
     row = _make_continuation_row(
@@ -1315,8 +1307,8 @@ async def test_continuation_turn_admin_cards_read_no_agent_source(
         reason="trial",
         idempotency_key=f"trial:{tenant.id}",
     )
-    requester = await get_or_create_platform_principal(
-        db_session, tenant_id=tenant.id, platform="slack", external_id="U_CONT_ADMISSION"
+    requester = await _get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, external_id="U_CONT_ADMISSION"
     )
     await db_session.commit()
 

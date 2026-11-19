@@ -91,7 +91,7 @@ USER daimon
 # before the dependency split.
 RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
     UV_LINK_MODE=copy uv sync --frozen --no-dev --extra billing --extra gemini --no-cache \
-    && python -c "import openai; from daimon.core.turn.runtimes import ensure_channel_runtime; assert ensure_channel_runtime('openai.persistent_workspace')" \
+    && python -c "import openai; from daimon.core.turn.runtimes import hosted_backend; assert hosted_backend('openai.persistent_workspace')" \
     && python -c "import google.genai" \
     && python -m compileall -q -j 0 packages
 

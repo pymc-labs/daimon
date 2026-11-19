@@ -24,12 +24,12 @@ from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.discord.context import compose_queued_content
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
+from daimon.testing.builders import provision_workspace
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -162,9 +162,7 @@ async def queued_bot(
     # the next test share one xdist worker schema.
     db_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Funded: a turn that queued re-checks the balance once it holds a slot.
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="123456", signup_credit=Decimal("10")
-    )
+    result = await provision_workspace(db_session_factory, "123456", signup_credit=Decimal("10"))
 
     runtime = _make_runtime(result.tenant_id, db_session_factory)
     bot = make_bot(runtime)

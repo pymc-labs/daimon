@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.hosted_io import OpenAITurnIO
 from mux.contracts.events import Event
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.transport import SDKTransport

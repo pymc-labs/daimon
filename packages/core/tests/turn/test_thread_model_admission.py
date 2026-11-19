@@ -10,8 +10,8 @@ from pathlib import Path
 
 from daimon.core.stores.thread_models import set_thread_model
 from daimon.core.thread_models import choose_thread_model
-from daimon.core.turn.admission import Admission, admit
-from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn.admission import Admission
+from daimon.testing.builders import admit_chat
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_admission import _NOW, _admittable_router, _deps, _seed_admittable_tenant
@@ -26,17 +26,13 @@ async def _admit_in(
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
     )
-    return await admit(
+    return await admit_chat(
         deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        platform="discord",
+        tenant,
         external_user_id="member-1",
-        channel_id="chan-1",
         thread_id=thread_id,
         now=_NOW,
         verified_membership=True,
-        requester_org=RequesterOrg.HOST,
     )
 
 

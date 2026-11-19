@@ -15,11 +15,11 @@ import pytest
 import pytest_asyncio
 from daimon.adapters.discord import thread_participation
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
+from daimon.testing.builders import provision_workspace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -38,11 +38,8 @@ from .test_thread_participation_routing import (
 
 @pytest_asyncio.fixture
 async def tenant_id(db_session_factory: async_sessionmaker[AsyncSession]) -> uuid.UUID:
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=str(GUILD_ID),
-        signup_credit=Decimal("10"),
+    result = await provision_workspace(
+        db_session_factory, str(GUILD_ID), signup_credit=Decimal("10")
     )
     return result.tenant_id
 

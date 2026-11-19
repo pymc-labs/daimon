@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,8 @@ from .conformance_support import (
 SCOPE = Scope(
     tenant_id=str(TENANT), account_id=str(ACCOUNT), principal_id="host", authorization_id="offline"
 )
+
+_termination_evidence = partial(termination_evidence, scope=SCOPE, platform="slack")
 
 
 def session(provider="openai", id_="native-session"):
@@ -102,9 +105,7 @@ async def test_every_typed_reason_is_read_from_its_exact_committed_row(host, pro
         )
         for reason in reasons
     ]
-    facts = await termination_evidence(
-        host, scope=SCOPE, platform="slack", required_reasons=reasons, cases=cases
-    )
+    facts = await _termination_evidence(host, required_reasons=reasons, cases=cases)
     assert facts["required_reasons"] == tuple(reason.value for reason in reasons)
     assert len(facts["terminations"]) == len(reasons)
     assert len({row["outcome_id"] for row in facts["terminations"]}) == len(reasons)
@@ -136,10 +137,8 @@ async def test_partial_execution_keeps_the_full_independent_oracle_visible(host)
         required.clear()
         return await scripted_run(TerminationReason.COMPLETED)()
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=required,
         cases=[TerminationCase("one-root", TerminationReason.COMPLETED, session(), run)],
     )
@@ -173,10 +172,8 @@ async def test_expected_values_never_repair_writer_failure_or_wrong_rows(
         await original(db, replace(row, **change))
 
     monkeypatch.setattr(outcomes, "record", corrupt)
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.UPSTREAM],
         cases=[
             TerminationCase(
@@ -213,10 +210,8 @@ async def test_swallowed_writer_exception_stays_missing_without_private_text(hos
         raise RuntimeError("private database parameters")
 
     monkeypatch.setattr(outcomes, "record", broken)
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.COMPLETED],
         cases=[
             TerminationCase(
@@ -242,10 +237,8 @@ async def test_expected_attribution_never_seeds_actual_host_identity(host, wrong
             observation.session_id = "wrong" if wrong == "session" else "native-session"
         return TurnState(termination=TerminationReason.COMPLETED)
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.COMPLETED],
         cases=[TerminationCase("wrong-identity", TerminationReason.COMPLETED, session(), run)],
     )
@@ -261,10 +254,8 @@ async def test_pre_native_refusal_has_no_phantom_session(host):
         current_outcome.get().account_id = ACCOUNT
         raise AdmissionDenied(reason="writers_none")
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
         cases=[
             TerminationCase(
@@ -287,10 +278,8 @@ async def test_unterminated_state_is_missing_truth_not_default_completion(host):
     async def run():
         return TurnState()
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.COMPLETED],
         cases=[TerminationCase("no-terminal", TerminationReason.COMPLETED, None, run)],
     )
@@ -337,10 +326,8 @@ async def test_real_prepared_boundary_owns_once_only_attribution_and_recovery(ho
             recovery_lifecycle=lambda cancel: RecordingLifecycle(),
         )
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.COMPLETED],
         cases=[
             TerminationCase(
@@ -379,10 +366,8 @@ async def test_finalizer_reason_is_not_overwritten_by_exception_fallback(host):
         observation.finish(error=error, reason=TerminationReason.RECOVERY_FAILED)
         raise error
 
-    facts = await termination_evidence(
+    facts = await _termination_evidence(
         host,
-        scope=SCOPE,
-        platform="slack",
         required_reasons=[TerminationReason.RECOVERY_FAILED],
         cases=[
             TerminationCase(
@@ -422,10 +407,8 @@ async def test_unrelated_rows_are_never_used_as_this_execution_evidence(host):
 
     with MonkeyPatch.context() as patch:
         patch.setattr(outcomes, "record", redirect)
-        facts = await termination_evidence(
+        facts = await _termination_evidence(
             host,
-            scope=SCOPE,
-            platform="slack",
             required_reasons=[TerminationReason.COMPLETED],
             cases=[TerminationCase("stale", TerminationReason.COMPLETED, session(), run)],
         )
@@ -461,10 +444,9 @@ async def test_foreign_envelopes_refuse_before_any_case_or_sql(host, foreign):
         scope = scope.model_copy(update={"account_id": "invalid-uuid"})
     try:
         with pytest.raises((ScopeViolation, ValueError)):
-            await termination_evidence(
+            await _termination_evidence(
                 host,
                 scope=scope,
-                platform="slack",
                 required_reasons=[TerminationReason.COMPLETED],
                 cases=[TerminationCase("foreign", TerminationReason.COMPLETED, ref, run)],
             )
@@ -515,9 +497,7 @@ async def test_invalid_oracles_refuse_before_execution(host, bad):
     else:
         platform = " "
     with pytest.raises(ValueError):
-        await termination_evidence(
-            host, scope=SCOPE, platform=platform, required_reasons=reasons, cases=cases
-        )
+        await _termination_evidence(host, platform=platform, required_reasons=reasons, cases=cases)
     assert calls == 0
 
 
@@ -551,10 +531,8 @@ async def test_database_guard_checks_every_bind_before_connect_or_callback(route
 
     try:
         with pytest.raises(ValueError):
-            await termination_evidence(
+            await _termination_evidence(
                 sm,
-                scope=SCOPE,
-                platform="slack",
                 required_reasons=[TerminationReason.COMPLETED],
                 cases=[TerminationCase("guarded", TerminationReason.COMPLETED, session(), run)],
             )
@@ -572,10 +550,8 @@ async def test_callback_cancellation_and_untyped_values_do_not_become_completion
         return {"pass": True}
 
     with pytest.raises(asyncio.CancelledError if bad_result == "cancelled" else TypeError):
-        await termination_evidence(
+        await _termination_evidence(
             host,
-            scope=SCOPE,
-            platform="slack",
             required_reasons=[TerminationReason.COMPLETED],
             cases=[TerminationCase("invalid", TerminationReason.COMPLETED, session(), run)],
         )

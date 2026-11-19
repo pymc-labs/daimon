@@ -41,15 +41,14 @@ SLOT = Slot(thread=THREAD, account_id="a")
 
 
 def _registered_hosts() -> dict[str, object]:
-    from daimon.core.turn import gemini_deployment, openai_host, selfhosted_host
+    from daimon.core.turn.runtimes import hosted_backend, hosted_profiles
 
-    openai_host.register_host()
-    selfhosted_host.register_host()
-    gemini_deployment.register_runtime()
+    backends = {profile: hosted_backend(profile) for profile in hosted_profiles()}
     return {
-        profile: prepare
-        for profile, prepare in preparation._PROVIDER_PREPARATIONS.items()  # pyright: ignore[reportPrivateUsage]
-        if getattr(prepare, "__module__", "").startswith("daimon.core.")
+        profile: backend.prepare
+        for profile, backend in backends.items()
+        if backend is not None
+        and getattr(backend.prepare, "__module__", "").startswith("daimon.core.")
     }
 
 

@@ -17,7 +17,8 @@ from daimon.adapters.slack.routines_panel.read import load_routines
 from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.core.routines import PANEL_CAP
-from daimon.core.stores.routines import create_routine, record_result, set_last_fired_at
+from daimon.core.stores.routines import record_result, set_last_fired_at
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -63,51 +64,43 @@ async def test_load_routines_returns_entries_with_correct_glyphs_for_all_4_state
     now = datetime.now(UTC)
 
     # Paused: enabled=False
-    await create_routine(
+    await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
+        tenant_id,
         agent_id="a1",
         agent_name="Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="paused routine",
         enabled=False,
     )
     # Never-run: enabled=True, last_fired_at=None (default)
-    await create_routine(
+    await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
+        tenant_id,
         agent_id="a2",
         agent_name="Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="never run routine",
         enabled=True,
     )
     # Error: enabled=True + last_fired_at set + last_error set
-    error_routine = await create_routine(
+    error_routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
+        tenant_id,
         agent_id="a3",
         agent_name="Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="errored routine",
         enabled=True,
     )
     await _set_routine_state(db_session, error_routine.id, last_fired_at=now, last_error="oops")
     # Success: enabled=True + last_fired_at set + last_error=None
-    success_routine = await create_routine(
+    success_routine = await new_routine(
         db_session,
-        tenant_id=tenant_id,
-        created_by_user_id=None,
+        tenant_id,
         agent_id="a4",
         agent_name="Agent",
         cron_expr="0 * * * *",
-        timezone_="UTC",
         trigger_message="successful routine",
         enabled=True,
     )
@@ -147,14 +140,12 @@ async def test_load_routines_caps_at_25_and_reports_over_cap_count(
     total = PANEL_CAP + 3  # 28 routines
 
     for i in range(total):
-        await create_routine(
+        await new_routine(
             db_session,
-            tenant_id=tenant_id,
-            created_by_user_id=None,
+            tenant_id,
             agent_id=f"agent-{i}",
             agent_name="Agent",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message=f"routine {i:04d}",
         )
     await db_session.flush()
@@ -177,14 +168,13 @@ async def test_load_routines_shows_a_member_only_their_own_routines(
     """Another member's routine label and trigger are their (often a client's) work."""
     tenant_id = await _seed_tenant(db_session, workspace_id="T_ROUTINES_OWN")
     for creator in ("U_ME", "U_ACME", None):
-        await create_routine(
+        await new_routine(
             db_session,
-            tenant_id=tenant_id,
+            tenant_id,
             created_by_user_id=creator,
             agent_id="a1",
             agent_name="Agent",
             cron_expr="0 * * * *",
-            timezone_="UTC",
             trigger_message=f"routine of {creator}",
         )
     await db_session.flush()

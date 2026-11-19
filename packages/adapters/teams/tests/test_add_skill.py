@@ -11,7 +11,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from daimon.adapters.teams import add_skill, setup_card
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, tenant_scoped_display_title
@@ -21,6 +20,7 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.user_skills import load_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -66,14 +66,11 @@ class _Skills:
         found = re.search(rb'name="display_title"\r\n\r\n([^\r]+)', request.content)
         assert found is not None, "an upload names its display title"
         self.created.append(found.group(1).decode())
-        skill = SkillListResponse(
+        skill = skill_listed(
             id=f"skill_{len(self.rows)}",
-            type="custom",
             display_title=self.created[-1],
-            latest_version="1",
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
-            source="custom",
         ).model_dump(mode="json")
         self.rows.append(skill)
         return httpx.Response(200, json=skill)

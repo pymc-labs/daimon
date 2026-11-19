@@ -36,6 +36,7 @@ from daimon.core.turn.replace_binding import (
     hold_slot,
     read_turns,
 )
+from daimon.core.turn.runtimes import hosted_backend
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef, Scope
 from mux.contracts.ports import Artifacts
@@ -51,15 +52,6 @@ SessionReader = Callable[
     [TurnRuntime, ConfigRevision, Scope, ProviderBinding, StateStore], OldSession
 ]
 """A provider's view of one of its old sessions: its ref and an Events port."""
-
-_READERS: dict[str, SessionReader] = {}
-
-
-def register_session_reader(profile: str, reader: SessionReader, *, fallback: bool = True) -> None:
-    """Register how `profile`'s old sessions are read; a fallback keeps an override."""
-    if fallback and profile in _READERS:
-        return
-    _READERS[profile] = reader
 
 
 def carry_over_channel(
@@ -184,7 +176,8 @@ async def _old_session(
             )
             ref = resource_ref(backend, "session", session_id, scope=request.scope)
             return OldSession(binding=binding, ref=ref, backend=backend)
-        reader = _READERS.get(binding.profile)
+        hosted = hosted_backend(binding.profile)
+        reader = hosted.reader if hosted is not None else None
         revision = await store.get_config_revision(binding.thread.channel, binding.config_revision)
         if reader is None or revision is None:
             log.warning("carry_over.reader_missing", profile=binding.profile)

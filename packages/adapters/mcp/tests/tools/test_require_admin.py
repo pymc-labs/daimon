@@ -15,7 +15,6 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _require_admin
 from daimon.adapters.mcp.tools.agents import AgentInfo, _create_agent_impl, _list_agents_impl
@@ -30,12 +29,12 @@ from daimon.adapters.mcp.tools.skills import _list_impl, _sync_impl
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.core.stores.domain import Role
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import seed_tenant
+from ..harness import auth_identity, seed_tenant
 
 _ADMIN_REQUIRED = "requires an admin"
 
@@ -46,12 +45,7 @@ _ADMIN_REQUIRED = "requires an admin"
 
 
 def test_require_admin_raises_tool_error_when_not_admin() -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     with pytest.raises(ToolError) as exc_info:
         _require_admin(auth)
     assert _ADMIN_REQUIRED in str(exc_info.value), (
@@ -60,9 +54,9 @@ def test_require_admin_raises_tool_error_when_not_admin() -> None:
 
 
 def test_require_admin_passes_when_admin() -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    auth = auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         is_admin=True,
         is_platform_admin=True,
@@ -103,21 +97,16 @@ async def test_create_agent_impl_does_not_raise_admin_gate_for_non_admin(
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
     result = await _create_agent_impl(
         _agents_runtime(client, session_factory=db_session_factory), auth, spec
@@ -136,23 +125,11 @@ async def test_list_agents_impl_does_not_raise_for_non_admin(
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(name="demo", tenant_id=tenant_id)]),
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     result = await _list_agents_impl(
         _agents_runtime(client, session_factory=db_session_factory), auth, page=None
     )
@@ -173,13 +150,7 @@ async def test_self_write_file_impl_does_not_raise_admin_gate_for_non_admin(
     async with committing_sessionmaker.begin() as session:
         tenant_id = await seed_tenant(session)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        agent_id=uuid.uuid4(),
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER, agent_id=uuid.uuid4())
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
@@ -198,13 +169,7 @@ async def test_self_read_file_impl_does_not_raise_admin_gate_for_non_admin(
     async with committing_sessionmaker.begin() as session:
         tenant_id = await seed_tenant(session)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.USER,
-        agent_id=uuid.uuid4(),
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER, agent_id=uuid.uuid4())
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
@@ -223,12 +188,7 @@ async def test_self_read_file_impl_does_not_raise_admin_gate_for_non_admin(
 
 async def test_sync_impl_raises_when_not_admin() -> None:
     """Non-admin caller is rejected before any HTTP call."""
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     runtime = McpRuntime(
         session_factory=MagicMock(),
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
@@ -269,12 +229,7 @@ async def test_list_impl_does_not_raise_admin_gate_for_non_admin(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     runtime = McpRuntime(
         session_factory=db_session_factory,
         client=client,  # type: ignore[arg-type]
@@ -306,12 +261,7 @@ async def test_create_environment_impl_does_not_refuse_non_admin() -> None:
     fails later on the stub client, which is enough to distinguish "refused up
     front" from "allowed through".
     """
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     spec = EnvironmentSpec(name="e")
     with pytest.raises(Exception) as exc_info:
         await _create_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, spec)
@@ -326,12 +276,7 @@ async def test_update_environment_impl_raises_when_not_admin() -> None:
 
     The gate must be the FIRST line — before the empty-patch check fires.
     """
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     with pytest.raises(ToolError) as exc_info:
         await _update_environment_impl(
             _env_runtime(MagicMock(spec=AsyncAnthropic)),
@@ -347,12 +292,7 @@ async def test_update_environment_impl_raises_when_not_admin() -> None:
 
 async def test_archive_environment_impl_raises_when_not_admin() -> None:
     """Non-admin caller is rejected before any MA call."""
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     with pytest.raises(ToolError) as exc_info:
         await _archive_environment_impl(_env_runtime(MagicMock(spec=AsyncAnthropic)), auth, "e")
     assert _ADMIN_REQUIRED in str(exc_info.value), (
@@ -399,12 +339,7 @@ async def test_list_environments_impl_does_not_raise_for_non_admin(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-    )
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     result = await _list_environments_impl(
         _env_runtime(client, db_session_factory), auth, page=None
     )

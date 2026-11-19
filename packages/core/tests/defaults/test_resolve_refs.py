@@ -8,6 +8,7 @@ from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.skills import resolve_refs
 from daimon.core.errors import DefaultsError
 from daimon.core.specs import SkillRef
+from daimon.testing.builders import skill_listed
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
 
@@ -19,11 +20,10 @@ _TENANT_B = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000002")
 def _skill_item(
     *, id_: str, display_title: str, source: str = "custom", created_at: str = _CREATED_AT
 ) -> dict[str, object]:
-    return SkillListResponse(
+    return skill_listed(
         id=id_,
         type=source,
         display_title=display_title,
-        latest_version="1",
         created_at=created_at,
         updated_at=_CREATED_AT,
         source=source,

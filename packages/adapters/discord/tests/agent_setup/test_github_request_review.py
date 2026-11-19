@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.discord.agent_setup import github_requests as module
+from daimon.core import github_request_decisions as decisions
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.stores.github_access import InstallationLimitError
 
@@ -186,7 +187,7 @@ async def test_uncached_member_decision_edits_requester_thread_card(
     monkeypatch.setattr(module, "is_member_guild_admin", MagicMock(return_value=True))
     monkeypatch.setattr(module, "dismiss_delivery", AsyncMock(return_value=True))
     monkeypatch.setattr(
-        module,
+        decisions,
         "approve_connected_request",
         AsyncMock(
             side_effect=InstallationLimitError(

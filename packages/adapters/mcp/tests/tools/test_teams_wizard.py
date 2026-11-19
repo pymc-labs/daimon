@@ -25,6 +25,8 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
 _CHANNEL = "19:chan@thread.tacv2"
@@ -80,12 +82,8 @@ def _runtime(fake: _Fake, sessionmaker: async_sessionmaker[AsyncSession]) -> Mcp
 async def _auth(db_session: AsyncSession) -> AuthIdentity:
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
-    return AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="teams",
-        platform_user_id=_CALLER,
+    return auth_identity(
+        account.id, tenant.id, role=Role.USER, platform="teams", platform_user_id=_CALLER
     )
 
 

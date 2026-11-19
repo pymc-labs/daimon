@@ -434,7 +434,7 @@ async def test_env_modal_successful_submit_edits_the_card_into_the_received_stat
         {
             "event": "credential_modal.env.submit",
             "key": "STRIPE_KEY",
-            "outcome": "applied",
+            "state": "applied",
             "log_level": "info",
         }
     ], "one event names the key and how the submit ended, and never the value"
@@ -1298,7 +1298,7 @@ async def test_env_file_collision_refuses_and_writes_nothing(
     logs, decision = await _submit_with_audit(modal, interaction)
     assert logs == [
         {
-            "event": "credential_modal.env_file.submit",
+            "event": "credential_modal.env_file_collision",
             "key_count": 2,
             "collision_count": 1,
             "log_level": "info",
@@ -1351,7 +1351,7 @@ async def test_env_file_valid_upload_writes_all_keys_atomically_and_edits_card_a
         {
             "event": "credential_modal.env_file.submit",
             "key_count": 2,
-            "collision_count": 0,
+            "keys": ["TOGGL_TOKEN", "OPENAI_API_KEY"],
             "log_level": "info",
         }
     ], "the event counts the keys saved and names none"
@@ -1545,7 +1545,7 @@ async def test_stale_replacement_leaves_the_stored_value_alone_and_renders_super
         {
             "event": "credential_modal.env.submit",
             "key": "ROTATING_KEY",
-            "outcome": "stale_replacement",
+            "state": "superseded",
             "log_level": "info",
         }
     ], "a replacement that lost the race is logged with the outcome it recorded"
@@ -1615,7 +1615,7 @@ async def test_replacement_needs_admin_at_submit_renders_refused_and_writes_noth
         {
             "event": "credential_modal.env.submit",
             "key": "SHARED_SECRET",
-            "outcome": "write_failed",
+            "state": "refused",
             "log_level": "info",
         }
     ], "a refused replacement is logged with the outcome it recorded"

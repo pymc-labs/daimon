@@ -18,7 +18,6 @@ import httpx
 import pytest
 from anthropic.types.beta import (
     BetaManagedAgentsModelConfig,
-    SkillListResponse,
 )
 from daimon.core._models import Account, Tenant
 from daimon.core.defaults.ma_index import (
@@ -40,6 +39,7 @@ from daimon.core.defaults.report import Action, classify_verification
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import tenant_ledger
+from daimon.testing.builders import provision_workspace, skill_listed
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
@@ -93,15 +93,7 @@ def _create_serving_router(
         r"/v1/skills",
         lambda req, _m: httpx.Response(
             200,
-            json=SkillListResponse(
-                id=skill_id,
-                type="custom",
-                display_title="seed-skill",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id=skill_id, display_title="seed-skill").model_dump(mode="json"),
         ),
     )
     router.add(
@@ -144,14 +136,11 @@ def _existing_resources_router(*, tenant_id: uuid.UUID) -> MARouter:
     """
     tenant_id_str = str(tenant_id)
     created_at_str = "2026-04-21T00:00:00Z"
-    existing_skill = SkillListResponse(
+    existing_skill = skill_listed(
         id="sk_1",
-        type="custom",
         display_title=tenant_scoped_display_title(tenant_id=tenant_id, name="cli-auth"),
-        latest_version="1",
         created_at=created_at_str,
         updated_at=created_at_str,
-        source="custom",
     ).model_dump(mode="json")
     existing_env = ma_environment(
         id="env_1", name="default", tenant_id=tenant_id_str, created_at=created_at_str
@@ -219,12 +208,8 @@ async def test_provision_tenant_is_idempotent_when_called_twice(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    first = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-idempotent"
-    )
-    second = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-idempotent"
-    )
+    first = await provision_workspace(db_session_factory, "guild-idempotent")
+    second = await provision_workspace(db_session_factory, "guild-idempotent")
 
     assert first.tenant_id == second.tenant_id, (
         "both calls should return the same deterministic tenant_id"
@@ -252,12 +237,8 @@ async def test_provision_tenant_distinct_workspaces_yield_distinct_tenants(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    result_a = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-aaa"
-    )
-    result_b = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-bbb"
-    )
+    result_a = await provision_workspace(db_session_factory, "guild-aaa")
+    result_b = await provision_workspace(db_session_factory, "guild-bbb")
 
     assert result_a.tenant_id != result_b.tenant_id, (
         "distinct workspace_ids should yield distinct tenant_ids"
@@ -297,9 +278,7 @@ async def test_reconcile_tenant_defaults_idempotent_on_rerun(
     creates zero duplicate MA resources. First run CREATEs; second run (lists
     already serving the tenant-tagged resources) records no CREATED actions."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-rerun"
-    )
+    result = await provision_workspace(db_session_factory, "guild-rerun")
 
     first = await reconcile_tenant_defaults(
         build_fake_anthropic_http(_create_serving_router().dispatch),
@@ -336,9 +315,7 @@ async def test_reconcile_tenant_defaults_uses_passed_tenant_not_bootstrap(
     The agent CREATE payload must carry daimon_tenant == passed tenant, proving
     no ensure_tenant_bootstrap (earliest-row) substitution happened."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-tenant"
-    )
+    result = await provision_workspace(db_session_factory, "guild-tenant")
 
     real_agent_payload: dict[str, Any] = {}
 
@@ -379,9 +356,7 @@ async def test_reconcile_tenant_defaults_applies_tenant_prefix_to_skill_title(
     {tenant_id[:8]}- prefix, proving the ISO-04 tenant-prefixed reconcile_skill
     path is reached (W3 coverage)."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-prefix"
-    )
+    result = await provision_workspace(db_session_factory, "guild-prefix")
 
     skill_payload: dict[str, Any] = {}
 
@@ -390,15 +365,7 @@ async def test_reconcile_tenant_defaults_applies_tenant_prefix_to_skill_title(
         skill_payload["body"] = req.content.decode("utf-8", errors="replace")
         return httpx.Response(
             200,
-            json=SkillListResponse(
-                id="sk_1",
-                type="custom",
-                display_title="created",
-                latest_version="1",
-                created_at="2026-04-21T00:00:00Z",
-                updated_at="2026-04-21T00:00:00Z",
-                source="custom",
-            ).model_dump(mode="json"),
+            json=skill_listed(id="sk_1", display_title="created").model_dump(mode="json"),
         )
 
     router = _create_serving_router(skill_create_handler=on_skill_create)
@@ -425,9 +392,7 @@ async def test_reconcile_tenant_defaults_stamps_guild_account_on_agents(
     so the assertion runs against what actually reaches MA.
     """
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-rbac01"
-    )
+    result = await provision_workspace(db_session_factory, "guild-rbac01")
 
     agent_metadata: dict[str, Any] = {}
     env_metadata: dict[str, Any] = {}
@@ -518,9 +483,7 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
     """
     skill_name = "brainstorm"
     _write_seed_tree_with_skill_ref(tmp_path, skill_name)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-sc1"
-    )
+    result = await provision_workspace(db_session_factory, "guild-sc1")
 
     # Stateful list handler: skills list starts empty, reflects created skills after POST.
     created_skills: list[dict[str, Any]] = []
@@ -532,15 +495,7 @@ async def test_reconcile_tenant_defaults_seed_tree_with_skill_ref_pins_tenant_sk
         return list_response(list(created_skills))
 
     def skill_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        row = SkillListResponse(
-            id="sk_sc1",
-            type="custom",
-            display_title=canonical,
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
-        ).model_dump(mode="json")
+        row = skill_listed(id="sk_sc1", display_title=canonical).model_dump(mode="json")
         created_skills.append(row)
         return httpx.Response(200, json=row)
 
@@ -655,9 +610,7 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
     """
     skill_name = "brainstorm"
     _write_seed_tree_with_skill_ref(tmp_path, skill_name)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-sc5"
-    )
+    result = await provision_workspace(db_session_factory, "guild-sc5")
     skill_create_count = 0
 
     def skill_create_sentinel(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -668,15 +621,9 @@ async def test_reconcile_tenant_defaults_flips_status_failed_when_skills_list_pa
         )
 
     filler = [
-        SkillListResponse(
-            id=f"filler_{i}",
-            type="custom",
-            display_title=f"unrelated-filler-{i}",
-            latest_version="1",
-            created_at="2026-04-21T00:00:00Z",
-            updated_at="2026-04-21T00:00:00Z",
-            source="custom",
-        ).model_dump(mode="json")
+        skill_listed(id=f"filler_{i}", display_title=f"unrelated-filler-{i}").model_dump(
+            mode="json"
+        )
         for i in range(_SKILLS_PAGE_LIMIT)
     ]
 
@@ -762,11 +709,8 @@ async def test_provision_tenant_seeds_trial_credit_when_signup_credit_set(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """provision_tenant with signup_credit=5 seeds a trial ledger row; balance == 5."""
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id="guild-trial-1",
-        signup_credit=Decimal("5.00"),
+    result = await provision_workspace(
+        db_session_factory, "guild-trial-1", signup_credit=Decimal("5.00")
     )
     balance = await tenant_ledger.get_balance(db_session, tenant_id=result.tenant_id)
     assert balance == Decimal("5.00"), (
@@ -780,18 +724,12 @@ async def test_provision_tenant_trial_credit_idempotent_on_reprovision(
 ) -> None:
     """Re-running provision_tenant with same workspace_id does NOT double-credit."""
     for _ in range(2):
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id="guild-trial-idem",
-            signup_credit=Decimal("5.00"),
+        await provision_workspace(
+            db_session_factory, "guild-trial-idem", signup_credit=Decimal("5.00")
         )
     tenant_id = (
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id="guild-trial-idem",
-            signup_credit=Decimal("5.00"),
+        await provision_workspace(
+            db_session_factory, "guild-trial-idem", signup_credit=Decimal("5.00")
         )
     ).tenant_id
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
@@ -838,14 +776,11 @@ def _build_stateful_router(
             return list_response([])
         return list_response(
             [
-                SkillListResponse(
+                skill_listed(
                     id="sk_v1",
-                    type="custom",
                     display_title=canonical_skill_title,
-                    latest_version="1",
                     created_at=_CREATED_AT.isoformat(),
                     updated_at=_CREATED_AT.isoformat(),
-                    source="custom",
                 ).model_dump(mode="json")
             ]
         )
@@ -855,14 +790,11 @@ def _build_stateful_router(
         state["skill_created"] = True
         return httpx.Response(
             200,
-            json=SkillListResponse(
+            json=skill_listed(
                 id="sk_v1",
-                type="custom",
                 display_title=canonical_skill_title,
-                latest_version="1",
                 created_at=_CREATED_AT.isoformat(),
                 updated_at=_CREATED_AT.isoformat(),
-                source="custom",
             ).model_dump(mode="json"),
         )
 
@@ -945,9 +877,7 @@ async def test_verify_tenant_defaults_in_sync_report_makes_zero_write_requests(
     spec produces an all-SKIPPED report, classified in_sync, and the dry-run pass
     that produced it made ZERO write requests against the fake provider transport."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-verify-sync"
-    )
+    result = await provision_workspace(db_session_factory, "guild-verify-sync")
     router, write_count = _build_stateful_router(tenant_id=result.tenant_id)
     client = build_fake_anthropic_http(router.dispatch)
 
@@ -988,9 +918,7 @@ async def test_verify_reuses_one_skill_list_for_multiple_agent_skill_refs(
         "  - type: custom\n    skill_id: cli-auth\n"
         "  - type: custom\n    skill_id: cli-auth\n"
     )
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-verify-skill-snapshot"
-    )
+    result = await provision_workspace(db_session_factory, "guild-verify-skill-snapshot")
     router, _write_count = _build_stateful_router(tenant_id=result.tenant_id)
     skill_list_calls = 0
 
@@ -1026,9 +954,7 @@ async def test_verify_tenant_defaults_classifies_missing_agent_as_diverged(
     """A tenant whose spec's agent is absent from MA classifies as diverged,
     naming that agent."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-verify-missing"
-    )
+    result = await provision_workspace(db_session_factory, "guild-verify-missing")
     router, _write_count = _build_stateful_router(tenant_id=result.tenant_id)
     client = build_fake_anthropic_http(router.dispatch)
 
@@ -1058,17 +984,7 @@ async def test_verify_tenant_defaults_classifies_missing_agent_as_diverged(
         "GET",
         r"/v1/skills",
         lambda req, _m: list_response(
-            [
-                SkillListResponse(
-                    id="sk_v1",
-                    type="custom",
-                    display_title=canonical_skill_title,
-                    latest_version="1",
-                    created_at="2026-04-21T00:00:00Z",
-                    updated_at="2026-04-21T00:00:00Z",
-                    source="custom",
-                ).model_dump(mode="json")
-            ]
+            [skill_listed(id="sk_v1", display_title=canonical_skill_title).model_dump(mode="json")]
         ),
     )
     report = await verify_tenant_defaults(
@@ -1091,9 +1007,7 @@ async def test_verify_tenant_defaults_classifies_fingerprint_mismatch_as_diverge
     """A tenant whose agent fingerprint no longer matches the spec (the spec
     changed since the last reconcile) classifies as diverged, naming that agent."""
     _write_seed_tree(tmp_path)
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-verify-drift"
-    )
+    result = await provision_workspace(db_session_factory, "guild-verify-drift")
     router, _write_count = _build_stateful_router(tenant_id=result.tenant_id)
     client = build_fake_anthropic_http(router.dispatch)
 
@@ -1128,9 +1042,7 @@ async def test_verify_tenant_defaults_classifies_provider_read_failure_as_unveri
     (skill_dir / "SKILL.md").write_text(
         "---\nname: cli-auth\ndescription: seed skill for provisioning tests.\n---\n\n# cli-auth\n"
     )
-    result = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id="guild-verify-unverifiable"
-    )
+    result = await provision_workspace(db_session_factory, "guild-verify-unverifiable")
 
     router = MARouter()
     router.add(
@@ -1158,12 +1070,7 @@ async def test_provision_tenant_zero_signup_credit_seeds_no_ledger_row(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """signup_credit=0 (the default) must insert no ledger row."""
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id="guild-trial-zero",
-        signup_credit=Decimal("0"),
-    )
+    result = await provision_workspace(db_session_factory, "guild-trial-zero")
     balance = await tenant_ledger.get_balance(db_session, tenant_id=result.tenant_id)
     assert balance == Decimal("0"), (
         "signup_credit=0 must seed no ledger row — zero-credit guilds start at Decimal('0')"

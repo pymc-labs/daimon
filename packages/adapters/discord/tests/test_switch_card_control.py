@@ -1,88 +1,32 @@
-"""The switch card's buttons: only the requester's press acts, and the card shows what happened."""
+"""A click on a switch card posted before switches applied at once closes it as expired."""
 
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord.notice_card import build_notice_embed
-from daimon.adapters.discord.posted_controls import switch_card as module
-from daimon.core.switch_cards import SwitchCardPress, card_custom_id
+from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
+from daimon.core.switch_cards import EXPIRED_TEXT
 
 
-def _control(action: str = "confirm") -> module.SwitchCardControl:
-    card_id = uuid.uuid4()
-    return module.SwitchCardControl(
-        discord.ui.Button(label="Confirm", custom_id=card_custom_id(card_id, action))  # pyright: ignore[reportArgumentType]
-    )
-
-
-def _interaction() -> MagicMock:
+async def test_an_older_switch_card_button_is_parsed_and_answered_as_expired():
+    custom_id = f"bsw:{uuid.uuid4()}:confirm"
+    match = SwitchCardControl.__discord_ui_compiled_template__.fullmatch(custom_id)
+    assert match is not None
+    item = discord.ui.Button(label="Confirm", custom_id=custom_id)
     interaction = MagicMock()
-    interaction.guild = SimpleNamespace(id=1234)
-    interaction.user = SimpleNamespace(id=42)
-    interaction.message = MagicMock()
-    interaction.message.edit = AsyncMock()
-    interaction.response.defer = AsyncMock()
-    interaction.response.send_message = AsyncMock()
-    interaction.followup.send = AsyncMock()
-    interaction.client.runtime = MagicMock()
-    return interaction
+    interaction.response.edit_message = AsyncMock()
+    control = await SwitchCardControl.from_custom_id(interaction, item, match)
+
+    await control.callback(interaction)
+
+    view = interaction.response.edit_message.await_args.kwargs["view"]
+    assert EXPIRED_TEXT in str([getattr(i, "content", "") for i in view.walk_children()])
+    assert not [i for i in view.walk_children() if isinstance(i, discord.ui.Button)]
 
 
-def test_the_control_reads_its_card_and_action_from_the_custom_id():
-    card_id = uuid.uuid4()
-    control = module.SwitchCardControl(
-        discord.ui.Button(label="Cancel", custom_id=card_custom_id(card_id, "cancel"))
-    )
-    assert (control.card_id, control.press) == (card_id, "cancel")
+def test_any_other_custom_id_is_not_a_switch_card_control():
     with pytest.raises(ValueError):
-        module.SwitchCardControl(discord.ui.Button(label="x", custom_id="invalid:nope"))
-
-
-async def test_someone_elses_press_is_answered_privately_and_the_card_stays(monkeypatch):
-    monkeypatch.setattr(module, "press_switch_card", AsyncMock(return_value=None))
-    interaction = _interaction()
-    await _control().callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(
-        embed=build_notice_embed(module.NOT_YOURS), ephemeral=True
-    )
-    interaction.message.edit.assert_not_awaited()
-
-
-async def test_the_requesters_press_edits_the_card_to_what_happened(monkeypatch):
-    press = SwitchCardPress("Researcher now uses OpenAI.", closed=True, applied=True)
-    pressed = AsyncMock(return_value=press)
-    monkeypatch.setattr(module, "press_switch_card", pressed)
-    interaction = _interaction()
-    await _control().callback(interaction)
-    assert pressed.await_args.kwargs["clicker"] == "42"
-    interaction.message.edit.assert_awaited_once()
-    view = interaction.message.edit.await_args.kwargs["view"]
-    assert "Researcher now uses OpenAI." in str(
-        [getattr(item, "content", "") for item in view.walk_children()]
-    )
-    assert not [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]
-
-
-async def test_a_failed_press_is_reported_privately(monkeypatch):
-    monkeypatch.setattr(module, "press_switch_card", AsyncMock(side_effect=RuntimeError("boom")))
-    interaction = _interaction()
-    await _control().callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(
-        embed=build_notice_embed(module.UNAVAILABLE), ephemeral=True
-    )
-
-
-async def test_a_press_while_a_confirm_is_applying_answers_privately(monkeypatch):
-    press = SwitchCardPress("This switch is already being confirmed.", closed=False)
-    monkeypatch.setattr(module, "press_switch_card", AsyncMock(return_value=press))
-    interaction = _interaction()
-    await _control("cancel").callback(interaction)
-    interaction.followup.send.assert_awaited_once_with(
-        embed=build_notice_embed(press.text, neutral=True), ephemeral=True
-    )
-    interaction.message.edit.assert_not_awaited()
+        SwitchCardControl(discord.ui.Button(custom_id="hcc:nope"))

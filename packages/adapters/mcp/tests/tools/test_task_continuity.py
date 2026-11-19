@@ -43,12 +43,14 @@ from daimon.core.stores.thread_sessions import create_thread_session, get_live_t
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity, discord_turn_origin
 
 _DESTINATION_ID = "agt_research"
 _DESTINATION_NAME = "research-bot"
@@ -152,29 +154,16 @@ async def test_handoff_binds_the_thread_and_writes_no_channel_or_workspace_routi
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
@@ -218,9 +207,9 @@ async def test_handoff_with_a_continuation_queues_the_work_bounded_to_its_limit(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform=platform,
         platform_user_id="42",
@@ -294,29 +283,16 @@ async def test_handoff_nulls_a_fabricated_or_switch_only_continuation(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _hand_off_task_impl(
             runtime,
             auth,
@@ -358,9 +334,9 @@ async def test_handoff_confirmation_omits_the_raw_channel_id(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform=platform,
         platform_user_id="42",
@@ -399,29 +375,16 @@ async def test_handoff_unreachable_refusal_renders_the_channel_as_a_mention(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with pytest.raises(ToolError, match=r"<#C_PARENT>") as excinfo:
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -439,29 +402,16 @@ async def test_handoff_refuses_an_agent_nobody_can_reach_and_writes_nothing(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with pytest.raises(ToolError, match="does not answer anywhere here"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -496,29 +446,17 @@ async def test_handoff_refuses_inside_a_setup_conversation(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="SETUP",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        sender_foreign=False,
-        shared_channel=False,
-        is_setup=True,
-        chat_session_id="test-session",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, thread_id="SETUP", is_setup=True
     ) as origin:
         with pytest.raises(ToolError, match="Setup conversations always answer as Daimon"):
             await _hand_off_task_impl(
@@ -550,29 +488,16 @@ async def test_handoff_refuses_a_recreated_namesakes_old_id(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id, agent_id="agt_research_v2")])
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with pytest.raises(ToolError, match="recreated and has a new id"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -597,28 +522,21 @@ async def test_handoff_refuses_the_agent_that_already_answers_here(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
+        tenant,
+        caller,
         responder_ma_agent_id=_DESTINATION_ID,
         responder_name=_DESTINATION_NAME,
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="already answers in this conversation"):
             await _hand_off_task_impl(
@@ -645,29 +563,16 @@ async def test_handoff_asks_once_about_uncommitted_work_then_proceeds_with_the_a
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with pytest.raises(ToolError, match="uncommitted changes in https://github.com/acme/data"):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -723,29 +628,16 @@ async def test_handoff_never_asks_about_uncommitted_work_when_no_repo_is_bound(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
@@ -783,9 +675,9 @@ async def test_handoff_rejects_a_wrong_or_expired_origin_before_touching_ma(
         chat_session_id="test-session",
     )
     await db_session.commit()
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="slack",
         platform_user_id="U1",
@@ -834,29 +726,16 @@ async def test_fresh_start_marks_the_callers_live_session_without_tearing_it_dow
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(MARouter().dispatch))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
     assert "Starting fresh from your next message here." in result.confirmation, (
@@ -896,29 +775,16 @@ async def test_fresh_start_confirms_even_when_the_caller_has_no_live_session(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(MARouter().dispatch))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
     assert "Starting fresh from your next message here." in result.confirmation, (
@@ -944,28 +810,21 @@ async def test_fresh_start_does_not_change_who_answers_in_the_thread(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(MARouter().dispatch))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
+        tenant,
+        caller,
         responder_ma_agent_id=_DESTINATION_ID,
         responder_name=_DESTINATION_NAME,
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
     ) as origin:
         await _start_fresh_task_impl(runtime, auth, origin_context_id=str(origin.id))
 
@@ -995,29 +854,16 @@ async def test_handoff_with_an_answer_and_no_live_session_still_switches_the_res
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _hand_off_task_impl(
             runtime,
             auth,
@@ -1073,28 +919,17 @@ async def test_handoff_stays_on_its_side_of_an_isolated_channel(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id=parent,
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="room-bot",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, parent_channel_id=parent, responder_name="room-bot"
     ) as origin:
         if reachable:
             result = await _hand_off_task_impl(
@@ -1123,30 +958,18 @@ async def test_handoff_refuses_an_agent_pinned_to_other_channels_and_writes_noth
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_platform_admin=Role.ADMIN is Role.ADMIN,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         is_admin=Role.ADMIN is Role.ADMIN,
+        is_platform_admin=Role.ADMIN is Role.ADMIN,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, role=Role.ADMIN
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1177,28 +1000,17 @@ async def test_handoff_admits_a_pinned_agent_inside_its_own_channel(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_RX",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, parent_channel_id="C_RX"
     ) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -1239,19 +1051,8 @@ async def test_handoff_to_another_channels_agent_is_admin_only(
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_CLIENTB",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=role,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, parent_channel_id="C_CLIENTB", role=role
     ) as origin:
         if role is Role.USER:
             with pytest.raises(ToolError, match="only a server admin can do it"):
@@ -1292,30 +1093,20 @@ async def test_handoff_from_a_dm_is_outside_every_pin(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
-        is_admin=True,
-        is_platform_admin=True,
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
+        tenant,
+        caller,
         thread_id="dm:3f1c0a52-0000-4000-8000-000000000000",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
         role=Role.ADMIN,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1336,37 +1127,23 @@ async def test_handoff_refuses_an_agent_pinned_by_its_display_name(
         policy=TenantAccessPolicy(agent_channel_pins={"Research Display": ("C_RX",)}),
     )
     await db_session.commit()
-    destination = ma_agent(
+    destination = ma_agent_payload(
         id=_DESTINATION_ID,
         name="Research Display",
         model=ma_model_config("claude-sonnet-5", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: _DESTINATION_NAME},
-    ).model_dump(mode="json")
+    )
     runtime = _runtime(committing_sessionmaker, _client([destination]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
-        is_admin=True,
-        is_platform_admin=True,
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, role=Role.ADMIN
     ) as origin:
         with pytest.raises(ToolError, match="only runs in other channels"):
             await _hand_off_task_impl(
@@ -1404,28 +1181,15 @@ async def test_a_member_hands_the_thread_to_an_agent_pinned_to_this_channel(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         result = await _hand_off_task_impl(
             runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
         )
@@ -1478,29 +1242,17 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         )
     )
     runtime = _runtime(committing_sessionmaker, build_fake_anthropic(router.dispatch))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-        platform_message_id="M1",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, platform_message_id="M1"
     ) as origin:
         await _asked_by_person(committing_sessionmaker, origin.id)
         result = await _hand_off_task_impl(
@@ -1536,28 +1288,15 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
     )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
+    async with discord_turn_origin(committing_sessionmaker, tenant, caller) as origin:
         with capture_decision() as decision, pytest.raises(ToolError):
             await _hand_off_task_impl(
                 runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
@@ -1662,29 +1401,19 @@ async def test_a_hand_off_to_another_provider_moves_only_with_a_summary(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
         chat_session_id="provider-handoff-grant",
     )
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        sender_foreign=False,
-        shared_channel=False,
+        tenant,
+        caller,
         chat_session_id="provider-handoff-grant",
+        role=Role.ADMIN,
         platform_message_id="M1",
     ) as origin:
         await _asked_by_person(
@@ -1781,29 +1510,15 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        sender_foreign=False,
-        shared_channel=False,
-        chat_session_id="test-session",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, role=Role.ADMIN
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -1892,29 +1607,15 @@ async def test_a_move_is_refused_when_the_summary_may_not_reach_the_destination(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        sender_foreign=False,
-        shared_channel=False,
-        chat_session_id="test-session",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, role=Role.ADMIN
     ) as origin:
         match = "can't read this conversation" if why == "sealed_elsewhere" else "shared on"
         with pytest.raises(ToolError, match=match):
@@ -1992,29 +1693,15 @@ async def test_a_same_provider_hand_off_says_when_its_summary_cant_go(
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.ADMIN,
-        sender_foreign=False,
-        shared_channel=False,
-        chat_session_id="test-session",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, role=Role.ADMIN
     ) as origin:
         result = await _hand_off_task_impl(
             runtime,
@@ -2076,29 +1763,16 @@ async def test_handoff_uses_calling_principal_before_binding_or_queueing(
             )
         ),
     )
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
     )
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        attended=True,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-        platform_message_id="M1",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, attended=True, platform_message_id="M1"
     ) as origin:
         await _asked_by_person(committing_sessionmaker, origin.id, human)
         call = _hand_off_task_impl(
@@ -2156,33 +1830,22 @@ async def test_only_a_persons_own_message_starts_the_destination_now(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, _client([_destination(tenant.id)]))
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
-        agent_id=(
-            derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_RESPONDER_ID)
-            if gate == "agent_key"
-            else None
-        ),
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_RESPONDER_ID)
+        if gate == "agent_key"
+        else None,
     )
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
+        tenant,
+        caller,
         attended=True,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
         platform_message_id=None if gate == "resumed" else "M1",
     ) as origin:
         human = {"wake": False, "legacy": None}.get(gate, True)
@@ -2237,7 +1900,7 @@ async def test_a_relay_agent_hands_nothing_off_and_is_handed_nothing(
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    destination = ma_agent(
+    destination = ma_agent_payload(
         id=_DESTINATION_ID,
         name=_DESTINATION_NAME,
         model=ma_model_config("claude-sonnet-5", speed="standard"),
@@ -2246,44 +1909,30 @@ async def test_a_relay_agent_hands_nothing_off_and_is_handed_nothing(
             MA_METADATA_KEY_NAME: _DESTINATION_NAME,
         },
         mcp_servers=_relay_server() if case == "to_relay" else [],
-    ).model_dump(mode="json")
-    responder = ma_agent(
+    )
+    responder = ma_agent_payload(
         id=_RESPONDER_ID,
         name="daimon",
         model=ma_model_config("claude-sonnet-5", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: "daimon"},
         mcp_servers=_relay_server() if case == "relay_dm" else [],
-    ).model_dump(mode="json")
+    )
     runtime = _runtime(committing_sessionmaker, _client([destination, responder]))
     runtime.settings.mcp.public_url = HttpUrl(_RELAY_APP)  # pyright: ignore[reportAttributeAccessIssue]
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
-        hold=(
-            TurnHold("discord", "C_PARENT", client=False, relay=True)
-            if case == "relay_channel"
-            else None
-        ),
+        hold=TurnHold("discord", "C_PARENT", client=False, relay=True)
+        if case == "relay_channel"
+        else None,
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-        platform_message_id="M1",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, platform_message_id="M1"
     ) as origin:
         await _asked_by_person(committing_sessionmaker, origin.id)
         call = _hand_off_task_impl(

@@ -36,6 +36,7 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
 from .test_pin_guard import _AGENT_ID, _member, _pinned
 
 _PINS = TenantAccessPolicy(agent_channel_pins={"acme-config": ("C_ACME",)})
@@ -148,9 +149,9 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
     monkeypatch.setattr("daimon.adapters.mcp.tools.publish.publish_report", _ok_publish({}))
     account = await make_account(db_session, tenant=await get_tenant(db_session, tenant_id))
     await db_session.commit()
-    member = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant_id,
+    member = auth_identity(
+        account.id,
+        tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",

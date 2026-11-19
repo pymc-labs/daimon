@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from functools import partial
 
 import httpx
 import pytest
@@ -22,6 +23,12 @@ from daimon.core.notebooks.publish import (
     NotebookRateLimitError,
 )
 from pydantic import HttpUrl, SecretStr
+
+_notebook_settings = partial(
+    NotebookSettings,
+    host_url=HttpUrl("http://notebook-host:8001"),
+    admin_secret=SecretStr("secret"),
+)
 
 
 def _make_client(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.AsyncClient:
@@ -150,10 +157,7 @@ async def test_attach_raises_when_host_url_unset() -> None:
 
 async def test_attach_raises_when_admin_secret_unset() -> None:
     """attach_notebook_data raises HostNotConfiguredError when admin_secret is None."""
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=None,
-    )
+    settings = _notebook_settings(admin_secret=None)
 
     def handler(_req: httpx.Request) -> httpx.Response:
         raise AssertionError("host should not be called when not configured")
@@ -182,10 +186,7 @@ async def test_attach_raises_when_admin_secret_unset() -> None:
 )
 async def test_attach_rejects_unsafe_name(bad_name: str) -> None:
     """Invalid attachment names raise InvalidAttachmentError before touching the host."""
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-    )
+    settings = _notebook_settings()
 
     def reject_handler(_req: httpx.Request) -> httpx.Response:
         raise AssertionError("host should not be called when name is invalid")
@@ -203,11 +204,7 @@ async def test_attach_rejects_unsafe_name(bad_name: str) -> None:
 
 async def test_attach_rejects_oversize_against_daimon_setting() -> None:
     """Content larger than max_attachment_bytes raises InvalidAttachmentError."""
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-        max_attachment_bytes=10,
-    )
+    settings = _notebook_settings(max_attachment_bytes=10)
 
     def reject_handler(_req: httpx.Request) -> httpx.Response:
         raise AssertionError("host should not be called when content is oversize")
@@ -225,10 +222,7 @@ async def test_attach_rejects_oversize_against_daimon_setting() -> None:
 
 async def test_attach_returns_size_and_path() -> None:
     """attach_notebook_data returns the host body with slug/name/size_bytes/path."""
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-    )
+    settings = _notebook_settings()
 
     async with _make_client(_attach_ok_handler) as client:
         result = await attach_notebook_data(
@@ -268,10 +262,7 @@ async def test_attach_namespaces_by_principal() -> None:
             },
         )
 
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-    )
+    settings = _notebook_settings()
 
     async with _make_client(handler) as client:
         result_a = await attach_notebook_data(
@@ -333,10 +324,7 @@ async def test_attach_mints_random_slug_when_slug_none(
             },
         )
 
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-    )
+    settings = _notebook_settings()
 
     async with _make_client(handler) as client:
         result = await attach_notebook_data(
@@ -361,10 +349,7 @@ async def test_attach_refunds_rate_limit_slot_on_host_error() -> None:
     Without the refund, a flapping host locks the principal out of their
     hourly quota after a handful of retries even though no work succeeded.
     """
-    settings = NotebookSettings(
-        host_url=HttpUrl("http://notebook-host:8001"),
-        admin_secret=SecretStr("secret"),
-    )
+    settings = _notebook_settings()
     limiter = RateLimiter(max_requests=2)
 
     call_count = {"n": 0}

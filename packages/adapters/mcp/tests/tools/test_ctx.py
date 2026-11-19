@@ -4,9 +4,10 @@ import uuid
 from typing import Any
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.tools._ctx import _auth
 from fastmcp.exceptions import ToolError
+
+from ..harness import auth_identity
 
 
 class _FakeCtx:
@@ -18,7 +19,7 @@ class _FakeCtx:
 
 
 async def test_auth_returns_identity_when_middleware_seeded_it() -> None:
-    identity = AuthIdentity(account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN)
+    identity = auth_identity(uuid.uuid4(), uuid.uuid4(), is_admin=False, is_platform_admin=False)
     ctx = _FakeCtx({"auth": identity})
     got = await _auth(ctx)  # type: ignore[arg-type]
     assert got is identity, "should return the seeded identity"

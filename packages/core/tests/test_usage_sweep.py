@@ -13,7 +13,6 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, cast
 
 import anthropic
@@ -32,7 +31,6 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core import usage_sweep
 from daimon.core._models import TenantLedger, UsageEvent
-from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -40,13 +38,9 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.pricing import AGENT_WEB_SEARCH_USD, MODEL_PRICING, cost_of
-from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import session_settle_state, turn_outcomes
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.posture import UsageRecorder
 from daimon.core.turn.prepare import bind_recorder
 from daimon.core.turn.termination import TerminationReason
@@ -59,6 +53,7 @@ from daimon.core.usage_sweep import (
     sweep_headless_usage,
     turn_ended,
 )
+from daimon.testing.builders import plain_turn_deps
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, not_found_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
@@ -212,22 +207,7 @@ async def _ledger(db_session: AsyncSession) -> dict[str, TenantLedger]:
 def _chat_recorder(
     sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, ma: _MA
 ) -> UsageRecorder:
-    deps = TurnDeps(
-        anthropic=ma.client,
-        sessionmaker=sessionmaker,
-        deployment_default=DeploymentDefault(),
-        resolver_cache=new_resolver_cache(),
-        defaults_root=Path("/nonexistent"),
-        mcp=McpSettings(),
-        billing_config=None,
-        markup=MARKUP,
-        fernet=None,
-        github_fallback_pat=None,
-        github_app_id=None,
-        github_app_private_key=None,
-        public_url=None,
-        tool_safety=OPEN_TOOL_SAFETY,
-    )
+    deps = plain_turn_deps(ma.client, sessionmaker, markup=MARKUP)
     return bind_recorder(
         deps,
         tenant_id=tenant_id,

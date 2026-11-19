@@ -68,6 +68,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.routing import Route
 
+from .harness import auth_identity
+
 _SECRET = "s" * 32
 _PUBLIC = "https://daimon.example.com/mcp"
 _UP = "https://tools.example.com/mcp"
@@ -752,7 +754,6 @@ async def test_an_agent_origin_harness_reply_acts_as_its_own_agent(
     """An agent answering on its own self-hosted pick: the credential the harness gets
     names that agent, as its origin does, so origin-bound tools accept it and the relay
     serves that agent's own connectors, not the shared harness record's."""
-    from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.adapters.mcp.connector_relay import record_connectors
     from daimon.adapters.mcp.runtime import McpRuntime
@@ -831,9 +832,9 @@ async def test_an_agent_origin_harness_reply_acts_as_its_own_agent(
     assert turn.agent_id == derive_agent_uuid(tenant_id=rig.tenant_id, ma_agent_id=own.ref.id), (
         "the credential names the answering agent, not the harness record"
     )
-    identity = AuthIdentity(
-        account_id=rig.account_id,
-        tenant_id=rig.tenant_id,
+    identity = auth_identity(
+        rig.account_id,
+        rig.tenant_id,
         role=Role.USER,
         platform="discord",
         chat_agent_id=turn.agent_id,

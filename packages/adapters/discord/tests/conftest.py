@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 
@@ -66,23 +65,3 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         f"{report.longreprtext}\n",
         encoding="utf-8",
     )
-
-
-@pytest.fixture(autouse=True)
-def isolate_card_edits() -> Iterator[None]:
-    """Card edits finish in the background; one test's stalled edit must not
-    hold the next test's edit to a card with the same id."""
-    from daimon.core.posted_controls.lifecycle import cancel_pending_card_edits
-
-    yield
-    cancel_pending_card_edits()
-
-
-@pytest.fixture(autouse=True)
-def isolate_agent_faces() -> Iterator[None]:
-    """Creating an agent starts its face render in the background; one test's
-    render must not write into the next test's database or back-off state."""
-    from daimon.core.agent_identity import cancel_pending_agent_faces
-
-    yield
-    cancel_pending_agent_faces()

@@ -16,7 +16,7 @@ from typing import cast
 import httpx
 import pytest
 import typer
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.cli.commands.skills import add_skill
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
@@ -24,6 +24,7 @@ from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.user_skills import load_user_skill
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -73,14 +74,8 @@ class _FakeMA:
         found = re.search(rb'name="display_title"\r\n\r\n([^\r]+)', request.content)
         assert found is not None, "skills.create must send a display_title"
         self.created_titles.append(found.group(1).decode())
-        created = SkillListResponse(
-            id="sk_new",
-            type="custom",
-            display_title=found.group(1).decode(),
-            latest_version="1",
-            created_at=_TS,
-            updated_at=_TS,
-            source="custom",
+        created = skill_listed(
+            id="sk_new", display_title=found.group(1).decode(), created_at=_TS, updated_at=_TS
         )
         return httpx.Response(200, json=created.model_dump(mode="json"))
 

@@ -10,8 +10,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_memory_stores import insert_memory_store
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,

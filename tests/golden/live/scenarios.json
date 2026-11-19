@@ -456,7 +456,7 @@
     {
       "name": "approval_card_discord",
       "status": "BLOCKED",
-      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-discord]",
+      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_effects_match_recording[approve-discord]",
       "golden_sha256": "fabfef23e6730a78398b42ab9508a7e2b94b470d8d4e16a6339ef6eef1adc657",
       "host_entry_point": "daimon.adapters.discord.tool_confirmation",
       "platform": "discord",
@@ -510,7 +510,7 @@
     {
       "name": "approval_card_slack",
       "status": "BLOCKED",
-      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_base_and_new[approve-slack]",
+      "source_node": "tests/test_posted_controls_equivalence.py::test_confirmation_effects_match_recording[approve-slack]",
       "golden_sha256": "dc3a5d514aafa6f1f7f82fbe49e2e7f1b88ac0afe7b01e6bf5b45c8702e0999d",
       "host_entry_point": "daimon.adapters.slack.tool_confirmation",
       "platform": "slack",

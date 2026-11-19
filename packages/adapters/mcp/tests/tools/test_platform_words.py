@@ -24,6 +24,8 @@ from daimon.adapters.mcp.tools.skill_uploads import (
 from daimon.core.stores.domain import ChatPlatform, Role
 from fastmcp.exceptions import ToolError
 
+from ..harness import auth_identity
+
 _FOREIGN: dict[str, tuple[str, ...]] = {
     "teams": ("/agent-setup", "/billing", "server admin", "workspace admin", "Manage Server"),
     "slack": ("server admin", "Manage Server"),
@@ -32,9 +34,7 @@ _FOREIGN: dict[str, tuple[str, ...]] = {
 
 
 def _auth(platform: str | None) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform=platform
-    )
+    return auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform=platform)
 
 
 def test_nouns_come_from_the_table() -> None:

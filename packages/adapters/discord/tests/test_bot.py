@@ -12,6 +12,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import replace
 from decimal import Decimal
+from functools import partial
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,10 +23,11 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import BillingSettings, DiscordSettings, McpSettings, ThreadNamingSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import set_turn_cap
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import provision_workspace
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -33,6 +35,15 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
+
+_resolved_config = partial(
+    ResolvedConfig,
+    agent_name="test-agent",
+    agent_name_tier="tenant",
+    environment_name="test-env",
+    environment_name_tier="tenant",
+)
 
 
 def _make_runtime(
@@ -66,12 +77,10 @@ def _make_runtime(
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
@@ -145,16 +154,10 @@ async def test_reply_to_recorded_agent_post_starts_turn(
     qa_bot_listed: bool,
     expected: bool,
 ) -> None:
-    from daimon.core.defaults.provisioning import provision_tenant
     from daimon.core.stores.agent_posts import record_post
 
     guild_id = "801000098"
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=guild_id,
-        signup_credit=Decimal("5.00"),
-    )
+    result = await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
     async with db_session_factory() as session, session.begin():
         await record_post(
             session,
@@ -214,17 +217,11 @@ async def test_identity_off_reply_to_any_answer_message_starts_a_turn(
     second chunk of a long answer starts a turn just like a reply to the first.
     A routine's result counts the same way.
     """
-    from daimon.core.defaults.provisioning import provision_tenant
     from daimon.core.stores.agent_posts import record_post
     from daimon.core.stores.turn_card_intents import create_turn_card_intent
 
     guild_id = "801000099"
-    result = await provision_tenant(
-        db_session_factory,
-        platform="discord",
-        workspace_id=guild_id,
-        signup_credit=Decimal("5.00"),
-    )
+    result = await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
     async with db_session_factory() as session, session.begin():
         intent = await create_turn_card_intent(
             session,
@@ -327,14 +324,10 @@ class TestInflightCapRejection:
     async def test_tenant_override_admits_above_deployment_default(
         self, db_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        from daimon.core.defaults.provisioning import provision_tenant
 
         guild_id = "801000099"
-        result = await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
+        result = await provision_workspace(
+            db_session_factory, guild_id, signup_credit=Decimal("5.00")
         )
         async with db_session_factory() as session, session.begin():
             await set_turn_cap(session, tenant_id=result.tenant_id, cap=30)
@@ -372,17 +365,11 @@ class TestInflightCapRejection:
         queue room; the next on_message must send the over-cap message and
         NOT start a turn.
         """
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_id = "801000001"
         cap = 3
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
         runtime = _make_runtime(db_session_factory, max_concurrent_turns_per_tenant=cap)
@@ -430,24 +417,13 @@ class TestInflightDecrement:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """In-flight counter released after a successful turn."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_id = "801000002"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-dec")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -485,24 +461,13 @@ class TestInflightDecrement:
     ) -> None:
         """In-flight counter released even when the turn raises (finally bracket)."""
         import anthropic as _anthropic
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_id = "801000003"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-dec-err")
         mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
         mock_find_agent.return_value = "ag_test"
@@ -543,32 +508,16 @@ class TestInflightIsolation:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """Per-tenant isolation: tenant A saturated, tenant B still admits."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_a = "801000010"
         guild_b = "801000011"
         cap = 3
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_a,
-            signup_credit=Decimal("5.00"),
-        )
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_b,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_a, signup_credit=Decimal("5.00"))
+        await provision_workspace(db_session_factory, guild_b, signup_credit=Decimal("5.00"))
         tenant_a = derive_tenant_uuid(platform="discord", workspace_id=guild_a)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-isolation")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -636,27 +585,16 @@ class TestIsAdminDerivation:
 
         The MCP gate reads account.role on every request (88-03).
         """
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_platform_principal
 
         guild_id = "801000020"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-admin-true")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -713,27 +651,16 @@ class TestIsAdminDerivation:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """Non-manage_guild member → account.role=user written to the DB each turn."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_platform_principal
 
         guild_id = "801000021"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-admin-false")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -788,27 +715,16 @@ class TestIsAdminDerivation:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """Plain discord.User (not Member) defaults to is_admin=False → role=user in DB."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_platform_principal
 
         guild_id = "801000022"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("5.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-user-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -1062,17 +978,11 @@ class TestOnReadySweepWidenedReconcile:
     ) -> None:
         """A tenant already in status='ready' still gets `_seed_tenant_defaults`
         invoked on boot -- the whole point of widening the sweep."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_id = 900000010
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_id),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(guild_id))
         # provision_tenant leaves provision_status at its server default, "ready".
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
         mock_reconcile.return_value = ApplyReport()
@@ -1109,25 +1019,14 @@ class TestOnReadySweepWidenedReconcile:
     ) -> None:
         """Pre-existing behavior is not lost: tenants stuck in pending or failed
         are still reconciled on boot."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.tenants import set_provision_status
 
         guild_pending = 900000011
         guild_failed = 900000012
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_pending),
-            signup_credit=Decimal("0"),
-        )
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_failed),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(guild_pending))
+        await provision_workspace(db_session_factory, str(guild_failed))
         tenant_pending = derive_tenant_uuid(platform="discord", workspace_id=str(guild_pending))
         tenant_failed = derive_tenant_uuid(platform="discord", workspace_id=str(guild_failed))
         await set_provision_status(db_session_factory, tenant_id=tenant_pending, status="pending")
@@ -1168,18 +1067,12 @@ class TestOnReadySweepWidenedReconcile:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """An absent guild still gets defaults, without guild or status effects."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.tenants import get_tenant
 
         guild_id = 900000013
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_id),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(guild_id))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
         mock_reconcile.return_value = ApplyReport()
         if reconcile_raises:
@@ -1218,17 +1111,11 @@ class TestOnReadySweepWidenedReconcile:
         """A rejoin during the boot refresh still seeds and flips the tenant to ready."""
         import asyncio
 
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.stores.tenants import get_tenant, set_provision_status
 
         guild_id = 900000015
-        result = await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_id),
-            signup_credit=Decimal("0"),
-        )
+        result = await provision_workspace(db_session_factory, str(guild_id))
         tenant_id = result.tenant_id
         release = asyncio.Event()
         calls = 0
@@ -1269,13 +1156,10 @@ class TestOnReadySweepWidenedReconcile:
         mock_reconcile: AsyncMock,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.stores.tenants import set_provision_status
 
         guild_id = 900000014
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=str(guild_id)
-        )
+        result = await provision_workspace(db_session_factory, str(guild_id))
         await set_provision_status(db_session_factory, tenant_id=result.tenant_id, archive=True)
         bot = make_bot(_make_runtime(db_session_factory))
         with patch.object(bot.tree, "sync", new_callable=AsyncMock):
@@ -1294,7 +1178,6 @@ class TestOnReadySweepWidenedReconcile:
         """on_ready re-fires after a failed RESUME. A tenant whose reconcile succeeded
         and every synced scope are done once per process; a tenant whose reconcile
         failed, though still ready, is reconciled again."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
         from daimon.core.ma_identity import derive_tenant_uuid
 
@@ -1305,12 +1188,7 @@ class TestOnReadySweepWidenedReconcile:
         db_session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
         ok_id, flaky_id = 900000020, 900000021
         for guild_id in (ok_id, flaky_id):
-            await provision_tenant(
-                db_session_factory,
-                platform="discord",
-                workspace_id=str(guild_id),
-                signup_credit=Decimal("0"),
-            )
+            await provision_workspace(db_session_factory, str(guild_id))
         flaky_tenant = derive_tenant_uuid(platform="discord", workspace_id=str(flaky_id))
         reconciled: list[uuid.UUID] = []
 
@@ -1350,17 +1228,11 @@ class TestOnReadySweepWidenedReconcile:
     ) -> None:
         """A ready tenant whose guild was not joined at the first on_ready took the
         unjoined reconcile; once the guild is back it still gets the joined one."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.ma_identity import derive_tenant_uuid
 
         guild_id = 900000022
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_id),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(guild_id))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
 
         bot = make_bot(_make_runtime(db_session_factory))
@@ -1393,23 +1265,12 @@ class TestOnReadySweepWidenedReconcile:
     ) -> None:
         """discord.py keeps READY's unavailable guilds cached with no `me`; the sweep
         skips one rather than raising before the global sync and later tenants."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
 
         guild_id = 900000030
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(guild_id),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(guild_id))
         later_id = guild_id + 1  # swept after the stub: tenants go in external_id order
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=str(later_id),
-            signup_credit=Decimal("0"),
-        )
+        await provision_workspace(db_session_factory, str(later_id))
         bot = make_bot(_make_runtime(db_session_factory))
         # The call parse_ready makes for each guild stub in the READY payload.
         bot._connection._add_guild_from_data({"id": str(guild_id), "unavailable": True})  # pyright: ignore[reportPrivateUsage, reportArgumentType]
@@ -1648,14 +1509,11 @@ class TestReconcileFailureReasonPersistence:
         naming the failing resource's kind and name, and persisted -- but a
         tenant that was already ready (was_ready=True, the boot-sweep case)
         must stay ready rather than being demoted to failed."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
         from daimon.core.stores.tenants import get_tenant_liveness
 
         guild_id = "900000030"
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=guild_id
-        )
+        result = await provision_workspace(db_session_factory, guild_id)
         tenant_id = result.tenant_id
 
         report = ApplyReport()
@@ -1692,14 +1550,11 @@ class TestReconcileFailureReasonPersistence:
     ) -> None:
         """A tenant with a stale failed status and reason from a prior boot is
         cleared once a subsequent reconcile succeeds."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
         from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
 
         guild_id = "900000031"
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=guild_id
-        )
+        result = await provision_workspace(db_session_factory, guild_id)
         tenant_id = result.tenant_id
         await set_provision_status(
             db_session_factory, tenant_id=tenant_id, status="failed", reason="stale failure"
@@ -1730,13 +1585,10 @@ class TestReconcileFailureReasonPersistence:
     ) -> None:
         """The unexpected-error branch records the exception TYPE only -- never
         its message body, which may carry request/response content."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.stores.tenants import get_tenant_liveness
 
         guild_id = "900000032"
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=guild_id
-        )
+        result = await provision_workspace(db_session_factory, guild_id)
         tenant_id = result.tenant_id
 
         secret_message = "leaked-credential-abc123 in request body"
@@ -1793,22 +1645,6 @@ def _make_thread_message_for_bot(
     return message
 
 
-class _AsyncIter:
-    """Minimal async iterator for history stubs in bot tests."""
-
-    def __init__(self, items: list[discord.Message]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> discord.Message:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
-
-
 class TestPerCallerSessionKeying:
     """Per-(thread,account) session keying: get_live_thread_session and both
     create_thread_session calls use session_account_id=principal.account_id, so
@@ -1838,27 +1674,16 @@ class TestPerCallerSessionKeying:
         Uses DISTINCT external_ids (admin=111, low-priv=222) to ensure the test
         covers the cross-account gap that a same-external_id test would mask.
         """
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.identity import get_or_create_platform_principal
         from daimon.core.stores.thread_sessions import get_live_thread_session
 
         guild_id = "802000001"
         thread_id = 8020001
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_context_xml.return_value = ("<context></context>", [])
@@ -1977,7 +1802,6 @@ class TestPerCallerSessionKeying:
         inserts a new thread_sessions row with the caller's account_id — not NULL
         (T-88-04-02: NULL row → permanent cold-create loop).
         """
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.identity import get_or_create_platform_principal
         from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -1985,20 +1809,10 @@ class TestPerCallerSessionKeying:
 
         guild_id = "802000002"
         thread_id = 8020002
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_context_xml.return_value = ("<context></context>", [])
@@ -2097,27 +1911,16 @@ class TestPerTurnRoleUpsert:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """An admin caller's turn sets their platform account role to admin in the DB."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_platform_principal
 
         guild_id = "803000001"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-role-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2172,27 +1975,16 @@ class TestPerTurnRoleUpsert:
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         """A non-admin caller's turn sets their platform account role to user in the DB."""
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_platform_principal
 
         guild_id = "803000002"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-role-user")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2251,19 +2043,13 @@ class TestPerTurnRoleUpsert:
         The role write targets only the platform-principal's account (the account
         returned by get_or_create_platform_principal). It never touches a CLI account.
         """
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.accounts import get_account, set_role
         from daimon.core.stores.domain import Role
         from daimon.core.stores.identity import get_or_create_cli_principal
 
         guild_id = "803000003"
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
         # Create a CLI principal pre-set to Role.ADMIN.
@@ -2275,12 +2061,7 @@ class TestPerTurnRoleUpsert:
             await s.commit()
         cli_account_id = cli_principal.account_id
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-no-downgrade")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2343,16 +2124,9 @@ class TestDrainLoopDeCoalescing:
         """
         from unittest.mock import patch as _patch
 
-        from daimon.core.defaults.provisioning import provision_tenant
-
         guild_id = "804000001"
         thread_id = 8040001
-        await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("100.00"),
-        )
+        await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
 
         runtime = _make_runtime(db_session_factory)
         bot = make_bot(runtime)
@@ -2666,17 +2440,13 @@ class TestGuildInstallLifecycle:
         self,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.ma_identity import derive_tenant_uuid
         from daimon.core.stores.tenant_ledger import list_for_tenant
         from daimon.core.stores.tenants import get_tenant, set_provision_status
 
         guild_id = "900000112"
-        provisioned = await provision_tenant(
-            db_session_factory,
-            platform="discord",
-            workspace_id=guild_id,
-            signup_credit=Decimal("1.00"),
+        provisioned = await provision_workspace(
+            db_session_factory, guild_id, signup_credit=Decimal("1.00")
         )
         await set_provision_status(
             db_session_factory, tenant_id=provisioned.tenant_id, archive=True
@@ -2760,12 +2530,9 @@ async def test_startup_replay_is_off_without_configuration(
 async def test_live_message_then_startup_replay_admit_one_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.defaults.provisioning import provision_tenant
 
     guild_id = "801000101"
-    await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
-    )
+    await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5"))
     runtime = _make_runtime(db_session_factory)
     bot = make_bot(runtime)
     bot._handle_mention = AsyncMock()
@@ -2787,12 +2554,8 @@ async def test_cancelled_input_before_first_card_remains_replayable(
 ) -> None:
     import asyncio
 
-    from daimon.core.defaults.provisioning import provision_tenant
-
     guild_id = "801000103"
-    await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
-    )
+    await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5"))
     bot = make_bot(_make_runtime(db_session_factory))
     entered = asyncio.Event()
 
@@ -2823,12 +2586,9 @@ async def test_cancelled_input_before_first_card_remains_replayable(
 async def test_archive_queue_handoff_resumes_its_pending_admission_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from daimon.core.defaults.provisioning import provision_tenant
 
     guild_id = "801000104"
-    await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
-    )
+    await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5"))
     bot = make_bot(_make_runtime(db_session_factory))
     bot._handle_mention = AsyncMock()
     message = _make_thread_message_for_bot(guild_id=int(guild_id))
@@ -2852,13 +2612,10 @@ async def test_startup_scan_replays_unseen_addressed_messages_through_live_gates
     import asyncio
     from datetime import UTC, datetime
 
-    from daimon.core.defaults.provisioning import provision_tenant
     from daimon.core.stores.discord_message_admissions import claim_message, finish_messages
 
     guild_id = "801000102"
-    tenant = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
-    )
+    tenant = await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5"))
     runtime = _make_runtime(db_session_factory)
     runtime.settings.discord.startup_replay_minutes = 15
     runtime.settings.discord.startup_replay_channels_per_guild = 25
@@ -2908,13 +2665,10 @@ async def test_replay_does_not_repeat_a_provisioning_notice(
     db_session_factory: async_sessionmaker[AsyncSession],
     status: str,
 ) -> None:
-    from daimon.core.defaults.provisioning import provision_tenant
     from daimon.core.stores.tenants import set_provision_status
 
     guild_id = "801000105"
-    tenant = await provision_tenant(
-        db_session_factory, platform="discord", workspace_id=guild_id, signup_credit=Decimal("5")
-    )
+    tenant = await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5"))
     await set_provision_status(db_session_factory, tenant_id=tenant.tenant_id, status=status)
     bot = make_bot(_make_runtime(db_session_factory))
     bot._seed_tenant_defaults = AsyncMock()

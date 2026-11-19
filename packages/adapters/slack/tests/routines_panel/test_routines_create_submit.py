@@ -31,8 +31,8 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.routines import list_routines_for_tenant
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 

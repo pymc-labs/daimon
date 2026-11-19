@@ -18,8 +18,17 @@ from daimon.adapters.slack.modal_limits import finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_connect_cards import resolve_connect_card
-from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
+from daimon.core.github_panel import safe_github_error
 from daimon.core.github_request_cards import admin_card
+from daimon.core.github_request_decisions import (
+    DECLINED,
+    WAITING,
+    ConnectOrigin,
+    approve_connected,
+    approve_with_connect,
+    approved_update,
+    decline,
+)
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
@@ -29,13 +38,6 @@ from daimon.core.stores.github_access_requests import (
     get_request,
     list_asker_requests,
     list_waiting,
-    set_status,
-)
-from daimon.core.stores.github_links import account_link_status
-from daimon.core.stores.github_personal_links import mint_link
-from daimon.core.stores.github_request_actions import (
-    approve_connected_request,
-    approve_connection_request,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.errors import SlackApiError
@@ -363,79 +365,53 @@ async def handle(
                 return True
         try:
             if action_id == ACTION_APPROVE:
-                async with runtime.sessionmaker.begin() as session:
-                    changed = await approve_connected_request(
-                        session,
+                if await approve_connected(
+                    runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                    account_id=principal.account_id,
+                ):
+                    update = await approved_update(
+                        runtime.sessionmaker,
+                        runtime.settings,
+                        request,
                         tenant_id=tenant_id,
-                        request_id=request_id,
-                        account_id=principal.account_id,
+                        platform="slack",
                     )
-                if changed:
-                    personal_url: str | None = None
-                    if runtime.settings.mcp.app_root_url is not None:
-                        async with runtime.sessionmaker() as session:
-                            linked = await account_link_status(
-                                session, account_id=request.requester_account_id
-                            )
-                        if not linked:
-                            async with runtime.sessionmaker.begin() as session:
-                                personal_url = await mint_link(
-                                    session,
-                                    tenant_id=tenant_id,
-                                    account_id=request.requester_account_id,
-                                    platform="slack",
-                                    platform_user_id=request.requester_platform_user_id,
-                                    root_url=str(runtime.settings.mcp.app_root_url),
-                                )
                     await update_requester_card(
                         runtime,
                         client,
                         tenant_id=tenant_id,
                         request_id=request_id,
-                        text=(
-                            "Link GitHub so Daimon can check that you have access to "
-                            "what this request needs."
-                            if personal_url is not None
-                            else f"✓ Added. {request.agent_name} is continuing."
-                        ),
-                        can_cancel=personal_url is not None,
-                        link_url=personal_url,
+                        text=update.text,
+                        can_cancel=update.can_cancel,
+                        link_url=update.link_url,
                     )
             elif action_id == ACTION_CONNECT:
                 team = cast("dict[str, Any]", payload.get("team") or {})
                 user = cast("dict[str, Any]", payload.get("user") or {})
-                async with runtime.sessionmaker.begin() as session:
-                    await sync_connect_admin(
-                        session,
-                        tenant_id=tenant_id,
-                        platform="slack",
-                        platform_user_id=user_id,
-                        is_platform_admin=is_admin,
-                    )
-                    url = await connect_link(
-                        session,
-                        settings=runtime.settings,
-                        tenant_id=tenant_id,
-                        platform="slack",
-                        platform_user_id=user_id,
-                        verified_tenant_admin=is_admin,
-                        requester_label=str(user.get("name") or user_id),
+                url, changed = await approve_with_connect(
+                    runtime.sessionmaker,
+                    settings=runtime.settings,
+                    tenant_id=tenant_id,
+                    platform="slack",
+                    admin_user_id=user_id,
+                    is_admin=is_admin,
+                    request_id=request_id,
+                    account_id=principal.account_id,
+                    origin=ConnectOrigin(
                         workspace_label=str(team.get("name") or team_id),
-                        origin_parent_channel_id=request.parent_channel_id,
-                        origin_thread_id=request.thread_id,
-                        origin_followup_token=str(payload.get("response_url") or "") or None,
-                        origin_followup_expires_at=(
+                        requester_label=str(user.get("name") or user_id),
+                        parent_channel_id=request.parent_channel_id,
+                        thread_id=request.thread_id,
+                        followup_token=str(payload.get("response_url") or "") or None,
+                        followup_expires_at=(
                             datetime.now(UTC) + timedelta(minutes=30)
                             if payload.get("response_url")
                             else None
                         ),
-                    )
-                    changed = await approve_connection_request(
-                        session,
-                        tenant_id=tenant_id,
-                        request_id=request_id,
-                        account_id=principal.account_id,
-                    )
+                    ),
+                )
                 await send_link(
                     client,
                     channel_id=meta.channel_id or user_id,
@@ -457,26 +433,18 @@ async def handle(
                         client,
                         tenant_id=tenant_id,
                         request_id=request_id,
-                        text="Waiting for GitHub confirmation.",
-                        can_cancel=True,
+                        text=WAITING.text,
+                        can_cancel=WAITING.can_cancel,
                     )
             elif action_id == ACTION_DECLINE:
-                async with runtime.sessionmaker.begin() as session:
-                    changed = await set_status(
-                        session,
-                        tenant_id=tenant_id,
-                        request_id=request_id,
-                        expected=request.status,
-                        status="declined",
-                    )
-                if changed:
+                if await decline(runtime.sessionmaker, tenant_id=tenant_id, request=request):
                     await update_requester_card(
                         runtime,
                         client,
                         tenant_id=tenant_id,
                         request_id=request_id,
-                        text="An admin declined GitHub access for this request.",
-                        can_cancel=True,
+                        text=DECLINED.text,
+                        can_cancel=DECLINED.can_cancel,
                     )
             else:
                 async with runtime.sessionmaker.begin() as session:

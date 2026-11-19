@@ -96,7 +96,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.posture import UsageRecorder
-from daimon.core.turn.runtimes import ensure_channel_runtime, scope_channel_runtimes
+from daimon.core.turn.runtimes import hosted_backend, scope_channel_runtimes
 from daimon.core.turn_origin import SessionState
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.core.usage_recording import record_turn_usage
@@ -260,20 +260,6 @@ class ProviderPreparationRequest:
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
-_PROVIDER_PREPARATIONS: dict[str, ProviderPreparation] = {}
-
-
-def register_turn_preparation(
-    profile: str, prepare: ProviderPreparation, *, fallback: bool = False
-) -> None:
-    """Register provider-native binding; missing hooks never use Anthropic IDs."""
-    if profile == "anthropic.managed_agents":
-        raise ValueError(f"turn preparation already registered: {profile}")
-    if profile in _PROVIDER_PREPARATIONS:
-        if fallback:
-            return
-        raise ValueError(f"turn preparation already registered: {profile}")
-    _PROVIDER_PREPARATIONS[profile] = prepare
 
 
 def _admitted_profile(admission: Admission) -> str:
@@ -1195,11 +1181,8 @@ async def bind_session_impl(
         ):
             raise AdmissionDenied(reason="backend_unsupported")
 
-        prepare = _PROVIDER_PREPARATIONS.get(profile)
-        if prepare is None and ensure_channel_runtime(
-            profile, ready=lambda: profile in _PROVIDER_PREPARATIONS
-        ):
-            prepare = _PROVIDER_PREPARATIONS.get(profile)
+        hosted = hosted_backend(profile)
+        prepare = hosted.prepare if hosted is not None else None
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
         if admission.shared_owner is not None and admission.backend_revision_origin == "agent":

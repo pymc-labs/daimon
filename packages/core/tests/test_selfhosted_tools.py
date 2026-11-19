@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import uuid
 import zipfile
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -35,8 +36,13 @@ from mux.drivers.openai.skills import bundle_digest
 from mux.errors import ProviderError, ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+_turn_tools = partial(build_turn_tools, platform="discord", channel_id="channel")
+
+
 TENANT = uuid.UUID("00000000-0000-0000-0000-000000000007")
 NOW = dt.datetime(2026, 10, 20, tzinfo=dt.UTC)
+
+_mint_turn_mcp_authorization = partial(mint_turn_mcp_authorization, deadline_s=300, now=NOW)
 
 
 def bundle(name: str, **files: bytes) -> SkillBundle:
@@ -59,11 +65,9 @@ def build(
     single_tenant: bool = False,
     allowed_http_hosts: tuple[str, ...] = (),
 ) -> TurnTools:
-    return build_turn_tools(
+    return _turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=TENANT,
-        platform="discord",
-        channel_id="channel",
         agent_names=("agent",),
         skill_bundles=bundles or {},
         mcp_servers=servers,
@@ -119,11 +123,9 @@ def test_reserved_server_and_configured_servers_are_credential_free() -> None:
 
 
 def test_relayed_connectors_mount_the_relay_with_the_turn_credential() -> None:
-    tools = build_turn_tools(
+    tools = _turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=TENANT,
-        platform="discord",
-        channel_id="channel",
         agent_names=("agent",),
         skill_bundles={},
         mcp_servers=(
@@ -361,14 +363,8 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
             )
 
     agents = cast(Agents, TenantAgents())
-    header = await mint_turn_mcp_authorization(
-        db_session_factory,
-        scope=scope,
-        agent=agent,
-        agents=agents,
-        deadline_s=300,
-        secret=b"t" * 32,
-        now=NOW,
+    header = await _mint_turn_mcp_authorization(
+        db_session_factory, scope=scope, agent=agent, agents=agents, secret=b"t" * 32
     )
     claims = jwt.decode(
         header.header.get_secret_value().removeprefix("Bearer "),
@@ -379,38 +375,29 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
     assert claims["anthropic_disabled"] is True
     for deadline in (3540.001, 3600, 10**100, float("nan"), float("inf"), 0, -1):
         with pytest.raises(ValueError, match="deadline"):
-            await mint_turn_mcp_authorization(
+            await _mint_turn_mcp_authorization(
                 db_session_factory,
                 scope=scope,
                 agent=agent,
                 agents=agents,
                 deadline_s=deadline,
                 secret=b"t" * 32,
-                now=NOW,
             )
-    maximum = await mint_turn_mcp_authorization(
+    maximum = await _mint_turn_mcp_authorization(
         db_session_factory,
         scope=scope,
         agent=agent,
         agents=agents,
         deadline_s=3540,
         secret=b"t" * 32,
-        now=NOW,
     )
     assert maximum.expires_at == NOW + dt.timedelta(hours=1)
     from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
     from daimon.core.turn_hold import TurnHold
 
     hold = TurnHold(platform="discord", channel_id="C-SYN-1", client=True)
-    held = await mint_turn_mcp_authorization(
-        db_session_factory,
-        scope=scope,
-        agent=agent,
-        agents=agents,
-        deadline_s=300,
-        secret=b"t" * 32,
-        now=NOW,
-        hold=hold,
+    held = await _mint_turn_mcp_authorization(
+        db_session_factory, scope=scope, agent=agent, agents=agents, secret=b"t" * 32, hold=hold
     )
     held_claims = jwt.decode(
         held.header.get_secret_value().removeprefix("Bearer "),
@@ -444,38 +431,24 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         revoked = await revoke_mcp_token(session, jti=header.jti, now=NOW)
         assert revoked is not None and revoked.revoked_at == NOW
     with pytest.raises(ProviderError):
-        await mint_turn_mcp_authorization(
+        await _mint_turn_mcp_authorization(
             db_session_factory,
             scope=scope,
             agent=agent.model_copy(update={"id": "sh_agent_missing"}),
             agents=agents,
-            deadline_s=300,
             secret=b"t" * 32,
-            now=NOW,
         )
     foreign = scope.model_copy(update={"tenant_id": str(TENANT)})
     foreign_agent = agent.model_copy(
         update={"tenant_id": str(TENANT), "account_scope_id": str(TENANT)}
     )
     with pytest.raises(ProviderError):
-        await mint_turn_mcp_authorization(
-            db_session_factory,
-            scope=foreign,
-            agent=foreign_agent,
-            agents=agents,
-            deadline_s=300,
-            secret=b"t" * 32,
-            now=NOW,
+        await _mint_turn_mcp_authorization(
+            db_session_factory, scope=foreign, agent=foreign_agent, agents=agents, secret=b"t" * 32
         )
     with pytest.raises(ScopeViolation, match="scope"):
-        await mint_turn_mcp_authorization(
-            db_session_factory,
-            scope=scope,
-            agent=foreign_agent,
-            agents=agents,
-            deadline_s=300,
-            secret=b"t" * 32,
-            now=NOW,
+        await _mint_turn_mcp_authorization(
+            db_session_factory, scope=scope, agent=foreign_agent, agents=agents, secret=b"t" * 32
         )
 
     from daimon.core.stores.domain import Role
@@ -483,14 +456,12 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
     from daimon.core.turn_origin import current_execution_origin_id
 
     with pytest.raises(ScopeViolation, match="origin"):
-        await mint_turn_mcp_authorization(
+        await _mint_turn_mcp_authorization(
             db_session_factory,
             scope=scope,
             agent=agent,
             agents=agents,
-            deadline_s=300,
             secret=b"t" * 32,
-            now=NOW,
             memory_read_only=True,
         )
     async with db_session_factory() as session, session.begin():
@@ -513,14 +484,12 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         )
     reset = current_execution_origin_id.set(origin.id)
     try:
-        read_only = await mint_turn_mcp_authorization(
+        read_only = await _mint_turn_mcp_authorization(
             db_session_factory,
             scope=scope,
             agent=agent,
             agents=agents,
-            deadline_s=300,
             secret=b"t" * 32,
-            now=NOW,
             memory_read_only=True,
         )
     finally:
@@ -545,14 +514,12 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
     assert stamped is not None and stamped.memory_read_only is True, "the server reads it read-only"
     reset = current_execution_origin_id.set(origin.id)
     try:
-        relayed = await mint_turn_mcp_authorization(
+        relayed = await _mint_turn_mcp_authorization(
             db_session_factory,
             scope=scope,
             agent=agent,
             agents=agents,
-            deadline_s=300,
             secret=b"t" * 32,
-            now=NOW,
             bind_session=True,
         )
     finally:
@@ -567,14 +534,12 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
     assert "requester_account_id" not in claims, "a per-caller credential names no asker"
     reset = current_execution_origin_id.set(origin.id)
     try:
-        shared = await mint_turn_mcp_authorization(
+        shared = await _mint_turn_mcp_authorization(
             db_session_factory,
             scope=scope,
             agent=agent,
             agents=agents,
-            deadline_s=300,
             secret=b"t" * 32,
-            now=NOW,
             requester_account_id=principal.account_id,
         )
     finally:
@@ -640,19 +605,10 @@ def test_daimon_url_requires_tls_and_cannot_be_aliased() -> None:
         build(servers=(MCPConnection(name="alias", url="HTTPS://MCP.EXAMPLE:443/mcp/"),))
     for url in ("http://remote.example/mcp", "https://user:pass@example/mcp"):
         with pytest.raises(ValueError):
-            build_turn_tools(
-                daimon_mcp_url=url,
-                tenant_id=TENANT,
-                platform="discord",
-                channel_id="channel",
-                agent_names=(),
-                skill_bundles={},
-            )
-    result = build_turn_tools(
+            _turn_tools(daimon_mcp_url=url, tenant_id=TENANT, agent_names=(), skill_bundles={})
+    result = _turn_tools(
         daimon_mcp_url="https://MCP.EXAMPLE:443/mcp/",
         tenant_id=TENANT,
-        platform="discord",
-        channel_id="channel",
         agent_names=(),
         skill_bundles={},
     )
@@ -753,11 +709,9 @@ async def test_retained_channel_pin_loads_exact_authorized_catalog_bytes(
     loaded = await load_turn_skill_bundles(tmp_path, refs, scope=scope, catalog=catalog)
     assert loaded == {("uploaded", "v1"): first}
     assert build(refs=refs[:1], bundles=loaded).skills[0].name == "retained"
-    tools = build_turn_tools(
+    tools = _turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=tenant.id,
-        platform="discord",
-        channel_id="channel",
         agent_names=("agent",),
         skill_bundles=loaded,
         channel_skills=(row("uploaded", "retained", tenant_id=tenant.id),),
@@ -865,11 +819,9 @@ def test_native_content_pin_matches_retained_bundle_not_zip() -> None:
             refs=(SkillRef(id="native", digest=retained.preview.content_hash),),
             bundles={("native", None): retained},
         )
-    tools = build_turn_tools(
+    tools = _turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=TENANT,
-        platform="discord",
-        channel_id="channel",
         agent_names=(),
         skill_bundles={("native", None): retained},
         skill_digest_kind="zip",
@@ -1031,11 +983,9 @@ async def test_channel_member_loads_only_persisted_exact_channel_grants(
         )
         == {}
     )
-    tools = build_turn_tools(
+    tools = _turn_tools(
         daimon_mcp_url="https://mcp.example/mcp",
         tenant_id=tenant.id,
-        platform="discord",
-        channel_id="channel",
         agent_names=("agent",),
         skill_bundles=loaded,
         channel_skills=(grant,),

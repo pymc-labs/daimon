@@ -122,7 +122,7 @@ def expired_panel_v2() -> Any:
 def billing_panel_v2() -> Any:
     from daimon.adapters.discord import layout
     from daimon.adapters.discord.billing_panel.panel import build_billing_container
-    from daimon.adapters.discord.billing_panel.state import BillingPanelState, MemberRow
+    from daimon.core.billing_panel import BillingPanelState, MemberRow
 
     state = BillingPanelState(
         is_admin=True,

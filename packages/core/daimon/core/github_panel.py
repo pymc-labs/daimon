@@ -172,21 +172,6 @@ def safe_github_error(error: ValueError) -> str:
     return message if message in _PUBLIC_ERRORS else "GitHub didn't answer. Try again in a minute."
 
 
-def suggested_repo(repos: tuple[RepoChoice, ...], channel_name: str | None) -> RepoChoice | None:
-    """Suggest a connected repo whose name matches the channel without selecting it."""
-    if not channel_name:
-        return None
-    slug = channel_name.lstrip("#").casefold().replace("_", "-")
-    return next(
-        (
-            repo
-            for repo in repos
-            if repo.full_name.rsplit("/", 1)[-1].casefold().replace("_", "-") == slug
-        ),
-        None,
-    )
-
-
 def connect_root(settings: Settings) -> str | None:
     """Return the browser route only when the complete App flow is configured."""
     app = settings.github_app

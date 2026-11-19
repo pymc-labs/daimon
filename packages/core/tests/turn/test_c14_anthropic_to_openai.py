@@ -43,6 +43,7 @@ from mux.contracts.resources import SessionSpec
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
+from mux.errors import UnsupportedCapability
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -270,8 +271,10 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
 
         # Remove the original host registration; B remains runnable. The
         # observer is the public adapter-facing typed refusal evidence.
-        assert "anthropic.managed_agents" in mux_backend._TURN_BACKENDS
-        monkeypatch.delitem(mux_backend._TURN_BACKENDS, "anthropic.managed_agents")
+        def removed(request: object) -> object:
+            raise UnsupportedCapability(("host_turn_backend",), "anthropic.managed_agents")
+
+        monkeypatch.setattr(mux_backend, "_anthropic_turn_backend", removed)
         monkeypatch.setattr(
             channel_backend,
             "RUNNABLE_PROFILES",

@@ -23,13 +23,14 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import ThreadNamingSettings
 from daimon.core.ma_identity import derive_tenant_uuid as _derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError, new_resolver_cache
-from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores.tenants import (
     get_tenant_liveness,
     set_provision_status,
 )
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.builders import provision_workspace
+from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -59,12 +60,10 @@ def _make_runtime(
     anthropic.beta.environments.retrieve = AsyncMock(return_value=ma_environment())
     resolver_cache = new_resolver_cache()
     deployment_default = DeploymentDefault()
-    return DiscordRuntime(
+    return discord_runtime(
         settings=settings,
         anthropic=anthropic,
         sessionmaker=sessionmaker,
-        notebook_rate_limiter=RateLimiter(max_requests=999),
-        billing_config=None,
         deployment_default=deployment_default,
         resolver_cache=resolver_cache,
         turn_deps=build_turn_deps(
@@ -219,12 +218,9 @@ class TestPerMessageTenantResolution:
         db_session: AsyncSession,
         db_session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        from daimon.core.defaults.provisioning import provision_tenant
 
         guild_id = "700000003"
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=guild_id
-        )
+        result = await provision_workspace(db_session_factory, guild_id)
         await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="pending")
 
         runtime = _make_runtime(db_session_factory)
@@ -252,15 +248,12 @@ class TestNonReadySelfHealGate:
         db_clean: None,
         db_committing_engine: AsyncEngine,
     ) -> None:
-        from daimon.core.defaults.provisioning import provision_tenant
         from daimon.core.defaults.report import ApplyReport
 
         db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
         mock_reconcile.return_value = ApplyReport()
         guild_id = "700000004"
-        result = await provision_tenant(
-            db_session_factory, platform="discord", workspace_id=guild_id
-        )
+        result = await provision_workspace(db_session_factory, guild_id)
         await set_provision_status(db_session_factory, tenant_id=result.tenant_id, status="failed")
 
         runtime = _make_runtime(db_session_factory)

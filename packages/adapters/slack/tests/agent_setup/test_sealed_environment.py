@@ -8,6 +8,7 @@ import pytest
 from daimon.adapters.slack.agent_setup import channel_environment as env
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize, origin_ids
+from daimon.testing.shared_helpers import Session as _Session
 
 SEALED = TenantAccessPolicy(channel_rules={"C1": ChannelRule(readers="own", writers="own")})
 
@@ -41,11 +42,3 @@ async def test_the_panels_channel_is_the_origin(monkeypatch: pytest.MonkeyPatch)
         user_id="U1",
     )
     assert authorize(SEALED, subject=outside, **kw).reason == "sealed_channel"  # pyright: ignore[reportArgumentType]
-
-
-class _Session:
-    async def __aenter__(self) -> _Session:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None

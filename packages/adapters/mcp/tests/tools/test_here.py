@@ -18,22 +18,22 @@ from daimon.adapters.mcp.tools.here import (  # pyright: ignore[reportPrivateUsa
 )
 from daimon.core.access_policy import ChannelRule
 from daimon.core.here_card import HereCard
-from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
+
+from ..harness import auth_identity
 
 #: "1:1" as the chat, not inside a time such as "21:15".
 _ONE_TO_ONE = re.compile(r"(?<![\d:])1:1(?![\d:])")
 
 
 def _auth(*, platform: str = "discord") -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        is_platform_admin=False,
         platform=platform,
         external_id="123456",
         platform_user_id="123",
-        is_admin=True,
     )
 
 

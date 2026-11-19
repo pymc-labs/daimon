@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from cryptography.fernet import Fernet
 from daimon.adapters.cli.commands import crypto
 from daimon.adapters.cli.main import app
-from daimon.core.stores.agent_files import put_agent_file
+from daimon.testing.builders import new_agent_file
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -31,13 +31,8 @@ async def test_verify_fails_on_plaintext_then_passes_after_encrypt(
     tenant_id = uuid.uuid4()
     async with plain() as session, session.begin():
         await make_tenant(session, id=tenant_id)
-        await put_agent_file(
-            session,
-            tenant_id=tenant_id,
-            agent_id=uuid.uuid4(),
-            key="CRM_TOKEN",
-            content="legacy-secret",
-            set_by_account_id=None,
+        await new_agent_file(
+            session, tenant_id, agent_id=uuid.uuid4(), key="CRM_TOKEN", content="legacy-secret"
         )
 
     @asynccontextmanager
@@ -109,13 +104,8 @@ async def test_verify_fails_when_a_retired_key_still_encrypts_rows(
     tenant_id = uuid.uuid4()
     async with with_old() as session, session.begin():
         await make_tenant(session, id=tenant_id)
-        await put_agent_file(
-            session,
-            tenant_id=tenant_id,
-            agent_id=uuid.uuid4(),
-            key="CRM_TOKEN",
-            content="old-key-secret",
-            set_by_account_id=None,
+        await new_agent_file(
+            session, tenant_id, agent_id=uuid.uuid4(), key="CRM_TOKEN", content="old-key-secret"
         )
 
     @asynccontextmanager

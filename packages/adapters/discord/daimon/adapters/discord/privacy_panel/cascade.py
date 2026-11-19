@@ -12,7 +12,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.privacy_panel.modal import DeleteConfirmModal
 from daimon.adapters.discord.privacy_panel.state import PurgePreview
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.privacy import DELETE_PAUSED, delete_scope_lines
+from daimon.core.privacy import DELETE_PAUSED, cascade_lines, delete_scope_lines
 
 import discord
 
@@ -26,50 +26,10 @@ def build_cascade_preview_container(
 
     Pure: no I/O, no ActionRows. The view shell appends hairline + ActionRow.
     """
-    will_happen_rows: list[str] = []
+    will_happen_rows = [f"-# {line}" for line in cascade_lines(preview, "discord")]
 
-    def amount(count: int, singular: str, plural: str | None = None) -> str:
-        return f"**{count}** {singular if count == 1 else plural or singular + 's'}"
-
-    if preview.linked_principals.count > 0:
-        ex = preview.linked_principals.example or "—"
-        n = amount(preview.linked_principals.count, "linked account")
-        will_happen_rows.append(f"-# 🔑 Remove {n}, for example `{ex}`")
-    if preview.routines.count > 0:
-        will_happen_rows.append(f"-# ⏰ Cancel {amount(preview.routines.count, 'routine')}")
-    if preview.principal_links.count > 0:
-        will_happen_rows.append(
-            f"-# 🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
-        )
-    if preview.user_configs.count > 0:
-        will_happen_rows.append("-# ⚙ Remove your saved settings")
-    if preview.user_skills.count > 0:
-        ex = preview.user_skills.example or "—"
-        n = amount(preview.user_skills.count, "skill")
-        will_happen_rows.append(f"-# 🧰 Forget {n} you synced, for example `{ex}`")
-    if preview.github_user_links.count > 0:
-        will_happen_rows.append(
-            f"-# 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
-        )
-    if preview.mcp_tokens.count > 0:
-        will_happen_rows.append(
-            f"-# 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
-        )
-    if preview.slack_user_tokens.count > 0:
-        will_happen_rows.append(
-            f"-# 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved access token')}"
-        )
-    if preview.slack_turn_contexts.count > 0:
-        n = amount(preview.slack_turn_contexts.count, "temporary request record")
-        will_happen_rows.append(f"-# 💬 Delete {n}")
-    if preview.direct_message_conversations.count > 0:
-        n = amount(preview.direct_message_conversations.count, "private conversation")
-        will_happen_rows.append(f"-# 💬 Delete Daimon's saved data for {n}")
-    if preview.mux_slots.count > 0:
-        n = amount(preview.mux_slots.count, "saved conversation")
-        will_happen_rows.append(f"-# 💬 Delete Daimon's copy of {n}, with its messages")
-    if preview.account.count > 0:
-        will_happen_rows.append("-# 🪪 Remove your account")
+    def amount(count: int, singular: str) -> str:
+        return f"**{count}** {singular if count == 1 else singular + 's'}"
 
     shared_conversations = preview.retained_shared_conversations.count
     shared_rows = (

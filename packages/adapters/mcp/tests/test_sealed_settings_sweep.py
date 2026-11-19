@@ -40,7 +40,7 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.effect_recorder import database_metadata
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.ma_models import ma_agent_payload, ma_environment
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import (
@@ -546,15 +546,15 @@ async def _server(
     await db_session.commit()
     metadata = {"daimon_tenant": str(tenant.id)}
     agents = [
-        ma_agent(
+        ma_agent_payload(
             id=AGENT,
             name=NAME,
             metadata={**metadata, "daimon_name": NAME, "daimon_account": str(account.id)},
             mcp_servers=[{"type": "url", "name": "n", "url": "https://x.example.com/mcp"}],
-        ).model_dump(mode="json"),
-        ma_agent(
+        ),
+        ma_agent_payload(
             id=CHAT_AGENT, name=CHAT_NAME, metadata={**metadata, "daimon_name": CHAT_NAME}
-        ).model_dump(mode="json"),
+        ),
     ]
     for channel_id in (SEAL, OPEN):
         await set_fields(

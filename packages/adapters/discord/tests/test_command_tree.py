@@ -12,26 +12,7 @@ import inspect
 
 from daimon.adapters.discord.commands.agent_setup import AgentSetupCog
 from daimon.adapters.discord.commands.help import HelpCog
-from discord import app_commands
-from discord.ext import commands
-
-
-def _all_app_command_names(cog_cls: type[commands.Cog]) -> set[str]:
-    """Return the set of slash-command names registered by ``cog_cls``.
-
-    For ``GroupCog`` subclasses, each child command's full path is included
-    (group + child) — for regular ``Cog`` subclasses, the top-level command
-    names are returned.
-    """
-    names: set[str] = set()
-    for cmd in cog_cls.__cog_app_commands__:  # type: ignore[attr-defined]
-        if isinstance(cmd, app_commands.Group):
-            names.add(cmd.name)
-            for child in cmd.commands:
-                names.add(f"{cmd.name} {child.name}")
-        else:
-            names.add(cmd.name)
-    return names
+from daimon.testing.shared_helpers import all_app_command_names as _all_app_command_names
 
 
 def test_agent_setup_slash_is_registered() -> None:

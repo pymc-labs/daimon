@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import re
 import uuid
+from functools import partial
 from typing import Any
 
 import httpx
 import pytest
-from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ISOLATED,
     MA_METADATA_KEY_MANAGED,
@@ -25,6 +25,7 @@ from daimon.core.reader_agent import (
     ensure_reader_variant,
 )
 from daimon.core.specs import AgentSpec, SkillRef
+from daimon.testing.builders import skill_listed
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -35,6 +36,10 @@ from mux.testing.drivers.anthropic.ma import (
 
 TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
 ACCOUNT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a2")
+
+_ensure_reader_variant = partial(
+    ensure_reader_variant, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
+)
 
 
 def _agent_spec(**overrides: object) -> AgentSpec:
@@ -197,6 +202,11 @@ def _reader_agent_dict(
     ).model_dump(mode="json")
 
 
+_reader_agent_dict_with = partial(
+    _reader_agent_dict, id_="ag_reader", name="alpha-reader", tenant_id=TENANT_ID
+)
+
+
 def _router(agents: list[dict[str, Any]]) -> MARouter:
     """List + per-id retrieve + a skills list that resolves the report-reader ref."""
     router = MARouter()
@@ -219,14 +229,11 @@ def _router(agents: list[dict[str, Any]]) -> MARouter:
         r"/v1/skills",
         lambda req, _m: list_response(
             [
-                SkillListResponse(
+                skill_listed(
                     id="sk_reader_resolved",
-                    type="custom",
                     display_title=canonical_title,
-                    latest_version="1",
                     created_at="2026-09-01T00:00:00Z",
                     updated_at="2026-09-01T00:00:00Z",
-                    source="custom",
                 ).model_dump(mode="json")
             ]
         ),
@@ -239,12 +246,7 @@ def _add_create_route(router: MARouter, captured: dict[str, Any]) -> None:
         captured.update(json_body(req))
         return httpx.Response(
             200,
-            json=_reader_agent_dict(
-                id_="ag_reader",
-                name="alpha-reader",
-                tenant_id=TENANT_ID,
-                metadata_extra=captured["metadata"],
-            ),
+            json=_reader_agent_dict_with(metadata_extra=captured["metadata"]),
         )
 
     router.add("POST", r"/v1/agents", on_create)
@@ -258,9 +260,7 @@ async def test_ensure_reader_variant_creates_when_no_existing_variant() -> None:
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
 
-    result = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    result = await _ensure_reader_variant(client)
 
     assert result.id == "ag_reader"
     md = created["metadata"]
@@ -276,21 +276,15 @@ async def test_ensure_reader_variant_reuses_on_unchanged_source() -> None:
     created: dict[str, Any] = {}
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
-    first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    first = await _ensure_reader_variant(client)
 
     # No POST route registered at all on this router — any create or update
     # attempt raises AssertionError from MARouter, failing the test.
-    reader_variant = _reader_agent_dict(
-        id_="ag_reader", name="alpha-reader", tenant_id=TENANT_ID, metadata_extra=first.metadata
-    )
+    reader_variant = _reader_agent_dict_with(metadata_extra=first.metadata)
     router2 = _router([source, reader_variant])
     client2 = build_fake_anthropic(router2.dispatch)
 
-    second = await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    second = await _ensure_reader_variant(client2)
 
     assert second.id == "ag_reader"
 
@@ -302,18 +296,10 @@ async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> 
     created: dict[str, Any] = {}
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
-    first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    first = await _ensure_reader_variant(client)
 
     changed_source = _source_agent_dict(id_="ag_src", spec_hash="src-hash-2")
-    reader_variant = _reader_agent_dict(
-        id_="ag_reader",
-        name="alpha-reader",
-        tenant_id=TENANT_ID,
-        metadata_extra=first.metadata,
-        version=first.version,
-    )
+    reader_variant = _reader_agent_dict_with(metadata_extra=first.metadata, version=first.version)
     router2 = _router([changed_source, reader_variant])
     updated: dict[str, Any] = {}
 
@@ -321,12 +307,8 @@ async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> 
         updated.update(json_body(req))
         return httpx.Response(
             200,
-            json=_reader_agent_dict(
-                id_="ag_reader",
-                name="alpha-reader",
-                tenant_id=TENANT_ID,
-                metadata_extra=updated["metadata"],
-                version=first.version + 1,
+            json=_reader_agent_dict_with(
+                metadata_extra=updated["metadata"], version=first.version + 1
             ),
         )
 
@@ -335,9 +317,7 @@ async def test_ensure_reader_variant_updates_when_source_spec_hash_changes() -> 
     router2.add("POST", r"/v1/agents/ag_reader", on_update)
     client2 = build_fake_anthropic(router2.dispatch)
 
-    second = await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    second = await _ensure_reader_variant(client2)
 
     assert updated["version"] == first.version, "update must use MA's version, not a stale one"
     assert updated["metadata"][MA_METADATA_KEY_READER_OF] == "src-hash-2"
@@ -352,21 +332,13 @@ async def test_ensure_reader_variant_reader_of_fallback_changes_with_source_vers
     created: dict[str, Any] = {}
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
-    first = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    first = await _ensure_reader_variant(client)
 
     expected_reader_of_v1 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 1})
     assert first.metadata[MA_METADATA_KEY_READER_OF] == expected_reader_of_v1
 
     source_v2 = _source_agent_dict(id_="ag_src", spec_hash=None, version=2)
-    reader_variant = _reader_agent_dict(
-        id_="ag_reader",
-        name="alpha-reader",
-        tenant_id=TENANT_ID,
-        metadata_extra=first.metadata,
-        version=first.version,
-    )
+    reader_variant = _reader_agent_dict_with(metadata_extra=first.metadata, version=first.version)
     router2 = _router([source_v2, reader_variant])
     updated: dict[str, Any] = {}
 
@@ -374,21 +346,15 @@ async def test_ensure_reader_variant_reader_of_fallback_changes_with_source_vers
         updated.update(json_body(req))
         return httpx.Response(
             200,
-            json=_reader_agent_dict(
-                id_="ag_reader",
-                name="alpha-reader",
-                tenant_id=TENANT_ID,
-                metadata_extra=updated["metadata"],
-                version=first.version + 1,
+            json=_reader_agent_dict_with(
+                metadata_extra=updated["metadata"], version=first.version + 1
             ),
         )
 
     router2.add("POST", r"/v1/agents/ag_reader", on_update)
     client2 = build_fake_anthropic(router2.dispatch)
 
-    await ensure_reader_variant(
-        client2, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    await _ensure_reader_variant(client2)
 
     expected_reader_of_v2 = compute_spec_fingerprint({"agent_id": "ag_src", "version": 2})
     assert expected_reader_of_v2 != expected_reader_of_v1
@@ -402,9 +368,7 @@ async def test_ensure_reader_variant_raises_for_unknown_source() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(DaimonError, match="ghost"):
-        await ensure_reader_variant(
-            client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="ghost"
-        )
+        await _ensure_reader_variant(client, source_name="ghost")
 
 
 async def test_ensure_reader_variant_ignores_the_source_toolset_and_servers() -> None:
@@ -442,9 +406,7 @@ async def test_ensure_reader_variant_ignores_the_source_toolset_and_servers() ->
     _add_create_route(router, created)
     client = build_fake_anthropic(router.dispatch)
 
-    result = await ensure_reader_variant(
-        client, tenant_id=TENANT_ID, account_id=ACCOUNT_ID, source_name="alpha"
-    )
+    result = await _ensure_reader_variant(client)
 
     assert result.id == "ag_reader"
     tools = created["tools"]

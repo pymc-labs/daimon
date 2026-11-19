@@ -18,8 +18,8 @@ from daimon.core.config import TurnSettings
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnQueue
+from daimon.testing.builders import admit_chat
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -320,15 +320,12 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
     from daimon.core.direct_messages import start_dm
     from daimon.core.handoff_context import TranscriptTurn
     from daimon.core.stores.domain import Role
-    from daimon.core.turn.admission import admit
 
     tenant = real_dm.tenants[0]
     deps = real_dm.cog.bot.runtime.turn_deps
-    admission = await admit(
+    admission = await admit_chat(
         deps,
-        origin="chat",
-        tenant_id=tenant.id,
-        platform="discord",
+        tenant,
         external_user_id="999",
         channel_id="123",
         now=datetime.now(UTC),
@@ -336,7 +333,6 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
         verified_membership=True,
         is_dm=True,
         dm_source_channel_id="123",
-        requester_org=RequesterOrg.HOST,
     )
     await start_dm(
         deps,

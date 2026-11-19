@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -47,6 +48,9 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
+
+_choose_channel_skill = partial(choose_channel_skill, channel_id="C1", current=(), platform="slack")
+
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _DEFAULTS = Path(__file__).resolve().parents[3] / "defaults"
@@ -95,15 +99,12 @@ async def test_a_library_skill_is_chosen_by_name_at_its_latest_version(
     title = tenant_scoped_display_title(tenant_id=tenant.id, name="pdf-tools")
     client = _client([_skill("skill_lib", title)])
 
-    choice = await choose_channel_skill(
+    choice = await _choose_channel_skill(
         db_session,
         client,
         tenant_id=tenant.id,
-        channel_id="C1",
         skill="pdf-tools",
         agent=ma_agent(name="shared"),
-        current=(),
-        platform="slack",
         platform_skills={},
     )
 
@@ -125,15 +126,12 @@ async def test_another_agents_upload_and_another_tenants_skill_are_refused(
     client = _client([_skill("skill_other", other_agent), _skill("skill_foreign", foreign)])
 
     async def choose(skill: str) -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
+        return await _choose_channel_skill(
             db_session,
             client,
             tenant_id=tenant.id,
-            channel_id="C1",
             skill=skill,
             agent=ma_agent(name="shared"),
-            current=(),
-            platform="slack",
             platform_skills={},
         )
 
@@ -152,16 +150,8 @@ async def test_the_answering_agents_own_upload_is_usable_unless_isolated_elsewhe
     agent = ma_agent(name="rx")
 
     async def choose() -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
-            db_session,
-            client,
-            tenant_id=tenant.id,
-            channel_id="C1",
-            skill="rx/x",
-            agent=agent,
-            current=(),
-            platform="slack",
-            platform_skills={},
+        return await _choose_channel_skill(
+            db_session, client, tenant_id=tenant.id, skill="rx/x", agent=agent, platform_skills={}
         )
 
     usable = await choose()
@@ -185,17 +175,14 @@ async def test_a_clashing_mount_and_a_full_agent_are_refused(db_session: AsyncSe
     own = tenant_scoped_display_title(tenant_id=tenant.id, name="report", agent_name="shared")
     client = _client([_skill("skill_lib", lib), _skill("skill_own", own)])
 
-    clash = await choose_channel_skill(
+    clash = await _choose_channel_skill(
         db_session,
         client,
         tenant_id=tenant.id,
-        channel_id="C1",
         skill="report",
         agent=ma_agent(
             name="shared", skills=[{"type": "custom", "skill_id": "skill_own", "version": "1"}]
         ),
-        current=(),
-        platform="slack",
         platform_skills={},
     )
     assert clash == "mount_clash"
@@ -207,16 +194,8 @@ async def test_a_clashing_mount_and_a_full_agent_are_refused(db_session: AsyncSe
             for i in range(AGENT_SKILL_CAP)
         ],
     )
-    too_many = await choose_channel_skill(
-        db_session,
-        client,
-        tenant_id=tenant.id,
-        channel_id="C1",
-        skill="report",
-        agent=full,
-        current=(),
-        platform="slack",
-        platform_skills={},
+    too_many = await _choose_channel_skill(
+        db_session, client, tenant_id=tenant.id, skill="report", agent=full, platform_skills={}
     )
     assert too_many == "too_many"
 
@@ -547,11 +526,10 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
     current = [_row(f"skill_{i}", f"s{i}") for i in range(5)]
 
     async def choose(skill: str, platform: str) -> ChannelSkillChoice | str:
-        return await choose_channel_skill(
+        return await _choose_channel_skill(
             db_session,
             client,
             tenant_id=tenant.id,
-            channel_id="C1",
             skill=skill,
             agent=_default_agent(),
             current=current if skill == "report" else (),

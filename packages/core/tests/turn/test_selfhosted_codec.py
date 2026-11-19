@@ -1,11 +1,15 @@
 """Self-hosted neutral events use the existing host reducers without provider I/O."""
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
-from daimon.core.turn.selfhosted_codec import display_batch, tool_display_id
+from daimon.core.turn import hosted_codec
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
 from mux.errors import ScopeViolation
+
+display_batch = partial(hosted_codec.display_batch, codec=hosted_codec.SELFHOSTED)
+tool_display_id = hosted_codec.SELFHOSTED.tool_display_id
 
 
 def event(type_, payload, provider="selfhosted"):

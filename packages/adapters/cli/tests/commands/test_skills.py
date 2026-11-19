@@ -13,7 +13,7 @@ from typing import Any, cast
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent, SkillCreateResponse, SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillCreateResponse
 from anthropic.types.beta.skills import VersionCreateResponse
 from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.commands import skills as skills_cmd
@@ -35,6 +35,7 @@ from daimon.core.stores.channel_skills import add_channel_skill, list_skill_chan
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.seeded_skills import record_seeded_skill
 from daimon.core.stores.tenants import get_tenant
+from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, json_body, list_response
@@ -81,15 +82,7 @@ def _build_rt_with_router(
 
 
 def _skill_row(id_: str, name: str, *, source: str = "custom") -> dict[str, object]:
-    return SkillListResponse(
-        id=id_,
-        type="custom",
-        display_title=name,
-        latest_version="1",
-        created_at="2026-04-21T00:00:00Z",
-        updated_at="2026-04-21T00:00:00Z",
-        source=source,
-    ).model_dump(mode="json")
+    return skill_listed(id=id_, display_title=name, source=source).model_dump(mode="json")
 
 
 def _version_row(id_: str, skill_id: str) -> dict[str, object]:

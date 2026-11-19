@@ -16,7 +16,7 @@ from daimon.core.context_provider import (
     ProviderConfig,
 )
 from daimon.core.turn.posture import BillingExempt
-from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_prepared
 from daimon.testing.turn_fakes import run_turn_on_leg as run_turn
 
 from ..context_card_stub import FixtureProvider
@@ -148,7 +148,6 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
     from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
     from daimon.core.stores.context_providers import set_provider
     from daimon.core.turn.admission import AdmissionGrant
-    from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.factories import make_account, make_tenant, make_thread_session
     from daimon.testing.ma_models import ma_agent, ma_environment
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -245,21 +244,17 @@ async def test_prepared_path_loads_tenant_binding_and_trusted_request_fields(
         prepared,
         session_model_id="claude-sonnet-4-6" if older_session else "claude-sonnet-5",
     )
-    outcome = await run_prepared_turn(
+    outcome = await run_prepared(
         deps,
         prepared,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="thread-1",
         external_user_id="alice",
         user_message="adapter framing and message",
         context_message_text="Orbit's plan",
         context_mention_ids=("bob",),
-        lifecycle=RecordingLifecycle(),
-        cancel=asyncio.Event(),
         reseed_user_message=_reseed,
         recovery_lifecycle=_recovery_lifecycle,
-        render_interval_s=0.001,
     )
     assert outcome.state.error is None
     if place_kind in ("unknown", "feature_off"):

@@ -164,7 +164,7 @@ def _fake_ma(
     agent = ma_agent(
         id="ag_oauth",
         name="daimon",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
+        tenant_id=tenant_id,
         tools=[
             {
                 "type": "agent_toolset_20260401",

@@ -4,21 +4,20 @@ from __future__ import annotations
 
 import ast
 import importlib
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core import auxiliary_calls, auxiliary_models, pricing
 from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
-from daimon.core.auxiliary_calls import AuxiliaryUnavailable, register_completions
+from daimon.core.auxiliary_calls import AuxiliaryUnavailable
 from daimon.core.auxiliary_models import AUXILIARY_MODELS
 from daimon.core.pricing import MODEL_PRICING, ModelRates, side_call_rates
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_naming import THREAD_NAMING_MODEL, suggest_thread_name
 from daimon.core.thread_participation import SILENCE_ON_ERROR
-from daimon.core.turn import gemini_deployment, openai_deployment
+from daimon.core.turn.runtimes import provider_completions
 from mux.contracts.completions import CompletionResult, CompletionUsage
 from mux.contracts.ids import Provider, Scope
 from mux.errors import ProviderError
@@ -51,14 +50,14 @@ class _Fake:
 
 
 @pytest.fixture
-def registered() -> Iterator[dict[Provider, _Fake]]:
+def registered(monkeypatch: pytest.MonkeyPatch) -> dict[Provider, _Fake]:
     fakes: dict[Provider, _Fake] = {"openai": _Fake(), "gemini": _Fake()}
-    saved = dict(auxiliary_calls._FACTORIES)  # pyright: ignore[reportPrivateUsage]
-    for provider, fake in fakes.items():
-        register_completions(provider, lambda fake=fake: fake)  # type: ignore[misc]
-    yield fakes
-    auxiliary_calls._FACTORIES.clear()  # pyright: ignore[reportPrivateUsage]
-    auxiliary_calls._FACTORIES.update(saved)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(
+        auxiliary_calls,
+        "_completions",
+        lambda provider: (lambda: fakes[provider]) if provider in fakes else None,
+    )
+    return fakes
 
 
 def test_every_auxiliary_model_is_priced() -> None:
@@ -117,27 +116,17 @@ async def test_naming_without_an_admitted_provider_uses_the_first_keyed(
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-def test_runtime_registers_side_calls_only_with_a_key(
+def test_side_calls_are_reachable_only_with_a_key(
     monkeypatch: pytest.MonkeyPatch, provider: Provider
 ) -> None:
-    """Each provider runtime makes its completions reachable when its deployment key is set."""
-    register = {"openai": openai_deployment, "gemini": gemini_deployment}[provider]
-    saved = dict(auxiliary_calls._FACTORIES)  # pyright: ignore[reportPrivateUsage]
-    try:
-        for keyed in (False, True):
-            auxiliary_calls._FACTORIES.clear()  # pyright: ignore[reportPrivateUsage]
-            if keyed:
-                monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "test-key")
-            else:
-                monkeypatch.delenv(DEFAULT_KEY_ENV[provider], raising=False)
-            register.register_runtime()
-            registered = provider in auxiliary_calls._FACTORIES  # pyright: ignore[reportPrivateUsage]
-            assert registered == keyed, (
-                f"{provider} side calls registered={registered}, key={keyed}"
-            )
-    finally:
-        auxiliary_calls._FACTORIES.clear()  # pyright: ignore[reportPrivateUsage]
-        auxiliary_calls._FACTORIES.update(saved)  # pyright: ignore[reportPrivateUsage]
+    """Each provider's completions are reachable while its deployment key is set."""
+    for keyed in (False, True):
+        if keyed:
+            monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "test-key")
+        else:
+            monkeypatch.delenv(DEFAULT_KEY_ENV[provider], raising=False)
+        reachable = provider_completions(provider) is not None
+        assert reachable == keyed, f"{provider} side calls reachable={reachable}, key={keyed}"
 
 
 async def test_classifier_fails_closed_when_no_provider_is_reachable() -> None:
@@ -183,7 +172,6 @@ async def test_naming_skips_a_provider_whose_side_call_price_expired(
     assert suggestion.provider == "gemini", "an unpriced side call falls back to a priced one"
     assert registered["openai"].models == [], "the unpriced model is never called"
     del registered["gemini"]
-    auxiliary_calls._FACTORIES.pop("gemini")  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(AuxiliaryUnavailable):
         await suggest_thread_name(
             KEYLESS, message_text="plan the weekly report", max_input_chars=2000, provider="openai"

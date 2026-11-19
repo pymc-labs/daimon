@@ -34,6 +34,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _AGENT_ID = "ag_acme"
 
 
@@ -86,15 +88,12 @@ async def test_the_guard_never_exempts_an_agent_key_even_an_admins(
         tenant_id=tenant_id,
         metadata={"daimon_name": "Acme Display"},
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         platform="discord",
         platform_user_id=None if auth_kind == "agent-key-no-platform-user" else "42",
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_AGENT_ID),
-        is_admin=True,
-        is_platform_admin=True,
     )
     with pytest.raises(ToolError):
         await require_pin_write_access(runtime, auth, ma_agent=agent, origin=None)

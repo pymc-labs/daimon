@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.native_admins import (
@@ -16,6 +18,10 @@ from daimon.core.stores.domain import Platform, Role
 from daimon.core.stores.security_audit import erase_admin_subject, list_events
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_change_grant = partial(
+    change_grant, platform="discord", subject_kind="user", is_platform_admin=True
+)
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
@@ -98,22 +104,14 @@ async def test_user_grant_revoke_is_scoped_and_atomic(
 @pytest.mark.parametrize("revoke", [False, True])
 async def test_delegated_admin_cannot_change_grants(db_session: AsyncSession, revoke: bool) -> None:
     tenant = await make_tenant(db_session)
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id="delegate",
-        actor_user_id="owner",
-        is_platform_admin=True,
+    await _change_grant(
+        db_session, tenant_id=tenant.id, subject_id="delegate", actor_user_id="owner"
     )
     before = await list_events(db_session, tenant_id=tenant.id)
     with pytest.raises(PermissionError):
-        await change_grant(
+        await _change_grant(
             db_session,
             tenant_id=tenant.id,
-            platform="discord",
-            subject_kind="user",
             subject_id="new-admin",
             actor_user_id="delegate",
             is_platform_admin=False,
@@ -160,14 +158,8 @@ async def test_discord_roles_are_live_and_revoke_preserves_platform_snapshot(
 async def test_erasure_scrubs_grantee_and_grantor(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     for subject in ("user", "other"):
-        await change_grant(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            subject_kind="user",
-            subject_id=subject,
-            actor_user_id="user",
-            is_platform_admin=True,
+        await _change_grant(
+            db_session, tenant_id=tenant.id, subject_id=subject, actor_user_id="user"
         )
     await erase_user(db_session, tenant_id=tenant.id, platform="discord", platform_user_id="user")
     await erase_admin_subject(
@@ -183,14 +175,13 @@ async def test_erasure_scrubs_grantee_and_grantor(db_session: AsyncSession) -> N
 async def test_non_discord_roles_refused(db_session: AsyncSession, platform: Platform) -> None:
     tenant = await make_tenant(db_session, platform=platform)
     with pytest.raises(ValueError):
-        await change_grant(
+        await _change_grant(
             db_session,
             tenant_id=tenant.id,
             platform=platform,
             subject_kind="role",
             subject_id="role",
             actor_user_id="owner",
-            is_platform_admin=True,
         )
     assert await list_admins(db_session, tenant_id=tenant.id) == []
 
@@ -202,15 +193,7 @@ async def test_stored_subject_cannot_borrow_another_principals_grant(
     user = await make_platform_principal(
         db_session, tenant=tenant, platform="discord", external_id="user"
     )
-    await change_grant(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        subject_kind="user",
-        subject_id="admin",
-        actor_user_id="owner",
-        is_platform_admin=True,
-    )
+    await _change_grant(db_session, tenant_id=tenant.id, subject_id="admin", actor_user_id="owner")
     assert not (
         await read_stored_admin(
             db_session,
@@ -233,14 +216,8 @@ async def test_account_purge_erases_grants_and_audit_targets(
         db_session, tenant=tenant, platform="discord", external_id="user"
     )
     for target in ("user", "other"):
-        await change_grant(
-            db_session,
-            tenant_id=tenant.id,
-            platform="discord",
-            subject_kind="user",
-            subject_id=target,
-            actor_user_id="user",
-            is_platform_admin=True,
+        await _change_grant(
+            db_session, tenant_id=tenant.id, subject_id=target, actor_user_id="user"
         )
     await db_session.commit()
     report = await purge_account(sm=db_session_factory, account_id=user.account_id)

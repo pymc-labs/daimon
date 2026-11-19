@@ -43,25 +43,13 @@ from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .shared_fakes import AsyncIter as _AsyncIter
+
 _TENANT_UUID = uuid.uuid4()
 
 
 class _SimulatedProcessDeath(BaseException):
     """Bypass dispatcher error handling to model abrupt process termination."""
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _make_thread(*, thread_id: int = 42) -> MagicMock:

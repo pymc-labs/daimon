@@ -135,11 +135,11 @@ class DurableRereads:
     ) -> int:
         """One pass: the re-reads made."""
         from daimon.core.stores import mux_state
-        from daimon.core.turn.openai_codec import PROFILES
+        from daimon.core.turn.hosted_codec import OPENAI
 
         async with sessionmaker() as db:
             rows = await mux_state.pending_outbox_for_profiles(
-                db, PROFILES, limit=PASS_ROWS, after=self._cursor
+                db, OPENAI.profiles, limit=PASS_ROWS, after=self._cursor
             )
         last = rows[-1].row if len(rows) == PASS_ROWS else None
         self._cursor = (

@@ -7,21 +7,38 @@ in `daimon.testing.asgi`. Don't duplicate them here.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
+from contextlib import AbstractAsyncContextManager
+from typing import Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.middleware.mcp_identity import (
+    IdentityMiddleware,
+    production_agent_id_resolver,
+    production_internal_resolver,
+    production_is_admin_resolver,
+    production_role_resolver,
+    production_subject_resolver,
+    production_tenant_resolver,
+)
 from daimon.core.mcp_auth import mint_jwt, mint_panel_mcp_token
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import AccountRow, Role, TenantRow, TurnOriginRow
+from daimon.core.turn_origin import turn_origin
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "stop_confirmation_workers",
+    "auth_identity",
+    "discord_turn_origin",
     "make_identity",
     "make_jwt",
     "mcp_session",
+    "production_identity_middleware",
     "seed_server_admin",
     "seed_tenant",
     "seed_tenant_and_account",
@@ -56,6 +73,64 @@ def make_identity(
         is_platform_admin=role is Role.ADMIN,
         is_admin=role is Role.ADMIN,
         token_kind="cli",
+    )
+
+
+def auth_identity(
+    account_id: uuid.UUID, tenant_id: uuid.UUID, role: Role = Role.ADMIN, **fields: Any
+) -> AuthIdentity:
+    """An identity for `role`: an admin is also a platform admin unless `fields` say otherwise."""
+    admin = role is Role.ADMIN
+    defaults: dict[str, Any] = {"is_admin": admin, "is_platform_admin": admin}
+    return AuthIdentity(
+        account_id=account_id, tenant_id=tenant_id, role=role, **(defaults | fields)
+    )
+
+
+def discord_turn_origin(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant: TenantRow,
+    caller: AccountRow,
+    *,
+    parent_channel_id: str = "C_PARENT",
+    thread_id: str = "T_THREAD",
+    responder_ma_agent_id: str = "agt_daimon",
+    responder_name: str = "daimon",
+    role: Role = Role.USER,
+    chat_session_id: str | None = "test-session",
+    **fields: Any,
+) -> AbstractAsyncContextManager[TurnOriginRow]:
+    """A committed Discord thread origin for `caller`, removed when the block ends."""
+    return turn_origin(
+        sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id=parent_channel_id,
+        thread_id=thread_id,
+        responder_ma_agent_id=responder_ma_agent_id,
+        responder_name=responder_name,
+        role=role,
+        chat_session_id=chat_session_id,
+        sender_foreign=False,
+        shared_channel=False,
+        **fields,
+    )
+
+
+def production_identity_middleware(
+    sessionmaker: async_sessionmaker[AsyncSession], **fields: Any
+) -> IdentityMiddleware:
+    """The identity middleware with every production resolver."""
+    return IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=sessionmaker,
+        **fields,
     )
 
 
@@ -111,3 +186,18 @@ async def registered_account_token(
             secret=secret,
             now=dt.datetime.now(dt.UTC),
         )
+
+
+async def stop_confirmation_workers() -> None:
+    """Cancel the confirmation workers agent-chat sends started and wait them out.
+
+    A worker reads through the test's database connection, so a test that holds
+    one must call this before its database fixture tears down.
+    """
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
+    _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)

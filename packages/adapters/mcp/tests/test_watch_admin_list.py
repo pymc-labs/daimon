@@ -9,10 +9,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.watches import WatchListEntry, list_watches_impl
-from daimon.core.stores.domain import Role, WatchRow
+from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.platform_names import KnownName
 from daimon.core.stores.watches import WatchActivity
 from fastmcp.exceptions import ToolError
+
+from .harness import auth_identity
 
 TENANT = uuid.uuid4()
 CALLER = uuid.uuid4()
@@ -67,13 +69,14 @@ def runtime():
 
 
 def caller() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=CALLER,
-        tenant_id=TENANT,
+    return auth_identity(
+        CALLER,
+        TENANT,
+        is_admin=False,
+        is_platform_admin=False,
         platform="discord",
         platform_user_id="1",
         external_id="guild",
-        role=Role.ADMIN,
     )
 
 

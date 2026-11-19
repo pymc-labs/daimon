@@ -10,12 +10,12 @@ from daimon.core.routine_move import RoutineSeedEntry, routine_rollback_document
 from daimon.core.stores.routine_move import rollback_rows, seed_routines
 from daimon.core.stores.routines import (
     claim_due_fireable,
-    create_routine,
     get_routine,
     pause_routine,
     record_result,
     resume_routine,
 )
+from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text, update
 
@@ -25,16 +25,12 @@ NOW = datetime(2026, 10, 27, 12, tzinfo=UTC)
 async def setup(session, *, count=2):
     tenant = await make_tenant(session)
     rows = [
-        await create_routine(
+        await new_routine(
             session,
-            tenant_id=tenant.id,
-            created_by_user_id=None,
+            tenant,
             agent_id="ag",
             source_routine_id=uuid.uuid4(),
-            agent_name="daimon",
             cron_expr="0 * * * *",
-            timezone_="UTC",
-            trigger_message="run",
             enabled=False,
         )
         for _ in range(count)

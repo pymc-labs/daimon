@@ -15,15 +15,14 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core import pricing
-from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
-from daimon.core.mux_backend import TurnRuntime, register_turn_backend
+from daimon.core.mux_backend import TurnRuntime
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.provider_key_gate import ProviderKey
-from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
@@ -47,8 +46,7 @@ from daimon.core.turn.gemini_state import (
     SQLiteGeminiStorage,
 )
 from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
-from daimon.core.turn.io import register_turn_codec
-from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
+from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
     ConfigurationGrant,
@@ -62,6 +60,7 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from daimon.core.turn.runtimes import HostedBackend
 from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope, ThreadRef
@@ -731,20 +730,12 @@ def _side_call_completions() -> Completions:
     )
 
 
-def register_runtime() -> None:
-    """Install the provider's host callbacks without transports or credential access."""
-    if provider_key_present(INLINE_REUSE.provider):
-        register_completions(INLINE_REUSE.provider, _side_call_completions)
-    from daimon.core.turn.carry_over import register_session_reader
-    from daimon.core.turn.runtimes import register_channel_runtime
-
-    register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
-    register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
-    register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
-    register_session_reader(PROFILE, old_gemini_session)
-    register_channel_runtime(
-        PROFILE,
-        build_gemini_runtime,
-        tariffs=partial(pricing.provider_prices, PROFILE),
-        fallback=True,
-    )
+BACKEND = HostedBackend(
+    runtime=build_gemini_runtime,
+    backend=compose_gemini_backend,
+    codec=compose_gemini_codec,
+    prepare=prepare_gemini_turn,
+    reader=old_gemini_session,
+    tariffs=partial(pricing.provider_prices, PROFILE),
+    completions=_side_call_completions,
+)

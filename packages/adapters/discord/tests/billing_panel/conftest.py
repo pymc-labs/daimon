@@ -16,15 +16,15 @@ from unittest.mock import MagicMock
 import discord
 
 if TYPE_CHECKING:  # pragma: no cover - import only used for type hints
-    from daimon.adapters.discord.billing_panel.state import (
+    from daimon.adapters.discord.runtime import DiscordRuntime
+    from daimon.core.billing_panel import (
         BillingPanelState,
         MemberRow,
     )
-    from daimon.adapters.discord.runtime import DiscordRuntime
 
 
 def _make_member_row(**overrides: Any) -> MemberRow:
-    from daimon.adapters.discord.billing_panel.state import MemberRow
+    from daimon.core.billing_panel import MemberRow
 
     base: dict[str, Any] = {
         "platform_user_id": "100000000000000001",
@@ -51,7 +51,7 @@ def _make_state(
     member_rows: tuple[MemberRow, ...] = (),
     over_cap_count: int = 0,
 ) -> BillingPanelState:
-    from daimon.adapters.discord.billing_panel.state import BillingPanelState
+    from daimon.core.billing_panel import BillingPanelState
 
     return BillingPanelState(
         is_admin=is_admin,

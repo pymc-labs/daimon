@@ -1,7 +1,7 @@
 """Checkpoint authorization reaches the turn boundary without another provider read."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import Literal, cast
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -21,12 +21,12 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.posture import PolicyApproval
 from daimon.core.turn.state import TurnState
 from daimon.core.workspace_ports_compat import restore_transfer_records
+from daimon.testing.shared_helpers import NOW
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
 

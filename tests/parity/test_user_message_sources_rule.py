@@ -49,8 +49,7 @@ _NO_RULE: dict[tuple[str, str], str] = {
     ("core/daimon/core/workspace_transfer.py", "transfer_workspace"): (
         "the checkpoint gate turns built-ins, search included, off"
     ),
-    ("core/daimon/core/turn/openai_codec.py", "display_event"): "renders a stored event",
-    ("core/daimon/core/turn/selfhosted_codec.py", "display_event"): "renders a stored event",
+    ("core/daimon/core/turn/hosted_codec.py", "display_event"): "renders a stored event",
 }
 
 #: Sends the walk must reach: agent chat, the scheduler, wakes and continuations.

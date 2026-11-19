@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.stores.pending_carry_overs import (
@@ -21,13 +19,11 @@ from daimon.core.stores.pending_carry_overs import (
 )
 from daimon.core.turn import run as run_module
 from daimon.core.turn.driver import SEND_ATTEMPTED, SEND_CLAIM
-from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import CONTINUED, ContinuityOutcome
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
-    RecordingLifecycle,
     YieldEvent,
     run_turn_on_leg,
 )
@@ -357,13 +353,9 @@ async def _real_send(
     failure: BaseException | None = None
     try:
         await run_turn_on_leg(
-            anthropic=cast(AsyncAnthropic, fake),
+            fake,
             session_id="sess_new",
             user_message=f"{REPLACED.user_prefix}hi",
-            lifecycle=RecordingLifecycle(),
-            cancel=asyncio.Event(),
-            render_interval_s=0.001,
-            billing=BillingExempt(reason="cli-operator-run"),
             system_blocks=SYSTEM,
             before_send=before_send,
         )

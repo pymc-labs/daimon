@@ -12,6 +12,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.stores import watches
 from daimon.core.stores.domain import WatchRow
+from daimon.testing.builders import new_thread_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 #: What the `permanent_watch` fixture yields.
@@ -78,17 +79,15 @@ def test_is_expired_treats_none_as_permanent():
 async def _owner_binding(db: AsyncSession) -> ContinuationRequest:
     """A tenant, an owner and the owner's live conversation the watches bind to."""
     from daimon.core.stores.identity import get_or_create_platform_principal
-    from daimon.core.stores.thread_sessions import create_thread_session
     from daimon.testing.factories import make_tenant
 
     tenant = await make_tenant(db)
     principal = await get_or_create_platform_principal(
         db, tenant_id=tenant.id, platform="discord", external_id="123"
     )
-    await create_thread_session(
+    await new_thread_session(
         db,
         tenant_id=tenant.id,
-        platform="discord",
         thread_id="4242",
         channel_id="4241",
         account_id=principal.account_id,

@@ -19,8 +19,17 @@ from daimon.core.github_connect_cards import (
     connect_button_blocks,
     resolve_connect_card,
 )
-from daimon.core.github_panel import connect_link, safe_github_error, sync_connect_admin
+from daimon.core.github_panel import safe_github_error, sync_connect_admin
 from daimon.core.github_request_cards import slack_mrkdwn_escape
+from daimon.core.github_request_decisions import (
+    DECLINED,
+    WAITING,
+    ConnectOrigin,
+    added_text,
+    approve_connected,
+    approve_with_connect,
+    decline,
+)
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
@@ -30,14 +39,9 @@ from daimon.core.stores.github_access_requests import (
     lock_delivery_slot,
     lookup_request,
     record_reposted_requester_card,
-    set_status,
 )
 from daimon.core.stores.github_app_installations import get as get_app_installation
 from daimon.core.stores.github_installation_coverage import installation_covers_repo
-from daimon.core.stores.github_request_actions import (
-    approve_connected_request,
-    approve_connection_request,
-)
 from daimon.core.stores.identity import find_platform_principal
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -425,14 +429,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         await respond("Only a workspace admin can approve GitHub requests.", error=True)
         return
     if decision == "decline":
-        async with runtime.sessionmaker.begin() as session:
-            changed = await set_status(
-                session,
-                tenant_id=tenant_id,
-                request_id=request_id,
-                expected=request.status,
-                status="declined",
-            )
+        changed = await decline(runtime.sessionmaker, tenant_id=tenant_id, request=request)
         await respond("Declined." if changed else "This request is unavailable.", error=not changed)
         if changed:
             await update_requester_card(
@@ -440,27 +437,24 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 client,
                 tenant_id=tenant_id,
                 request_id=request_id,
-                text="An admin declined GitHub access for this request.",
-                can_cancel=True,
+                text=DECLINED.text,
+                can_cancel=DECLINED.can_cancel,
                 skip_account_id=principal.account_id,
             )
         return
     if decision == "approve":
         try:
-            async with runtime.sessionmaker.begin() as session:
-                changed = await approve_connected_request(
-                    session,
-                    tenant_id=tenant_id,
-                    request_id=request_id,
-                    account_id=principal.account_id,
-                )
+            changed = await approve_connected(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                request_id=request_id,
+                account_id=principal.account_id,
+            )
         except ValueError as error:
             await respond(safe_github_error(error), error=True)
             return
         await respond(
-            f"✓ Added. {request.agent_name} is continuing."
-            if changed
-            else "This request is unavailable.",
+            added_text(request.agent_name) if changed else "This request is unavailable.",
             error=not changed,
         )
         if changed:
@@ -469,48 +463,38 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
                 client,
                 tenant_id=tenant_id,
                 request_id=request_id,
-                text=f"✓ Added. {request.agent_name} is continuing.",
+                text=added_text(request.agent_name),
                 can_cancel=False,
                 skip_account_id=principal.account_id,
             )
         return
     try:
-        async with runtime.sessionmaker.begin() as session:
-            await sync_connect_admin(
-                session,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                is_platform_admin=is_admin,
-            )
-            url = await connect_link(
-                session,
-                settings=runtime.settings,
-                tenant_id=tenant_id,
-                platform="slack",
-                platform_user_id=user_id,
-                verified_tenant_admin=is_admin,
-                requester_label=str(user.get("name") or user_id),
+        url, _ = await approve_with_connect(
+            runtime.sessionmaker,
+            settings=runtime.settings,
+            tenant_id=tenant_id,
+            platform="slack",
+            admin_user_id=user_id,
+            is_admin=is_admin,
+            request_id=request_id,
+            account_id=principal.account_id,
+            origin=ConnectOrigin(
                 workspace_label=str(team.get("name") or team_id),
-                origin_parent_channel_id=request.parent_channel_id,
-                origin_thread_id=request.thread_id,
-                origin_followup_token=str(payload.get("response_url") or "") or None,
-                origin_followup_expires_at=(
+                requester_label=str(user.get("name") or user_id),
+                parent_channel_id=request.parent_channel_id,
+                thread_id=request.thread_id,
+                followup_token=str(payload.get("response_url") or "") or None,
+                followup_expires_at=(
                     datetime.now(UTC) + timedelta(minutes=30)
                     if payload.get("response_url")
                     else None
                 ),
-            )
-            await approve_connection_request(
-                session,
-                tenant_id=tenant_id,
-                request_id=request_id,
-                account_id=principal.account_id,
-            )
+            ),
+        )
     except ValueError as error:
         await respond(safe_github_error(error), error=True)
         return
-    await respond("Waiting for GitHub confirmation.", url=url if modal else None)
+    await respond(WAITING.text, url=url if modal else None)
     if not modal:
         await send_link(
             client,
@@ -527,7 +511,7 @@ async def handle_action(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
         client,
         tenant_id=tenant_id,
         request_id=request_id,
-        text="Waiting for GitHub confirmation.",
-        can_cancel=True,
+        text=WAITING.text,
+        can_cancel=WAITING.can_cancel,
         skip_account_id=principal.account_id,
     )

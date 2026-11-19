@@ -17,7 +17,7 @@ import functools
 import json
 import time
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -31,18 +31,15 @@ from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_command,
 )
 from daimon.adapters.slack.agent_setup.add_skill import (
-    AddSkillDecision,
     evaluate_add_skill_submission,
     run_add_skill_submission,
 )
 from daimon.adapters.slack.agent_setup.avatar import evaluate_avatar_submission
 from daimon.adapters.slack.agent_setup.channel_skills import (
-    ChannelSkillsSubmission,
     evaluate_channel_skills_submission,
     run_channel_skills_submission,
 )
 from daimon.adapters.slack.agent_setup.operator_tokens import (
-    OperatorTokenSubmission,
     evaluate_operator_token_submission,
     run_operator_token_submission,
 )
@@ -52,7 +49,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     CALLBACK_CHANNEL_SKILLS,
     CALLBACK_OPERATOR_MINT,
 )
-from daimon.adapters.slack.agent_setup.state import PanelMetadata, decode_private_metadata
+from daimon.adapters.slack.agent_setup.state import decode_private_metadata
 from daimon.adapters.slack.agent_setup.submit import (
     evaluate_new_agent_submission,
     run_new_agent_submission,
@@ -70,7 +67,6 @@ from daimon.adapters.slack.billing_panel.actions import (
 )
 from daimon.adapters.slack.billing_panel.redeem import (
     REDEEM_CALLBACK_ID,
-    RedeemDecision,
     evaluate_redeem_submission,
     handle_redeem_open,
     run_redeem_submission,
@@ -96,7 +92,6 @@ from daimon.adapters.slack.context import (
 )
 from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.credential_requests import (
-    CredentialSubmissionDecision,
     evaluate_credential_submission,
     handle_credential_request_click,
     run_env_credential_submission,
@@ -128,7 +123,6 @@ from daimon.adapters.slack.external_access import (
 )
 from daimon.adapters.slack.feedback import (
     FEEDBACK_DETAILS_ACTION_ID,
-    FeedbackTextDecision,
     evaluate_feedback_text_submission,
     handle_feedback_details_click,
     handle_feedback_vote,
@@ -205,6 +199,7 @@ from daimon.adapters.slack.shared_channel import (
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
+    SupportSubmission,
     evaluate_menu_submission,
     evaluate_support_submission,
     handle_ask_human_click,
@@ -409,6 +404,23 @@ def _payload_team_id(payload: dict[str, Any]) -> str:
     return str(team.get("id") or "")
 
 
+def _payload_ids(payload: dict[str, Any]) -> tuple[str, str]:
+    """The (team_id, user_id) a view submission came from."""
+    user: dict[str, Any] = payload.get("user") or {}
+    return _payload_team_id(payload), str(user.get("id") or "")
+
+
+def _view_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    view: dict[str, Any] = payload.get("view") or {}
+    return decode_private_metadata(str(view.get("private_metadata") or ""))
+
+
+type _SubmissionJob = Callable[[], Coroutine[Any, Any, None]]
+# What a view submission acks with (None: an empty ack) and the job to spawn after.
+type _Submitted = tuple[dict[str, Any] | None, _SubmissionJob | None]
+type _SubmissionHandler = Callable[[dict[str, Any]], Awaitable[_Submitted]]
+
+
 def _author_id(event: dict[str, Any]) -> str:
     """The Slack user id that authored an event, or "" when there is none.
 
@@ -533,6 +545,263 @@ class SlackApp:
         self.draining: bool = False
         self._orphan_recovery_task: asyncio.Task[None] | None = None
         self._card_recovery_task: asyncio.Task[None] | None = None
+
+    @property
+    def _view_submissions(self) -> dict[str, _SubmissionHandler]:
+        return {
+            "privacy_delete": self._submit_privacy_delete,
+            "routines__create": self._submit_routines_create,
+            "routines__delete_confirm": self._submit_routines_delete,
+            "agent_setup__new_agent": self._submit_new_agent,
+            REDEEM_CALLBACK_ID: self._submit_redeem,
+            CALLBACK_CHANNEL_SKILLS: self._submit_channel_skills,
+            CALLBACK_OPERATOR_MINT: self._submit_operator_token,
+            CALLBACK_ADD_SKILL: self._submit_add_skill,
+            CALLBACK_AVATAR_UPLOAD: self._submit_avatar,
+            "feedback_text": self._submit_feedback_text,
+            SUPPORT_CALLBACK_ID: self._submit_support,
+            MENU_CALLBACK_ID: self._submit_menu,
+            SETTLE_CALLBACK_ID: self._submit_settle,
+        }
+
+    def _with_web_client(
+        self, team_id: str, run: Callable[[AsyncWebClient], Awaitable[None]]
+    ) -> _SubmissionJob:
+        async def job() -> None:
+            web_client = await resolve_web_client(self.runtime, team_id=team_id)
+            if web_client is not None:
+                await run(web_client)
+
+        return job
+
+    async def _submit_privacy_delete(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_delete_submission(
+            payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
+        )
+        account_id, view_id = decision.account_id, decision.view_id
+        if not decision.proceed or account_id is None or view_id is None:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_purge_and_update(
+                self.runtime,
+                wc,
+                account_id=account_id,
+                tenant_id=tenant_id,
+                platform_user_id=user_id,
+                view_id=view_id,
+            ),
+        )
+
+    async def _submit_routines_create(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_routines_create_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        # view_submission payloads carry no top-level "channel": the invoking
+        # channel lives in the view's private_metadata.
+        meta = _view_metadata(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_routines_create_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=str(meta.get("channel_id") or ""),
+                extra=decision.extra,
+            ),
+        )
+
+    async def _submit_routines_delete(self, payload: dict[str, Any]) -> _Submitted:
+        # No form fields to validate: an empty ack pops the confirm modal back
+        # to the panel, then delete + refresh run in the background.
+        team_id, user_id = _payload_ids(payload)
+        meta = _view_metadata(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_routines_delete_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=str(meta.get("channel_id") or ""),
+                routine_id=str(meta.get("routine_id") or ""),
+                root_view_id=str(meta.get("root_view_id") or ""),
+            ),
+        )
+
+    async def _submit_new_agent(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_new_agent_submission(payload)
+        panel_meta = decision.panel_meta
+        if not decision.proceed or panel_meta is None:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        view: dict[str, Any] = payload.get("view") or {}
+        extra = decision.extra
+        # The invoking channel comes from the view's metadata, so success and
+        # refusal ephemerals reach a real channel rather than "" (channel_not_found).
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_new_agent_submission(
+                self.runtime,
+                wc,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=panel_meta.channel_id,
+                view_id=str(view.get("id") or ""),
+                meta=panel_meta,
+                name=str(extra.get("name") or ""),
+                purpose=str(extra["purpose"]) if extra.get("purpose") else None,
+                model=str(extra.get("model") or ""),
+            ),
+        )
+
+    async def _submit_credential(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_credential_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+
+        async def dispatch_continuations() -> None:
+            """Run whatever the just-saved value unblocked.
+
+            Addressed from the request row, never from the form: the modal
+            carries routing handles only, and the thread that is waiting is the
+            one the request was minted in, which may not be where the form was
+            submitted from.
+            """
+            async with self.runtime.sessionmaker() as session:
+                row = await peek_credential_request(session, token=decision.token)
+            if row is None or row.origin_thread_id is None:
+                return
+            web_client = await resolve_web_client(self.runtime, team_id=team_id)
+            if web_client is None:
+                return
+            await self.dispatch_continuations_in_thread(
+                web_client=web_client,
+                tenant_id=row.tenant_id,
+                channel=row.parent_channel_id or row.channel_id,
+                thread_id=row.origin_thread_id,
+                account_id=row.account_id,
+                team_id=team_id,
+            )
+
+        async def job() -> None:
+            common: dict[str, Any] = {
+                "team_id": team_id,
+                "user_id": user_id,
+                "channel_id": decision.channel_id,
+                "message_ts": decision.message_ts,
+                "token": decision.token,
+                "dispatch_continuations": dispatch_continuations,
+            }
+            if decision.kind == "env":
+                await run_env_credential_submission(self.runtime, value=decision.value, **common)
+            elif decision.kind == "env_file":
+                await run_env_file_credential_submission(
+                    self.runtime, file_id=decision.file_id or "", **common
+                )
+            elif decision.kind == "mcp":
+                await run_mcp_credential_submission(self.runtime, value=decision.value, **common)
+            elif decision.kind == "skill_repo":
+                await run_skill_repo_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            elif decision.kind == "repo":
+                await run_repo_bind_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            else:
+                log.info("slack.on_request.unknown_credential_kind", kind=decision.kind)
+
+        return decision.response_payload, job
+
+    async def _submit_redeem(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_redeem_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_redeem_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, decision=decision
+            ),
+        )
+
+    async def _submit_channel_skills(self, payload: dict[str, Any]) -> _Submitted:
+        submission = evaluate_channel_skills_submission(payload)
+        if submission is None:
+            return None, None
+        team_id, user_id = _payload_ids(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_channel_skills_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, submission=submission
+            ),
+        )
+
+    async def _submit_operator_token(self, payload: dict[str, Any]) -> _Submitted:
+        # An empty ack closes the form; the token arrives as an ephemeral and
+        # the routing view refreshes.
+        submission = evaluate_operator_token_submission(payload)
+        if submission is None:
+            return None, None
+        team_id, user_id = _payload_ids(payload)
+        return None, self._with_web_client(
+            team_id,
+            lambda wc: run_operator_token_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, submission=submission
+            ),
+        )
+
+    async def _submit_add_skill(self, payload: dict[str, Any]) -> _Submitted:
+        # Pure but slow, so off the loop: errors, a fresh preview, or close and add.
+        decision = await asyncio.to_thread(evaluate_add_skill_submission, payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+        return decision.response_payload, self._with_web_client(
+            team_id,
+            lambda wc: run_add_skill_submission(
+                self.runtime, wc, team_id=team_id, user_id=user_id, decision=decision
+            ),
+        )
+
+    async def _submit_avatar(self, payload: dict[str, Any]) -> _Submitted:
+        return evaluate_avatar_submission(payload), None
+
+    async def _submit_feedback_text(self, payload: dict[str, Any]) -> _Submitted:
+        decision = evaluate_feedback_text_submission(payload)
+        if not decision.proceed:
+            return decision.response_payload, None
+        team_id, user_id = _payload_ids(payload)
+
+        async def job() -> None:
+            await run_feedback_text_submission(
+                self.runtime, team_id=team_id, user_id=user_id, decision=decision
+            )
+
+        return decision.response_payload, job
+
+    async def _submit_support(self, payload: dict[str, Any]) -> _Submitted:
+        return self._support_submitted(evaluate_support_submission(payload))
+
+    async def _submit_menu(self, payload: dict[str, Any]) -> _Submitted:
+        return self._support_submitted(evaluate_menu_submission(payload))
+
+    def _support_submitted(self, submission: SupportSubmission) -> _Submitted:
+        if not submission.proceed:
+            return submission.response_payload, None
+        return submission.response_payload, lambda: run_support_submission(self.runtime, submission)
+
+    async def _submit_settle(self, payload: dict[str, Any]) -> _Submitted:
+        submission = evaluate_settle_submission(payload)
+        if not submission.proceed:
+            return submission.response_payload, None
+        return submission.response_payload, lambda: run_settle_submission(self.runtime, submission)
 
     def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
         """Fire-and-forget a background task, tracked so it isn't GC'd."""
@@ -905,416 +1174,22 @@ class SlackApp:
                     )
                 )
                 return
-            if cb_id == "privacy_delete":
-                decision = evaluate_delete_submission(
-                    payload, delete_enabled=self.runtime.settings.privacy.delete_enabled
-                )
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=decision.response_payload,
-                        )
-                    )
-                )
-                if (
-                    decision.proceed
-                    and decision.account_id is not None
-                    and decision.view_id is not None
-                ):
-                    _account_id = decision.account_id
-                    _view_id = decision.view_id
-                    team_info_vs: dict[str, Any] = payload.get("team") or {}
-                    _team_id_vs: str = str(team_info_vs.get("id") or "")
-                    user_info_vs: dict[str, Any] = payload.get("user") or {}
-                    _user_id_vs: str = str(user_info_vs.get("id") or "")
-                    _tenant_id_vs = derive_tenant_uuid(platform="slack", workspace_id=_team_id_vs)
-
-                    async def _run_purge() -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_team_id_vs)
-                        if wc is not None:
-                            await run_purge_and_update(
-                                self.runtime,
-                                wc,
-                                account_id=_account_id,
-                                tenant_id=_tenant_id_vs,
-                                platform_user_id=_user_id_vs,
-                                view_id=_view_id,
-                            )
-
-                    self._spawn(_run_purge())
-            elif cb_id == "routines__create":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _rc_decision = evaluate_routines_create_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_rc_decision.response_payload,
-                        )
-                    )
-                )
-                if _rc_decision.proceed:
-                    _rc_team_info: dict[str, Any] = payload.get("team") or {}
-                    _rc_team_id: str = str(_rc_team_info.get("id") or "")
-                    _rc_user_info: dict[str, Any] = payload.get("user") or {}
-                    _rc_user_id: str = str(_rc_user_info.get("id") or "")
-                    _rc_view_info: dict[str, Any] = payload.get("view") or {}
-                    # view_submission payloads carry no top-level "channel" — the
-                    # invoking channel lives in the view's private_metadata.
-                    _rc_meta = decode_private_metadata(
-                        str(_rc_view_info.get("private_metadata") or "")
-                    )
-                    _rc_channel_id: str = str(_rc_meta.get("channel_id") or "")
-                    _rc_extra: dict[str, Any] = _rc_decision.extra
-
-                    async def _run_routines_create_submission(
-                        *,
-                        _t: str = _rc_team_id,
-                        _u: str = _rc_user_id,
-                        _c: str = _rc_channel_id,
-                        _e: dict[str, Any] = _rc_extra,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is None:
-                            return
-                        await run_routines_create_submission(
-                            self.runtime,
-                            wc,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            extra=_e,
-                        )
-
-                    self._spawn(_run_routines_create_submission())
-            elif cb_id == "routines__delete_confirm":
-                # No form fields to validate — ack empty to pop the confirm modal
-                # back to the panel, then delete + refresh in the background.
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                _rd_team_info: dict[str, Any] = payload.get("team") or {}
-                _rd_team_id: str = str(_rd_team_info.get("id") or "")
-                _rd_user_info: dict[str, Any] = payload.get("user") or {}
-                _rd_user_id: str = str(_rd_user_info.get("id") or "")
-                _rd_view_info: dict[str, Any] = payload.get("view") or {}
-                _rd_meta = decode_private_metadata(str(_rd_view_info.get("private_metadata") or ""))
-                _rd_channel_id: str = str(_rd_meta.get("channel_id") or "")
-                _rd_routine_id: str = str(_rd_meta.get("routine_id") or "")
-                _rd_root_view_id: str = str(_rd_meta.get("root_view_id") or "")
-
-                async def _run_routines_delete_submission(
-                    *,
-                    _t: str = _rd_team_id,
-                    _u: str = _rd_user_id,
-                    _c: str = _rd_channel_id,
-                    _r: str = _rd_routine_id,
-                    _v: str = _rd_root_view_id,
-                ) -> None:
-                    wc = await resolve_web_client(self.runtime, team_id=_t)
-                    if wc is None:
-                        return
-                    await run_routines_delete_submission(
-                        self.runtime,
-                        wc,
-                        team_id=_t,
-                        user_id=_u,
-                        channel_id=_c,
-                        routine_id=_r,
-                        root_view_id=_v,
-                    )
-
-                self._spawn(_run_routines_delete_submission())
-            elif cb_id == "agent_setup__new_agent":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _as_decision = evaluate_new_agent_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_as_decision.response_payload,
-                        )
-                    )
-                )
-                if _as_decision.proceed and _as_decision.panel_meta is not None:
-                    _as_team_info: dict[str, Any] = payload.get("team") or {}
-                    _as_team_id: str = str(_as_team_info.get("id") or "")
-                    _as_user_info: dict[str, Any] = payload.get("user") or {}
-                    _as_user_id: str = str(_as_user_info.get("id") or "")
-                    _as_view_info: dict[str, Any] = payload.get("view") or {}
-                    _as_view_id: str = str(_as_view_info.get("id") or "")
-                    # view_submission payloads carry no top-level "channel" — the
-                    # invoking channel lives in the view's metadata, so success
-                    # and refusal ephemerals reach a real channel rather than ""
-                    # (channel_not_found).
-                    _as_panel_meta = _as_decision.panel_meta
-                    _as_channel_id: str = _as_panel_meta.channel_id
-                    _as_extra: dict[str, Any] = _as_decision.extra
-
-                    async def _run_agent_setup_submission(
-                        *,
-                        _t: str = _as_team_id,
-                        _u: str = _as_user_id,
-                        _c: str = _as_channel_id,
-                        _v: str = _as_view_id,
-                        _e: dict[str, Any] = _as_extra,
-                        _pm: PanelMetadata = _as_panel_meta,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is None:
-                            return
-                        await run_new_agent_submission(
-                            self.runtime,
-                            wc,
-                            team_id=_t,
-                            user_id=_u,
-                            channel_id=_c,
-                            view_id=_v,
-                            meta=_pm,
-                            name=str(_e.get("name") or ""),
-                            purpose=str(_e["purpose"]) if _e.get("purpose") else None,
-                            model=str(_e.get("model") or ""),
-                        )
-
-                    self._spawn(_run_agent_setup_submission())
-            elif cb_id.startswith("credential_request__"):
-                # Pure pre-ack evaluation (as feedback/agent_setup).
-                _cred_decision = evaluate_credential_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(
-                        envelope_id=req.envelope_id,
-                        payload=_cred_decision.response_payload,
-                    )
-                )
-                if _cred_decision.proceed:
-                    cred_team: dict[str, Any] = payload.get("team") or {}
-                    cred_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_credential_submission(
-                        _d: CredentialSubmissionDecision = _cred_decision,
-                        _team: str = str(cred_team.get("id") or ""),
-                        _user: str = str(cred_user.get("id") or ""),
-                    ) -> None:
-                        async def _dispatch_continuations() -> None:
-                            """Run whatever the just-saved value unblocked.
-
-                            Addressed from the request row, never from the
-                            form: the modal carries routing handles only, and
-                            the thread that is waiting is the one the request
-                            was minted in, which may not be where the form
-                            was submitted from.
-                            """
-                            async with self.runtime.sessionmaker() as _session:
-                                _row = await peek_credential_request(_session, token=_d.token)
-                            if _row is None or _row.origin_thread_id is None:
-                                return
-                            _client = await resolve_web_client(self.runtime, team_id=_team)
-                            if _client is None:
-                                return
-                            await self.dispatch_continuations_in_thread(
-                                web_client=_client,
-                                tenant_id=_row.tenant_id,
-                                channel=_row.parent_channel_id or _row.channel_id,
-                                thread_id=_row.origin_thread_id,
-                                account_id=_row.account_id,
-                                team_id=_team,
-                            )
-
-                        common: dict[str, Any] = {
-                            "team_id": _team,
-                            "user_id": _user,
-                            "channel_id": _d.channel_id,
-                            "message_ts": _d.message_ts,
-                            "token": _d.token,
-                            "dispatch_continuations": _dispatch_continuations,
-                        }
-                        if _d.kind == "env":
-                            await run_env_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "env_file":
-                            await run_env_file_credential_submission(
-                                self.runtime, file_id=_d.file_id or "", **common
-                            )
-                        elif _d.kind == "mcp":
-                            await run_mcp_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "skill_repo":
-                            await run_skill_repo_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        elif _d.kind == "repo":
-                            await run_repo_bind_credential_submission(
-                                self.runtime, value=_d.value, **common
-                            )
-                        else:
-                            log.info("slack.on_request.unknown_credential_kind", kind=_d.kind)
-
-                    self._spawn(_run_credential_submission())
-            elif cb_id == REDEEM_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _pr_decision = evaluate_redeem_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_pr_decision.response_payload,
-                        )
-                    )
-                )
-                if _pr_decision.proceed:
-                    _pr_team_info: dict[str, Any] = payload.get("team") or {}
-                    _pr_user_info: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_redeem(
-                        *,
-                        _t: str = str(_pr_team_info.get("id") or ""),
-                        _u: str = str(_pr_user_info.get("id") or ""),
-                        _d: RedeemDecision = _pr_decision,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_redeem_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
-                            )
-
-                    self._spawn(_run_redeem())
-            elif cb_id == CALLBACK_CHANNEL_SKILLS:
-                _cs = evaluate_channel_skills_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if _cs is not None:
-                    _cs_team: dict[str, Any] = payload.get("team") or {}
-                    _cs_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_channel_skills(
-                        *,
-                        _t: str = str(_cs_team.get("id") or ""),
-                        _u: str = str(_cs_user.get("id") or ""),
-                        _s: ChannelSkillsSubmission = _cs,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_channel_skills_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_channel_skills())
-            elif cb_id == CALLBACK_OPERATOR_MINT:
-                # Pure evaluate, then an empty ack closes the form; the token
-                # arrives as an ephemeral and the routing view refreshes.
-                _ot = evaluate_operator_token_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
-                if _ot is not None:
-                    _ot_team: dict[str, Any] = payload.get("team") or {}
-                    _ot_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_operator_token(
-                        *,
-                        _t: str = str(_ot_team.get("id") or ""),
-                        _u: str = str(_ot_user.get("id") or ""),
-                        _s: OperatorTokenSubmission = _ot,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_operator_token_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, submission=_s
-                            )
-
-                    self._spawn(_run_operator_token())
-            elif cb_id == CALLBACK_ADD_SKILL:
-                # Pure evaluate, off the loop: errors, a fresh preview, or close and add.
-                _as = await asyncio.to_thread(evaluate_add_skill_submission, payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_as.response_payload)
-                )
-                if _as.proceed:
-                    _as_team: dict[str, Any] = payload.get("team") or {}
-                    _as_user: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_add_skill(
-                        *,
-                        _t: str = str(_as_team.get("id") or ""),
-                        _u: str = str(_as_user.get("id") or ""),
-                        _d: AddSkillDecision = _as,
-                    ) -> None:
-                        wc = await resolve_web_client(self.runtime, team_id=_t)
-                        if wc is not None:
-                            await run_add_skill_submission(
-                                self.runtime, wc, team_id=_t, user_id=_u, decision=_d
-                            )
-
-                    self._spawn(_run_add_skill())
-            elif cb_id == CALLBACK_AVATAR_UPLOAD:
-                await client.send_socket_mode_response(
-                    SocketModeResponse(
-                        envelope_id=req.envelope_id,
-                        payload=evaluate_avatar_submission(payload),
-                    )
-                )
-            elif cb_id == "feedback_text":
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _fb_decision = evaluate_feedback_text_submission(payload)
-                await (
-                    client.send_socket_mode_response(  # ACK WITH PAYLOAD — pure call above, no I/O
-                        SocketModeResponse(
-                            envelope_id=req.envelope_id,
-                            payload=_fb_decision.response_payload,
-                        )
-                    )
-                )
-                if _fb_decision.proceed:
-                    _fb_team_info: dict[str, Any] = payload.get("team") or {}
-                    _fb_user_info: dict[str, Any] = payload.get("user") or {}
-
-                    async def _run_feedback_text(
-                        *,
-                        _t: str = str(_fb_team_info.get("id") or ""),
-                        _u: str = str(_fb_user_info.get("id") or ""),
-                        _d: FeedbackTextDecision = _fb_decision,
-                    ) -> None:
-                        await run_feedback_text_submission(
-                            self.runtime, team_id=_t, user_id=_u, decision=_d
-                        )
-
-                    self._spawn(_run_feedback_text())
-            elif cb_id == SUPPORT_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _sup = evaluate_support_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_sup.response_payload)
-                )
-                if _sup.proceed:
-                    self._spawn(run_support_submission(self.runtime, _sup))
-            elif cb_id == MENU_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _menu = evaluate_menu_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_menu.response_payload)
-                )
-                if _menu.proceed:
-                    self._spawn(run_support_submission(self.runtime, _menu))
-            elif cb_id == SETTLE_CALLBACK_ID:
-                # Pure evaluate (no I/O) — must run before the single ack.
-                _settle = evaluate_settle_submission(payload)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(
-                        envelope_id=req.envelope_id, payload=_settle.response_payload
-                    )
-                )
-                if _settle.proceed:
-                    self._spawn(run_settle_submission(self.runtime, _settle))
-            else:
-                # Unknown view_submission callback_id — log and ack empty.
+            # Each submit handler is pure before the ack (which may carry its
+            # response_action payload); any I/O runs in the spawned job after it.
+            submit = self._view_submissions.get(cb_id)
+            if submit is None and cb_id.startswith("credential_request__"):
+                submit = self._submit_credential
+            ack_payload: dict[str, Any] | None = None
+            followup: _SubmissionJob | None = None
+            if submit is None:
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
-                await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id)
-                )
+            else:
+                ack_payload, followup = await submit(payload)
+            await client.send_socket_mode_response(
+                SocketModeResponse(envelope_id=req.envelope_id, payload=ack_payload)
+            )
+            if followup is not None:
+                self._spawn(followup())
             return  # view_submission fully handled
 
         # ACK FIRST for all non-view_submission envelope types.

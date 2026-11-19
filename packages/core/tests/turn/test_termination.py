@@ -13,10 +13,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import cast, get_args
+from typing import get_args
 
 import pytest
-from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_mcp_authentication_failed_error import (
     BetaManagedAgentsMCPAuthenticationFailedError,
 )
@@ -40,7 +39,6 @@ from daimon.core.turn.errors import (
     SessionBusyError,
     SessionPreparationFailed,
 )
-from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import denial_termination_reason, normalized_termination_reason
 from daimon.testing.turn_fakes import (
@@ -66,7 +64,6 @@ from .conftest import (
 )
 
 _FROZEN_NOW = datetime(2026, 4, 21, 12, 0, 0, tzinfo=UTC)
-_EXEMPT = BillingExempt(reason="cli-operator-run")
 
 
 def _now() -> datetime:
@@ -197,15 +194,11 @@ async def test_every_driver_exit_sets_its_reason(case: _Case) -> None:
             tg.create_task(_cancel_later(case.cancel_after_s))
         final = await asyncio.wait_for(
             run_turn_on_leg(
-                anthropic=cast(AsyncAnthropic, fa),
-                session_id="sess_1",
-                user_message="hi",
+                fa,
                 lifecycle=lc,
                 cancel=cancel,
-                render_interval_s=0.001,
                 interrupt_timeout_s=case.interrupt_timeout_s,
                 now=_now,
-                billing=_EXEMPT,
             ),
             timeout=5.0,
         )
@@ -226,16 +219,7 @@ async def test_interrupt_before_the_stream_opens_is_interrupted() -> None:
     cancel.set()
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=cancel,
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, cancel=cancel, now=_now)
 
     assert final.termination is TerminationReason.INTERRUPTED
     assert _terminal_state(lc).termination is TerminationReason.INTERRUPTED
@@ -247,15 +231,7 @@ async def test_driver_ceiling_is_ceiling() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-        deadline=_FROZEN_NOW - timedelta(seconds=1),
+        fa, lifecycle=lc, now=_now, deadline=_FROZEN_NOW - timedelta(seconds=1)
     )
 
     assert final.termination is TerminationReason.CEILING
@@ -397,16 +373,7 @@ async def test_a_terminated_session_with_no_terminal_event_is_not_completed() ->
     fa.beta.sessions.retrieve_statuses = ["terminated"]
     lc = RecordingLifecycle()
 
-    final = await run_turn_on_leg(
-        anthropic=cast(AsyncAnthropic, fa),
-        session_id="sess_1",
-        user_message="hi",
-        lifecycle=lc,
-        cancel=asyncio.Event(),
-        render_interval_s=0.001,
-        now=_now,
-        billing=_EXEMPT,
-    )
+    final = await run_turn_on_leg(fa, lifecycle=lc, now=_now)
 
     assert final.termination is TerminationReason.SESSION_TERMINATED
     assert final.error is not None and final.error.kind == "upstream"

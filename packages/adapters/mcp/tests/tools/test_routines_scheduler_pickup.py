@@ -37,6 +37,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, lis
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 
 def _ma_agent_json(*, agent_id: str, name: str, tenant_id: uuid.UUID) -> dict[str, object]:
     agent = ma_agent(
@@ -83,14 +85,13 @@ def _auth_identity(
     tenant_id: uuid.UUID | None = None,
 ) -> AuthIdentity:
     tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    return auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
         platform=platform,
         external_id=external_id,
         platform_user_id="u_test",
-        # A member in a chat turn with the agent the routine schedules.
         chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_a"),
     )
 
