@@ -109,6 +109,9 @@ class _Footer:
     expires: float
     shown: Decimal | None
     latest: Decimal | None = None
+    final: bool = False
+    #: The one edit in flight; it shows `latest` until that one landed.
+    task: asyncio.Task[None] | None = None
 
 
 def _place(outcome: TurnObservation | None) -> tuple[str, str, str | None] | None:
@@ -206,39 +209,48 @@ class LateTurnCosts:
                 self._settled[key] = (debit, observation.final)
                 self._bound(self._settled, key)
             return
-        if debit is None or debit == footer.shown:
+        if debit is None:
             if observation.final:
                 del self._waiting[key]
             return
-        footer.latest = debit
-        task = asyncio.get_running_loop().create_task(
-            self._show(key, footer, debit, final=observation.final), context=footer.context
+        footer.latest, footer.final = debit, observation.final
+        if footer.task is not None and not footer.task.done():
+            return  # one edit per footer: the one in flight shows the newest debit next
+        if debit == footer.shown:
+            if observation.final:
+                del self._waiting[key]
+            return
+        footer.task = asyncio.get_running_loop().create_task(
+            self._show(key, footer), context=footer.context
         )
-        self._shows.add(task)
-        task.add_done_callback(self._shows.discard)
+        self._shows.add(footer.task)
+        footer.task.add_done_callback(self._shows.discard)
 
     async def wait(self) -> None:
         """Until every footer edit started so far has finished."""
         while self._shows:
             await asyncio.gather(*self._shows, return_exceptions=True)
 
-    async def _show(
-        self, key: tuple[str, str], footer: _Footer, debit: Decimal, *, final: bool
-    ) -> None:
-        for delay in (0.0, *self._retry_s):
-            await asyncio.sleep(delay)
-            if self._waiting.get(key) is not footer or footer.latest != debit:
-                return  # released, expired, or a newer revision took over
+    async def _show(self, key: tuple[str, str], footer: _Footer) -> None:
+        delays, attempt = (0.0, *self._retry_s), 0
+        while attempt < len(delays):
+            await asyncio.sleep(delays[attempt])
+            debit = footer.latest
+            if self._waiting.get(key) is not footer or debit is None:
+                return  # released or expired
+            if debit == footer.shown:
+                if footer.final:
+                    del self._waiting[key]
+                return
             try:
                 applied = await footer.show(float(debit))
             except Exception:  # a footer edit is cosmetic: a failed one is retried, then dropped
                 log.warning("late_turn_cost.show_failed", key=":".join(key), exc_info=True)
                 applied = False
-            if applied:
-                footer.shown = debit
-                if final and self._waiting.get(key) is footer:
-                    del self._waiting[key]
-                return
+            if applied:  # a debit settled during the edit is shown next, at once
+                footer.shown, attempt = debit, 0
+            else:
+                attempt += 1
 
 
 #: The process's waiting footers, shared by every chat platform's lifecycle.
