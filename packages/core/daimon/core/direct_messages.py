@@ -1268,6 +1268,17 @@ async def _watch_fence(deps: TurnDeps, fence: OwnerDmFence, stop: asyncio.Timeou
     """Stop the holder's turn once its fence is gone, so a waiting turn never runs beside it."""
     while True:
         await asyncio.sleep(_FENCE_CHECK_S)
+        if fence.db is not None:
+            # The fence connection idles in its transaction all turn, so an infrastructure
+            # idle drop would end it; a ping keeps it alive and proves it is still up.
+            try:
+                async with asyncio.timeout(_FENCE_CHECK_S):
+                    await fence.db.execute(text("SELECT 1"))
+            except (SQLAlchemyError, OSError, TimeoutError) as err:
+                _log.warning("dm.owner_fence_ping_failed", error_type=type(err).__name__)
+                fence.lost.set()
+                stop.reschedule(asyncio.get_running_loop().time())
+                return
         try:
             async with deps.sessionmaker() as session:
                 held = await fence_held(session, fence)
@@ -1319,7 +1330,7 @@ async def owner_dm_turn(
         except BaseException:
             await stack.aclose()
             raise
-        return stack, OwnerDmFence(platform, owner, pid)
+        return stack, OwnerDmFence(platform, owner, pid, db)
 
     if wait:
         stack, fence = await retry_fences(acquire)

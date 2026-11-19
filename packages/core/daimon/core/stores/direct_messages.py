@@ -41,12 +41,14 @@ class OwnerDmFence:
     """The owner's fence as `owner_dm_turn` holds it, on connection `pid`.
 
     `fence_held` checks the hold; one built without a `pid` proves none. `lost` is set
-    once the holder sees the fence gone.
+    once the holder sees the fence gone. `db` is the holding session, which the holder
+    pings so an idle drop cannot end the hold unseen.
     """
 
     platform: str
     owner: str
     pid: int = 0
+    db: AsyncSession | None = field(default=None, compare=False, repr=False)
     lost: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
 
 
