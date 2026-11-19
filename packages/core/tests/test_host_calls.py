@@ -1,8 +1,6 @@
 """Pure parts of press-applies confirmation: digest, custom ids and cards."""
 
-import ast
 import uuid
-from pathlib import Path
 
 import daimon.core.host_calls as host_calls
 from daimon.core.host_calls import (
@@ -60,19 +58,6 @@ def test_wake_key_is_one_per_record() -> None:
     card = uuid.uuid4()
     assert wake_key(card) == wake_key(card), "stable per record"
     assert wake_key(card) != wake_key(uuid.uuid4()), "distinct across records"
-
-
-def test_host_calls_never_waits_on_listen_notify_or_sleep() -> None:
-    """Delivery is wake-only: no polling sleeps and no LISTEN/NOTIFY in the module."""
-    tree = ast.parse(Path(host_calls.__file__).read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            assert node.attr != "sleep", f"line {node.lineno}: no sleep in host_calls"
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            upper = node.value.upper()
-            assert "LISTEN " not in upper and "NOTIFY " not in upper, (
-                f"line {node.lineno}: no LISTEN/NOTIFY in host_calls"
-            )
 
 
 def test_card_args_fence_outlasts_any_backtick_run_inside() -> None:

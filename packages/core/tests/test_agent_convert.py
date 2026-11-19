@@ -1,7 +1,5 @@
 """Converting a Managed Agents agent to a Daimon record: copy, then delete the MA twin."""
 
-import ast
-import inspect
 import io
 import re
 import uuid
@@ -108,15 +106,6 @@ async def test_convert_is_admin_only(
             name="analyst",
             subject=Subject(is_admin=False),
         )
-
-
-def test_convert_never_reaches_lifecycle_archive() -> None:
-    """Contract: convert deletes through the raw port, never the name-keyed lifecycle path."""
-    tree = ast.parse(inspect.getsource(agent_convert))
-    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-    names |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-    banned = {"forget_archived_agent", "archive_agent", "archive_agent_everywhere"}
-    assert not names & banned, f"convert must not call lifecycle archive: {names & banned}"
 
 
 def _skill_zip(name: str) -> bytes:

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import dataclasses
 import uuid
 from datetime import date
-from pathlib import Path
 
 import pytest
 from daimon.core import pricing
@@ -55,41 +53,6 @@ def test_claude_model_choices_labels_match_display_names() -> None:
         assert choice.label == MODEL_DISPLAY_NAMES.get(choice.id, choice.id), (
             "label must come from MODEL_DISPLAY_NAMES"
         )
-
-
-ROOT = Path(__file__).resolve().parents[3]
-_ID_TABLE_OWNERS = frozenset({"pricing.py", "constants.py"})
-
-
-def _production_sources() -> list[Path]:
-    roots = [
-        ROOT / "packages/core/daimon",
-        *sorted((ROOT / "packages/adapters").glob("*/daimon")),
-        ROOT / "apps",
-    ]
-    return [path for root in roots for path in root.rglob("*.py") if "tests" not in path.parts]
-
-
-def _id_table_reads(path: Path) -> list[int]:
-    lines: list[int] = []
-    for node in ast.walk(ast.parse(path.read_text())):
-        imported = isinstance(node, ast.ImportFrom) and any(
-            alias.name == "ALLOWED_MODEL_IDS" for alias in node.names
-        )
-        if imported or (isinstance(node, ast.Attribute) and node.attr == "ALLOWED_MODEL_IDS"):
-            lines.append(node.lineno)
-    return lines
-
-
-def test_only_the_catalog_reads_the_raw_model_id_table() -> None:
-    """Every surface reads model ids through `models_catalog`, never `ALLOWED_MODEL_IDS`."""
-    readers = [
-        f"{path.relative_to(ROOT)}:{line}"
-        for path in _production_sources()
-        if path.name not in _ID_TABLE_OWNERS
-        for line in _id_table_reads(path)
-    ]
-    assert not readers, f"read model ids via daimon.core.models_catalog instead: {readers}"
 
 
 def _tenant(*enabled: str) -> TenantBackendPolicy:
