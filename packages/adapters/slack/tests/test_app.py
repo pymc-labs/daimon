@@ -1594,6 +1594,8 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    # A real admission names the channel it was admitted in; the pin card reads it.
+    admission.origin_channel_id = "C_TEST"
     admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id

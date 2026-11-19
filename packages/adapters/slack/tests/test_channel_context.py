@@ -429,6 +429,8 @@ async def _first_turn(
     admission.backend_follow = None
     admission.turn_ceiling_s = TURN_CEILING_S
     admission.history_depth = FULL_HISTORY
+    # A real admission names the channel it was admitted in; the pin card reads it.
+    admission.origin_channel_id = _CHANNEL
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
