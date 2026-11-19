@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import anthropic
+import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic._models import construct_type_unchecked
@@ -15,7 +16,7 @@ from daimon.core.mux_compat import legacy_call
 from daimon.core.session_ports_compat import session_scope
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn.driver import current_turn_events
-from daimon.core.turn.io import turn_io
+from daimon.core.turn.io import TurnConnectionLost, turn_io
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState, extract_final_response
 from mux.drivers.anthropic import SessionReads
@@ -78,9 +79,17 @@ async def completed_orphan_text(
             ):
                 return None
             return extract_final_response(state.content) or None
-    # The event replay raises mux errors (a malformed event, an unsupported profile):
+    # The event replay raises mux errors (a malformed event, an unsupported profile) and
+    # lost connections (a raw httpx error, `TurnConnectionLost`):
     # an unreadable result must not fail the orphan sweep, which then reruns every turn.
-    except (anthropic.APIError, TimeoutError, DaimonError, MuxError) as err:
+    except (
+        anthropic.APIError,
+        httpx.HTTPError,
+        TimeoutError,
+        DaimonError,
+        MuxError,
+        TurnConnectionLost,
+    ) as err:
         log.warning(
             "turn.orphan_result_read_failed",
             thread_id=row.thread_id,

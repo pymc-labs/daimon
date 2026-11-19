@@ -11,6 +11,7 @@ import structlog.testing
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import startup_replay
 from daimon.core.stores.domain import ThreadSessionRow
+from daimon.core.turn.io import TurnConnectionLost
 from daimon.testing.turn_router import turn_events
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
@@ -163,10 +164,13 @@ async def test_api_error_is_still_handled_without_an_event_read(code: int) -> No
     [
         ProviderError("upstream", retryable=False, native_code="malformed_event"),
         UnsupportedCapability(("event_history",), "anthropic.managed_agents"),
+        # The walk's lost connection, as `_native_error_edge` re-raises it.
+        httpx.ReadError("connection reset"),
+        TurnConnectionLost("connection reset"),
     ],
 )
 async def test_a_mux_error_on_the_event_replay_reads_no_result(
-    monkeypatch: pytest.MonkeyPatch, error: MuxError
+    monkeypatch: pytest.MonkeyPatch, error: MuxError | httpx.HTTPError | TurnConnectionLost
 ) -> None:
     """An unreadable replay is no result, never a failed orphan sweep."""
 
