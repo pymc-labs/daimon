@@ -17,6 +17,7 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import default_mux_turn_io
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.state import TextBlock
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.events import Event, NativeProvenance
@@ -96,7 +97,7 @@ def message(*, preview: bool = False) -> Event:
     )
 
 
-async def test_actual_sdk_traffic_and_effects_match_legacy_with_durable_journal(
+async def test_actual_sdk_traffic_and_effects_with_durable_journal(
     stores: Callable[[], StateStore],
 ) -> None:
     store = stores()
@@ -105,36 +106,26 @@ async def test_actual_sdk_traffic_and_effects_match_legacy_with_durable_journal(
         make_agent_message(event_id="message", text="answer").model_dump(mode="json"),
         make_status_idle(event_id="ended").model_dump(mode="json"),
     ]
-    runs: list[tuple[object, ...]] = []
-    for path in ("legacy", "mux"):
-        transport = ScriptedTransport()
-        transport.queue(
-            ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
-        )
-        lifecycle = RecordingLifecycle()
-        async with transport.client() as client:
-            with context(store).activate():
-                state = await run_turn(
-                    anthropic=client,
-                    session_id="session",
-                    user_message="question",
-                    lifecycle=lifecycle,
-                    cancel=asyncio.Event(),
-                    billing=BillingExempt(reason="headless-unrecorded"),
-                    path=path,
-                    scope=SCOPE,
-                    now=lambda: NOW,
-                    render_interval_s=3600,
-                )
-        transport.assert_consumed()
-        runs.append((transport.requests, state.content, state.stop_reason, state.error, lifecycle))
-        if path == "legacy":
-            assert not await store.read_events(SESSION.id)
-            assert await store.get_operation(SCOPE, "root:send:0") is None
-    # Lifecycle instances are separate; compare their recorded effects.
-    assert runs[0][:4] == runs[1][:4]
-    assert vars(runs[0][4]) == vars(runs[1][4])
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    )
+    async with transport.client() as client:
+        with context(store).activate():
+            state = await run_turn(
+                anthropic=client,
+                session_id="session",
+                user_message="question",
+                lifecycle=RecordingLifecycle(),
+                cancel=asyncio.Event(),
+                billing=BillingExempt(reason="headless-unrecorded"),
+                scope=SCOPE,
+                now=lambda: NOW,
+                render_interval_s=3600,
+            )
+    transport.assert_consumed()
+    assert state.error is None and state.content == [TextBlock(kind="text", text="answer")]
     events = await stores().read_events(SESSION.id)
     assert [event.sequence for event in events] == list(range(len(events)))
     assert [event.native.event_id for event in events] == ["message", "ended"]
@@ -602,7 +593,7 @@ async def test_explicit_sdk_refusal_allows_one_fresh_attempt_with_the_same_wire_
     assert accepted is not None and accepted.operation.status == "accepted"
 
 
-async def test_main_confirmation_recovery_keeps_legacy_wire_and_the_mux_fence(
+async def test_main_confirmation_recovery_journals_under_the_mux_fence(
     stores: Callable[[], StateStore],
 ) -> None:
     import httpx
@@ -620,43 +611,32 @@ async def test_main_confirmation_recovery_keeps_legacy_wire_and_the_mux_fence(
     }
     idle = make_status_idle(event_id="settled").model_dump(mode="json")
     answer = make_agent_message(event_id="answer", text="recovered").model_dump(mode="json")
-    results: list[tuple[object, ...]] = []
-    for path in ("legacy", "mux"):
-        transport = ScriptedTransport()
-        transport.queue(
-            ScriptedReply.stream("/v1/sessions/session/events/stream", []),
-            ScriptedReply("POST", "/v1/sessions/session/events", httpx.Response(400, json=refusal)),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
-            ScriptedReply(
-                "GET", "/v1/sessions/session", session_response(session_id="session", status="idle")
-            ),
-            ScriptedReply("GET", "/v1/sessions/session/events", list_response([idle])),
-            ScriptedReply.stream("/v1/sessions/session/events/stream", [answer, idle]),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
-        )
-        lifecycle = RecordingLifecycle()
-        async with transport.client() as client:
-            with context(store).activate():
-                state = await run_turn(
-                    anthropic=client,
-                    session_id="session",
-                    user_message="retry me",
-                    lifecycle=lifecycle,
-                    cancel=asyncio.Event(),
-                    billing=BillingExempt(reason="headless-unrecorded"),
-                    path=path,
-                    scope=SCOPE,
-                )
-        transport.assert_consumed()
-        assert state.error is None and state.termination == TerminationReason.COMPLETED
-        results.append(
-            (
-                transport.requests,
-                state.content,
-                [event.model_dump(mode="json") for event in lifecycle.sse_events],
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply.stream("/v1/sessions/session/events/stream", []),
+        ScriptedReply("POST", "/v1/sessions/session/events", httpx.Response(400, json=refusal)),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+        ScriptedReply(
+            "GET", "/v1/sessions/session", session_response(session_id="session", status="idle")
+        ),
+        ScriptedReply("GET", "/v1/sessions/session/events", list_response([idle])),
+        ScriptedReply.stream("/v1/sessions/session/events/stream", [answer, idle]),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    )
+    lifecycle = RecordingLifecycle()
+    async with transport.client() as client:
+        with context(store).activate():
+            state = await run_turn(
+                anthropic=client,
+                session_id="session",
+                user_message="retry me",
+                lifecycle=lifecycle,
+                cancel=asyncio.Event(),
+                billing=BillingExempt(reason="headless-unrecorded"),
+                scope=SCOPE,
             )
-        )
-    assert results[0] == results[1]
+    transport.assert_consumed()
+    assert state.error is None and state.termination == TerminationReason.COMPLETED
     rejected = await store.get_operation(SCOPE, "root:send:0")
     interrupt = await store.get_operation(SCOPE, "root:recovery-interrupt:0")
     retried = await store.get_operation(SCOPE, "root:send:1")
@@ -704,23 +684,23 @@ async def test_cached_action_batch_refuses_changed_wire_order_or_decision(
 
 @pytest.mark.parametrize(
     "kind",
-    ["send", "actions", "cancel", "archive", "recovery-send", "recovery-stop", "recovery-archive"],
+    ["send", "actions", "cancel", "archive", "recovery-interrupt"],
 )
 async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kind: str) -> None:
     import httpx
     from anthropic import APIConnectionError
     from daimon.core.errors import TurnError
-    from daimon.core.turn.io import TrackedLegacyTurnIO, TurnConnectionLost
+    from daimon.core.turn.io import TurnConnectionLost
     from mux.testing.drivers.anthropic.ma import session_response
 
     store = MemoryStateStore()
     await store.put_binding(BINDING, expected_generation=0)
     persistence = context(store)
-    archive = kind in {"archive", "recovery-archive"}
+    archive = kind == "archive"
     path = "/v1/sessions/session/archive" if archive else "/v1/sessions/session/events"
     reply = session_response(session_id=SESSION.id) if archive else send_events_response()
     transport = ScriptedTransport()
-    interrupt = kind in {"cancel", "recovery-stop"}
+    interrupt = kind == "cancel"
     if interrupt:
         transport.queue(ScriptedReply.stream("/v1/sessions/session/events/stream", []))
     transport.queue(
@@ -732,12 +712,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     )
     async with transport.client(max_retries=MA_MAX_RETRIES) as client:
         assert client.max_retries == 8 == MA_MAX_RETRIES
-        if kind.startswith("recovery-"):
-            io = TrackedLegacyTurnIO(client, SESSION.id, scope=SCOPE, persistence=persistence)
-        else:
-            io = default_mux_turn_io(
-                client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
-            )
+        io = default_mux_turn_io(
+            client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
+        )
         if kind == "actions":
             inputs = (
                 {"type": "user.tool_confirmation", "tool_use_id": "action", "result": "allow"},
@@ -746,8 +723,10 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
         async def pump() -> None:
             if archive:
                 await io.archive()
-            elif kind in {"cancel", "recovery-stop"}:
+            elif kind == "cancel":
                 await io.interrupt(timeout_s=10)
+            elif kind == "recovery-interrupt":
+                await io.request_interrupt()
             else:
                 await io.send(inputs)
 
@@ -759,9 +738,7 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
         ["GET", "POST"] if interrupt else ["POST"]
     )
     assert len(transport.replies) == 1
-    operation_kind = "send" if kind == "recovery-send" else kind
-    if kind == "recovery-archive":
-        operation_kind = "archive"
+    operation_kind = kind
     if kind == "actions":
         from daimon.core.turn.io import _send_kind, neutral_inputs
 
@@ -770,10 +747,9 @@ async def test_production_retries_cannot_duplicate_a_claimed_native_mutation(kin
     assert record is not None and record.operation.status == "outcome_unknown"
 
 
-async def test_reads_retry_but_legacy_mutations_never_retry_without_a_claim() -> None:
+async def test_reads_retry_but_mutations_never_retry_without_a_claim() -> None:
     import httpx
-    from anthropic import APIConnectionError
-    from daimon.core.turn.io import LegacyTurnIO
+    from daimon.core.turn.io import TurnConnectionLost
     from mux.testing.drivers.anthropic.ma import session_response
 
     store = MemoryStateStore()
@@ -801,10 +777,10 @@ async def test_reads_retry_but_legacy_mutations_never_retry_without_a_claim() ->
                 SESSION, "read-proof", {}, read, SendReceipt, lambda receipt: "processed"
             )
         )
-        legacy = LegacyTurnIO(client, SESSION.id, scope=SCOPE)
-        with pytest.raises(APIConnectionError):
-            await legacy.send(
-                ({"type": "user.message", "content": [{"type": "text", "text": "legacy"}]},)
+        unclaimed = default_mux_turn_io(client, SCOPE, SESSION.id, read_timeout_s=120)
+        with pytest.raises(TurnConnectionLost):
+            await unclaimed.send(
+                ({"type": "user.message", "content": [{"type": "text", "text": "unclaimed"}]},)
             )
         assert client.max_retries == MA_MAX_RETRIES
     transport.assert_consumed()

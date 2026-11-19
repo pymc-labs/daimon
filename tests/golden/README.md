@@ -2,8 +2,7 @@
 
 These 33 offline scenarios run existing tests and four boundary scenarios against the current production path. The initial recordings came from integration `546ed15c7765d270a228beb730258002dbe09e98`; the canonical files have since been re-recorded with the changes that moved them. No production module changed while recording. The pytest test in `tests/parity/test_ma_goldens.py` replays every scenario and compares its entire transcript. Failure of the original scenario test is also a failure of the oracle.
 
-Mux cases explicitly skip as a group until the public N4 driver exposes all four controls (`path`, `backend`, `scope`, `session_ref`). An unwired flag is not a parity pass. After that seam lands, all 33 mux comparisons and all four mux mutation probes run; no scenario-specific skips or separate mux golden files are allowed. This pending matrix does not certify M0 until the mux comparisons actually pass.
-
+Every scenario and mutation probe runs on mux, the only turn path; the recordings did not change when the legacy path was removed.
 
 Configure `DAIMON_DATABASE__TEST_URL` for an isolated, migrated local test database before running. N3 uses `daimon_test_nc_n3`. Do not use the shared `daimon_test` or live provider credentials.
 
@@ -22,16 +21,14 @@ Ordinary pytest collection sends each UUID probe through the existing child repl
 ```bash
 uv run pytest -n 2 -q tests/parity/test_ma_goldens.py tests/parity/test_ma_call_ratchet.py
 uv run python tests/golden/runner.py plain_discord approval_card
-uv run python tests/golden/runner.py --turn-path both
-# A mux-only invocation fails clearly while its bridge is pending.
-uv run python tests/golden/runner.py --turn-path mux plain_turn
-# Only N3 may record from unchanged integration; forbidden in extraction lanes.
-uv run python tests/golden/runner.py --turn-path legacy --regen
+uv run python tests/golden/runner.py
+# Regenerate only for an intended behaviour change.
+uv run python tests/golden/runner.py --regen
 ```
 
-The runner starts one fresh pytest process per selected path that replays all requested scenarios in sequence (`replay_batch`), pinning `DAIMON_TURN__PATH` independently of the parent environment. Between scenarios `oracle_plugin.py` undoes its patch stack, restarts the recorder, id counters and token counters, and reinstalls its static patches; the default callables that SQLAlchemy memoizes are module-level functions so every scenario reaches the same objects. Parametrized variants of one bare node id (`mcp_continue_turn`) still share a patch stack and one transcript. In the parity suite, `SharedReplays` (fixture `golden_replays`) starts every child at once on the first request and shares the results between xdist workers. The plugin rewrites `state.json` (items expected and finished, plus each failure's traceback) after every report; a scenario passes only if all its items finished, none failed and its transcript exists, so a child that crashes, hangs (300 s limit, whole process group killed) or exits abnormally fails every scenario it did not finish, with the child output tail. Both CLI and API regeneration accept only the unmutated legacy path. `--turn-path both` reports every pending mux case as skipped; a mux-only invocation fails before replay when the bridge is absent.
+The runner starts one fresh pytest process that replays all requested scenarios in sequence (`replay_batch`). Between scenarios `oracle_plugin.py` undoes its patch stack, restarts the recorder, id counters and token counters, and reinstalls its static patches; the default callables that SQLAlchemy memoizes are module-level functions so every scenario reaches the same objects. Parametrized variants of one bare node id (`mcp_continue_turn`) still share a patch stack and one transcript. In the parity suite, `SharedReplays` (fixture `golden_replays`) starts every child at once on the first request and shares the results between xdist workers. The plugin rewrites `state.json` (items expected and finished, plus each failure's traceback) after every report; a scenario passes only if all its items finished, none failed and its transcript exists, so a child that crashes, hangs (300 s limit, whole process group killed) or exits abnormally fails every scenario it did not finish, with the child output tail. Both CLI and API regeneration accept only an unmutated replay.
 
-After normal oracle/fixture setup, `turn_path_plugin.py` applies the same explicit path to real driver calls and their imported aliases. A caller's conflicting explicit path fails instead of producing a false match. Mux direct-driver fixtures receive an explicit offline Scope when none was supplied; existing caller Scope/backend/session_ref values remain intact. Mux absolute deadlines share the host's frozen clock. Mocked `run_turn` records omit only the four internal controls above; actual calls still receive them and all semantic kwargs remain recorded. Real SDK HTTP/SSE, request bodies/query/beta headers, platform effects and legacy DB facts retain the same comparison boundary on both paths.
+After normal oracle/fixture setup, `turn_scope_plugin.py` gives real driver calls and their imported aliases an explicit offline Scope when none was supplied; existing caller Scope/backend/session_ref values remain intact. Mux absolute deadlines share the host's frozen clock. Mocked `run_turn` records omit only the internal controls (`backend`, `scope`, `session_ref`); actual calls still receive them and all semantic kwargs remain recorded. Real SDK HTTP/SSE, request bodies/query/beta headers, platform effects and legacy DB facts keep the same comparison boundary.
 
 The instrumentation observes the real SDK over existing MockTransport/MARouter/stateful resource fakes and ScriptedTransport, existing Discord/Slack fake clients, lifecycle callbacks, confirmation prompt/card posts and edits, CLI JSON output, DM turns, and scheduler execution/billing bindings. It captures `usage_events`, `tenant_ledger`, `turn_outcomes`, `thread_sessions`, and `task_continuations`, including rows still in the test fixture's transaction, after draining background writes. No domain rules are copied into a new scenario implementation.
 

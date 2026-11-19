@@ -1,10 +1,9 @@
 """A chat turn through the core pipeline, interrupted at each recovery point.
 
-Every cell runs on `legacy` and `mux` (the `turn_path` fixture) and in two
-modes: `kill` (SIGKILL: nothing in the dying process can write) and `cancel`
+Every cell runs in two modes: `kill` (SIGKILL: nothing in the dying process can write) and `cancel`
 (a drain that cancelled the task and let its cleanup run). After the
 interruption a fresh process takes the same user's retry on the same thread.
-The tests assert the invariants that must hold on both paths and record the
+The tests assert the invariants that must hold and record the
 rest for MATRIX.md.
 """
 
@@ -157,7 +156,6 @@ async def test_c1_before_session_creation_provider_never_saw_it(
         "chat",
         "C1 before session creation (request lost)",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
         interrupted_turn_rendered=len(first.renders),
         interrupted_turn_failures=len(first.terminal_failures),
@@ -182,7 +180,6 @@ async def test_c1b_session_created_but_process_dies_before_it_hears(
         "chat",
         "C1b session created, response lost",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
     )
 
@@ -203,7 +200,6 @@ async def test_c2_input_accepted_but_receipt_never_arrives(scenario: Scenario, m
         "chat",
         "C2 input accepted, receipt lost",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
     )
 
@@ -225,7 +221,6 @@ async def test_c2x_connection_drops_after_the_provider_accepted_the_input(
         "chat",
         "C2x connection drop after acceptance (no restart)",
         "none",
-        scenario.path,
         provider_inputs_accepted=inputs,
         provider_model_calls=len(world.model_calls),
         turn_error=str(outcome.state.error) if outcome.state.error else None,
@@ -254,7 +249,6 @@ async def test_c3_interrupted_while_waiting_out_a_retryable_refusal(
         "chat",
         "C3 during retryable refusal",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
         provider_send_posts=world.posts("/events"),
     )
@@ -276,7 +270,6 @@ async def test_c4_provider_finished_but_process_never_saw_it(
         "chat",
         "C4 completed at provider, unseen",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
     )
 
@@ -311,7 +304,6 @@ async def test_c5_before_platform_delivery(scenario: Scenario, mode: Mode) -> No
         "chat",
         "C5 before platform delivery",
         mode,
-        scenario.path,
         **summarize(scenario, before, after, retry),
     )
 
@@ -367,9 +359,6 @@ async def test_reg1_a_retry_after_sigkill_waits_at_most_the_lease_ttl(
     turn, retry = start_chat(process, scenario.tenant_id, "second question")
     loop = asyncio.get_running_loop()
     started = loop.time()
-    if scenario.path == "legacy":
-        await asyncio.wait_for(retry, timeout=PATIENCE_S)
-        return
     done, _ = await asyncio.wait({retry}, timeout=1.0)
     assert not done, "the dead holder's lease is still in force"
     assert 0 < await lease_seconds_left(scenario) <= LEASE_TTL.total_seconds()

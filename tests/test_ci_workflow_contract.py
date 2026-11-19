@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import subprocess
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -110,8 +109,6 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert set(deploy["needs"]) == {
         "lint",
         "shard-check",
-        # The production default path (mux) gates the deploy.
-        "pytest-mux-leg",
         "pytest-db",
         "pytest-discord",
         "pytest-light",
@@ -142,7 +139,6 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
     assert set(pytest_jobs) == {
         "pytest-db",
         "pytest-discord",
-        "pytest-mux-leg",
         "pytest-staging-config",
         "pytest-light",
         "pytest-notebook-host",
@@ -208,7 +204,6 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
         == {
             "pytest-db",
             "pytest-discord",
-            "pytest-mux-leg",
         }
     )
 
@@ -733,7 +728,6 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
     assert result.returncode == 0, result.stderr
     updates = (tmp_path / "updates").read_text()
     pins = (
-        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
     )
@@ -743,8 +737,8 @@ def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
         assert "TURN__" not in updates and "FLEET__" not in updates, updates
 
 
-def test_production_worker_refresh_pins_mux_with_backends_off() -> None:
-    """The prod worker env gets mux with both backend switches off after every refresh."""
+def test_production_worker_refresh_pins_backends_off() -> None:
+    """The prod worker env gets both backend switches off after every refresh."""
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     script = next(
         step["run"]
@@ -756,34 +750,11 @@ def test_production_worker_refresh_pins_mux_with_backends_off() -> None:
     assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
     block = script[pin : script.index("fi", pin)]
     for line in (
-        "DAIMON_TURN__PATH=mux",
         "DAIMON_TURN__CHANNEL_BACKENDS=false",
         "DAIMON_TURN__AGENT_BACKENDS=false",
     ):
         assert line in block
     assert "tee -a /etc/daimon/daimon.env" in block
-
-
-def test_mux_leg_is_a_blocking_ratchet_inside_the_deploy_gate() -> None:
-    """The mux leg selects mux through the environment and ratchets its known failures."""
-    jobs = _workflow("ci.yml")["jobs"]
-    job = jobs["pytest-mux-leg"]
-    assert not job.get("continue-on-error")
-    assert job["env"]["DAIMON_TURN__PATH"] == "mux"
-    assert job["env"]["DAIMON_TURN__CHANNEL_BACKENDS"] == "true"
-    assert all("-p daimon.testing.mux_leg_known" in c for c in _pytest_commands(job))
-    # Production defaults to mux, so a mux failure holds back the staging deploy.
-    assert "pytest-mux-leg" in jobs["deploy-gcp"]["needs"]
-    assert (_ROOT / "tests" / "mux_leg_known_failures.txt").is_file()
-    # The other legs never load the ratchet or select a path: the root addopts run
-    # them on the emergency-stop leg (daimon.testing.stop_leg_default).
-    addopts = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["pytest"][
-        "ini_options"
-    ]["addopts"]
-    assert "-p daimon.testing.stop_leg_default" in addopts
-    for name in ("pytest-db", "pytest-discord"):
-        assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
-        assert "DAIMON_TURN__PATH" not in jobs[name]["env"]
 
 
 def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> None:
@@ -795,36 +766,40 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
     assert legs == [
         {
             "configuration": "enabled",
-            "path": "mux",
             "channel_backends": "true",
             "agent_backends": "true",
         },
         {
             "configuration": "mux-only",
-            "path": "mux",
-            "channel_backends": "false",
-            "agent_backends": "false",
-        },
-        {
-            "configuration": "legacy-off",
-            "path": "legacy",
             "channel_backends": "false",
             "agent_backends": "false",
         },
     ]
     for flag, matrix_key in (
-        ("DAIMON_TURN__PATH", "path"),
         ("DAIMON_TURN__CHANNEL_BACKENDS", "channel_backends"),
         ("DAIMON_TURN__AGENT_BACKENDS", "agent_backends"),
         ("DAIMON_CI_CONFIGURATION", "configuration"),
     ):
         assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"
     command = " ".join(_pytest_commands(job))
-    for selected in (
-        "test_turn_runs_on_the_selected_leg",
-        "packages/core/tests/turn/test_staging_configuration_paths.py",
-    ):
-        assert selected in command
+    assert "packages/core/tests/turn/test_staging_configuration_paths.py" in command
+    for path in command.split():
+        if path.endswith(".py") or ".py::" in path:
+            assert (_WORKFLOWS.parents[1] / path.split("::")[0]).is_file(), f"{path} must exist"
+
+
+def test_journeys_run_on_the_default_and_production_backend_pins() -> None:
+    """mux runs the code defaults (backends on); stop pins both off, as deploy.yml does for production."""
+    job = _workflow("ci.yml")["jobs"]["journeys-offline"]
+    assert job["strategy"]["matrix"]["include"] == [
+        {"leg": "mux", "backends": "true"},
+        {"leg": "stop", "backends": "false"},
+    ]
+    step = next(step for step in job["steps"] if "journey" in step.get("name", ""))
+    assert step["env"] == {
+        "DAIMON_TURN__CHANNEL_BACKENDS": "${{ matrix.backends }}",
+        "DAIMON_TURN__AGENT_BACKENDS": "${{ matrix.backends }}",
+    }
 
 
 _CLEAR_STEP = "Forget the deployed commit until this deploy passes"

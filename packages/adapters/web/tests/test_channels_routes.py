@@ -48,7 +48,7 @@ _ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
 _SUPPORTED = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
     support=SupportSettings(escalation_channel_id="c9"),
 )
 """A deployment support channel, where an alert budget with no channel of its own alerts."""

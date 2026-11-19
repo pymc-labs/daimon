@@ -4,7 +4,7 @@ OpenAI's event stream replays nothing and keeps a connection alive with
 keep-alive frames, so a turn whose end it missed would wait out its deadline. An
 IO with `idle_check_s` makes the driver ask for the session status after that much
 silence: still running keeps waiting on the same fetch, a failed check is no
-verdict, and idle finishes through the replay. The fake here is the legacy IO over
+verdict, and idle finishes through the replay. The fake here is mux turn I/O over
 the fake Managed Agents client, opted in.
 """
 
@@ -23,7 +23,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
 )
 from daimon.core.turn import driver
-from daimon.core.turn.io import LegacyTurnIO, TurnStream
+from daimon.core.turn.io import TurnStream, turn_io
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.testing.turn_fakes import (
@@ -33,18 +33,19 @@ from daimon.testing.turn_fakes import (
     RecordingLifecycle,
     YieldEvent,
 )
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.receipts import StopObservation
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 
 
 class IdleChecked:
-    """The legacy IO, opted into the idle status check (as OpenAITurnIO is)."""
+    """Mux turn I/O, opted into the idle status check (as OpenAITurnIO is)."""
 
     idle_check_s = 0.05
 
     def __init__(self, fake: FakeAnthropic, *, fail_first: bool = False, slow_s: float = 0):
-        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
         self.fail_first, self.slow_s = fail_first, slow_s
         self.checks = 0
         self.replays = 0

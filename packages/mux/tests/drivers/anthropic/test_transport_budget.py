@@ -1,153 +1,37 @@
-"""Legacy turn calls bound SDK retry stacking and whole paginator walks."""
-
-import asyncio
+"""A turn mutation is one SDK attempt at its original timeout that never follows a redirect."""
 
 import httpx
 import pytest
-from anthropic import APIConnectionError, AsyncAnthropic, InternalServerError
-from mux.drivers.anthropic import transport
-from mux.drivers.anthropic.transport import LegacyTurnTransport, single_attempt_mutation
+from anthropic import APIStatusError, AsyncAnthropic
+from mux.drivers.anthropic.transport import mutation_client, single_attempt_mutation
 
 
-@pytest.mark.parametrize("operation", ["status", "replay", "latest_idle_is_settled"])
-async def test_idempotent_reads_cancel_a_hung_request(
-    monkeypatch: pytest.MonkeyPatch, operation: str
-) -> None:
-    monkeypatch.setattr(transport, "READ_TIMEOUT_S", 0.1)
-    cancelled = asyncio.Event()
-    requests: list[httpx.Request] = []
+async def test_a_claimed_mutation_never_retries_or_follows_an_accepted_post_redirect() -> None:
+    attempts: list[httpx.Request] = []
 
-    async def hang(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
-        raise AssertionError("request should have been cancelled")
+    async def accepted_redirect(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        return httpx.Response(307, headers={"location": "/v1/sessions/other/events"})
 
     async with AsyncAnthropic(
         api_key="test",
         max_retries=8,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(hang)),
+        http_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(accepted_redirect), follow_redirects=True
+        ),
     ) as client:
-        io = LegacyTurnTransport(client, "sess_1")
-        with pytest.raises(TimeoutError):
-            await getattr(io, operation)()
-    assert cancelled.is_set()
-    assert len(requests) == 1
-    assert requests[0].extensions["timeout"]["read"] == 30.0
-
-
-async def test_replay_may_take_longer_than_the_default_read_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(transport, "READ_TIMEOUT_S", 0.05)
-
-    async def slow_page(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.1)
-        return httpx.Response(200, json={"data": [], "next_page": None})
-
-    async with AsyncAnthropic(
-        api_key="test",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(slow_page)),
-    ) as client:
-        events = await LegacyTurnTransport(client, "sess_1").replay(timeout_s=5.0)
-    assert events == []
-
-
-async def test_claimed_mutations_keep_zero_retries_and_original_timeout() -> None:
-    attempts: list[httpx.Request] = []
-
-    async def fail(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        raise httpx.ConnectError("offline", request=request)
-
-    async with AsyncAnthropic(
-        api_key="test",
-        max_retries=8,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fail)),
-    ) as client:
-        io = LegacyTurnTransport(client, "sess_1")
-        with single_attempt_mutation(), pytest.raises(APIConnectionError):
-            await io.send([{"type": "user.message", "content": "hi"}])
-    assert len(attempts) == 1
-    assert attempts[0].extensions["timeout"]["read"] == 600.0
-
-
-async def test_status_uses_two_sdk_retries_even_when_shared_client_uses_eight() -> None:
-    attempts: list[httpx.Request] = []
-
-    async def fail(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        return httpx.Response(500, headers={"retry-after-ms": "1"}, json={"error": "oops"})
-
-    async with AsyncAnthropic(
-        api_key="test",
-        max_retries=8,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fail)),
-    ) as client:
-        with pytest.raises(InternalServerError):
-            await LegacyTurnTransport(client, "sess_1").status()
-        assert client.max_retries == 8
-    assert len(attempts) == 3
-    assert all(request.extensions["timeout"]["read"] == 30.0 for request in attempts)
-
-
-async def test_explicit_zero_retry_client_stays_single_attempt() -> None:
-    attempts: list[httpx.Request] = []
-
-    async def fail(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        raise httpx.ConnectError("offline", request=request)
-
-    async with AsyncAnthropic(
-        api_key="test",
-        max_retries=0,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(fail)),
-    ) as client:
-        with pytest.raises(APIConnectionError):
-            await LegacyTurnTransport(client, "sess_1").send(
-                [{"type": "user.message", "content": "hi"}]
+        with single_attempt_mutation(), pytest.raises(APIStatusError) as failure:
+            await mutation_client(client).beta.sessions.events.send(
+                "sess_1", events=[{"type": "user.message", "content": "hi"}]
             )
-    assert len(attempts) == 1
-
-
-@pytest.mark.parametrize("operation", ["message", "confirmation", "interrupt", "archive"])
-async def test_accepted_mutation_with_lost_ack_is_one_post_at_original_timeout(
-    operation: str,
-) -> None:
-    attempts: list[httpx.Request] = []
-
-    async def accept_then_lose_ack(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        raise httpx.ReadTimeout("accepted; acknowledgement lost", request=request)
-
-    async with AsyncAnthropic(
-        api_key="test",
-        max_retries=8,
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(accept_then_lose_ack)),
-    ) as client:
-        io = LegacyTurnTransport(client, "sess_1")
-        from anthropic import APITimeoutError
-
-        with pytest.raises(APITimeoutError):
-            if operation == "archive":
-                await io.archive()
-            elif operation == "interrupt":
-                await io.send([{"type": "user.interrupt"}])
-            elif operation == "confirmation":
-                await io.send(
-                    [{"type": "user.tool_confirmation", "tool_use_id": "tu_1", "result": "allow"}]
-                )
-            else:
-                await io.send([{"type": "user.message", "content": "hi"}])
-    assert len(attempts) == 1
-    assert attempts[0].method == "POST"
-    assert attempts[0].extensions["timeout"]["read"] == 600.0
+        assert client.max_retries == 8, "the shared client is unchanged"
+    assert failure.value.status_code == 307
+    assert [request.url.path for request in attempts] == ["/v1/sessions/sess_1/events"]
 
 
 @pytest.mark.parametrize("operation", ["send", "confirmation", "cancel", "archive", "native-tool"])
 async def test_all_turn_mutation_ports_disable_sdk_retries(operation: str) -> None:
+    """Each mux mutation port is one POST on its own: no single_attempt_mutation() around it."""
     from mux.contracts.actions import UserMessage, UserToolConfirmation
     from mux.contracts.events import TextPart
     from mux.contracts.ids import ResourceRef, Scope
@@ -218,30 +102,4 @@ async def test_all_turn_mutation_ports_disable_sdk_retries(operation: str) -> No
                     )
     assert len(attempts) == 1
     assert attempts[0].method == "POST"
-    assert attempts[0].extensions["timeout"]["read"] == 600.0
-
-
-async def test_attended_mutation_never_follows_an_accepted_post_redirect() -> None:
-    from anthropic import APIStatusError
-
-    attempts: list[httpx.Request] = []
-
-    async def accepted_redirect(request: httpx.Request) -> httpx.Response:
-        attempts.append(request)
-        return httpx.Response(307, headers={"location": "/v1/sessions/other/events"})
-
-    async with AsyncAnthropic(
-        api_key="test",
-        max_retries=8,
-        http_client=httpx.AsyncClient(
-            transport=httpx.MockTransport(accepted_redirect), follow_redirects=True
-        ),
-    ) as client:
-        with pytest.raises(APIStatusError) as failure:
-            await LegacyTurnTransport(client, "sess_1").send(
-                [{"type": "user.message", "content": "hi"}]
-            )
-    assert failure.value.status_code == 307
-    assert len(attempts) == 1
-    assert attempts[0].url.path == "/v1/sessions/sess_1/events"
     assert attempts[0].extensions["timeout"]["read"] == 600.0

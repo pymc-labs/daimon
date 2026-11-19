@@ -18,10 +18,11 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.turn import driver
-from daimon.core.turn.io import LegacyTurnIO, TurnEvent, TurnStream
+from daimon.core.turn.io import TurnEvent, TurnIO, TurnStream, turn_io
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle, YieldEvent
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import StopObservation
 from mux.contracts.resources import ProviderBinding
@@ -85,7 +86,7 @@ class NativeStream:
 
 class Codec:
     def __init__(self, fake: FakeAnthropic, observations: Sequence[UsageObservation]) -> None:
-        self.source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+        self.source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
         self.live = deque(observations)
         self.reconciled = list(observations[-1:])
         self.opened = asyncio.Event()
@@ -250,7 +251,6 @@ async def test_persisted_provider_pump_keeps_lease_through_usage_reconciliation(
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=ObservationBilled(record),
-            path="mux",
         )
         if failed:
             with pytest.raises(RuntimeError, match="codec failure"):
@@ -305,9 +305,9 @@ async def test_billed_codec_without_reconciliation_refuses_before_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = FakeAnthropic()
-    source = LegacyTurnIO(cast(AsyncAnthropic, fake), "sess_1")
+    source = turn_io(cast(AsyncAnthropic, fake), "sess_1", scope=LEG_SCOPE)
 
-    def factory(*args: object, **kwargs: object) -> LegacyTurnIO:
+    def factory(*args: object, **kwargs: object) -> TurnIO:
         return source
 
     monkeypatch.setattr(driver, "turn_io", factory)

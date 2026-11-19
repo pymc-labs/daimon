@@ -167,7 +167,6 @@ async def run_gemini_turn(
                     session_ref=session,
                     profile=channel.revision.profile,
                     backend_request=request,
-                    path="mux",
                     user_message=request_text,
                     lifecycle=clocked,
                     cancel=asyncio.Event(),

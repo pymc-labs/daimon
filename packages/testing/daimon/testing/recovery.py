@@ -69,8 +69,6 @@ from sqlalchemy.ext.asyncio.session import (
     _AsyncSessionContextManager,  # pyright: ignore[reportPrivateUsage]
 )
 
-type Path_ = Literal["legacy", "mux"]
-
 #: What a queued fault does to the request that meets it.
 #:
 #: ``ok``          the provider handles the request normally.
@@ -349,9 +347,7 @@ class Process:
     tasks: list[asyncio.Task[Any]] = field(default_factory=list[asyncio.Task[Any]])
 
     @classmethod
-    def start(
-        cls, world: ProviderWorld, engine: AsyncEngine, path: Path_, *, tmp_path: Path
-    ) -> Process:
+    def start(cls, world: ProviderWorld, engine: AsyncEngine, *, tmp_path: Path) -> Process:
         sessionmaker = KillableSessionmaker(engine, expire_on_commit=False)
         deps = TurnDeps(
             anthropic=world.client(),
@@ -368,13 +364,8 @@ class Process:
             github_app_id=None,
             github_app_private_key=None,
             public_url=None,
-            turn_path=path,
         )
         return cls(world=world, sessionmaker=sessionmaker, deps=deps)
-
-    @property
-    def path(self) -> Path_:
-        return cast(Path_, self.deps.turn_path)
 
     def spawn[T](self, coro: Awaitable[T]) -> asyncio.Task[T]:
         task = asyncio.ensure_future(coro)
@@ -395,10 +386,10 @@ class Process:
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
 
-def restarted(process: Process, path: Path_, *, tmp_path: Path) -> Process:
+def restarted(process: Process, *, tmp_path: Path) -> Process:
     """A fresh process against the same provider and database."""
     engine = process.sessionmaker.kw["bind"]
-    return Process.start(process.world, engine, path, tmp_path=tmp_path)
+    return Process.start(process.world, engine, tmp_path=tmp_path)
 
 
 async def count(engine: AsyncEngine, sql: str, **params: object) -> int:
@@ -491,10 +482,10 @@ async def ledger(engine: AsyncEngine, tenant_id: uuid.UUID) -> Ledger:
     )
 
 
-def record(surface: str, point: str, mode: str, path: str, **observed: object) -> None:
+def record(surface: str, point: str, mode: str, **observed: object) -> None:
     target = os.environ.get("RECOVERY_MATRIX_JSONL")
     if not target:
         return
-    line = {"surface": surface, "point": point, "mode": mode, "path": path, **observed}
+    line = {"surface": surface, "point": point, "mode": mode, **observed}
     with open(target, "a", encoding="utf-8") as sink:
         sink.write(json.dumps(line, default=str, sort_keys=True) + "\n")

@@ -166,7 +166,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         settings = Settings(
             database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
             anthropic={"api_key": "test-fixture-key"},
-            turn=TurnSettings(path="mux", channel_backends=True),
+            turn=TurnSettings(channel_backends=True),
             mcp=McpSettings(public_url="https://mcp.invalid"),
         )
         runtime = McpRuntime(
@@ -335,7 +335,7 @@ async def test_a_switch_without_this_threads_session_refuses_before_capturing_th
             await mark_dead(session, id=mapping.id)
         agent()
     else:
-        stopped = TurnSettings(path="legacy", channel_backends=False, agent_backends=False)
+        stopped = TurnSettings(channel_backends=False, agent_backends=False)
         runtime = replace(runtime, settings=runtime.settings.model_copy(update={"turn": stopped}))
     with pytest.raises(ToolError):
         await _request_agent_backend_switch_impl(
@@ -352,27 +352,19 @@ async def test_a_switch_without_this_threads_session_refuses_before_capturing_th
     )
 
 
-@pytest.mark.parametrize(
-    "path,channel_backends,present",
-    [
-        ("legacy", False, False),
-        ("legacy", True, False),
-        ("mux", False, False),
-        ("mux", True, True),
-    ],
-)
-async def test_registration_uses_only_the_existing_backend_flags(path, channel_backends, present):
+@pytest.mark.parametrize("channel_backends", [False, True])
+async def test_registration_uses_only_the_existing_backend_flags(channel_backends):
     from daimon.adapters.mcp.tools.agents import register_agent_tools
     from daimon.core.config import TurnSettings
     from fastmcp import FastMCP
 
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path=path, channel_backends=channel_backends)
+    runtime.settings.turn = TurnSettings(channel_backends=channel_backends)
     mcp = FastMCP()
     register_agent_tools(mcp, cast(McpRuntime, runtime))
     tools = await mcp.local_provider.list_tools()
     names = [tool.name for tool in tools]
-    assert ("request_agent_backend_switch" in names) is present
+    assert ("request_agent_backend_switch" in names) is channel_backends
     assert len(names) == len(set(names))
 
 
@@ -1393,7 +1385,7 @@ async def test_an_older_callers_consent_fields_are_ignored_and_the_switch_applie
     monkeypatch.setattr(agents_mod, "_request_agent_backend_switch_impl", switched)
     monkeypatch.setattr(agents_mod, "_auth", AsyncMock(return_value=MagicMock()))
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True, agent_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True, agent_backends=True)
     mcp = FastMCP(name="t")
     register_agent_tools(mcp, runtime)
     result = await mcp.call_tool(

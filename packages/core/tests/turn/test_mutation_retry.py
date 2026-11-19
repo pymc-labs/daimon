@@ -28,7 +28,6 @@ from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import (
-    TrackedLegacyTurnIO,
     TurnConnectionLost,
     default_mux_turn_io,
     neutral_inputs,
@@ -198,7 +197,6 @@ async def test_rate_limit_then_success_completes_the_turn_with_one_accepted_send
                 lifecycle=lifecycle,
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="mux",
                 scope=SCOPE,
                 now=lambda: NOW,
                 render_interval_s=3600,
@@ -594,8 +592,9 @@ async def test_a_connection_refused_before_the_request_was_written_is_retried(
     )
     persistence = context(store)
     async with transport.client(max_retries=MA_MAX_RETRIES) as client:
-        # Main's native recovery path raises the SDK's own errors unnormalized.
-        io = TrackedLegacyTurnIO(client, SESSION.id, scope=SCOPE, persistence=persistence)
+        io = default_mux_turn_io(
+            client, SCOPE, SESSION.id, read_timeout_s=120, persistence=persistence
+        )
         await persistence.run(lambda: io.send(INPUTS))
     transport.assert_consumed()
     assert len(transport.requests) == 2

@@ -82,13 +82,12 @@ def test_prose_runs_nothing() -> None:
 def test_web_adapter_change_runs_only_its_suites() -> None:
     paths = ["packages/adapters/web/daimon/adapters/web/app.py"]
     suites, jobs = _tests(paths)
-    assert suites == {"web", "parity", "parity-mux", "lint", "shard-check", "image-daimon"}
-    assert jobs == {"lint", "pytest-db", "pytest-mux-leg", "shard-check", "docker-build"}
+    assert suites == {"web", "parity", "lint", "shard-check", "image-daimon"}
+    assert jobs == {"lint", "pytest-db", "shard-check", "docker-build"}
     # Only the selected legs start.
     result = plan.plan_tests(paths)
     legs = {job: json.loads(result[job])["include"] for job in plan.MATRICES}
     assert [leg["suite"] for leg in legs["pytest-db"]] == ["web", "parity"]
-    assert [leg["suite"] for leg in legs["pytest-mux-leg"]] == ["parity-mux"]
     assert legs["pytest-light"] == []
 
 

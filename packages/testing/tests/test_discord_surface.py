@@ -16,6 +16,7 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.discord_surface import DiscordSurfaceCapture, DiscordSurfaceHarness
+from daimon.testing.turn_leg import LEG_SCOPE
 from daimon.testing.turn_router import build_turn_router
 from mux.testing.drivers.anthropic.ma import build_no_retry_anthropic
 
@@ -272,8 +273,8 @@ async def test_real_host_driver_pumps_scripted_provider_into_real_discord_posts(
                 user_message="qa input",
                 lifecycle=lc,
                 cancel=asyncio.Event(),
-                path="legacy",
                 billing=BillingExempt(reason="cli-operator-run"),
+                scope=LEG_SCOPE,
             )
 
         capture = await h.run(invoke)

@@ -2,7 +2,7 @@
 
 A headless turn opens a fresh provider session per call, so "restart" means the
 next call: a new process runs the next fire. Nothing replays the interrupted
-one on either path; the cells record what the interruption left behind.
+one; the cells record what the interruption left behind.
 """
 
 from __future__ import annotations
@@ -62,7 +62,6 @@ async def headless(
         account_id=scenario.account_id,
         session_factory=process.sessionmaker,
         usage_record_factory=usage_factory(process, scenario),
-        turn_path=process.path,
         on_state=on_state,
         tool_safety=OPEN_TOOL_SAFETY,
     )
@@ -126,9 +125,7 @@ async def test_h1_before_session_creation(
     point = "H1 before session creation" + (
         " (request lost)" if create_fault == "hang" else " (session created, response lost)"
     )
-    record(
-        "headless", point, mode, scenario.path, **observation(scenario, before, after, reply, error)
-    )
+    record("headless", point, mode, **observation(scenario, before, after, reply, error))
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -148,7 +145,6 @@ async def test_h2_input_accepted_but_receipt_never_arrives(scenario: Scenario, m
         "headless",
         "H2 input accepted, receipt lost",
         mode,
-        scenario.path,
         **observation(scenario, before, after, reply, error),
     )
 
@@ -169,7 +165,6 @@ async def test_h3_interrupted_while_waiting_out_a_retryable_refusal(
         "headless",
         "H3 during retryable refusal",
         mode,
-        scenario.path,
         **observation(scenario, before, after, reply, error),
         provider_send_posts=world.posts("/events"),
     )
@@ -191,7 +186,6 @@ async def test_h4_provider_finished_but_process_never_saw_it(
         "headless",
         "H4 completed at provider, unseen",
         mode,
-        scenario.path,
         **observation(scenario, before, after, reply, error),
     )
 
@@ -219,7 +213,6 @@ async def test_h5_after_the_answer_before_the_caller_commits_it(
         "headless",
         "H5 answer in hand, caller dies before committing it",
         mode,
-        scenario.path,
         **observation(scenario, before, after, reply, None),
     )
 
@@ -251,7 +244,6 @@ async def test_h2x_connection_drops_after_the_provider_accepted_the_input(
         "headless",
         "H2x connection drop after acceptance (no restart)",
         "none",
-        scenario.path,
         provider_inputs_accepted=inputs,
         provider_model_calls=len(world.model_calls),
         next_fire_reply=reply,

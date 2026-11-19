@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -41,7 +40,7 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
         raise AdmissionDenied(reason="channel_budget_exceeded")
 
     monkeypatch.setattr(direct_messages, "admit", refuse)
-    deps = replace(deps_for(None, db_session_factory), turn_path=None)
+    deps = deps_for(None, db_session_factory)
 
     with pytest.raises(AdmissionDenied):
         await reply_to_dm(
@@ -117,7 +116,7 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         return interrupt_ack
 
     monkeypatch.setattr(direct_messages, "interrupt_orphaned_session", interrupt)
-    deps = replace(deps_for(client, db_session_factory), turn_path=None)
+    deps = deps_for(client, db_session_factory)
     await direct_messages._settle_cancelled_dm(deps, claimed)
     assert calls == (["owned-dm-session"] if owns_claim else [])
     async with db_session_factory() as session:

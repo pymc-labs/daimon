@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import uuid
-from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -52,7 +51,7 @@ def _make_runtime(
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name=agent_name),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # seed tests never run a turn
+        turn_deps=deps_for(),  # seed tests never run a turn
     )
 
 

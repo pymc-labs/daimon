@@ -7,9 +7,7 @@ contributors working in the package. Operators who enable a backend should
 read [providers](providers.md).
 
 The import name is the top-level `mux`, not `daimon.mux`, and `mux` never
-imports `daimon`. Daimon runs turns through mux's ports by default.
-[`DAIMON_TURN__PATH`](configuration.md#daimon_turn__path) is the emergency
-stop that returns every turn to the Anthropic-only path.
+imports `daimon`. Daimon runs every turn through mux's ports.
 
 ## Layout
 

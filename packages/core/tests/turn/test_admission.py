@@ -155,7 +155,6 @@ async def test_admission_names_a_pinned_channels_backend_before_it_refuses(
     deps = replace(
         _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
         channel_backends=True,
-        turn_path="mux",
     )
     observation = TurnObservation(db_session_factory, tenant.id, tenant.platform, "chan-1")
     token = current_outcome.set(observation)
@@ -2307,7 +2306,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         config=MagicMock(),
         source_sealed=True,
     )
-    deps = replace(deps_for(None, MagicMock()), turn_path=None)
+    deps = deps_for(None, MagicMock())
     with pytest.raises(DaimonError, match="Only conversations inside this channel can read it"):
         await start_dm(
             deps,

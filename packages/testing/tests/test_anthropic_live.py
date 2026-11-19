@@ -669,7 +669,7 @@ def test_missing_go_live_cli_pending_never_reads_key_or_reserves(tmp_path, monke
         ("processed", "failed"),
     ],
 )
-async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
+async def test_actual_a7_host_turn_uses_a_fresh_session_and_mux_journal(
     db_preflight, db_engine, db_clean, tmp_path, monkeypatch, native_ack, claim_status
 ):
     import uuid
@@ -772,18 +772,17 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
     )
     assert result["result"]["status"] == ("pass" if claim_status == "actual" else "failed"), result
     legs = result["result"]["legs"]
-    assert [leg["path"] for leg in legs] == ["legacy", "mux"]
-    assert legs[0]["session_id"] != legs[1]["session_id"]
-    assert legs[0]["journal_records"] == 0 < legs[1]["journal_records"]
-    assert [leg["final_text"] for leg in legs] == ["a7-paired-probe-ok"] * 2
-    assert [leg["termination"] for leg in legs] == ["completed"] * 2
+    assert [leg["path"] for leg in legs] == ["mux"]
+    assert legs[0]["journal_records"] > 0
+    assert [leg["final_text"] for leg in legs] == ["a7-paired-probe-ok"]
+    assert [leg["termination"] for leg in legs] == ["completed"]
     for leg in legs:
         file = args.output / f"a7-{leg['path']}-leg.json"
         assert json.loads(file.read_text()) == leg
         assert file.stat().st_mode & 0o777 == 0o600
     saved = json.loads((args.output / "receipt.json").read_text())
     saved_legs = saved["result"]["legs"]
-    assert len(saved_legs) == 2
+    assert len(saved_legs) == 1
     for expected, projected in zip(legs, saved_legs, strict=True):
         assert projected["path"] == expected["path"]
         assert projected["termination"] == expected["termination"]
@@ -798,10 +797,7 @@ async def test_actual_a7_host_pair_uses_two_fresh_sessions_and_mux_journal(
         }
     if claim_status != "actual":
         assert result["result"]["failure_type"] == "LiveRefused"
-    assert native.created == 2
-    assert native.requests.index(("POST", "/v1/sessions/sess-1/archive")) < native.requests.index(
-        ("POST", "/v1/sessions"), 1
-    )
+    assert native.created == 1
     assert guard.report()[0].held_usd == Decimal(".35")
     assert len(receipts(guard)) == 2
 
@@ -814,10 +810,10 @@ async def test_completed_leg_refuses_credential_bearing_output_before_file_write
     async def invoke(context):
         with pytest.raises(live.RecordingError):
             context.retain_completed_leg(
-                {"path": "legacy", "final_text": "offline-key", "termination": "completed"}
+                {"path": "mux", "final_text": "offline-key", "termination": "completed"}
             )
         assert not context.completed_legs
-        assert not (args.output / "a7-legacy-leg.json").exists()
+        assert not (args.output / "a7-mux-leg.json").exists()
         return {"status": "failed"}
 
     result = await live.run_live(

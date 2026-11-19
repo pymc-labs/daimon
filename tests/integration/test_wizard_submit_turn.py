@@ -1798,7 +1798,7 @@ async def test_a_wizard_turns_admin_cards_read_no_agent_source(
     router = _build_router(str(tenant.id), sent_events=[], stream_hits=[])
     runtime = _make_runtime(db_session_factory, router)
     # Backend selection is on for the card hook (the turn deps were built before).
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     bot = _make_bot(runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot, channel=channel, guild_id=123)
 

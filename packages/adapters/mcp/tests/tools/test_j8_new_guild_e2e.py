@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 SETTINGS = Settings(
     database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
     anthropic={"api_key": "test-fixture-key"},
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
     mcp=McpSettings(public_url="https://mcp.invalid"),
 )
 #: Each channel the member uses: a fresh public channel and a private one.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -43,7 +42,7 @@ def _runtime(
         billing_config=None,
         deployment_default=deployment_default or DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # never runs a turn
+        turn_deps=deps_for(),
     )
 
 

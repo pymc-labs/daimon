@@ -163,7 +163,6 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnDeps:
         sessionmaker,
         defaults_root=Path("/unused"),
         markup=Decimal(1),
-        turn_path="mux",
         channel_backends=True,
     )
 

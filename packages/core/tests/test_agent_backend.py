@@ -293,13 +293,10 @@ def test_factory_uses_existing_flags() -> None:
         "on by default"
     )
     assert not make_backend_service(
-        None, TurnSettings(path="legacy"), capture_source=NO_CAPTURE
-    ).enabled
-    assert not make_backend_service(
         None, TurnSettings(channel_backends=False), capture_source=NO_CAPTURE
     ).enabled
     assert make_backend_service(
-        None, TurnSettings(path="mux", channel_backends=True), capture_source=NO_CAPTURE
+        None, TurnSettings(channel_backends=True), capture_source=NO_CAPTURE
     ).enabled
 
 
@@ -344,7 +341,7 @@ async def test_audit_filters_before_pagination_and_unknown_accounts_are_not_acce
 
 async def test_factory_preserves_actual_agent_model_and_unknown_native_rates(owned) -> None:
     _, agent, _, sessions = owned
-    settings = TurnSettings(path="mux", channel_backends=True)
+    settings = TurnSettings(channel_backends=True)
     service = make_backend_service(sessions, settings, capture_source=NO_CAPTURE)
     opus = await service.preview(agent.model_copy(update={"model": "claude-opus-5-5"}), "anthropic")
     assert "claude-opus-5-5" in opus.cost_line

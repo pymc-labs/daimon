@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while Daimon cannot know it, such as an unpriced model or usage the provider
   never reported.
 
+- **The legacy turn path is gone.** Every turn runs through the neutral turn
+  ports. `DAIMON_TURN__PATH=mux` or an empty value is accepted and does nothing;
+  `legacy` now fails at startup, so remove the variable. `daimon run` always
+  runs as the local CLI operator and refuses a session another tenant owns.
+  `daimon-mux` 0.3.0 drops `LegacyTurnTransport`.
+
 - **Admins can monitor an agent, and people are told.** Two features, Monitor
   direct messages and Monitor coding tools, are off by default and set per
   workspace or agent. While one is on, Daimon keeps what people ask that agent

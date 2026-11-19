@@ -626,7 +626,6 @@ async def test_restart_replays_same_claim_without_second_post(composed):
         return turn_io(
             request.deps.anthropic,
             SESSION_ID,
-            path="mux",
             scope=SCOPE,
             profile=PROFILE,
             backend_request=TurnBackendRequest(
@@ -691,7 +690,6 @@ async def test_actual_cancel_ack_waits_and_completes_claim(composed):
         io = turn_io(
             request.deps.anthropic,
             SESSION_ID,
-            path="mux",
             scope=SCOPE,
             profile=PROFILE,
             backend_request=TurnBackendRequest(
@@ -1040,7 +1038,6 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
             io = turn_io(
                 request.deps.anthropic,
                 SESSION_ID,
-                path="mux",
                 scope=SCOPE,
                 profile=PROFILE,
                 backend_request=TurnBackendRequest(

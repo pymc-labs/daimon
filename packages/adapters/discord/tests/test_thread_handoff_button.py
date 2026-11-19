@@ -65,7 +65,7 @@ def _interaction(sessionmaker: async_sessionmaker[AsyncSession], tenant_id: Any)
     runtime = SimpleNamespace(
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=sessionmaker,
-        turn_deps=replace(deps_for(None, None), deployment_default=_DEFAULT, turn_path=None),
+        turn_deps=replace(deps_for(None, None), deployment_default=_DEFAULT),
     )
     thread = MagicMock(spec=discord.Thread)
     thread.id = _THREAD
@@ -269,7 +269,7 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     environment = ma_environment(id="env_handover", name="default", tenant_id=tenant.id)
     client = build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
     default = DeploymentDefault(agent_name="daimon", environment_name="default")
-    deps = replace(deps_for(client, db_session_factory), turn_path=None, deployment_default=default)
+    deps = replace(deps_for(client, db_session_factory), deployment_default=default)
     settings = MagicMock()
     settings.mcp = McpSettings()
     settings.app.env = "production"

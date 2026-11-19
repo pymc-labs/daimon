@@ -168,9 +168,7 @@ callback, settlement and normalized export. See `docs/conformance/README.md`.
 
 `AnthropicManagedAgents` registers an `AnthropicEvents` port over the
 host's existing SDK client; an explicitly injected Events implementation still
-wins. The host bridge is experimental and requires `DAIMON_TURN__PATH=mux`;
-unset or empty selects the unchanged `legacy` path. No database writes or
-client retry settings are added by the bridge.
+wins. No database writes or client retry settings are added by the bridge.
 Sessions lifecycle remains a separately injected port.
 
 The Events port checks host resource authorization before sending, listing,
@@ -367,18 +365,6 @@ session JSON after scope, reference and tenant-tag checks. It preserves partial
 SDK responses and nullable location metadata without constructing a binding;
 generic session records retain their validation. Turn seal stamping uses this
 read and the existing metadata-only update port, with no extra provider request.
-Prepared legacy replay and interruption pass the caller's admitted scope to the
-private transport while preserving SDK traffic and recovery behavior.
-
-The Anthropic legacy turn transport bounds idempotent reads (status, replay and
-idle history) to 60 seconds including retries and pagination; a replay may be
-given a longer budget by its caller. Its read client
-uses a 30-second request timeout and at most two retries. Turn mutations (input,
-confirmations, interrupt and archive) retain the original client timeout and
-always disable automatic SDK retries, including attended turns. An unknown
-liveness probe keeps the turn held and probes again until a definitive result,
-cancellation or the overall turn ceiling. Live streams retain their separate
-read timeout.
 
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 

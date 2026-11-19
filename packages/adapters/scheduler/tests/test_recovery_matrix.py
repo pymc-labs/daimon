@@ -48,21 +48,13 @@ TICK = dict(max_age=timedelta(minutes=15), max_concurrent_fires=4, dispatch_time
 pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
 
 
-@pytest.fixture(params=["legacy", "mux"])
-def turn_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
-    monkeypatch.setenv("DAIMON_TURN__PATH", request.param)
-    return str(request.param)
-
-
-def make_settings(monkeypatch: pytest.MonkeyPatch, path: str) -> Settings:
+def make_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     for name in list(os.environ):
         if name.startswith("DAIMON_"):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
-    settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
-    monkeypatch.setenv("DAIMON_TURN__PATH", path)
-    return settings
+    return Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
 
 
 @dataclass
@@ -74,7 +66,6 @@ class Fleet:
     settings: Settings
     tenant_id: Any
     routine: RoutineRow
-    path: str
     sessionmaker: KillableSessionmaker | None = None
     dispatcher: RoutineDispatcher | None = None
 
@@ -132,7 +123,6 @@ async def fleet(
     db_session: AsyncSession,
     db_committing_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
-    turn_path: str,
 ):
     tenant = await make_tenant(db_session)
     await tenant_ledger.insert_entry(
@@ -161,7 +151,7 @@ async def fleet(
         environment=ma_environment(id="env_recovery", name="default", tenant_id=tenant.id),
         tenant_id=tenant.id,
     )
-    settings = make_settings(monkeypatch, turn_path)
+    settings = make_settings(monkeypatch)
 
     async def resolved(*_args: object, **_kwargs: object) -> str:
         return "ag_recovery"
@@ -181,7 +171,6 @@ async def fleet(
             settings=settings,
             tenant_id=tenant.id,
             routine=routine,
-            path=turn_path,
         )
 
 
@@ -259,7 +248,6 @@ async def test_r1_before_session_creation(
         "routine",
         point,
         mode,
-        fleet.path,
         **summarize(fleet, dead_row, dead, same, after_row, after),
     )
 
@@ -275,7 +263,6 @@ async def test_r2_input_accepted_but_receipt_never_arrives(fleet: Fleet, mode: M
         "routine",
         "R2 input accepted, receipt lost",
         mode,
-        fleet.path,
         **summarize(fleet, dead_row, dead, same, after_row, after),
     )
 
@@ -293,7 +280,6 @@ async def test_r3_interrupted_while_waiting_out_a_retryable_refusal(
         "routine",
         "R3 during retryable refusal",
         mode,
-        fleet.path,
         **summarize(fleet, dead_row, dead, same, after_row, after),
     )
 
@@ -308,7 +294,6 @@ async def test_r4_provider_finished_but_process_never_saw_it(fleet: Fleet, mode:
         "routine",
         "R4 completed at provider, unseen",
         mode,
-        fleet.path,
         **summarize(fleet, dead_row, dead, same, after_row, after),
     )
 
@@ -340,7 +325,6 @@ async def test_r5_answer_in_hand_before_the_result_is_committed(
         "routine",
         "R5a answer in hand, before result commit",
         mode,
-        fleet.path,
         **summarize(fleet, dead_row, dead, same, after_row, after),
     )
 
@@ -375,7 +359,6 @@ async def test_r5b_result_committed_process_dies_before_delivery(fleet: Fleet, m
         "routine",
         "R5b committed, died before delivery",
         mode,
-        fleet.path,
         after_death_routine=routine_state(committed),
         deliveries_posted=len(poster.posted),
         after_restart_routine=routine_state(row),
@@ -407,7 +390,6 @@ async def test_r5c_died_mid_delivery_is_skipped_not_reposted(fleet: Fleet, mode:
         "routine",
         "R5c died mid-delivery (claim held)",
         mode,
-        fleet.path,
         deliveries_posted=len(poster.posted),
         after_restart_routine=routine_state(row),
     )
@@ -420,12 +402,11 @@ async def test_r2x_connection_drop_after_acceptance_no_restart(fleet: Fleet) -> 
     row = await fleet.row()
     after = await ledger(fleet.engine, fleet.tenant_id)
     inputs = [t for _, t in fleet.world.accepted_inputs]
-    assert len(inputs) == 1, "a send is one attempt on either path"
+    assert len(inputs) == 1, "a send is one attempt"
     record(
         "routine",
         "R2x connection drop after acceptance (no restart)",
         "none",
-        fleet.path,
         provider_inputs_count=len(inputs),
         provider_model_calls=len(fleet.world.model_calls),
         debits=after.debits,

@@ -1,13 +1,13 @@
-"""A self-hosted channel backend runs end to end on the mux leg and is refused on legacy.
+"""A self-hosted channel backend runs end to end with backends on and is refused with them off.
 
 Reuses the real host runtime, state stores and HTTP fake of `test_selfhosted_host`
 (no live harness, model or credentials) and swaps only the turn leg:
 
-* mux_selfhosted: admission binds the channel backend, the turn is dispatched on
-  the mux path with the self-hosted profile, the host answers, and the usage path
-  records the harness-reported tokens;
-* legacy_selfhosted: the same request is refused as `backend_unsupported` before
-  any harness I/O or usage.
+* mux_selfhosted: admission binds the channel backend, the turn is dispatched
+  with the self-hosted profile, the host answers, and the usage path records the
+  harness-reported tokens;
+* backends off: the same request is refused as `backend_unsupported` before any
+  harness I/O or usage.
 """
 
 from __future__ import annotations
@@ -16,19 +16,22 @@ import asyncio
 from dataclasses import replace
 
 import pytest
+from daimon.core.config import TurnSettings
 from daimon.core.turn import run as turn_run
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.testing.turn_fakes import RecordingLifecycle
-from daimon.testing.turn_leg import LEGACY_LEG, MUX_LEG
+from daimon.testing.turn_leg import MUX_LEG
 
 from .conformance_support import ACCOUNT, TENANT
 from .test_selfhosted_host import (
     PROFILE,
     composed,  # noqa: F401  (fixture)
 )
+
+OFF_LEG = TurnSettings(channel_backends=False, agent_backends=False)
 
 
 @pytest.fixture
@@ -84,11 +87,11 @@ async def test_mux_selfhosted_turn_is_admitted_dispatched_and_billed(composed, m
     )
     await drain_outcomes()
 
-    assert request.deps.turn_path == "mux" and request.deps.channel_backends
-    # The turn and its output sweep both build the turn port: each on the mux leg.
+    assert request.deps.channel_backends
+    # The turn and its output sweep both build the turn port.
     assert dispatched, "the turn was dispatched"
-    assert {(k["path"], k["profile"]) for k in dispatched} == {("mux", PROFILE)}, (
-        "every port of the turn runs on the mux leg with the self-hosted profile"
+    assert {k["profile"] for k in dispatched} == {PROFILE}, (
+        "every port of the turn runs with the self-hosted profile"
     )
     assert outcome.state.error is None
     assert "answer 1" in str(outcome.state.content)
@@ -209,12 +212,12 @@ async def test_mux_selfhosted_turn_persists_usage_through_the_real_host_path(com
     )
 
 
-@pytest.mark.parametrize("pinned_leg", [LEGACY_LEG], ids=["legacy"], indirect=True)
+@pytest.mark.parametrize("pinned_leg", [OFF_LEG], ids=["off"], indirect=True)
 @pytest.mark.parametrize("composed", ["memory"], indirect=True)
-async def test_legacy_selfhosted_channel_backend_is_refused(composed):  # noqa: F811
+async def test_selfhosted_channel_backend_is_refused_with_backends_off(composed):  # noqa: F811
     request, wire, _, observations = composed
 
-    assert request.deps.turn_path == "legacy" and not request.deps.channel_backends
+    assert not request.deps.channel_backends
     with pytest.raises(AdmissionDenied) as refused:
         await _bind(request)
 

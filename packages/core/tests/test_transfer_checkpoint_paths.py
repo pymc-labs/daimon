@@ -4,10 +4,10 @@
 to `prepare_session_for_turn`. When a thread's session must be replaced and the
 old one has something worth handing over, the runner drives a real checkpoint
 turn on the old session. These tests start from that preparation entry point
-(not `transfer_workspace`) on both turn paths, and spy on
-`daimon.core.turn.driver.turn_io` to prove which turn I/O the checkpoint used.
+(not `transfer_workspace`) and spy on `daimon.core.turn.driver.turn_io` to
+prove the checkpoint used mux turn I/O.
 
-Two contexts matter on mux, where the driver reads `current_persistence`:
+Two contexts matter, since the driver reads `current_persistence`:
 
 * chat preparation, which runs before any turn persistence is active;
 * preparation that runs inside another turn's activated persistence (a
@@ -51,7 +51,7 @@ from .test_workspace_transfer import (
     _script_checkpoint_reply,  # pyright: ignore[reportPrivateUsage]
     _seed_conversation,  # pyright: ignore[reportPrivateUsage]
 )
-from .turn_path_support import HeadlessIdentity, TurnIOSpy, TurnPath
+from .turn_io_support import HeadlessIdentity, TurnIOSpy
 
 
 class _TransferSpy:
@@ -135,7 +135,6 @@ async def _worth_checkpointing_thread(
 async def test_chat_preparation_runs_the_checkpoint_turn_on_the_selected_path(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -146,7 +145,7 @@ async def test_chat_preparation_runs_the_checkpoint_turn_on_the_selected_path(
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
-    deps = replace(_deps(db_session_factory, transport), turn_path=turn_path)
+    deps = _deps(db_session_factory, transport)
     spy = _TransferSpy(transport)
     spy.install(monkeypatch)
 
@@ -163,35 +162,32 @@ async def test_chat_preparation_runs_the_checkpoint_turn_on_the_selected_path(
     assert second.ma_session_id != first.ma_session_id
     assert second.continuity.state == "replaced"
     assert len(spy.calls) == 1, "the production runner started exactly one transfer"
-    assert spy.calls[0]["turn_path"] == turn_path, "the runner passes the deployment's turn path"
     assert spy.calls[0]["account_id"] == account.id
     assert isinstance(spy.outcomes[0], FullHandoff), f"expected a full handoff: {spy.outcomes[0]!r}"
     assert second.continuity.transfer_kind == "full"
     sent_to_old = [sid for sid, _ in transport.state.sent_batches]
     assert sent_to_old == [first.ma_session_id], "the checkpoint executed the OLD session"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
     assert len(turn_io_used.classes) == 1
 
 
 async def test_a_checkpoint_started_inside_another_turn_does_not_inherit_its_persistence(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preparation can run while an unrelated turn's persistence is active (a
-    headless run started from a turn). On mux that
-    persistence owns a different session, so a checkpoint turn that inherited
-    it would be refused by `check_session`. The checkpoint turn runs in a
-    context of its own and the outer turn's persistence is left active."""
+    headless run started from a turn). That persistence owns a different
+    session, so a checkpoint turn that inherited it would be refused by
+    `check_session`. The checkpoint turn runs in a context of its own and the
+    outer turn's persistence is left active."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
     deps = replace(
         _deps(db_session_factory, transport),
-        turn_path=turn_path,
         state_store=mux_state.PostgresStateStore(db_session_factory),
     )
     spy = _TransferSpy(transport)
@@ -215,14 +211,13 @@ async def test_a_checkpoint_started_inside_another_turn_does_not_inherit_its_per
         f"the checkpoint turn was refused or failed inside the outer turn: {spy.outcomes[0]!r}"
     )
     assert [sid for sid, _ in transport.state.sent_batches] == [first.ma_session_id]
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_a_headless_run_started_inside_another_turn_does_not_inherit_its_persistence(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     headless_identity: HeadlessIdentity,
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     """The same hazard for every headless caller (routines, smoke, `daimon
@@ -233,7 +228,6 @@ async def test_a_headless_run_started_inside_another_turn_does_not_inherit_its_p
     await db_session.commit()
     deps = replace(
         _deps(db_session_factory, _Transport()),
-        turn_path=turn_path,
         state_store=mux_state.PostgresStateStore(db_session_factory),
     )
     outer = await _open_unrelated_turn(deps, tenant_id=tenant.id, account=account)
@@ -247,18 +241,16 @@ async def test_a_headless_run_started_inside_another_turn_does_not_inherit_its_p
             trigger_message="hi",
             tenant_id=headless_identity.tenant_id,
             account_id=headless_identity.account_id,
-            turn_path=turn_path,
         )
         assert current_persistence.get() is outer, "the enclosing turn's persistence is restored"
 
     assert tail == "ok"
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()
 
 
 async def test_a_checkpoint_inside_the_same_slots_allocation_neither_waits_nor_is_fenced_by_it(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,7 +269,6 @@ async def test_a_checkpoint_inside_the_same_slots_allocation_neither_waits_nor_i
     transport = _Transport()
     deps = replace(
         _deps(db_session_factory, transport),
-        turn_path=turn_path,
         state_store=mux_state.PostgresStateStore(db_session_factory),
     )
     spy = _TransferSpy(transport)
@@ -322,4 +313,4 @@ async def test_a_checkpoint_inside_the_same_slots_allocation_neither_waits_nor_i
         f"the checkpoint was refused or failed inside the allocation: {spy.outcomes[0]!r}"
     )
     assert [sid for sid, _ in transport.state.sent_batches] == [first.ma_session_id]
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran()

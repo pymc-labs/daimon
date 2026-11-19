@@ -10,7 +10,6 @@ function's docstring) and returns the current row, which is exactly the
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -40,7 +39,7 @@ def _runtime(*, sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntim
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # feedback-modal tests never run a turn
+        turn_deps=deps_for(),  # feedback-modal tests never run a turn
     )
 
 

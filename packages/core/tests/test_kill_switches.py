@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from daimon.core.config import TurnSettings, load_turn_settings
+from pydantic import ValidationError
 
 _FLAGS = (
     "DAIMON_TURN__PATH",
@@ -23,7 +24,6 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 @pytest.mark.parametrize(
     ("name", "value", "field", "stopped"),
     [
-        ("DAIMON_TURN__PATH", "legacy", "path", "legacy"),
         ("DAIMON_TURN__CHANNEL_BACKENDS", "false", "channel_backends", False),
         ("DAIMON_TURN__AGENT_BACKENDS", "false", "agent_backends", False),
     ],
@@ -38,3 +38,17 @@ def test_each_turn_flag_still_stops(
 def test_the_default_load_needs_no_runtime_manifest(clean_env: pytest.MonkeyPatch) -> None:
     """Defaults on validate a manifest only when one is configured; none is required."""
     assert load_turn_settings(_env_file=None) == TurnSettings()
+
+
+@pytest.mark.parametrize("value", ["mux", ""])
+def test_the_deprecated_path_accepts_mux_or_empty(
+    clean_env: pytest.MonkeyPatch, value: str
+) -> None:
+    clean_env.setenv("DAIMON_TURN__PATH", value)
+    assert load_turn_settings(_env_file=None) == TurnSettings()
+
+
+def test_the_removed_legacy_path_fails_at_startup(clean_env: pytest.MonkeyPatch) -> None:
+    clean_env.setenv("DAIMON_TURN__PATH", "legacy")
+    with pytest.raises(ValidationError, match="legacy turn path was removed"):
+        load_turn_settings(_env_file=None)

@@ -129,7 +129,7 @@ async def test_component_readback_is_awaited_once_and_retained(counterpart: Agen
     assert request.counterpart is None, "proof completion cannot mutate an earlier request"
 
 
-@pytest.mark.parametrize("disabled", ["agent", "channel", "legacy", "no-runtime", "no-reader"])
+@pytest.mark.parametrize("disabled", ["agent", "channel", "no-runtime", "no-reader"])
 async def test_unconfigured_or_unproven_selection_refuses_before_hook_or_transport(
     counterpart: AgentRevision, disabled: str
 ) -> None:
@@ -142,8 +142,6 @@ async def test_unconfigured_or_unproven_selection_refuses_before_hook_or_transpo
         request = replace(request, deps=replace(request.deps, agent_backends=False))
     elif disabled == "channel":
         request = replace(request, deps=replace(request.deps, channel_backends=False))
-    elif disabled == "legacy":
-        request = replace(request, deps=replace(request.deps, turn_path="legacy"))
     elif disabled == "no-runtime":
         request = replace(request, deps=replace(request.deps, turn_runtimes={}))
     else:
@@ -237,7 +235,7 @@ async def test_public_bind_refuses_component_readback_as_execution_authority(
 
 
 @pytest.mark.parametrize(
-    "defect", ["flag-off", "legacy", "missing-reader", "error", "foreign", "changed-proof"]
+    "defect", ["flag-off", "missing-reader", "error", "foreign", "changed-proof"]
 )
 async def test_public_bind_refuses_before_native_preparer_or_transport(
     monkeypatch, counterpart, defect
@@ -268,8 +266,6 @@ async def test_public_bind_refuses_before_native_preparer_or_transport(
     request = request_for(counterpart, runtime)
     if defect == "flag-off":
         request = replace(request, deps=replace(request.deps, agent_backends=False))
-    elif defect == "legacy":
-        request = replace(request, deps=replace(request.deps, turn_path="legacy"))
     elif defect == "missing-reader":
         request = request_for(counterpart, TurnRuntime(no_transport, object(), object()))
     elif defect == "changed-proof":

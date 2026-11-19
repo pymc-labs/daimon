@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, cast
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import neutral_inputs
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.state import TextBlock
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
@@ -40,9 +41,7 @@ _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 @pytest.mark.parametrize("stop", ["end_turn", "requires_action", "retries_exhausted", "terminated"])
 @pytest.mark.parametrize("handoff", [False, True])
 @pytest.mark.parametrize("image", [False, True])
-async def test_real_http_and_host_effects_match_both_paths(
-    stop: str, handoff: bool, image: bool
-) -> None:
+async def test_real_http_traffic_and_host_effects(stop: str, handoff: bool, image: bool) -> None:
     message = make_agent_message(event_id="message", text="answer")
     if stop == "terminated":
         ending = make_status_terminated(event_id="ended")
@@ -54,60 +53,46 @@ async def test_real_http_and_host_effects_match_both_paths(
         }[stop]
         ending = make_status_idle(event_id="ended", stop_reason=reason)
     raw = [message.model_dump(mode="json"), ending.model_dump(mode="json")]
-    results: list[tuple[Any, ...]] = []
-    for path in ("legacy", "mux"):
-        transport = ScriptedTransport()
-        transport.queue(
-            ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    )
+    lifecycle = RecordingLifecycle()
+    async with transport.client() as client:
+        state = await run_turn(
+            anthropic=client,
+            session_id="session",
+            user_message="question",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="headless-unrecorded"),
+            scope=_SCOPE,
+            now=lambda: _NOW,
+            image_blocks=[
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+                }
+            ]
+            if image
+            else (),
+            system_blocks=[{"type": "text", "text": "host framing"}] if handoff else (),
         )
-        lifecycle = RecordingLifecycle()
-        async with transport.client() as client:
-            state = await run_turn(
-                anthropic=client,
-                session_id="session",
-                user_message="question",
-                lifecycle=lifecycle,
-                cancel=asyncio.Event(),
-                billing=BillingExempt(reason="headless-unrecorded"),
-                path=path,
-                scope=_SCOPE,
-                now=lambda: _NOW,
-                image_blocks=[
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
-                    }
-                ]
-                if image
-                else (),
-                system_blocks=[{"type": "text", "text": "host framing"}] if handoff else (),
-            )
-        transport.assert_consumed()
-        results.append(
-            (
-                [request.to_dict() for request in transport.requests],
-                state.content,
-                state.usage_totals,
-                state.stop_reason,
-                state.termination,
-                None if state.error is None else (state.error.kind, state.error.message),
-                [event.model_dump(mode="json") for event in lifecycle.sse_events],
-                len(lifecycle.terminal_success),
-                len(lifecycle.terminal_failures),
-            )
-        )
-    assert results[0] == results[1]
-    assert results[1][0][0]["method"] == "GET"
-    assert results[1][0][1]["method"] == "POST"
+    transport.assert_consumed()
+    assert [request.method for request in transport.requests] == ["GET", "POST"]
+    sent = cast(dict[str, Any], transport.requests[1].json())["events"]
+    assert [event["type"] for event in sent] == ["user.message"] + (
+        ["system.message"] if handoff else []
+    )
+    assert [block["type"] for block in sent[0]["content"]] == ["image"] * image + ["text"]
+    assert state.content == [TextBlock(kind="text", text="answer")]
     if stop == "end_turn":
-        assert results[1][4] == TerminationReason.COMPLETED
+        assert state.termination == TerminationReason.COMPLETED
+        assert len(lifecycle.terminal_success) == 1
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
-async def test_idle_stream_opens_before_post_and_needs_no_first_event(
-    path: Literal["legacy", "mux"],
-) -> None:
+async def test_idle_stream_opens_before_post_and_needs_no_first_event() -> None:
     import json
 
     import httpx
@@ -154,7 +139,6 @@ async def test_idle_stream_opens_before_post_and_needs_no_first_event(
                 lifecycle=RecordingLifecycle(),
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path=path,
                 scope=_SCOPE,
             )
         )
@@ -184,7 +168,6 @@ async def test_mux_scope_is_required_before_any_provider_io() -> None:
                 lifecycle=RecordingLifecycle(),
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="mux",
             )
     assert transport.requests == []
 
@@ -206,7 +189,7 @@ def test_host_inputs_roundtrip_wire_order_and_deny_text() -> None:
     assert translate_inputs(neutral_inputs(deny)) == deny
 
 
-async def test_future_native_root_idle_preserves_legacy_completion_without_reconnect() -> None:
+async def test_future_native_root_idle_completes_without_reconnect() -> None:
     raw: list[dict[str, object]] = [
         {
             "id": "future-idle",
@@ -215,34 +198,29 @@ async def test_future_native_root_idle_preserves_legacy_completion_without_recon
             "processed_at": _NOW.isoformat(),
         }
     ]
-    results: list[list[dict[str, Any]]] = []
-    for path in ("legacy", "mux"):
-        transport = ScriptedTransport()
-        transport.queue(
-            ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
-            ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply.stream("/v1/sessions/session/events/stream", raw),
+        ScriptedReply("POST", "/v1/sessions/session/events", send_events_response()),
+    )
+    lifecycle = RecordingLifecycle()
+    async with transport.client() as client:
+        state = await run_turn(
+            anthropic=client,
+            session_id="session",
+            user_message="question",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="headless-unrecorded"),
+            scope=_SCOPE,
+            now=lambda: _NOW,
         )
-        lifecycle = RecordingLifecycle()
-        async with transport.client() as client:
-            state = await run_turn(
-                anthropic=client,
-                session_id="session",
-                user_message="question",
-                lifecycle=lifecycle,
-                cancel=asyncio.Event(),
-                billing=BillingExempt(reason="headless-unrecorded"),
-                path=path,
-                scope=_SCOPE,
-                now=lambda: _NOW,
-            )
-        transport.assert_consumed()
-        assert state.termination == TerminationReason.COMPLETED
-        assert state.error is None
-        assert len(lifecycle.terminal_success) == 1
-        assert lifecycle.terminal_failures == []
-        assert [(r.method, r.path) for r in transport.requests] == [
-            ("GET", "/v1/sessions/session/events/stream"),
-            ("POST", "/v1/sessions/session/events"),
-        ]
-        results.append([request.to_dict() for request in transport.requests])
-    assert results[0] == results[1]
+    transport.assert_consumed()
+    assert state.termination == TerminationReason.COMPLETED
+    assert state.error is None
+    assert len(lifecycle.terminal_success) == 1
+    assert lifecycle.terminal_failures == []
+    assert [(r.method, r.path) for r in transport.requests] == [
+        ("GET", "/v1/sessions/session/events/stream"),
+        ("POST", "/v1/sessions/session/events"),
+    ]

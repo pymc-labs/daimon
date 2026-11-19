@@ -405,7 +405,7 @@ async def _prepare_with_runtime(
     request: ProviderPreparationRequest, runtime: OpenAIHostRuntime
 ) -> PreparedTurn:
     revision = request.admission.backend_revision
-    if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
+    if revision is None or not request.deps.channel_backends:
         raise AdmissionDenied(reason="backend_unsupported")
     # A held turn runs on a per-turn held credential (`template_mcp`). A shared
     # thread binds the account-less slot. On a channel's own deployment it runs

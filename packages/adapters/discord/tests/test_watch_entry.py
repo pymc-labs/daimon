@@ -224,7 +224,6 @@ async def test_watch_entry_rechecks_access_and_capabilities(
     deps = replace(
         runtime.turn_deps,
         anthropic=fake_client,
-        turn_path="mux",
         **({"public_url": "https://daimon.invalid/mcp"} if scenario == "alias_entry" else {}),
         tool_safety=ToolSafetyPolicy(enabled=True),
     )

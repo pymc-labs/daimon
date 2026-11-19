@@ -257,7 +257,7 @@ async def test_explicit_execution_setting_reaches_real_dependencies_without_allo
     )
     assert deps.agent_backends is enabled
     # The other turn flags keep their own (on) defaults: each one is a separate stop.
-    assert deps.turn_path == "mux" and deps.channel_backends is True
+    assert deps.channel_backends is True
     assert deps.turn_runtimes == {} and deps.state_store is None
 
 

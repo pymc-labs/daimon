@@ -92,7 +92,6 @@ from mux.drivers.anthropic.sessions_lifecycle import (
     WorkspaceTransfer,
 )
 from mux.drivers.anthropic.transport import (
-    LegacyTurnTransport,
     classify_mutation_failure,
     single_attempt_mutation,
 )
@@ -303,7 +302,6 @@ __all__ = [
     "EventNormalizer",
     "EventPage",
     "EventQuery",
-    "LegacyTurnTransport",
     "MCPToolset",
     "MemoryMount",
     "NativeArtifacts",

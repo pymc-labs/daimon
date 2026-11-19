@@ -13,7 +13,6 @@ import asyncio
 import json
 import re
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from secrets import randbits
 from typing import Any
@@ -84,7 +83,7 @@ def _make_bot(
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # the sweep never runs a turn
+        turn_deps=deps_for(),  # the sweep never runs a turn
     )
     intents = discord.Intents.default()
     intents.message_content = True

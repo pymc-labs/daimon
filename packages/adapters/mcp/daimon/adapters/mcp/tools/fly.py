@@ -22,7 +22,7 @@ from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, PROXY_TOOL_NAME
-from daimon.core.turn.io import LegacyTurnIO
+from daimon.core.turn.io import turn_io
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import JsonValue
@@ -101,7 +101,7 @@ async def _approved(
     parent = await retrieve_session(runtime.client, live.ma_session_id, scope=mcp_scope(auth))
     if parent.agent.id != origin.responder_ma_agent_id:
         raise ToolError("The conversation's agent changed. Try again there.")
-    events = await LegacyTurnIO(runtime.client, parent.id, scope=mcp_scope(auth)).replay()
+    events = await turn_io(runtime.client, parent.id, scope=mcp_scope(auth)).replay()
     approvals = {
         e.tool_use_id for e in events if e.type == "user.tool_confirmation" and e.result == "allow"
     }

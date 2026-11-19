@@ -266,3 +266,28 @@ def test_foreign_session_binding_fails_before_any_port_io(changed: dict[str, str
     backend = cast(ManagedAgents, SimpleNamespace())
     with pytest.raises(ScopeViolation):
         MuxTurnIO(backend, SCOPE, SESSION.model_copy(update=changed))
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        Scope.platform(reason="offline control"),
+        Scope.legacy_host_authorized(call_site="test"),
+        SCOPE.model_copy(update={"tenant_id": " "}),
+        SCOPE.model_copy(update={"account_id": ""}),
+    ],
+)
+def test_an_anthropic_turn_refuses_a_host_wide_or_blank_scope_before_any_io(scope: Scope) -> None:
+    import httpx
+    from anthropic import AsyncAnthropic
+    from daimon.core.turn.io import turn_io
+    from mux.errors import ScopeViolation
+
+    def no_io(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected {request.method} {request.url}")
+
+    client = AsyncAnthropic(
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(no_io))
+    )
+    with pytest.raises(ScopeViolation, match="real tenant and account"):
+        turn_io(client, SESSION.id, scope=scope)
