@@ -11,6 +11,8 @@ export type Sourced = { value: string | null; source: "channel" | "workspace" | 
 export type Readers = "any" | "inside" | "own"
 export type Writers = "any" | "own" | "none"
 export type BudgetWindow = "monthly" | "total" | "fixed"
+/** What a budget does at its limit: refuse new turns, or only post alerts. */
+export type BudgetOnLimit = "stop" | "alert"
 /** `locked`: only its own agents read it (confidential, admins only). `shared`: shared with another organisation. */
 export type ChannelTag = "kept_inside" | "locked" | "shared"
 
@@ -24,6 +26,9 @@ export type ChannelBudget = {
   percent_used: number
   active: boolean
   exceeded: boolean
+  on_limit: BudgetOnLimit
+  /** Where alerts post; null is the support channel. */
+  alert_channel_id: string | null
 }
 
 /** An ancestor in a channel's `path`. */
@@ -92,7 +97,7 @@ export type AccessChange = {
   release_agents?: boolean
   keep_rules?: boolean
 }
-/** PUT /:id/budget. `expected` is the budget as read (limit, window, dates), or null. */
+/** PUT /:id/budget. `expected` is the budget as read (limit, window, dates, mode), or null. */
 export type BudgetChange = {
   action: "set" | "raise" | "clear"
   limit_usd?: string
@@ -100,7 +105,9 @@ export type BudgetChange = {
   starts_at?: string | null
   ends_at?: string | null
   amount_usd?: string
-  expected: Pick<ChannelBudget, "limit_usd" | "window" | "starts_at" | "ends_at"> | null
+  on_limit?: BudgetOnLimit
+  alert_channel_id?: string | null
+  expected: Pick<ChannelBudget, "limit_usd" | "window" | "starts_at" | "ends_at" | "on_limit" | "alert_channel_id"> | null
 }
 
 /** GET /:id/history (admins): entries newest first, and the agents their values name. `tool_rule` values are `{agent, tool, rule}`. */

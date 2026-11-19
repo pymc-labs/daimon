@@ -11,9 +11,12 @@ from decimal import Decimal
 import pytest
 from daimon.core import channel_budget_notice
 from daimon.core.channel_budget_notice import (
+    BudgetAlert,
     BudgetNotice,
+    claim_budget_alert_post,
     claim_budget_notice,
     notice_recipients,
+    notify_budget_alert,
     notify_budget_exhausted,
 )
 from daimon.core.config import DirectMessagePolicy
@@ -26,6 +29,7 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
+from daimon.testing.settings_mock import bare_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 7, 15, 12, tzinfo=UTC)
@@ -225,3 +229,113 @@ async def test_allowed_recipients_when_policy_or_grant_refuses_then_skipped() ->
     assert notice.text("c") == "c has used its $5.00 budget.\n\nRaise the budget to resume now.", (
         "the notice names the channel and the limit"
     )
+
+
+async def _alert_budget(
+    session: AsyncSession, *, spent: str, channel: str | None = "chan-9"
+) -> TenantRow:
+    tenant = await make_tenant(session)
+    await make_ledger_entry(
+        session, tenant=tenant, delta_usd=-Decimal(spent), channel_id="chan-1", occurred_at=_NOW
+    )
+    await make_channel_budget(
+        session,
+        tenant=tenant,
+        limit_usd=Decimal("5"),
+        on_limit="alert",
+        alert_channel_id=channel,
+    )
+    await session.commit()
+    return tenant
+
+
+async def _alert(
+    factory: async_sessionmaker[AsyncSession],
+    tenant: TenantRow,
+    sent: list[BudgetAlert],
+    *,
+    lands: bool = True,
+) -> None:
+    async def alerter(alert: BudgetAlert) -> bool:
+        sent.append(alert)
+        return lands
+
+    await notify_budget_alert(
+        sessionmaker=factory,
+        alerter=alerter,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="chan-1",
+        now=_NOW,
+        settings=bare_settings(),
+    )
+
+
+async def test_an_alert_posts_once_per_multiple_of_the_limit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _alert_budget(db_session, spent="5.50")
+    sent: list[BudgetAlert] = []
+    await _alert(db_session_factory, tenant, sent)
+    await _alert(db_session_factory, tenant, sent)
+    assert [(a.level, a.destination_id) for a in sent] == [(1, "chan-9")], (
+        "the first multiple alerts once, in the budget's alert channel"
+    )
+    text = sent[0].text("#ops")
+    assert "$5.50" in text and "$5.00" in text and "monthly" in text and "#ops" in text, (
+        "the alert names the channel, the spend, the limit and the window"
+    )
+
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=Decimal("-5"), channel_id="chan-1", occurred_at=_NOW
+    )
+    await db_session.commit()
+    await _alert(db_session_factory, tenant, sent)
+    assert [a.level for a in sent] == [1, 2], "the next full multiple alerts again"
+
+    await _alert(db_session_factory, tenant, sent)
+    next_month = _NOW.replace(month=8)
+    async with db_session_factory() as session:
+        again = await claim_budget_alert_post(
+            session,
+            tenant_id=tenant.id,
+            platform=tenant.platform,
+            channel_id="chan-1",
+            now=next_month,
+            settings=bare_settings(),
+        )
+    assert again is None, "a new month has spent nothing, so nothing is due"
+    assert [a.level for a in sent] == [1, 2], "a repeat at the same level posts nothing"
+
+
+async def test_an_alert_that_does_not_land_is_retried_and_a_stop_budget_never_alerts(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _alert_budget(db_session, spent="6")
+    sent: list[BudgetAlert] = []
+    await _alert(db_session_factory, tenant, sent, lands=False)
+    await _alert(db_session_factory, tenant, sent)
+    assert [a.level for a in sent] == [1, 1], "a failed post frees the claim for the next turn"
+
+    stopper = await make_tenant(db_session)
+    await make_ledger_entry(
+        db_session, tenant=stopper, delta_usd=Decimal("-9"), channel_id="chan-1", occurred_at=_NOW
+    )
+    await make_channel_budget(db_session, tenant=stopper, limit_usd=Decimal("5"))
+    await db_session.commit()
+    await _alert(db_session_factory, stopper, sent)
+    assert len(sent) == 2, "a stop budget posts no alert"
+
+
+async def test_an_alert_without_a_destination_claims_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await _alert_budget(db_session, spent="6", channel=None)
+    sent: list[BudgetAlert] = []
+    await _alert(db_session_factory, tenant, sent)
+    assert sent == [], "no alert channel and no support channel leaves nowhere to post"
+    async with db_session_factory() as session:
+        status = await channel_budgets.get_channel_budget(
+            session, tenant_id=tenant.id, platform=tenant.platform, channel_id="chan-1"
+        )
+    assert status is not None and status.alert_level == 0, "nothing was claimed"

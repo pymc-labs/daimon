@@ -171,7 +171,7 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
   const obj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : null)
   const budget = (v: unknown): Part[] => {
     const b = obj(v)
-    return b ? [`$${b.limit_usd} ${String(WINDOWS[b.window as keyof typeof WINDOWS] ?? b.window).toLowerCase()}`] : none
+    return b ? [`$${b.limit_usd} ${String(WINDOWS[b.window as keyof typeof WINDOWS] ?? b.window).toLowerCase()}${b.on_limit === "alert" ? ", alert only" : ""}`] : none
   }
   const keys = (v: unknown) => (Array.isArray(v) ? (v as string[]) : [])
   const key = (v: unknown): Part[] => (typeof v === "string" && v ? agents([v]) : none)

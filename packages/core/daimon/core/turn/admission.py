@@ -57,7 +57,7 @@ from daimon.core.channel_backend import (
     current_backend_and_sharing,
 )
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
-from daimon.core.channel_budget_notice import spawn_budget_notice
+from daimon.core.channel_budget_notice import spawn_budget_alert, spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -1887,6 +1887,15 @@ async def _admit_gates(
                 server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
+    spawn_budget_alert(
+        sessionmaker=deps.sessionmaker,
+        alerter=deps.budget_alerter,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=budget_channel_id,
+        now=now,
+        settings=deps.settings,
+    )
 
     register_spend_recheck(
         partial(

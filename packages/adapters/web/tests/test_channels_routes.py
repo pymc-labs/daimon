@@ -199,6 +199,29 @@ async def test_a_stale_value_is_a_409_and_a_change_is_audited_and_in_history(
     assert trail[-1] == ("Changed channel", "#general", "Budget")
 
 
+async def test_an_alert_budget_reads_back_its_mode_and_needs_alert_for_a_channel(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    budget = {"action": "set", "limit_usd": "10", "window": "monthly", "expected": None}
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        stop_with_channel = await admin.client.put(
+            "/api/channels/c1/budget", json={**budget, "alert_channel_id": "c2"}
+        )
+        alert = await admin.client.put(
+            "/api/channels/c1/budget", json={**budget, "on_limit": "alert"}
+        )
+
+    assert stop_with_channel.status_code == 422, "a stop budget has nowhere to alert"
+    saved = alert.json()["channel"]["budget"]
+    assert (saved["on_limit"], saved["alert_channel_id"], saved["exceeded"]) == (
+        "alert",
+        None,
+        False,
+    ), "the default alert channel is the support channel"
+
+
 async def test_the_member_list_needs_the_module(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],

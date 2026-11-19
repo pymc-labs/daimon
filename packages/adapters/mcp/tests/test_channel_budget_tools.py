@@ -407,3 +407,37 @@ async def test_a_teams_clear_takes_the_threads_channel(
         f"{channel};messageid=17",
     )
     assert (cleared.channel_id, cleared.cleared) == (channel, True)
+
+
+async def test_an_alert_budget_keeps_its_alert_channel_and_never_blocks(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    auth = _auth(tenant, account_id, admin=True)
+    result = await _set_channel_budget_impl(
+        runtime,
+        auth,
+        channel_id=_PARENT,
+        limit_usd="5",
+        window="monthly",
+        starts_at=None,
+        ends_at=None,
+        on_limit="alert",
+        alert_channel_id=_THREAD,
+    )
+    assert (result.on_limit, result.alert_channel_id) == ("alert", _PARENT), (
+        "the alert channel resolves to its parent channel like the budgeted one"
+    )
+    assert "alert only" in result.summary, "the summary names the mode"
+    with pytest.raises(ToolError, match="needs on_limit alert"):
+        await _set_channel_budget_impl(
+            runtime,
+            auth,
+            channel_id=_PARENT,
+            limit_usd="5",
+            window="monthly",
+            starts_at=None,
+            ends_at=None,
+            alert_channel_id=_THREAD,
+        )

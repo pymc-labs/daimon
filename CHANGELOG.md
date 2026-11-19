@@ -54,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   editor), checked like `support channel set`; it beats the workspace's channel,
   and each request keeps the channel it was sent to. Requests charged before
   this release keep their charge.
+- **Channel budgets can alert instead of stopping replies.** A budget set to
+  `alert` (`daimon channels budget set --on-limit alert`, the channel budget MCP
+  tools, or the channel's budget editor in the web app) never refuses a turn.
+  When the window's spend reaches the limit, and again at each further full
+  multiple of it, Daimon posts one alert naming the channel, the spend, the limit
+  and the window, to the budget's alert channel or, when none is set, the
+  workspace's support channel. Each multiple alerts once per window, across
+  workers and restarts, and a failed post never delays a turn. The alert channel
+  must be a channel of the same workspace. Applying `channel_budget_alerts`
+  adds columns to `channel_budgets`; downgrading drops them.
+
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the

@@ -3,6 +3,7 @@
 A budget caps what one channel may spend. Spend is the channel's ledger
 debits (markup included) inside the budget's window; the gate refuses a new
 turn once spend has reached the limit, so a limit of 0 stops the channel.
+An `alert` budget never refuses: it only posts alerts (`channel_budget_alert`).
 It runs after the balance and per-person cap gates, and only where a turn has
 a channel. No budget row means no gate. Like the other gates it is checked
 once before a turn, so a running turn can finish past the limit.
@@ -18,14 +19,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from typing import Literal
+from typing import Literal, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
 from daimon.core.errors import DaimonError
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
-from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
+from daimon.core.stores.domain import BudgetOnLimit, BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
 from daimon.core.windows import (
     WINDOWS,
@@ -43,6 +44,7 @@ type UsageState = Literal["none", "pending", "settled"]
 log = structlog.get_logger()
 
 BUDGET_WINDOWS: tuple[BudgetWindow, ...] = WINDOWS
+BUDGET_ON_LIMIT: tuple[BudgetOnLimit, ...] = get_args(BudgetOnLimit)
 _MAX_LIMIT_USD = Decimal("9999999999.99")  # Numeric(12, 2)
 
 
@@ -58,6 +60,9 @@ class BudgetSpec:
     window: BudgetWindow
     starts_at: datetime | None
     ends_at: datetime | None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
+    """Where alerts go; None is the workspace's support destination."""
 
 
 BudgetPeriod = WindowPeriod
@@ -76,7 +81,24 @@ class ChannelBudgetStatus:
 
     @property
     def is_exceeded(self) -> bool:
-        return self.is_active and self.spent_usd >= self.budget.limit_usd
+        """True when new turns are refused: only a `stop` budget ever refuses."""
+        return (
+            self.is_active
+            and self.budget.on_limit == "stop"
+            and self.spent_usd >= self.budget.limit_usd
+        )
+
+    @property
+    def alert_level(self) -> int:
+        """The full multiple of the limit spent so far (2 at twice the limit) that an `alert`
+        budget alerts on; 0 below the limit and for a `stop` or inactive budget. A limit of 0
+        alerts once, on the first spend."""
+        budget = self.budget
+        if not self.is_active or budget.on_limit != "alert":
+            return 0
+        if budget.limit_usd <= 0:
+            return int(self.spent_usd > 0)
+        return int(self.spent_usd // budget.limit_usd)
 
     @property
     def percent_used(self) -> int:
@@ -100,18 +122,37 @@ def _parse_usd(value: str) -> Decimal:
 
 
 def parse_budget_spec(
-    *, limit_usd: str, window: str, starts_at: str | None = None, ends_at: str | None = None
+    *,
+    limit_usd: str,
+    window: str,
+    starts_at: str | None = None,
+    ends_at: str | None = None,
+    on_limit: str = "stop",
+    alert_channel_id: str | None = None,
 ) -> BudgetSpec:
-    """Validate a budget request from a tool or the CLI, before anything is written."""
+    """Validate a budget request from a tool or the CLI, before anything is written.
+
+    The caller has checked `alert_channel_id` is a channel Daimon can post in, in the workspace.
+    """
     if window not in BUDGET_WINDOWS:
         raise ChannelBudgetError(f"window must be one of {', '.join(BUDGET_WINDOWS)}")
+    mode: BudgetOnLimit = "alert" if on_limit == "alert" else "stop"
+    if on_limit != mode:
+        raise ChannelBudgetError(f"on_limit must be one of {', '.join(BUDGET_ON_LIMIT)}")
+    if alert_channel_id is not None and mode != "alert":
+        raise ChannelBudgetError("alert_channel needs on_limit alert")
     amount = _parse_usd(limit_usd)
     try:
         bounds = parse_window(window, starts_at=starts_at, ends_at=ends_at)
     except WindowError as exc:
         raise ChannelBudgetError(str(exc)) from exc
     return BudgetSpec(
-        limit_usd=amount, window=bounds.window, starts_at=bounds.starts_at, ends_at=bounds.ends_at
+        limit_usd=amount,
+        window=bounds.window,
+        starts_at=bounds.starts_at,
+        ends_at=bounds.ends_at,
+        on_limit=mode,
+        alert_channel_id=alert_channel_id,
     )
 
 
@@ -124,6 +165,8 @@ def describe_budget(status: ChannelBudgetStatus) -> str:
     """`$1.20 of $5.00 (monthly)`: the line every surface shows for a channel budget."""
     budget = status.budget
     label = window_label(budget, started=status.is_active)
+    if budget.on_limit == "alert":
+        label += ", alert only"
     return f"${status.spent_usd:,.2f} of ${budget.limit_usd:,.2f} ({label})"
 
 
@@ -237,7 +280,8 @@ async def balance_footer(
         status = await get_channel_budget_status(
             session, tenant_id=tenant_id, platform=platform, channel_id=budget_channel_id, now=now
         )
-        if status is not None and status.is_active:
+        # An alert-only budget never runs out, so it has nothing left to show.
+        if status is not None and status.is_active and status.budget.on_limit == "stop":
             return f"${status.remaining_usd:.2f} left"
     balance = await get_prepaid_balance(session, tenant_id=tenant_id)
     if balance is None:

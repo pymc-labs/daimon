@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
@@ -16,6 +16,7 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.cli.channel_lookup import (
     discord_parent_channel,
     fetch_discord_channel,
+    parent_channel,
     split_thread,
 )
 from daimon.adapters.cli.commands.channels_answerable import channels_answerable_command
@@ -33,6 +34,7 @@ from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
+    BUDGET_ON_LIMIT,
     BUDGET_WINDOWS,
     ChannelBudgetError,
     describe_budget,
@@ -78,7 +80,8 @@ channels_app = typer.Typer(
     help="Channels: a summary, spend budgets, skills, rules and where Daimon answers."
 )
 budget_app = typer.Typer(
-    help="A channel's spend budget: new turns there stop once its spend reaches the limit."
+    help="A channel's spend budget: new turns there stop once its spend reaches the limit, "
+    "or, set to alert, only alerts are posted."
 )
 channels_app.add_typer(budget_app, name="budget")
 skills_app = typer.Typer(
@@ -104,6 +107,8 @@ class BudgetListing(BaseModel):
     spent_usd: Decimal
     active: bool
     summary: str
+    on_limit: str
+    alert_channel_id: str | None
 
 
 def _validate_platform(value: str) -> Platform:
@@ -135,6 +140,21 @@ def budget_set_command(
     ends_at: Annotated[
         str | None, typer.Option("--ends-at", help="ISO 8601; fixed windows only.")
     ] = None,
+    on_limit: Annotated[
+        str,
+        typer.Option(
+            "--on-limit",
+            help=f"At the limit: {', '.join(BUDGET_ON_LIMIT)} (stop refuses turns; "
+            "alert posts an alert at each full multiple of the limit).",
+        ),
+    ] = "stop",
+    alert_channel: Annotated[
+        str | None,
+        typer.Option(
+            "--alert-channel",
+            help="Channel alerts post to; default is the support channel (needs alert).",
+        ),
+    ] = None,
 ) -> None:
     """Set or replace a channel's budget."""
     settings = load_settings()
@@ -152,6 +172,8 @@ def budget_set_command(
                 window=window,
                 starts_at=starts_at,
                 ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel=alert_channel,
             )
 
     run_cli(_with_runtime(), console=console)
@@ -168,17 +190,39 @@ async def budget_set(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
+    on_limit: str = "stop",
+    alert_channel: str | None = None,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
     try:
-        spec = parse_budget_spec(limit_usd=usd, window=window, starts_at=starts_at, ends_at=ends_at)
+        spec = parse_budget_spec(
+            limit_usd=usd,
+            window=window,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            on_limit=on_limit,
+            alert_channel_id=alert_channel,
+        )
     except ChannelBudgetError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    target = split_thread(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    if platform == "discord":
-        target = await discord_parent_channel(
-            rt, guild_id=workspace_id, channel_id=target, transport=discord_transport
+    target = await parent_channel(
+        rt,
+        platform=platform,
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        transport=discord_transport,
+    )
+    if alert_channel is not None:
+        spec = replace(
+            spec,
+            alert_channel_id=await parent_channel(
+                rt,
+                platform=platform,
+                workspace_id=workspace_id,
+                channel_id=alert_channel,
+                transport=discord_transport,
+            ),
         )
     budget = await set_budget(
         rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target, spec=spec
@@ -319,6 +363,8 @@ async def budget_list(
             spent_usd=s.spent_usd,
             active=s.is_active,
             summary=describe_budget(s),
+            on_limit=s.budget.on_limit,
+            alert_channel_id=s.budget.alert_channel_id,
         )
         for s in statuses
         if s.budget.platform == platform
@@ -341,7 +387,12 @@ def _listing(channel: ChannelSummary) -> ChannelListing:
         agent=channel.agent_name,
         environment=channel.environment_name,
         own_agents_only=channel.own_agents_only,
-        budget=f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window})" if budget else "",
+        budget=(
+            f"${budget.spent_usd} of ${budget.limit_usd} ({budget.window}"
+            f"{', alert only' if budget.on_limit == 'alert' else ''})"
+            if budget
+            else ""
+        ),
     )
 
 

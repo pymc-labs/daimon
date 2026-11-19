@@ -792,3 +792,28 @@ async def test_agent_invoker_roles_cli_refuses_unsupported_platform_or_everyone(
             agent_name="shared",
             roles=[role],
         )
+
+
+async def test_an_alert_budget_stores_its_alert_channel(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory)
+    console = _console()
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
+    await budget_set(
+        **args,
+        channel_id="C1",
+        usd="20",
+        window="total",
+        starts_at=None,
+        ends_at=None,
+        on_limit="alert",
+        alert_channel="C9:1717.5",
+    )
+    async with db_session_factory() as s:
+        alert = await channel_budgets.get_channel_budget(
+            s, tenant_id=tenant.tenant_id, platform="slack", channel_id="C1"
+        )
+    assert alert is not None and (alert.on_limit, alert.alert_channel_id) == ("alert", "C9")
+    assert "alert only" in _out(console), "the mode is printed"

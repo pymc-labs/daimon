@@ -1,8 +1,12 @@
-"""Tell the server admins, once per budget window, that its budget is used up.
+"""Tell people about a channel budget, once per budget window.
 
 When chat admission refuses a turn for the channel budget, the first refusal
 of each window claims the budget notice and DMs the server admins. The claim
 commits before any DM is sent. A tenant opts out with `budget_notices`.
+
+An alert-only budget never refuses; instead admission claims an alert for each
+full multiple of the limit (once each per window) and posts it to the budget's
+alert channel, else the workspace's support destination.
 """
 
 from __future__ import annotations
@@ -16,13 +20,20 @@ from typing import Final
 
 import structlog
 from daimon.core.channel_budget import get_channel_budget_status
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.stores.accounts import list_platform_user_ids
-from daimon.core.stores.channel_budgets import claim_exhausted_notice, release_exhausted_notice
-from daimon.core.stores.domain import ChannelBudgetRow
+from daimon.core.stores.channel_budgets import (
+    claim_budget_alert,
+    claim_exhausted_notice,
+    release_budget_alert,
+    release_exhausted_notice,
+)
+from daimon.core.stores.domain import ChannelBudgetRow, TenantRow
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.support_routing import SupportDestination, support_destination
+from daimon.core.windows import window_label
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -255,3 +266,215 @@ async def drain_budget_notices() -> None:
     tasks = [task for task in _PENDING if task.get_loop() is asyncio.get_running_loop()]
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@dataclass(frozen=True)
+class BudgetAlert:
+    """One alert-only budget's alert: where it posts, and what it says."""
+
+    tenant_id: uuid.UUID
+    workspace_id: str
+    """The tenant's platform id: a Discord guild, a Slack team, a Teams tenant."""
+    platform: str
+    channel_id: str
+    """The budgeted channel."""
+    destination_id: str
+    """The channel the alert posts to."""
+    slack_team_id: str | None
+    """The Slack team the destination lives in; None on other platforms."""
+    spent_line: str
+    limit_line: str
+    window_text: str
+    level: int
+    """Which full multiple of the limit this alert is for: 1 at the limit, 2 at twice it."""
+    budget_id: uuid.UUID
+    window_key: str
+    prior_key: str | None
+    prior_level: int
+    """The claim before this one, restored when the post does not land."""
+    channel_name: str | None = None
+
+    @property
+    def channel_label(self) -> str:
+        """The budgeted channel where the platform cannot mention it."""
+        return f"#{self.channel_name}" if self.channel_name else self.channel_id
+
+    def text(self, channel_ref: str) -> str:
+        reached = "reached" if self.level == 1 else f"reached {self.level}x"
+        return (
+            f"{channel_ref} has {reached} its {self.limit_line} budget ({self.window_text}): "
+            f"{self.spent_line} spent.\n\n"
+            "This budget only alerts; replies continue."
+        )
+
+
+BudgetAlerter = Callable[[BudgetAlert], Awaitable[bool]]
+"""Posts the alert and says whether it landed."""
+
+
+async def _alert_destination(
+    session: AsyncSession, budget: ChannelBudgetRow, tenant: TenantRow, settings: Settings
+) -> SupportDestination | None:
+    """The budget's own alert channel, else where the workspace's support requests go."""
+    if budget.alert_channel_id is not None:
+        return SupportDestination(
+            platform=budget.platform,
+            channel_id=budget.alert_channel_id,
+            own=True,
+            slack_team_id=tenant.external_id if budget.platform == "slack" else None,
+        )
+    return await support_destination(
+        session, tenant_id=tenant.id, platform=budget.platform, settings=settings
+    )
+
+
+async def claim_budget_alert_post(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    now: datetime,
+    settings: Settings,
+) -> BudgetAlert | None:
+    """Claim the alert for the multiple of the limit now spent; None when there is none
+    to send: no alert-only budget, below its limit, already alerted, or nowhere to post."""
+    status = await get_channel_budget_status(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id, now=now
+    )
+    level = 0 if status is None else status.alert_level
+    if status is None or level == 0:
+        return None
+    budget = status.budget
+    key = notice_key(budget, now=now)
+    prior_level = budget.alert_level if budget.alert_window_key == key else 0
+    if prior_level >= level:
+        return None
+    tenant = await get_tenant(session, tenant_id)
+    if tenant is None:
+        return None
+    destination = await _alert_destination(session, budget, tenant, settings)
+    if destination is None:
+        return None
+    if not await claim_budget_alert(session, budget_id=budget.id, key=key, level=level):
+        return None
+    names = await get_channel_names(
+        session, tenant_id=tenant_id, platform=platform, channel_ids=(channel_id,)
+    )
+    return BudgetAlert(
+        tenant_id=tenant_id,
+        workspace_id=tenant.external_id,
+        platform=platform,
+        channel_id=channel_id,
+        destination_id=destination.channel_id,
+        slack_team_id=destination.slack_team_id
+        or (tenant.external_id if platform == "slack" else None),
+        spent_line=f"${status.spent_usd:,.2f}",
+        limit_line=f"${budget.limit_usd:,.2f}",
+        window_text=window_label(budget),
+        level=level,
+        budget_id=budget.id,
+        window_key=key,
+        prior_key=budget.alert_window_key,
+        prior_level=budget.alert_level,
+        channel_name=names.get(channel_id),
+    )
+
+
+async def _claim_and_post_alert(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    alerter: BudgetAlerter,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    now: datetime,
+    settings: Settings,
+) -> None:
+    alert: BudgetAlert | None = None
+    landed = False
+    try:
+        async with asyncio.timeout(NOTICE_TIMEOUT_S):
+            # Committed before the post, so a slow platform call holds no lock.
+            async with sessionmaker() as session, session.begin():
+                alert = await claim_budget_alert_post(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    channel_id=channel_id,
+                    now=now,
+                    settings=settings,
+                )
+            if alert is None:
+                return
+            landed = await alerter(alert)
+            if landed:
+                log.info("channel_budget.alert_sent", tenant_id=str(tenant_id), level=alert.level)
+    finally:
+        # Freed when nothing posted, so the next turn tries again.
+        if alert is not None and not landed:
+            async with sessionmaker() as session, session.begin():
+                await release_budget_alert(
+                    session,
+                    budget_id=alert.budget_id,
+                    key=alert.window_key,
+                    level=alert.level,
+                    prior_key=alert.prior_key,
+                    prior_level=alert.prior_level,
+                )
+
+
+async def notify_budget_alert(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    alerter: BudgetAlerter,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    now: datetime,
+    settings: Settings,
+) -> None:
+    """Claim and post this channel's due alert; every failure is logged, never raised."""
+    try:
+        await _claim_and_post_alert(
+            sessionmaker,
+            alerter,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            now=now,
+            settings=settings,
+        )
+    except Exception as exc:  # background alert: a failure is logged, never raised
+        log.warning(
+            "channel_budget.alert_failed", tenant_id=str(tenant_id), err_type=type(exc).__name__
+        )
+
+
+def spawn_budget_alert(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    alerter: BudgetAlerter | None,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str | None,
+    now: datetime,
+    settings: Settings | None,
+) -> None:
+    """Check for a due alert off the turn's path: an alert never delays or fails a turn."""
+    if alerter is None or channel_id is None or settings is None:
+        return
+    task = asyncio.create_task(
+        notify_budget_alert(
+            sessionmaker=sessionmaker,
+            alerter=alerter,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            now=now,
+            settings=settings,
+        ),
+        name="channel_budget.alert",
+    )
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)

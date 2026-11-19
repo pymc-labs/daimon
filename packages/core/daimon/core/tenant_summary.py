@@ -44,6 +44,8 @@ class ChannelBudgetSummary:
     ends_at: str | None
     spent_usd: str
     """Debited spend in the current window, markup included."""
+    on_limit: str = "stop"
+    """`alert` when reaching the limit only posts alerts instead of stopping turns."""
 
 
 @pydantic_dataclass(frozen=True)
@@ -87,6 +89,7 @@ def _budget_summary(status: ChannelBudgetStatus) -> ChannelBudgetSummary:
         starts_at=budget.starts_at.isoformat() if budget.starts_at else None,
         ends_at=budget.ends_at.isoformat() if budget.ends_at else None,
         spent_usd=str(status.spent_usd),
+        on_limit=budget.on_limit,
     )
 
 

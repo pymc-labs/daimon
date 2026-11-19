@@ -26,7 +26,7 @@ from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
 from daimon.core.billing import BillingConfig
-from daimon.core.channel_budget_notice import BudgetNotifier
+from daimon.core.channel_budget_notice import BudgetAlerter, BudgetNotifier
 from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
     DirectMessagePolicy,
@@ -107,6 +107,8 @@ class TurnDeps:
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
     # Sends the channel budget notice; set by an adapter with a platform client.
     budget_notifier: BudgetNotifier | None = None
+    # Posts an alert-only channel budget's alerts; set by an adapter with a platform client.
+    budget_alerter: BudgetAlerter | None = None
     # The notice's server admins, where the stored role is not the source (Teams).
     server_admins: ServerAdminIds | None = None
     # Native MA client remains during the rollout; ancillary Messages calls

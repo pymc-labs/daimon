@@ -22,7 +22,7 @@ from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.channel_agents import AgentRefJson, agent_refs
 from daimon.adapters.web.channel_names import channel_names
-from daimon.adapters.web.channel_visibility import readable_channels
+from daimon.adapters.web.channel_visibility import readable_channels, request_channel_check
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelRule, ChannelWriters
 from daimon.core.agent_pins import agent_pin_names
@@ -61,7 +61,9 @@ from daimon.core.stores.agent_tool_rules import list_channel_rule_history
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import ChannelSetting
 from daimon.core.stores.platform_names import get_channel_names, mark_channel_status
+from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.support_routing import SupportDestination
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +76,7 @@ _UNREADABLE = "The access settings could not be read. Try again later."
 _NOT_FOUND = "No such channel."
 _NO_WEB_BUDGET = "Web chat has no channel budget."
 _BAD_BUDGET = "Enter a budget in dollars and pick a window."
+_BAD_ALERT_CHANNEL = "Pick a channel in this workspace for alerts."
 _AUDIT_DETAIL = {
     "default_agent": "Default agent",
     "kept_agents": "Agents kept here",
@@ -120,6 +123,8 @@ class BudgetJson(BaseModel):
     percent_used: int
     active: bool
     exceeded: bool
+    on_limit: Literal["stop", "alert"] = "stop"
+    alert_channel_id: str | None = None
 
 
 class SpendJson(BaseModel):
@@ -236,6 +241,8 @@ class BudgetExpected(BaseModel):
     window: Literal["monthly", "total", "fixed"]
     starts_at: str | None = None
     ends_at: str | None = None
+    on_limit: Literal["stop", "alert"] = "stop"
+    alert_channel_id: str | None = None
 
 
 class BudgetChange(BaseModel):
@@ -244,6 +251,8 @@ class BudgetChange(BaseModel):
     window: Literal["monthly", "total", "fixed"] | None = None
     starts_at: str | None = None
     ends_at: str | None = None
+    on_limit: Literal["stop", "alert"] = "stop"
+    alert_channel_id: str | None = None
     amount_usd: str | None = None
     expected: BudgetExpected | None
 
@@ -266,6 +275,8 @@ def _budget(status: ChannelBudgetStatus | None) -> BudgetJson | None:
         percent_used=status.percent_used,
         active=status.is_active,
         exceeded=status.is_exceeded,
+        on_limit=budget.on_limit,
+        alert_channel_id=budget.alert_channel_id,
     )
 
 
@@ -345,9 +356,47 @@ def _budget_value(expected: BudgetExpected | None) -> BudgetValue | None:
             window=expected.window,
             starts_at=datetime.fromisoformat(expected.starts_at) if expected.starts_at else None,
             ends_at=datetime.fromisoformat(expected.ends_at) if expected.ends_at else None,
+            on_limit=expected.on_limit,
+            alert_channel_id=expected.alert_channel_id,
         )
     except (InvalidOperation, ValueError) as exc:
         raise HTTPException(422, "The budget you read is not valid.") from exc
+
+
+async def _alert_channel_blocker(
+    runtime: WebRuntime, caller: WebCaller, platform: str, channel_id: str
+) -> str | None:
+    """Why alerts cannot go to `channel_id`, or None: a channel of this workspace Daimon
+    can post in, checked as the support channel is."""
+    row = await one_row(runtime, caller, channel_id)
+    if row.kind != "channel" or row.channel_id == WEB_ROW_ID or row.platform != platform:
+        return _BAD_ALERT_CHANNEL
+    async with runtime.sessionmaker() as db:
+        tenant = await get_tenant(db, caller.person.tenant_id)
+        sub = (
+            await get_teams_channel_subscription(
+                db, tenant_id=caller.person.tenant_id, channel_id=channel_id
+            )
+            if platform == "teams"
+            else None
+        )
+    if tenant is None:
+        return _BAD_ALERT_CHANNEL
+    check = await request_channel_check(
+        runtime,
+        SupportDestination(
+            platform=platform,
+            channel_id=channel_id,
+            own=True,
+            slack_team_id=tenant.external_id if platform == "slack" else None,
+            teams_team_id=next((n.id for n in row.path if n.kind == "team"), None),
+            teams_service_url=sub.service_url if sub else None,
+        ),
+        label=f"#{row.name.name}" if row.name else "the channel",
+        fresh=True,
+    )
+    # Only a definite answer refuses: a check that could not run saves.
+    return (check.detail or "Daimon can't post there.") if check.state == "blocked" else None
 
 
 async def detail_of(
@@ -653,9 +702,17 @@ def channels_router(runtime: WebRuntime) -> APIRouter:
                         window=body.window or "",
                         starts_at=body.starts_at,
                         ends_at=body.ends_at,
+                        on_limit=body.on_limit,
+                        alert_channel_id=body.alert_channel_id,
                     )
                 except ChannelBudgetError as exc:
                     raise HTTPException(422, _BAD_BUDGET) from exc
+                if body.alert_channel_id is not None:
+                    blocker = await _alert_channel_blocker(
+                        runtime, caller, platform, body.alert_channel_id
+                    )
+                    if blocker is not None:
+                        raise HTTPException(422, blocker)
                 await set_budget(
                     runtime.sessionmaker,
                     actor,

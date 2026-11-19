@@ -71,6 +71,10 @@ class ChannelBudgetResult:
     """False before a total or fixed window's start, or after a fixed one ends: it gates nothing."""
     summary: str
     """The line to read back, e.g. '$1.20 of $5.00 (monthly)'."""
+    on_limit: str = "stop"
+    """'stop' refuses new turns at the limit; 'alert' only posts alerts."""
+    alert_channel_id: str | None = None
+    """Where an 'alert' budget posts; None is the workspace's support channel."""
     web_url: WebUrl = None
     """Set by ``set_channel_budget``: the channel's settings on the web, when there is one."""
 
@@ -138,6 +142,8 @@ def _result(status: ChannelBudgetStatus) -> ChannelBudgetResult:
         remaining_usd=str(status.remaining_usd),
         active=status.is_active,
         summary=describe_budget(status),
+        on_limit=budget.on_limit,
+        alert_channel_id=budget.alert_channel_id,
     )
 
 
@@ -322,6 +328,8 @@ async def _set_channel_budget_impl(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
+    on_limit: str = "stop",
+    alert_channel_id: str | None = None,
 ) -> ChannelBudgetResult:
     """Validate everything before the write: a refused call leaves no row behind."""
     _require_platform_admin(auth)
@@ -329,11 +337,21 @@ async def _set_channel_budget_impl(
     platform = _require_platform(auth)
     try:
         spec = parse_budget_spec(
-            limit_usd=limit_usd, window=window, starts_at=starts_at, ends_at=ends_at
+            limit_usd=limit_usd,
+            window=window,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            on_limit=on_limit,
+            alert_channel_id=alert_channel_id,
         )
     except ChannelBudgetError as err:
         raise ToolError(f"{err}. Nothing was saved.") from err
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
+    if alert_channel_id is not None:
+        # As a support channel is: a channel of this workspace the caller can see.
+        spec = replace(
+            spec, alert_channel_id=await _budget_channel(runtime, auth, alert_channel_id)
+        )
     await require_budget_write(runtime, auth, target)
     budget = await set_budget(
         runtime.session_factory,
@@ -396,13 +414,20 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         window: Literal["monthly", "total", "fixed"],
         starts_at: str | None = None,
         ends_at: str | None = None,
+        on_limit: Literal["stop", "alert"] = "stop",
+        alert_channel_id: str | None = None,
     ) -> ChannelBudgetResult:
         """Set or replace a channel's spending budget. Admin-only.
 
-        Once the channel's spend in the window reaches ``limit_usd`` (a
-        decimal string such as ``"25.00"``; ``"0"`` stops the channel), new
-        turns there are refused, including routines that post there. Spend
-        is the tenant's debits for the channel, markup included.
+        With ``on_limit`` ``stop`` (the default), once the channel's spend in the
+        window reaches ``limit_usd`` (a decimal string such as ``"25.00"``;
+        ``"0"`` stops the channel), new turns there are refused, including
+        routines that post there. With ``alert``, turns are never refused:
+        Daimon posts an alert when spend reaches the limit and again at each
+        further full multiple of it, once each per window, to
+        ``alert_channel_id`` (a channel of this workspace) or, when unset, the
+        workspace's support channel. Spend is the tenant's debits for the
+        channel, markup included.
 
         ``window``: ``monthly`` resets each UTC calendar month and takes no
         dates; ``total`` counts everything since ``starts_at`` (or ever);
@@ -419,6 +444,8 @@ def register_channel_budget_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             window=window,
             starts_at=starts_at,
             ends_at=ends_at,
+            on_limit=on_limit,
+            alert_channel_id=alert_channel_id,
         )
         links = await tenant_links(runtime, auth)
         url = None if links is None else links.channel(result.channel_id)

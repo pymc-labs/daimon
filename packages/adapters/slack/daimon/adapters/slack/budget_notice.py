@@ -1,4 +1,5 @@
-"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) by DM."""
+"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) by DM,
+and an alert-only budget's alert in its channel."""
 
 from __future__ import annotations
 
@@ -10,7 +11,12 @@ from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.user_groups import user_group_lookup
-from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
+from daimon.core.channel_budget_notice import (
+    BudgetAlert,
+    BudgetAlerter,
+    BudgetNotice,
+    BudgetNotifier,
+)
 from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.turn.deps import TurnDeps
@@ -53,6 +59,27 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
     return send
 
 
+def slack_budget_alerter(runtime: SlackRuntime) -> BudgetAlerter:
+    """Post the alert into its channel; False when Slack refuses (a channel Daimon is not in)."""
+
+    async def send(alert: BudgetAlert) -> bool:
+        if alert.slack_team_id is None:
+            return False
+        client = await resolve_web_client(runtime, team_id=alert.slack_team_id)
+        if client is None:
+            return False
+        try:
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=alert.destination_id, **notice_fields(alert.text(f"<#{alert.channel_id}>"))
+            )
+        except SlackApiError as exc:
+            log.info("channel_budget.alert_undelivered", error=str(exc))
+            return False
+        return True
+
+    return send
+
+
 def with_budget_notifier(runtime: SlackRuntime) -> SlackRuntime:
     """`runtime` whose turns send the notice; a stand-in test runtime comes back unchanged."""
     real = cast(object, runtime)
@@ -65,5 +92,6 @@ def with_budget_notifier(runtime: SlackRuntime) -> SlackRuntime:
         turn_deps=replace(
             deps,
             budget_notifier=notifier,
+            budget_alerter=slack_budget_alerter(real),
         ),
     )

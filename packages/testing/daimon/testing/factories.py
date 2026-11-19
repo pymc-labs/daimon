@@ -61,6 +61,7 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import (
     AccountRow,
     AgentMemoryStoreRow,
+    BudgetOnLimit,
     BudgetWindow,
     ChannelBudgetRow,
     CliPrincipalRow,
@@ -580,6 +581,8 @@ async def make_channel_budget(
     window: BudgetWindow = "monthly",
     starts_at: datetime | None = None,
     ends_at: datetime | None = None,
+    on_limit: BudgetOnLimit = "stop",
+    alert_channel_id: str | None = None,
 ) -> ChannelBudgetRow:
     """Upsert a channel_budgets row via `channel_budgets.set_channel_budget`."""
     tenant = tenant or await make_tenant(session)
@@ -593,6 +596,8 @@ async def make_channel_budget(
         starts_at=starts_at,
         ends_at=ends_at,
         set_by_account_id=None,
+        on_limit=on_limit,
+        alert_channel_id=alert_channel_id,
     )
 
 

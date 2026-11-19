@@ -320,3 +320,48 @@ async def test_the_footer_never_shows_a_negative_balance(
         now=_NOW,
     )
     assert shown == footer, "a turn settling past zero showed $-0.01 left in Teams"
+
+
+def test_parse_budget_spec_reads_the_limit_mode() -> None:
+    """`stop` is the default; an alert channel needs `alert`."""
+    base = {"limit_usd": "5", "window": "monthly"}
+    assert parse_budget_spec(**base).on_limit == "stop", "the default stops"
+    spec = parse_budget_spec(**base, on_limit="alert", alert_channel_id="c-9")
+    assert (spec.on_limit, spec.alert_channel_id) == ("alert", "c-9"), "alert keeps its channel"
+    with pytest.raises(ChannelBudgetError, match="on_limit must be one of"):
+        parse_budget_spec(**base, on_limit="warn")
+    with pytest.raises(ChannelBudgetError, match="needs on_limit alert"):
+        parse_budget_spec(**base, alert_channel_id="c-9")
+
+
+@pytest.mark.parametrize(
+    ("spent", "level"),
+    [("4.99", 0), ("5", 1), ("9.99", 1), ("10", 2), ("27", 5)],
+)
+async def test_an_alert_budget_never_gates_and_counts_full_multiples(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    spent: str,
+    level: int,
+) -> None:
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(
+        db_session, tenant=tenant, delta_usd=-Decimal(spent), channel_id="chan-1", occurred_at=_NOW
+    )
+    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("5"), on_limit="alert")
+    await db_session.commit()
+
+    assert not await is_over_channel_budget(
+        sessionmaker=db_session_factory,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="chan-1",
+        now=_NOW,
+    ), "an alert-only budget never refuses a turn"
+    async with db_session_factory() as session:
+        status = await get_channel_budget_status(
+            session, tenant_id=tenant.id, platform=tenant.platform, channel_id="chan-1", now=_NOW
+        )
+    assert status is not None, "the budget reads back"
+    assert status.alert_level == level, "the level is the full multiples of the limit spent"
+    assert "alert only" in describe_budget(status), "every surface's summary names the mode"
