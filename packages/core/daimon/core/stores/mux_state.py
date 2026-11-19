@@ -937,6 +937,16 @@ async def pending_outbox_for_profiles(
     ]
 
 
+async def slot_of_binding(session: AsyncSession, binding_id: str) -> Slot | None:
+    """The slot a binding id lives in; None once account erasure removed it."""
+    generation = await session.scalar(
+        select(ProviderBindingSlot.generation).where(ProviderBindingSlot.binding_id == binding_id)
+    )
+    if generation is None:
+        return None
+    return binding_slot(await _binding(session, binding_id, generation))
+
+
 async def agent_of_usage_session(
     session: AsyncSession, *, tenant_id: uuid.UUID, binding_id: str, managed_session_id: str
 ) -> str | None:

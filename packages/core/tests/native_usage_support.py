@@ -53,7 +53,9 @@ async def seed_binding(sm, *, provider="gemini", tenant_id=None):
         return binding
 
 
-async def pending_usage(sm, *, provider="gemini", outputs=100, channel_id="channel"):
+async def pending_usage(
+    sm, *, provider="gemini", outputs=100, channel_id="channel", unknown=False, observed_at=None
+):
     binding = await seed_binding(sm, provider=provider)
     model = "gemini-3.8-flash" if provider == "gemini" else "gpt-6-luna"
     observation = UsageObservation(
@@ -71,12 +73,12 @@ async def pending_usage(sm, *, provider="gemini", outputs=100, channel_id="chann
         turn_id="turn",
         grain="turn",
         basis="cumulative",
-        input_tokens=1000,
-        input_cached_tokens=0,
-        input_cache_write_tokens=0,
-        output_tokens=outputs,
-        observed_at=datetime.now(UTC),
-        completeness="partial" if outputs is None else "measured",
+        input_tokens=None if unknown else 1000,
+        input_cached_tokens=None if unknown else 0,
+        input_cache_write_tokens=None if unknown else 0,
+        output_tokens=None if unknown else outputs,
+        observed_at=observed_at or datetime.now(UTC),
+        completeness="unknown" if unknown else "partial" if outputs is None else "measured",
         native_meter={"offline": True},
     )
     async with sm.begin() as db:

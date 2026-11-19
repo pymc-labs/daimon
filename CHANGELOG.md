@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Late GPT usage survives a restart.** OpenAI can report a turn's usage long
+  after the turn ends. Daimon re-read it only for about an hour, in the process
+  that ran the turn, so a restart or a later answer left the turn unbilled. The
+  scheduler now re-reads such turns from their pending usage for a day, then
+  logs that it gave up.
+
 - **Refusals on GPT and Gemini say what actually happened.** A spent daily
   Gemini quota no longer says to try again in a minute; it says the quota
   refills daily and to use another model. A provider that can't run a

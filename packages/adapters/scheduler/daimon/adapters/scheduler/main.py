@@ -1009,10 +1009,16 @@ async def _build_fire(
 
 @scheduler_step
 async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
-    """Settle pending usage of profiles with no infrastructure charge; failures retry on
-    the next scheduler tick (an applied row is never applied twice)."""
+    """Re-read late OpenAI usage, then settle pending usage of profiles with no
+    infrastructure charge; failures retry on the next scheduler tick (an applied row
+    is never applied twice)."""
+    from daimon.core.turn.openai_late_usage import DURABLE_REREADS
     from daimon.core.usage_outbox_drain import drain_pending_usage
 
+    try:
+        await DURABLE_REREADS.run(sm, markup=markup, now=datetime.now(UTC))
+    except Exception:
+        log.exception("scheduler.late_usage_reread.failed")
     try:
         await drain_pending_usage(sm, markup=markup)
     except Exception:

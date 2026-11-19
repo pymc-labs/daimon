@@ -6,7 +6,7 @@ from uuid import UUID
 
 import pytest
 from daimon.core import usage_outbox_drain
-from daimon.core.stores import thread_sessions, usage_events
+from daimon.core.stores import mux_state, thread_sessions, usage_events
 from daimon.core.usage_outbox_drain import drain_pending_usage
 from sqlalchemy import text
 
@@ -125,6 +125,48 @@ async def test_pending_openai_workspace_usage_drains_at_zero_infrastructure(sm):
     applied, usd = await drain_pending_usage(sm, markup=Decimal(1))
     assert applied == 1 and usd > 0, "the pending OpenAI row is debited"
     assert await _pending(sm) == 0 and await _debited(sm) == -usd, "exactly once"
+
+
+async def _reread(sm, monkeypatch, *, seen_ago: timedelta) -> tuple[int, list[str]]:
+    """One durable re-read pass over an unknown OpenAI turn, answered as measured."""
+    from daimon.core.turn import openai_deployment
+    from daimon.core.turn.openai_late_usage import DurableRereads
+    from mux.drivers.openai import OpenAIUsage
+
+    read: list[str] = []
+
+    async def reconcile_turn(self, scope, session, turn_id):
+        read.append(turn_id)
+        return (pending.model_copy(update=measured),)
+
+    monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
+    monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
+    await pending_usage(
+        sm, provider="openai", unknown=True, observed_at=datetime.now(UTC) - seen_ago
+    )
+    async with sm() as db:
+        row = (await mux_state.pending_outbox(db))[0]
+    pending = row.observation
+    measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
+    measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
+    reads = await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC))
+    return reads, read
+
+
+async def test_unknown_openai_usage_is_reread_from_the_scheduler_and_debited(sm, monkeypatch):
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3))
+    assert reads == 1 and read == ["turn"]
+    debited = await _debited(sm)
+    assert debited < 0
+    # The scheduler's drain, next in the same step, closes the unknown revision.
+    await drain_pending_usage(sm, markup=Decimal(1))
+    assert await _pending(sm) == 0 and await _debited(sm) == debited
+
+
+async def test_unknown_openai_usage_is_given_up_a_day_after_it_was_seen(sm, monkeypatch):
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(days=2))
+    assert reads == 0 and read == []
+    assert await _pending(sm) == 1 and await _debited(sm) == 0
 
 
 async def test_rows_the_drain_cannot_price_never_block_the_rest(sm):

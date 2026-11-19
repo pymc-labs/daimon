@@ -640,6 +640,33 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     return runtime
 
 
+def usage_transport(tenant_id: str, profile: str, account_scope_id: str) -> Transport | None:
+    """A transport that reads a tenant's turn usage outside a turn (no I/O yet).
+
+    The operator's rows for the session's project name the key and whether the
+    project header is sent; with none, the code-default row's. None when no single
+    key applies or it is not set.
+    """
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
+
+    rows = {
+        (row.api_key_env, row.project_header)
+        for row in authorized_deployments(tenant_id, profile=profile)
+        if row.project == account_scope_id
+    }
+    if not rows and account_scope_id == DEFAULT_PROJECT:
+        rows = {(DEFAULT_KEY_ENV[get_profile(profile).provider], False)}
+    if len(rows) != 1:
+        return None
+    ((key_env, header),) = rows
+    secret = os.environ.get(key_env)
+    if secret is None or not secret.strip():
+        return None
+    from mux.drivers.openai import configured_transport
+
+    return configured_transport(api_key=secret, project=account_scope_id if header else None)
+
+
 def _environments(key: str) -> EnvironmentPort:
     """The environment port on the install's OpenAI key (no I/O yet).
 

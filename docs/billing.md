@@ -330,4 +330,5 @@ Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 `admission_missing`, `model_mismatch` or `tariff_context_invalid`. Pass
 `--cursor <next-cursor>` for the next page. The command is read-only. The
 runtime repairs gaps by replaying the harness's measured usage, and a tariff
-added after a request cannot repair it. Never treat pending turns as free.
+added after a request cannot repair it. The scheduler re-reads a GPT turn's
+unknown usage for a day after the turn. Never treat pending turns as free.
