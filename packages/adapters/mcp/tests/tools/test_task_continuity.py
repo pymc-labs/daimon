@@ -1900,7 +1900,7 @@ async def test_a_relay_agent_hands_nothing_off_and_is_handed_nothing(
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    destination = ma_agent(
+    destination = ma_agent_payload(
         id=_DESTINATION_ID,
         name=_DESTINATION_NAME,
         model=ma_model_config("claude-sonnet-5", speed="standard"),
@@ -1909,44 +1909,30 @@ async def test_a_relay_agent_hands_nothing_off_and_is_handed_nothing(
             MA_METADATA_KEY_NAME: _DESTINATION_NAME,
         },
         mcp_servers=_relay_server() if case == "to_relay" else [],
-    ).model_dump(mode="json")
-    responder = ma_agent(
+    )
+    responder = ma_agent_payload(
         id=_RESPONDER_ID,
         name="daimon",
         model=ma_model_config("claude-sonnet-5", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: "daimon"},
         mcp_servers=_relay_server() if case == "relay_dm" else [],
-    ).model_dump(mode="json")
+    )
     runtime = _runtime(committing_sessionmaker, _client([destination, responder]))
     runtime.settings.mcp.public_url = HttpUrl(_RELAY_APP)  # pyright: ignore[reportAttributeAccessIssue]
-    auth = AuthIdentity(
-        account_id=caller.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        caller.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
         chat_session_id="test-session",
-        hold=(
-            TurnHold("discord", "C_PARENT", client=False, relay=True)
-            if case == "relay_channel"
-            else None
-        ),
+        hold=TurnHold("discord", "C_PARENT", client=False, relay=True)
+        if case == "relay_channel"
+        else None,
     )
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id="test-session",
-        sender_foreign=False,
-        shared_channel=False,
-        platform_message_id="M1",
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, platform_message_id="M1"
     ) as origin:
         await _asked_by_person(committing_sessionmaker, origin.id)
         call = _hand_off_task_impl(

@@ -209,10 +209,11 @@ async def test_an_agent_key_whose_agent_has_the_web_app_off_is_kept_from_the_web
     )
     derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_k")
     runtime.resolver_cache.derived_agent_ids[(tenant_id, derived)] = "agent_k"
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant_id,
+        is_admin=False,
+        is_platform_admin=False,
         platform="discord",
         agent_id=derived,
     )

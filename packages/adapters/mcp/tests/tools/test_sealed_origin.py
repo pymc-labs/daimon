@@ -11,22 +11,22 @@ from daimon.adapters.mcp.middleware import call_origin
 from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN, mcp_subject
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, authorize
-from daimon.core.stores.domain import Role
+
+from ..harness import auth_identity
 
 SEALED = TenantAccessPolicy(channel_rules={"c-seal": ChannelRule(readers="own", writers="own")})
 HERE = Place(channel_id="c-seal", parent_channel_id="c-seal")
 
 
 def _auth(*, kind: str | None = None, session: str | None = "s1") -> AuthIdentity:
-    return AuthIdentity(
-        token_kind=kind,  # pyright: ignore[reportArgumentType]
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        is_platform_admin=False,
+        token_kind=kind,
         scopes=frozenset({"channels:write"}),
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
         platform="discord",
         platform_user_id="u1",
-        is_admin=True,
         chat_session_id=session,
     )
 

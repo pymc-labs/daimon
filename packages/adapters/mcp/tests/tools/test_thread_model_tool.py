@@ -21,7 +21,6 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
 from daimon.core.thread_models import _MODEL_EFFORTS  # pyright: ignore[reportPrivateUsage]
-from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
@@ -302,19 +301,13 @@ async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_co
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
+    async with discord_turn_origin(
         committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
+        tenant,
+        caller,
         parent_channel_id="D_ROUTE",
         thread_id="dm:scope-1",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
         chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
     ) as origin:
         async with committing_sessionmaker() as db:
             await bind_origin_session(
