@@ -33,7 +33,7 @@ def agent_has_identity_relay(
     server_urls: Iterable[str],
     *,
     public_url: str | None,
-    unscoped: frozenset[str] = frozenset(),
+    unscoped: frozenset[str],
 ) -> bool:
     """Whether any of the agent's MCP server URLs is a channel-scoped identity relay.
 
