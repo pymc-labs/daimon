@@ -291,7 +291,7 @@ async def test_no_turn_runs_when_the_timers_agent_grant_leaves_the_owner_out(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     admits = AsyncMock(return_value=False)
-    monkeypatch.setattr(timer_delivery, "sender_admits", admits)
+    monkeypatch.setattr(timer_delivery, "sender_admission", admits)
     delivery = await _delivery(db_session_factory)
 
     with pytest.raises(AdmissionDenied):
@@ -300,6 +300,19 @@ async def test_no_turn_runs_when_the_timers_agent_grant_leaves_the_owner_out(
     assert admits.await_args is not None
     assert admits.await_args.kwargs["agent_name"] == "target-agent"
     assert admits.await_args.kwargs["user_id"] == _OWNER
+    delivery.run_turn.assert_not_awaited()
+
+
+async def test_a_failed_role_lookup_puts_the_timer_back_not_settled(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lookup that could not say is no refusal: the timer retries and runs no turn."""
+    monkeypatch.setattr(timer_delivery, "sender_admission", AsyncMock(return_value=None))
+    delivery = await _delivery(db_session_factory)
+
+    with pytest.raises(DeliveryRetry):
+        await delivery.run(db_session_factory)
+
     delivery.run_turn.assert_not_awaited()
 
 

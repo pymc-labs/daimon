@@ -29,6 +29,7 @@ from daimon.core.dm_access import (
     permits_dm,
     resolve_groups,
     roles_by_membership,
+    sender_admission,
     sender_admits,
 )
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
@@ -512,6 +513,25 @@ async def test_sender_admits_by_the_sending_agents_grant(
         db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999", groups=lookup
     )
     assert admitted is expected, f"{who} {user_ids} {group_ids} {groups}"
+
+
+async def test_sender_admission_when_the_group_lookup_fails_is_unknown_not_refused(
+    db_session_factory,
+):
+    """A failed lookup is None for callers that can retry; `sender_admits` still refuses."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=[], group_ids=["g1"], set_by=None, now=NOW,
+        )  # fmt: skip
+
+    async def failing(_user: str, _wanted: frozenset[str]) -> frozenset[str]:
+        raise GroupLookupFailed("boom")
+
+    ask = dict(tenant_id=tenant.id, agent_name="ada", user_id="999", groups=failing)
+    assert await sender_admission(db_session_factory, **ask) is None, "unknown"
+    assert await sender_admits(db_session_factory, **ask) is False, "other callers fail closed"
 
 
 async def test_sender_admits_ignores_a_lock_for_another_agent(db_session_factory):
