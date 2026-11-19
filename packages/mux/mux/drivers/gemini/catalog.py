@@ -14,7 +14,7 @@ from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.core import GeminiAgents, compile_agent, now, page_values, refuse
 from mux.drivers.gemini.mcp_auth import MCPSecretResolver
 from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
-from mux.drivers.gemini.storage import Records, Storage, owner
+from mux.drivers.gemini.storage import ACCOUNT, Keys, Records, Storage, owner, skill_keys
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
@@ -169,7 +169,7 @@ class GeminiCatalogAdapter(GeminiAgents):
 
     async def compile(self, scope: Scope, spec: AgentSpec, *, id_: str) -> Object:
         self._admit_catalog(scope)
-        async with self._storage.transaction() as records:
+        async with self._storage.read(Keys(read=skill_keys(spec.skills))) as records:
             return native_definition(
                 records,
                 scope,
@@ -198,7 +198,8 @@ class GeminiCatalogAdapter(GeminiAgents):
                 }
             )[:40]
         )
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT,), read=skill_keys(spec.skills))
+        async with self._storage.transaction(keys) as records:
             definition = native_definition(
                 records,
                 scope,
@@ -233,7 +234,8 @@ class GeminiCatalogAdapter(GeminiAgents):
                 ) from None
             raise
         verify_definition(observed, definition)
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT, ("agent", id_)), create=("agent",))
+        async with self._storage.transaction(keys) as records:
             self._creation(records, scope, key, digest)
             current = records.agents.get(id_)
             if current is not None:
@@ -267,11 +269,12 @@ class GeminiCatalogAdapter(GeminiAgents):
         self._admit_catalog(scope)
         self._check(scope, ref, "agent")
         # A pure read: the committed snapshot, never the account's write lock.
-        async with self._storage.read() as records:
+        async with self._storage.read(Keys(read=(("agent", ref.id),))) as records:
             agent = records.agents.get(ref.id)
-            if agent is None or agent.ref != ref:
-                raise ScopeViolation(ref.id, "no owned native catalog agent")
-            expected = deepcopy(self._owned(agent, scope))
+        if agent is None or agent.ref != ref:
+            raise ScopeViolation(ref.id, "no owned native catalog agent")
+        expected = deepcopy(self._owned(agent, scope))
+        async with self._storage.read(Keys(read=skill_keys(agent.spec.skills))) as records:
             compiled = native_definition(
                 records,
                 scope,
@@ -298,7 +301,8 @@ class GeminiCatalogAdapter(GeminiAgents):
         self._admit_catalog(scope)
         self._owned(retained, scope)
         # A pure read: the committed snapshot, never the account's write lock.
-        async with self._storage.read() as records:
+        keys = Keys(read=(("agent", retained.ref.id), *skill_keys(retained.spec.skills)))
+        async with self._storage.read(keys) as records:
             if records.agents.get(retained.ref.id) != retained:
                 raise ScopeViolation(retained.ref.id, "skill deployment agent differs")
             skill_sources(records, scope, self._account, retained.spec.skills)
@@ -323,7 +327,7 @@ class GeminiCatalogAdapter(GeminiAgents):
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         self._admit_catalog(scope)
         # A pure read: the committed snapshot, never the account's write lock.
-        async with self._storage.read() as records:
+        async with self._storage.read(Keys(scan=("agent",))) as records:
             candidates = tuple(
                 agent
                 for agent in records.agents.values()

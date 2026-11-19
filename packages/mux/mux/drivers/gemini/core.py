@@ -78,12 +78,17 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.packages import package_sources
 from mux.drivers.gemini.storage import (
+    ACCOUNT,
+    Keys,
     Records,
+    RowKey,
     SessionRecord,
     Storage,
     UploadedBundle,
     owner,
+    session_keys,
     session_refs,
+    skill_keys,
 )
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
@@ -372,7 +377,7 @@ class Base:
         records transaction, so a slow provider read never holds the account's
         records row (every other session in the account waits on it).
         """
-        async with self._storage.read() as snapshot:
+        async with self._storage.read(session_keys(session.id)) as snapshot:
             seen = self._record(snapshot, scope, session)
             pending = tuple(seen.interactions.items())
         fetched: list[tuple[str, str, Object]] = []
@@ -559,32 +564,34 @@ class GeminiAgents(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        keys = Keys(lock=(ACCOUNT,), read=skill_keys(spec.skills), create=("agent",))
+        async with self._storage.transaction(keys) as records:
             skill_sources(records, scope, self._account, spec.skills)
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
-                return records.agents[id_]
-            id_ = str(uuid4())
-            record = Agent(
-                ref=self._ref(scope, id_, "agent"),
-                revision=Revision(local=1),
-                spec=spec,
-                created_at=now(),
-            )
-            records.agents[id_] = record
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return record
+            if id_ is None:
+                id_ = str(uuid4())
+                record = Agent(
+                    ref=self._ref(scope, id_, "agent"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                )
+                records.agents[id_] = record
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return record
+        async with self._storage.read(Keys(read=(("agent", id_),))) as records:
+            return records.agents[id_]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
         self._check(scope, ref, "agent")
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(Keys(read=(("agent", ref.id),))) as records:
             result = records.agents.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline agent configuration")
             return result
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(Keys(scan=("agent",))) as records:
             return page_values(
                 [
                     a
@@ -699,27 +706,32 @@ class GeminiEnvironments(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        files: tuple[RowKey, ...] = tuple(
+            ("artifact", s.artifact.id) for s in spec.sources or () if s.artifact
+        )
+        keys = Keys(lock=(ACCOUNT,), read=files, create=("environment",))
+        async with self._storage.transaction(keys) as records:
             compile_environment(
                 spec, files=inline_files(records, scope, self._account, spec.sources)
             )
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
-                return records.environments[id_]
-            id_ = str(uuid4())
-            result = Environment(
-                ref=self._ref(scope, id_, "environment"),
-                revision=Revision(local=1),
-                spec=spec,
-                created_at=now(),
-            )
-            records.environments[id_] = result
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return result
+            if id_ is None:
+                id_ = str(uuid4())
+                result = Environment(
+                    ref=self._ref(scope, id_, "environment"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                )
+                records.environments[id_] = result
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return result
+        async with self._storage.read(Keys(read=(("environment", id_),))) as records:
+            return records.environments[id_]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._check(scope, ref, "environment")
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(Keys(read=(("environment", ref.id),))) as records:
             result = records.environments.get(ref.id)
             if result is None or result.ref != ref:
                 raise ScopeViolation(ref.id, "no owned inline environment configuration")
@@ -728,7 +740,7 @@ class GeminiEnvironments(Base):
     async def list(
         self, scope: Scope, *, filters: EnvironmentFilter, page: PageRequest
     ) -> Page[Environment]:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(Keys(scan=("environment",))) as records:
             return page_values(
                 [
                     e
@@ -826,9 +838,17 @@ class GeminiSessions(Base):
                 "spec": spec.model_dump(mode="json"),
             }
         )
-        async with self._storage.transaction() as records:
+        refs = await self._session_refs(spec)
+        keys = Keys(lock=(ACCOUNT,), read=refs, create=("session",))
+        async with self._storage.transaction(keys) as records:
             id_ = self._creation(records, scope, key, digest)
-            if id_ is not None:
+            replay = id_ is not None
+            if id_ is None:
+                id_ = self._new_session(
+                    records, scope, spec, key, digest, thread, string(ext.value["binding_id"]), refs
+                )
+        if replay:
+            async with self._storage.read(session_keys(id_)) as records:
                 prior = self._record(records, scope, self._ref(scope, id_, "session"))
                 if not prior.uploading:
                     # The mark says the session is new, so a host tells what it left out
@@ -840,12 +860,19 @@ class GeminiSessions(Base):
                         else native
                     )
                     return prior.session.model_copy(update={"native": kept})
-            else:
-                id_ = self._new_session(
-                    records, scope, spec, key, digest, thread, string(ext.value["binding_id"])
-                )
         # Past the transaction: an upload never holds the account's records.
         return await self._prepare(scope, self._ref(scope, id_, "session"))
+
+    async def _session_refs(self, spec: SessionSpec) -> tuple[RowKey, ...]:
+        """The rows a new session reads, from its agent and environment read first."""
+        env = spec.environment
+        named: list[RowKey] = [("agent", spec.agent.id)]
+        if env is not None:
+            named.append(("environment", env.id))
+        async with self._storage.read(Keys(read=tuple(named))) as records:
+            agent = records.agents.get(spec.agent.id)
+            environment = records.environments.get(env.id) if env else None
+        return session_refs(agent, environment, spec) if agent else tuple(named)
 
     def _new_session(
         self,
@@ -856,6 +883,7 @@ class GeminiSessions(Base):
         digest: str,
         thread: ThreadRef,
         binding_id: str,
+        refs: tuple[RowKey, ...],
     ) -> str:
         agent = records.agents.get(spec.agent.id)
         if agent is None or agent.ref != spec.agent:
@@ -895,11 +923,7 @@ class GeminiSessions(Base):
             request,
             mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             uploading=tuple(p.id for p in uploaded_pins(records, scope, self._account, pins)),
-            refs=session_refs(
-                agent,
-                records.environments.get(spec.environment.id) if spec.environment else None,
-                spec,
-            ),
+            refs=refs,
         )
         records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
         return id_
@@ -921,7 +945,9 @@ class GeminiSessions(Base):
             pending: tuple[SkillRef, ...] = ()
             manifests: dict[str, UploadedBundle] = {}
             environment_id: str | None = None
-            async with self._storage.transaction() as records:
+            async with self._storage.transaction(
+                session_keys(ref.id, lock=True, refs=True)
+            ) as records:
                 record = self._record(records, scope, ref)
                 if not record.uploading:
                     return record.session
@@ -953,7 +979,9 @@ class GeminiSessions(Base):
             # host can't supply is left out up front, not by replacing an environment.
             archives = {p.id: await self._archive(scope, p, manifests[p.id]) for p in pending}
             if unusable := tuple(i for i, archive in archives.items() if archive is None):
-                async with self._storage.transaction() as records:
+                async with self._storage.transaction(
+                    session_keys(ref.id, lock=True, refs=True)
+                ) as records:
                     record = self._record(records, scope, ref)
                     stale = self._leave_out(
                         records, scope, record, [i for i in unusable if i in record.uploading]
@@ -967,12 +995,16 @@ class GeminiSessions(Base):
                     if error.retryable:
                         raise
                     log.warning("gemini_environment_create_refused category=%s", error.category)
-                    async with self._storage.transaction() as records:
+                    async with self._storage.transaction(
+                        session_keys(ref.id, lock=True, refs=True)
+                    ) as records:
                         record = self._record(records, scope, ref)
                         stale = self._leave_out(records, scope, record, record.uploading)
                     await self._discard(environments, stale)
                     continue
-                async with self._storage.transaction() as records:
+                async with self._storage.transaction(
+                    session_keys(ref.id, lock=True, refs=True)
+                ) as records:
                     record = self._record(records, scope, ref)
                     # Only into a record still waiting for an environment of this very
                     # configuration: another create's, or a skill since left out, wins.
@@ -999,7 +1031,9 @@ class GeminiSessions(Base):
                     raise
                 failed = None  # the environment is gone: make it again, with every skill
             stale = None
-            async with self._storage.transaction() as records:
+            async with self._storage.transaction(
+                session_keys(ref.id, lock=True, refs=True)
+            ) as records:
                 record = self._record(records, scope, ref)
                 if record.environment_id != environment_id or not record.uploading:
                     continue  # another create moved the record on; start from what it holds
@@ -1116,7 +1150,7 @@ class GeminiSessions(Base):
         return await self.retrying(lambda: self._retrieve(scope, ref))
 
     async def _retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
             record = self._record(records, scope, ref)
             if record.current is not None:
                 self._observe(
@@ -1133,7 +1167,7 @@ class GeminiSessions(Base):
             refuse("session_list_filter")
         if filters.agent is not None:
             self._check(scope, filters.agent, "agent")
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(Keys(scan=("session",))) as records:
             return page_values(
                 [
                     r.session
@@ -1146,7 +1180,7 @@ class GeminiSessions(Base):
             )
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(ref.id)) as records:
             record = self._record(records, scope, ref)
             return UpdatePlan(
                 session=ref,
@@ -1292,7 +1326,9 @@ class GeminiEvents(Base):
                 "expected_turn": expected_turn,
             }
         )
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(
+            session_keys(session.id, lock=True, refs=True)
+        ) as records:
             record = self._record(records, scope, session)
             if record.uploading:
                 # Its large skills are still uploading: create the session again first.
@@ -1469,7 +1505,9 @@ class GeminiEvents(Base):
                 return unknown
             # Definite refusal permits a new operation, but never retries this key.
             await self._state_store.advance_operation(scope, key, "failed", now=now(), fence=None)
-            async with self._storage.transaction(after_dispatch=True) as records:
+            async with self._storage.transaction(
+                session_keys(session.id, lock=True), after_dispatch=True
+            ) as records:
                 record = self._record(records, scope, session)
                 record.unknown_delivery = False
             if exc.category == "not_found" and (
@@ -1488,7 +1526,9 @@ class GeminiEvents(Base):
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_interaction"
             ) from None
-        async with self._storage.transaction(after_dispatch=True) as records:
+        async with self._storage.transaction(
+            session_keys(session.id, lock=True), after_dispatch=True
+        ) as records:
             record = self._record(records, scope, session)
             interaction = string(raw["id"])
             if not is_result:
@@ -1529,7 +1569,7 @@ class GeminiEvents(Base):
         after: str | None = None,
         previews: bool = False,
     ) -> AsyncIterator[Event]:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
             record = self._record(records, scope, session)
             interaction, root = record.current, record.root
             if interaction is not None:
@@ -1576,7 +1616,7 @@ class GeminiEvents(Base):
                         # The reconcile just committed this turn's events: read them from
                         # the committed snapshot, never waiting behind the account's
                         # writers again (J6g PAKM6G failed busy here).
-                        async with self._storage.read() as records:
+                        async with self._storage.read(session_keys(session.id)) as records:
                             current = self._record(records, scope, session)
                             batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
@@ -1600,7 +1640,9 @@ class GeminiEvents(Base):
                             now=now(),
                             native_type="error",
                         )
-                        async with self._storage.transaction() as records:
+                        async with self._storage.transaction(
+                            session_keys(session.id, lock=True)
+                        ) as records:
                             current = self._record(records, scope, session)
                             self._append(current, (gap,))
                             gap = current.events[gap.id]
@@ -1635,7 +1677,7 @@ class GeminiEvents(Base):
                 await close()
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        async with self._storage.read() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
@@ -1643,7 +1685,7 @@ class GeminiEvents(Base):
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
             record = self._record(records, scope, session)
             self._apply_fetched(record, fetched)
             s = record.session
@@ -1660,7 +1702,7 @@ class GeminiEvents(Base):
     async def cancel(
         self, scope: Scope, session: ResourceRef, *, turn_id: str, key: str
     ) -> CancelReceipt:
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
             record = self._record(records, scope, session)
             if record.root != turn_id or record.current is None:
                 raise ProviderError("conflict", retryable=False)
@@ -1726,13 +1768,15 @@ class GeminiEvents(Base):
     async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
         # The provider read runs holding no lock (a stop waits on it repeatedly), then a
         # short transaction applies it to the same turn's same interaction only.
-        async with self._storage.read() as snapshot:
+        async with self._storage.read(session_keys(receipt.session.id)) as snapshot:
             seen = self._record(snapshot, scope, receipt.session)
             if seen.root != receipt.turn_id or seen.current is None:
                 raise ProviderError("conflict", retryable=False)
             interaction = seen.current
         raw = await self._get(seen, interaction)
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(
+            session_keys(receipt.session.id, lock=True)
+        ) as records:
             record = self._record(records, scope, receipt.session)
             if record.root != receipt.turn_id or record.current != interaction:
                 raise ProviderError("conflict", retryable=False)

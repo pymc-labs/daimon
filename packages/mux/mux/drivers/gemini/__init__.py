@@ -47,7 +47,7 @@ from mux.drivers.gemini.skill_deployment import (
     SkillBundlePublisher,
     verify_retained_deployments,
 )
-from mux.drivers.gemini.storage import Records, Storage
+from mux.drivers.gemini.storage import Records, Storage, session_keys
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -67,7 +67,7 @@ class GeminiUsage(Base):
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
         # Provider reads first, holding no lock; then a short write to apply them.
         fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction() as records:
+        async with self._storage.transaction(session_keys(session.id, lock=True)) as records:
             record = self._record(records, scope, session)
             self._apply_fetched(record, fetched)
             return tuple(record.observation_history.values())
@@ -76,7 +76,7 @@ class GeminiUsage(Base):
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
     ) -> Page[UsageObservation]:
         # A committed snapshot: listing usage never waits behind the account's writers.
-        async with self._storage.read() as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             record = self._record(records, scope, session)
             return page_values(tuple(record.observation_history.values()), page)
 

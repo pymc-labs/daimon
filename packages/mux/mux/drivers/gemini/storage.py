@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Literal, Protocol
 
 from mux.contracts.events import Event
-from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.ids import ModelRef, Scope, SkillRef
 from mux.contracts.receipts import DeletionReceipt, SendReceipt
 from mux.contracts.resources import (
     Agent,
@@ -155,6 +155,16 @@ ALL = Keys(everything=True)
 
 def session_key(id_: str) -> RowKey:
     return ("session", id_)
+
+
+def skill_keys(pins: Iterable[SkillRef] | None) -> tuple[RowKey, ...]:
+    return tuple(("skill", p.id) for p in pins or ())
+
+
+def session_keys(id_: str, *, lock: bool = False, refs: bool = False) -> Keys:
+    """One session's row, read or (`lock`) written, and with `refs` the rows it reads."""
+    key = (session_key(id_),)
+    return Keys(lock=key, refs=refs) if lock else Keys(read=key, refs=refs)
 
 
 @dataclass

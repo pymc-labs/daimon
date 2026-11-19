@@ -21,6 +21,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
+from mux.drivers.gemini.storage import ALL, Keys
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, close_iterator
 from mux.errors import (
     ContinuityLost,
@@ -1001,10 +1002,10 @@ async def test_a_completed_interactions_events_are_delivered_while_a_writer_hold
         held = True
         return result
 
-    def transaction(*, after_dispatch: bool = False):
+    def transaction(keys: Keys = ALL, *, after_dispatch: bool = False):
         if held:
             raise RuntimeError("records row held by another copy's writer")
-        return real_transaction(after_dispatch=after_dispatch)
+        return real_transaction(keys, after_dispatch=after_dispatch)
 
     ma.events.reconcile = reconcile_then_a_writer_takes_the_row  # type: ignore[method-assign]
     storage.transaction = transaction  # type: ignore[method-assign]
