@@ -132,7 +132,7 @@ from daimon.core.turn.lifecycle import (
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outbound import scrubbed_for
-from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
 from daimon.core.turn.posture import (
@@ -1331,7 +1331,7 @@ async def run_prepared_turn(
     revision = prepared.admission.backend_revision
     backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
     profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
-    observation.backend = f"{backend}/{profile}"
+    observation.backend = backend_label(revision)
     # Every log line of the turn names the backend it ran on, so failures, lost
     # connections and ceilings can be counted per backend. Bound until the end of
     # the `finally`, so the credential finalizer's lines carry it too.

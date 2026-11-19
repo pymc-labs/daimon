@@ -144,7 +144,7 @@ from daimon.core.turn.errors import (
     MissingTurnConfigError,
     SessionBusyError,
 )
-from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
 from daimon.core.turn_hold import RequesterOrg, TurnHold
@@ -603,6 +603,11 @@ def _observe_admission(observer: AdmissionObserver, decision: AdmissionDecision)
         observer(decision)
     except Exception:
         _log.warning("turn.admission_observer_failed")
+
+
+def _name_backend(revision: ConfigRevision | None) -> None:
+    if (observation := current_outcome.get()) is not None:
+        observation.backend = backend_label(revision)
 
 
 def _refuse_managed_fallback(
@@ -1077,6 +1082,10 @@ async def _admit_gates(
         backend_revision_origin: Literal["channel", "agent"] | None = (
             "channel" if configured_channel else None
         )
+        # Name the backend as soon as it is known, so a failure while admitting still
+        # says which provider it was on (the default Claude is named once preference is read).
+        if backend_revision is not None:
+            _name_backend(backend_revision)
         backend_footer_profile: str | None = None
         retained_revision: int | None = None
         backend_follow: ThreadFollow | None = None
@@ -1797,6 +1806,7 @@ async def _admit_gates(
 
     if not deps.agent_backends:
         await resolve_preference()
+        _name_backend(backend_revision)
 
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
@@ -1904,6 +1914,7 @@ async def _admit_gates(
 
     if deps.agent_backends:
         await resolve_preference()
+        _name_backend(backend_revision)
     _refuse_managed_fallback(daimon_record=daimon_record, revision=backend_revision)
     platform_skills = backend_platform_skills(
         platform_skills, None if backend_revision is None else backend_revision.profile

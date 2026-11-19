@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Failure alerts name the provider.** `turn.user_failure` carries a
+  `provider` field, and its `backend` is set as soon as admission reads the
+  channel's or agent's choice, so a turn that fails while being admitted no
+  longer logs `unknown`.
 - **Images work in Gemini conversations.** A message with a picture failed
   with no reason given. The picture now goes to Gemini with the message.
 - **Routines no longer run on Claude when their agent or channel is on GPT or

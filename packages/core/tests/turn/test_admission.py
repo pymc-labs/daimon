@@ -133,6 +133,58 @@ def _deps(
     )
 
 
+async def test_admission_names_a_pinned_channels_backend_before_it_refuses(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn refused at admission still says which backend its channel is pinned to, so
+    its failure log and alerts split by provider instead of reading `unknown`."""
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from daimon.core.turn.outcomes import TurnObservation, current_outcome
+    from mux.contracts.config import BackendConfig
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, tenant.platform, "chan-1"),
+        BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
+    )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        channel_backends=True,
+        turn_path="mux",
+    )
+    observation = TurnObservation(db_session_factory, tenant.id, tenant.platform, "chan-1")
+    token = current_outcome.set(observation)
+    try:
+        with pytest.raises(AdmissionDenied) as refused:
+            await admit(
+                deps,
+                origin="chat",
+                tenant_id=tenant.id,
+                requester_org=RequesterOrg.HOST,
+                platform=tenant.platform,
+                external_user_id="user-1",
+                channel_id="chan-1",
+                now=_NOW,
+            )
+    finally:
+        current_outcome.reset(token)
+    assert refused.value.reason == "backend_unsupported", "the pinned provider is not set up here"
+    assert observation.backend == "gemini/gemini.inline_reuse", (
+        "the backend should be named before any admission refusal"
+    )
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
