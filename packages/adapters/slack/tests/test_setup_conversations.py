@@ -78,7 +78,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
     responder = BetaManagedAgentsAgent(
         id="agent_daimon",
         type="agent",
-        name="daimon",
+        name="default",
         version=1,
         model=BetaManagedAgentsModelConfig(id="claude-sonnet-4-6", speed="standard"),
         system=None,
@@ -87,7 +87,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
         mcp_servers=[],
         metadata={
             "daimon_tenant": str(tenant.id),
-            "daimon_name": "daimon",
+            "daimon_name": "default",
             "daimon_managed": "true",
         },
         created_at=now,

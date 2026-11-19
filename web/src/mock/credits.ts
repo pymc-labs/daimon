@@ -43,7 +43,7 @@ const PERSON: SpendRow[] = [
 ]
 const AGENT_ROWS: SpendRow[] = [
   { id: "ag_mmm", name: "MMM Analyst", avatar: agent("ag_mmm").avatar, turns: 241, usd: 140.2 },
-  { id: "ag_daimon", name: "Daimon", avatar: agent("ag_daimon").avatar, turns: 402, usd: 98.4 },
+  { id: "ag_default", name: "Daimon", avatar: agent("ag_default").avatar, turns: 402, usd: 98.4 },
   { id: "ag_pricing", name: "Pricing Analyst", avatar: agent("ag_pricing").avatar, turns: 133, usd: 61.3 },
   { id: "ag_northwind", name: "Northwind Support", avatar: face(39), turns: 58, usd: 56.2 },
   { id: "ag_review", name: "Code Reviewer", avatar: agent("ag_review").avatar, turns: 77, usd: 44.1 },

@@ -16,10 +16,10 @@ the command is registered.
 
 A request asked from a channel is open to the people who could have asked the
 agent there (`answer_access`), as on Slack, decided when the form is shown and
-again on Send. This bot posts the request in the workspace's request channel
-(`support_routing.support_destination`); `daimon.core.support_routing` has no
-DM tier, so no one is messaged directly. A request whose charge is still to be
-set carries the charge and Set charge / Decline (`support_settle`). A channel
+again on Send. This bot posts the request in its menu's or the workspace's request
+channel (`support_routing.request_destination`); `daimon.core.support_routing` has no
+DM tier, so no one is messaged directly. A pending request carries Accept (a fixed
+price) or the charge and Set charge, and Decline (`support_settle`). A channel
 read only from inside is marked in the post, so whoever picks it up answers
 there, and the form warns that the note leaves it.
 
@@ -145,7 +145,7 @@ from daimon.core.support_routing import (
     deployment_channel,
     log_undelivered,
     own_channel_allowed,
-    support_destination,
+    request_destination,
 )
 from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import (
@@ -802,8 +802,12 @@ class SupportCommand:
         destination = None
         if await self._offered(origin):
             async with runtime.sessionmaker() as session:
-                destination = await support_destination(
-                    session, tenant_id=tenant_id, platform="teams", settings=runtime.settings
+                destination = await request_destination(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="teams",
+                    place=origin.support_place,
+                    settings=runtime.settings,
                 )
         if destination is None:
             return UNAVAILABLE
@@ -844,6 +848,7 @@ class SupportCommand:
                     default_allowance=runtime.settings.support.credits_per_user,
                     exempt=actor.is_platform_admin,
                     source_allowed=source_allowed,
+                    support_channel_id=destination.channel_id,
                 )
         except SupportError as err:
             # A missing step or a bad answer: nothing was recorded.
@@ -956,7 +961,7 @@ async def _post_in_support_channel(
     """
     channel = destination.channel_id
     try:
-        if direct is None or not await _may_post_to(runtime, channel):
+        if direct is None or not await may_post_to(runtime, channel):
             return None
         return await send(direct, channel)
     except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
@@ -964,7 +969,7 @@ async def _post_in_support_channel(
         return None
 
 
-async def _may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
+async def may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
     """Whether the deployment's organisation lets this bot post in `channel`."""
     teams = runtime.settings.teams
     if teams is None:

@@ -58,6 +58,9 @@ from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
+# The OpenAI journal keeps 100,000 events (`openai_state`); a page is the largest allowed.
+_HISTORY_PAGE = 1000
+_PAGE_BOUND = 100
 _BUFFER_BOUND = 1000
 
 
@@ -293,7 +296,9 @@ class HostedTurnIO:
         if event.session_id != self._session.id or event.native.provider != self.codec.provider:
             raise ScopeViolation(self._session.id, f"foreign {self.codec.label} host event")
 
-    async def _paged_history(self, cursor: str | None, *, bound: int | None) -> list[Event]:
+    async def _paged_history(
+        self, cursor: str | None, *, bound: int | None, limit: int
+    ) -> list[Event]:
         values: list[Event] = []
         seen: set[str] = set() if cursor is None else {cursor}
         pages = 0
@@ -303,7 +308,7 @@ class HostedTurnIO:
                 self._backend.events.list(
                     self._scope,
                     self._session,
-                    page=PageRequest(cursor=cursor, order="asc", limit=100),
+                    page=PageRequest(cursor=cursor, order="asc", limit=limit),
                 )
             )
             for event in page.data:
@@ -720,7 +725,7 @@ class OpenAITurnIO(HostedTurnIO):
         self._spend_guard = spend_guard
 
     async def _history(self) -> list[Event]:
-        return await self._paged_history(None, bound=50)
+        return await self._paged_history(None, bound=_PAGE_BOUND, limit=_HISTORY_PAGE)
 
     async def _take_baseline(self) -> None:
         values = await self._history()
@@ -817,7 +822,7 @@ class SelfHostedTurnIO(HostedTurnIO):
     async def _history(self) -> list[Event]:
         # A single model turn can exceed thousands of journal records. Advance
         # by cursor until exhausted; replay/interrupt own the wall-clock bound.
-        return await self._paged_history(str(self._after), bound=None)
+        return await self._paged_history(str(self._after), bound=None, limit=100)
 
     async def _take_baseline(self) -> None:
         page = await self._edge(

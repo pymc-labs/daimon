@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
-import { CardView } from "./Cards"
+import { CardView, MonitoringNotice } from "./Cards"
 import type { Card } from "./types"
 
 const card = (action: "switch_back_to_claude" | null): Card => ({ id: "c1", kind: "refusal", title: "GPT can't answer.", body: "It can't run right now.", help: "Switch back to Claude.", action })
@@ -23,5 +23,20 @@ describe("refusal card", () => {
   it("has no button for someone who can't switch", () => {
     view(card(null))
     expect(screen.queryByRole("button")).not.toBeInTheDocument()
+  })
+})
+
+describe("monitoring notice", () => {
+  it("says what is happening, then who can help", () => {
+    render(<MonitoringNotice notice={{ line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." }} />)
+    expect(screen.getByText("Admins can read what you and this agent say here.")).toBeInTheDocument()
+    expect(screen.getByText("Ask an admin if you have questions.")).toBeInTheDocument()
+  })
+
+  it("can be dismissed", async () => {
+    const onDismiss = vi.fn()
+    render(<MonitoringNotice notice={{ line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." }} onDismiss={onDismiss} />)
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+    expect(onDismiss).toHaveBeenCalledOnce()
   })
 })

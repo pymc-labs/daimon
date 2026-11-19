@@ -136,7 +136,7 @@ def dm_store(monkeypatch):
     monkeypatch.setattr(watch_delivery, "pause_watch", pause)
     state.granted = True
     state.admits = AsyncMock(side_effect=lambda *_a, **_k: state.granted)
-    monkeypatch.setattr(watch_delivery, "sender_admits", state.admits)
+    monkeypatch.setattr(watch_delivery, "sender_admission", state.admits)
     return state
 
 
@@ -184,6 +184,17 @@ async def test_agent_grant_leaving_the_owner_out_runs_no_turn_and_pauses_the_wat
     ports["run_turn"].assert_not_awaited()
     dm.send.assert_not_awaited()
     assert dm_store.paused, "the watch is paused"
+
+
+async def test_failed_role_lookup_skips_this_report_and_keeps_the_watch_running(dm_store):
+    """A lookup that could not say is no refusal: no pause, no notice, no turn."""
+    dm_store.granted = None
+    ports, dm = _ports()
+    with pytest.raises(AdmissionDenied):
+        await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    ports["run_turn"].assert_not_awaited()
+    dm.send.assert_not_awaited()
+    assert not dm_store.paused, "the watch is not paused"
 
 
 async def test_dm_disabled_runs_no_turn_and_pauses_the_watch(dm_store):

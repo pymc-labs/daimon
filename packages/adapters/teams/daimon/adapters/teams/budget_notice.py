@@ -1,4 +1,5 @@
-"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) in 1:1 chats."""
+"""Delivers the channel budget notice (`daimon.core.channel_budget_notice`) in 1:1 chats,
+and an alert-only budget's alert in its channel."""
 
 from __future__ import annotations
 
@@ -11,10 +12,17 @@ import structlog
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
+from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, send_error_details
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.support import may_post_to
 from daimon.adapters.teams.team_owners import team_group_lookup
-from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
+from daimon.core.channel_budget_notice import (
+    AlertOutcome,
+    BudgetAlert,
+    BudgetAlerter,
+    BudgetNotice,
+    BudgetNotifier,
+)
 from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.turn.deps import TurnDeps
@@ -54,6 +62,27 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
             except TEAMS_SEND_ERRORS as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)
         return delivered
+
+    return send
+
+
+def teams_budget_alerter(runtime: TeamsRuntime, direct: DirectChats) -> BudgetAlerter:
+    """Post the alert as a neutral card where the access policy lets Daimon post.
+
+    `refused` for a protected channel or a 403/404 from Teams; other errors may pass later.
+    """
+
+    async def send(alert: BudgetAlert) -> AlertOutcome:
+        if not await may_post_to(runtime, alert.destination_id):
+            return "refused"
+        text = alert.text(alert.channel_ref(alert.channel_label))
+        try:
+            await direct.post_card(alert.destination_id, notice_card(text, error=False))
+        except TEAMS_SEND_ERRORS as exc:
+            status, _ = send_error_details(exc)
+            log.info("channel_budget.alert_undelivered", err_type=type(exc).__name__, status=status)
+            return "refused" if status in (403, 404) else "failed"
+        return "sent"
 
     return send
 

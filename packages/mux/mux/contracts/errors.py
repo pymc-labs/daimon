@@ -8,6 +8,7 @@ comes back as a receipt whose status is `outcome_unknown`.
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 ProviderErrorCategory = Literal[
@@ -125,6 +126,17 @@ class MigrationUnsupported(MuxError):
         self.thread_id = thread_id
 
 
+DEFAULT_RETRY_AFTER_S = 30.0
+MAX_RETRY_AFTER_S = 600.0
+
+
+def bounded_retry_after(seconds: float | None) -> float:
+    """A 429's wait: the provider's own hint, else 30 s, never more than 10 minutes."""
+    if seconds is None or not math.isfinite(seconds):
+        return DEFAULT_RETRY_AFTER_S
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_S)
+
+
 class ProviderError(MuxError):
     """A provider call failed, normalized. `native_code` is the provider's own code."""
 
@@ -138,6 +150,7 @@ class ProviderError(MuxError):
         native_message: str | None = None,
         native_error_code: str | None = None,
         native_param: str | None = None,
+        retry_after_s: float | None = None,
     ) -> None:
         super().__init__(
             f"provider error: {category}" + (f" ({native_code})" if native_code else "")
@@ -149,9 +162,13 @@ class ProviderError(MuxError):
         self.native_message = native_message
         self.native_error_code = native_error_code
         self.native_param = native_param
+        # A rate limit that refills: seconds until the provider will accept calls again.
+        self.retry_after_s = retry_after_s
 
 
 __all__ = [
+    "DEFAULT_RETRY_AFTER_S",
+    "MAX_RETRY_AFTER_S",
     "BindingConflict",
     "ContinuityLost",
     "ExtensionVersionError",
@@ -164,4 +181,5 @@ __all__ = [
     "ProviderErrorCategory",
     "ScopeViolation",
     "UnsupportedCapability",
+    "bounded_retry_after",
 ]

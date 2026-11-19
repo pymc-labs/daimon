@@ -348,8 +348,13 @@ def channel_budget_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
     """The invoking channel's budget in words, e.g. `$1.20 of $5.00 used this month`.
 
     A budget that has not started shows its limit and when it starts; a fixed
-    one that has ended says so.
+    one that has ended says so. An alert-only budget says it never stops the channel.
     """
+    phrase = _window_phrase(status, now=now)
+    return f"{phrase} (alerts only)" if status.budget.on_limit == "alert" else phrase
+
+
+def _window_phrase(status: ChannelBudgetStatus, *, now: datetime) -> str:
     budget = status.budget
     spent = f"{fmt_usd(status.spent_usd)} of {fmt_usd(budget.limit_usd)} used"
     if budget.window == "monthly":

@@ -16,7 +16,8 @@ export type OptionDraft = {
   price: { kind: PriceKind; amount: string; min: string; max: string; label: string; steps: StepDraft[] }
   fields: FieldDraft[]
 }
-export type MenuDraft = { name: string; options: OptionDraft[] }
+/** `channel`: the id its requests go to; null is the request channel. */
+export type MenuDraft = { name: string; channel: string | null; options: OptionDraft[] }
 
 let counter = 0
 const uid = () => `r${++counter}`
@@ -33,7 +34,7 @@ export const newOption = (): OptionDraft => ({
   id: uid(), key: "", label: "", rest: {}, fields: [],
   price: { kind: "fixed", amount: "1", min: "", max: "", label: "", steps: [newStep(), newStep()] },
 })
-export const emptyMenu = (): MenuDraft => ({ name: "", options: [newOption()] })
+export const emptyMenu = (): MenuDraft => ({ name: "", channel: null, options: [newOption()] })
 
 /** Fields an option holds in all: a steps price counts as one. */
 export const used = (o: OptionDraft) => o.fields.length + (o.price.kind === "steps" ? 1 : 0)
@@ -59,7 +60,7 @@ export function toDraft(catalog: unknown): MenuDraft {
       }),
     }
   })
-  return { name: str(c.name), options: options.length ? options : [newOption()] }
+  return { name: str(c.name), channel: str(bag(c.channel).id) || null, options: options.length ? options : [newOption()] }
 }
 
 const num = (v: string) => (/^\d+$/.test(v.trim()) ? Number(v) : v.trim())
@@ -104,6 +105,7 @@ export function toCatalog(m: MenuDraft): Bag {
   }
   return {
     name: m.name.trim(),
+    ...(m.channel && { channel: { id: m.channel } }),
     options: m.options.map((o) => ({
       ...o.rest, key: keyOf(o), label: o.label.trim(), price: priceOf(o),
       ...(o.fields.length && { fields: fieldsOf(o) }),
@@ -115,7 +117,7 @@ const TAGS = new Set<string>([...Object.keys(PRICES), ...Object.keys(FIELDS)])
 
 /** Input paths a draft has, e.g. `options.0.price.amount`. */
 function inputs(m: MenuDraft): Set<string> {
-  const paths = new Set(["name", "options"])
+  const paths = new Set(["name", "channel", "options"])
   m.options.forEach((o, i) => {
     const at = `options.${i}`
     for (const p of ["", ".key", ".label", ".price", ".price.amount", ".price.min", ".price.max", ".price.label", ".price.steps", ".fields"]) paths.add(at + p)
@@ -129,6 +131,7 @@ function inputs(m: MenuDraft): Set<string> {
 function pathOf(loc: (string | number)[]): string {
   const t = loc.map(String)
   if (t[0] === "menu") t.shift()
+  if (t[0] === "channel") return "channel"
   if (t[2] === "price" && TAGS.has(t[3])) t.splice(3, 1)
   else if (t[2] === "fields" && TAGS.has(t[4])) t.splice(4, 1)
   const at = t.indexOf("choices")

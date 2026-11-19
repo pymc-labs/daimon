@@ -140,7 +140,10 @@ TABLE_DISPOSITIONS: dict[str, str] = {
         "counted); synthetic billing operations are not matched"
     ),
     "usage_observation": "retained financial evidence, detached from the slot",
-    "accounting_outbox": "retained financial evidence, detached from the slot",
+    "accounting_outbox": (
+        "retained financial evidence, detached from the slot; its platform user id is "
+        "billing attribution, retained like usage_events"
+    ),
     "accounting_binding_context": "the profile and channel settlement reads; no personal data",
     "erased_account": "the fence; a bare account id",
     "erased_principal": "the fence for operations keyed by principal; bare ids",
@@ -313,6 +316,43 @@ async def inventory(
         ),
     )
     return MuxInventory(erased=erased, retained=retained)
+
+
+@dataclass(frozen=True)
+class ProviderSession:
+    """A provider-side session a private slot's generation named, read before `erase`."""
+
+    tenant_id: uuid.UUID
+    provider: str
+    session_id: str
+    account_scope_id: str | None
+    profile: str
+
+
+async def provider_sessions(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> tuple[ProviderSession, ...]:
+    """The provider sessions behind the account's private slots, for upstream deletion.
+
+    Read before `erase` removes the bindings that name them. Shared slots are not listed.
+    """
+    rows = await session.execute(
+        select(
+            ProviderBinding.tenant_id,
+            ProviderBinding.provider,
+            ProviderBinding.binding,
+            ProviderBinding.profile,
+        ).where(ProviderBinding.binding_id.in_(_private_slot_ids(_account_key(account_id))))
+    )
+    found: dict[tuple[uuid.UUID, str, str], ProviderSession] = {}
+    for tenant_id, provider, binding, profile in rows.tuples():
+        refs = cast("dict[str, str]", binding.get("native_refs") or {})
+        session_id = refs.get("session")
+        if session_id:
+            found[tenant_id, provider, session_id] = ProviderSession(
+                tenant_id, provider, session_id, refs.get("account_scope"), profile
+            )
+    return tuple(found.values())
 
 
 async def _detach_accounting(session: AsyncSession, account_key: str) -> None:

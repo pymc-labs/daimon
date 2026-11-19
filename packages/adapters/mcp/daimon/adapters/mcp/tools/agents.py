@@ -1937,7 +1937,7 @@ async def _set_agent_backend_impl(
 
 
 class AgentBackendSwitchInfo(BaseModel):
-    status: Literal["changed"]
+    status: Literal["changed", "preview"]
     agent_name: str
     target_backend: Provider
     model: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -2143,6 +2143,46 @@ async def _request_agent_backend_switch_impl(
                     summary=f"{agent_name} already uses {uses_phrase(target_backend, model)}. "
                     "Nothing changed.",
                 )
+        from daimon.adapters.mcp.tools._card import provider_move_applies, provider_move_line
+
+        if not await provider_move_applies(
+            runtime,
+            auth,
+            origin,
+            tool_name="request_agent_backend_switch",
+            # Moving back to Claude sends nothing to another provider: no card, as for a thread.
+            moves=target_backend != DEFAULT_BACKEND and on_now != target_backend,
+            confirming=expected_revision is not None,
+        ):
+            # The preview hands out the revision that asks.
+            return AgentBackendSwitchInfo(
+                status="preview",
+                agent_name=agent.name,
+                target_backend=preview.target_backend,
+                model=preview.target_model,
+                models=selectable_models(preview.target_backend),
+                expected_revision=preview.setting_revision,
+                unsupported_skills=preview.unsupported_skills,
+                unsupported_mcps=preview.unsupported_mcps,
+                unsupported_capabilities=preview.unsupported_capabilities,
+                shared_thread_limits=preview.shared_thread_limits,
+                cost_line=preview.cost_line,
+                summary=" ".join(
+                    (
+                        provider_move_line(
+                            agent.name,
+                            uses_phrase(target_backend, model),
+                            sends="its conversations",
+                            field="expected_revision",
+                        ),
+                        *switch_lines(preview),
+                    )
+                ),
+                declared_drops=tuple(agent_loss_word(d) for d in preview.declared_drops),
+                agent_settings=settings_line(preview.target_settings)
+                if preview.target_settings
+                else None,
+            )
         try:
             revision = await _write_backend_model(
                 runtime,
@@ -2579,7 +2619,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
             effort: Effort | None = None,
         ) -> AgentBackendSwitchInfo:
-            """Change an agent's model to another provider's. It applies at once.
+            """Change an agent's model to another provider's.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
             or Gemini. It stays the same agent on a new model: say "Researcher now uses
@@ -2597,7 +2637,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The switch applies to new conversations wherever the agent answers, and to
             this conversation from the next message when the switched agent answers here
             (the result's summary says which). The summary also says what is off on the
-            new provider: tell the person, and never ask them to confirm. The
+            new provider: tell the person. A move to another provider first returns
+            status "preview" and changes nothing: call again with the same arguments and
+            its expected_revision, and the person confirms on a card that names the
+            provider. A model change within the provider applies at once. The
             server's default or built-in agent switches only when the person says
             it's for everyone (for_everyone=true); otherwise offer the copy
             below. For "make a copy of yourself on Gemini": copy the agent with
@@ -2611,7 +2654,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             If the call asks the uncommitted-work question, ask the person and call
             again with their answer as ``unsaved_work``.
             ``expected_revision`` refuses a switch when the agent changed since it was
-            read. ``preview_digest`` and ``accepted_drops`` are ignored.
+            read; it is also what asks for the card. ``preview_digest`` and ``accepted_drops``
+            are ignored.
             Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and

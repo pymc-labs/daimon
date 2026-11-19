@@ -95,6 +95,9 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
   // An error names rows by place, so it goes when the rows move.
   const edit = (next: MenuDraft) => { if (shape(next) !== shape(draft)) setOut(null); setDraft(next) }
   const key = menu?.key ?? menuKey(draft.name, d.menus.map((m) => m.key))
+  const c = d.channel
+  const channels = usePlaces(d).filter((p) => p.scope === "channel").map((p) => ({ value: p.id, label: p.name }))
+  if (menu?.channel && !channels.some((o) => o.value === menu.channel!.id)) channels.unshift({ value: menu.channel.id, label: menu.channel.name })
   const put = async (body: Record<string, unknown> | null) => {
     const r = await save.run(`menus/${encodeURIComponent(key)}`, { menu: body, expected_revision: revision })
     setOut(r)
@@ -115,12 +118,22 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
           <SettingRow label="Used in">{menu.used_in.length ? menu.used_in.map((u) => u.name).join(", ") : <span className="text-muted-foreground">No place</span>}</SettingRow>
         </PanelSection>
       )}
+      {c.own_allowed && (
+        <PanelSection>
+          <InheritedSelect
+            label="Requests go to" value={draft.channel} disabled={save.pending} options={channels}
+            inherited={{ value: "", label: c.value?.name ?? c.default?.name ?? "None", from: "Workspace" }}
+            onChange={(channel) => edit({ ...draft, channel })}
+          />
+          <Failure>{errors.at.channel}</Failure>
+        </PanelSection>
+      )}
       <PanelSection><MenuEditor draft={draft} errors={errors} onChange={edit} /></PanelSection>
       <div className="sticky bottom-0 mt-auto border-t bg-popover px-5 py-3">
         <Actions>
           {menu && <Button variant="ghost" className="mr-auto text-destructive max-sm:mr-0" disabled={save.pending} onClick={() => void remove()}>Remove</Button>}
           <Button variant="outline" onClick={() => setOpen(null)}>Cancel</Button>
-          <Button disabled={save.pending || !draft.name.trim()} onClick={() => void put(toCatalog(draft))}>Save</Button>
+          <Button disabled={save.pending || !draft.name.trim()} onClick={() => void put(toCatalog(c.own_allowed ? draft : { ...draft, channel: null }))}>Save</Button>
         </Actions>
         <Failure>{errors.rest ?? inUse}</Failure>
       </div>

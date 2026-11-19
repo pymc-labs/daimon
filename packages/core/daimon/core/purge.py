@@ -39,6 +39,9 @@ The compute reconciler deletes the remaining tagged apps as unregistered orphans
 upstream machine/file deletion requires the scheduler and Fly to be available.
 
 Deliberate carve-outs:
+- Sessions at other model providers: an OpenAI session an account's private slot named is
+  deleted through the driver after the commit (`daimon.core.provider_purge`), failures
+  logged. Gemini stored interactions have no delete there and stay for Google's retention.
 - Provider-neutral (mux) state: a person's private slots, with their binding generations,
   journal, leases, operations and release requests, are erased with the account, and the
   account is fenced so no retained scope or lease writes again (`stores.mux_erasure`).
@@ -126,7 +129,9 @@ from daimon.core.memory_resource import (
     delete_personal_memory_stores_for_account,
     sweep_erased_personal_memory,
 )
+from daimon.core.provider_purge import ProviderSessionDeleter, delete_provider_sessions
 from daimon.core.stores import accounts as accounts_store
+from daimon.core.stores import dm_access as dm_access_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
@@ -190,6 +195,7 @@ class PurgeReport(BaseModel):
     microsoft_user_tokens: int = 0
     lead_intakes: int = 0
     web_people: int = 0
+    monitored_events: int = 0
     web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
     mux_slots: int = 0
@@ -315,7 +321,12 @@ def _queued_name_keys(principals: Iterable[Principal]) -> list[platform_names.Us
 
 async def _purge_account_transaction(
     session: AsyncSession, *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+) -> tuple[
+    PurgeReport,
+    mux_erasure_store.MuxRetained,
+    list[platform_names.UserKey],
+    tuple[mux_erasure_store.ProviderSession, ...],
+]:
     """Everything `purge_account` deletes locally, in the caller's transaction.
 
     Takes the account lock, then the erasure locks (see `stores.mux_erasure` for the lock
@@ -360,6 +371,8 @@ async def _purge_account_transaction(
             session, account_id=account_id, principal_ids=principal_ids
         )
     ).retained
+    # Named before `erase` drops the bindings that hold their ids.
+    provider_sessions = await mux_erasure_store.provider_sessions(session, account_id=account_id)
     mux_erased = await mux_erasure_store.erase(
         session, account_id=account_id, principal_ids=principal_ids
     )
@@ -368,6 +381,8 @@ async def _purge_account_transaction(
     # reference accounts.id, so they go before the account row.
     subject = Subject(account_id, tuple(cli_list), tuple(pp_list))
     counts = {e.key: await e.account(session, subject) for e in ERASABLE if e.account}
+    # An admin's account id stays in the DM settings they set; the settings are the workspace's.
+    await dm_access_store.clear_setter(session, setter=str(account_id))
     await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
     # Revoke the person's GitHub router bearers before SET NULL detaches them.
     await github_router_sessions_store.close_for_account(session, account_id=account_id)
@@ -395,7 +410,7 @@ async def _purge_account_transaction(
             }
         )
     )
-    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list))
+    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list)), provider_sessions
 
 
 #: A purge that cannot get the account lock, or loses a deadlock, rolls back whole and
@@ -418,7 +433,12 @@ def _retryable(error: DBAPIError) -> bool:
 
 async def _purge_account_with_retries(
     sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+) -> tuple[
+    PurgeReport,
+    mux_erasure_store.MuxRetained,
+    list[platform_names.UserKey],
+    tuple[mux_erasure_store.ProviderSession, ...],
+]:
     for attempt in range(1, PURGE_ATTEMPTS + 1):
         try:
             async with sm() as session, session.begin():
@@ -444,6 +464,7 @@ async def purge_account(
     sm: async_sessionmaker[AsyncSession],
     account_id: uuid.UUID,
     anthropic: AsyncAnthropic | None = None,
+    delete_provider: ProviderSessionDeleter = delete_provider_sessions,
 ) -> AccountPurgeResult:
     """Delete every principal under `account_id`, then user_config + account.
 
@@ -458,10 +479,16 @@ async def purge_account(
     Sessions are enumerated across EVERY linked-principal tenant —
     `principal_links` permits an account to span tenants.
     """
-    db_report, mux_retained, queued_names = await _purge_account_with_retries(
+    db_report, mux_retained, queued_names, provider_sessions = await _purge_account_with_retries(
         sm, account_id=account_id
     )
     platform_names.forget_users(queued_names)
+    # Other providers' copies of the conversations, once the erasure has committed.
+    # A boundary catch like the Anthropic one below: the account is already erased.
+    try:
+        await delete_provider(provider_sessions)
+    except Exception:  # the erasure committed; a provider outage must not fail it
+        log.warning("purge.provider_sessions_failed", account_id=str(account_id), exc_info=True)
 
     # DB transaction committed. Upstream deletion is best-effort,
     # looped over every tenant the account's principals belonged to.

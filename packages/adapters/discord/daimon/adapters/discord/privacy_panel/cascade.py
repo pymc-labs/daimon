@@ -18,7 +18,7 @@ import discord
 
 
 def build_cascade_preview_container(
-    preview: PurgePreview, *, bot_display_name: str = "daimon"
+    preview: PurgePreview, *, bot_display_name: str = "daimon", providers: tuple[str, ...] = ()
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Red-accent V2 container for the cascade delete preview.
 
@@ -61,7 +61,7 @@ def build_cascade_preview_container(
             "🗑 Confirm delete",
             subtext="**irreversible** — re-onboarding starts from scratch",
         ),
-        discord.ui.TextDisplay("\n\n".join(delete_scope_lines(bot_display_name))),
+        discord.ui.TextDisplay("\n\n".join(delete_scope_lines(bot_display_name, providers))),
         layout.hairline(),
         discord.ui.TextDisplay("\n".join(body_rows)),
         accent_colour=theme.COLOR_RED,
@@ -78,13 +78,17 @@ class CascadePreviewView(discord.ui.LayoutView):
         allowed_user_id: int,
         user_name: str,
         preview: PurgePreview,
+        monitored: bool = False,
+        providers: tuple[str, ...] = (),
     ) -> None:
         super().__init__(timeout=600)
+        self.providers = providers
         self.runtime = runtime
         self.account_id = account_id
         self.allowed_user_id = allowed_user_id
         self.user_name = user_name
         self.preview = preview
+        self.monitored = monitored
 
         # Programmatic buttons — decorator pattern does not work on LayoutView subclasses
         confirm_btn: discord.ui.Button[CascadePreviewView] = discord.ui.Button(
@@ -107,7 +111,9 @@ class CascadePreviewView(discord.ui.LayoutView):
             if runtime.settings.discord is not None
             else "daimon"
         )
-        container = build_cascade_preview_container(preview, bot_display_name=bot_display_name)
+        container = build_cascade_preview_container(
+            preview, bot_display_name=bot_display_name, providers=providers
+        )
         container.add_item(layout.hairline())
         container.add_item(action_row)
         self.add_item(container)
@@ -135,6 +141,8 @@ class CascadePreviewView(discord.ui.LayoutView):
             account_id=self.account_id,
             allowed_user_id=self.allowed_user_id,
             user_name=self.user_name,
+            monitored=self.monitored,
+            providers=self.providers,
         )
         await interaction.response.edit_message(
             view=new_view,

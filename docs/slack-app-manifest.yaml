@@ -29,7 +29,7 @@ features:
     always_online: true
   slash_commands:
     - command: /dm-me
-      description: Continue privately (an admin turns it on)
+      description: Continue in a direct message (an admin turns it on)
       should_escape: false
     - command: /help
       description: This list

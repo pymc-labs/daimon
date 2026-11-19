@@ -24,6 +24,7 @@ from daimon.core._models import (
     Routine,
     UserConfig,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_environments import (
     build_limited_channels_confirm,
     build_limited_network_confirm,
@@ -31,9 +32,13 @@ from daimon.core.channel_environments import (
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.privacy import (
     DELETE_PAUSED,
+    MONITORED_LINE,
     PurgePreview,
     PurgePreviewRow,
+    account_other_providers,
     collect_purge_preview,
+    delete_scope_lines,
+    privacy_lines,
     summary_line,
 )
 from daimon.core.purge import PurgeReport, purge_account
@@ -46,6 +51,7 @@ from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import (
     link_principals,
     make_account,
@@ -77,6 +83,17 @@ def test_plain_privacy_summary_plural_and_pause_spacing() -> None:
         "Deleting your account is paused during the event.\n\n"
         "Ask the team running Daimon if you need it deleted now."
     )
+
+
+def test_monitored_people_are_told_on_the_privacy_panel() -> None:
+    """The panel says admins can read monitored conversations, and counts what they hold."""
+    assert MONITORED_LINE not in privacy_lines("Daimon")
+    assert privacy_lines("Daimon", monitored=True)[-1] == MONITORED_LINE
+    empty = PurgePreviewRow(count=0, example=None)
+    preview = PurgePreview(**{name: empty for name in PurgePreview.model_fields})
+    for count, words in ((1, "1 record admins can read"), (3, "3 records admins can read")):
+        row = PurgePreviewRow(count=count, example=None)
+        assert summary_line(preview.model_copy(update={"monitored_events": row})) == words
 
 
 def test_restricted_network_confirm_names_selected_channel_and_spaced_action() -> None:
@@ -166,6 +183,31 @@ async def test_account_purge_deletes_github_user_after_last_link(
     assert second_report.db.github_user_links == 1
     async with db_session_factory() as session:
         assert await session.get(GitHubUserLink, 101) is None
+
+
+async def test_privacy_copy_names_a_provider_only_for_a_tenant_that_enabled_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    opted_in = await make_account(db_session, tenant=await make_tenant(db_session))
+    await set_access_policy(
+        db_session,
+        tenant_id=opted_in.tenant_id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+    )
+    default = await make_account(db_session, tenant=await make_tenant(db_session))
+    await db_session.commit()
+
+    chosen = await account_other_providers(db_session_factory, account_id=opted_in.id)
+    unchosen = await account_other_providers(db_session_factory, account_id=default.id)
+
+    assert chosen == ("openai", "gemini")
+    assert unchosen == (), "a tenant that never opted in names only Anthropic"
+    stored = " ".join(privacy_lines("daimon", chosen))
+    assert "OpenAI" in stored and "Gemini" in stored
+    removed = " ".join(delete_scope_lines("daimon", chosen))
+    assert "retention period" in removed, "Gemini keeps stored conversations"
+    assert "OpenAI" not in " ".join(privacy_lines("daimon") + delete_scope_lines("daimon"))
 
 
 async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_data(
@@ -1006,6 +1048,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "microsoft_user_tokens": "microsoft_user_tokens",
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
+        "monitored_events": "monitored_events",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -1078,6 +1121,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # The web app: a person, with their identities, tokens and browser sessions, and
         # the admin grants of the account.
         "web_people": "account_id FK -> accounts.id",
+        "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",

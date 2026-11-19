@@ -37,8 +37,9 @@ from daimon.core.turn.termination import (
 )
 from daimon.core.usage_aggregation import disjoint_observations, replace_observation
 from daimon.core.usage_compat import event_observation
+from mux.contracts.config import ConfigRevision
 from mux.contracts.usage import UsageObservation
-from mux.profiles import accounting_mode_for
+from mux.profiles import MANAGED_AGENTS, accounting_mode_for
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
 
@@ -81,6 +82,13 @@ class UsageSample:
     cost: Decimal | None
     metered: bool
     provider_price: ProviderPrice | None = None
+
+
+def backend_label(revision: ConfigRevision | None) -> str:
+    """The `provider/profile` a turn runs on; no revision is Claude's Managed Agents."""
+    if revision is None:
+        return f"{MANAGED_AGENTS.provider}/{MANAGED_AGENTS.profile_id}"
+    return f"{revision.backend}/{revision.profile}"
 
 
 @dataclass
@@ -295,6 +303,7 @@ class TurnObservation:
                 causes=backend_refusal_causes(terminal_error),
                 origin=self.origin,
                 backend=self.backend or "unknown",
+                provider=(self.backend or "unknown").partition("/")[0],
                 release=current_release(),
                 turn_id=str(self.id),
                 tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,

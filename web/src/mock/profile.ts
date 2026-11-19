@@ -9,7 +9,7 @@ const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const ahead = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
 const GONE = () => HttpResponse.json({ detail: "That isn't here any more." }, { status: 404 })
 
-const daimon = { id: "ag_daimon", name: "Daimon" }
+const daimon = { id: "ag_default", name: "Daimon" }
 const mmm = { id: "ag_mmm", name: "MMM Analyst" }
 
 const state: Profile = {
@@ -33,6 +33,10 @@ const state: Profile = {
 
 const preview: DeletePreview = {
   enabled: true,
+  scope: [
+    "This deletes Daimon's records about you and tries to delete your conversations stored at Anthropic. It tries the same at OpenAI.",
+    "Shared agents and their memory stay, and other people may keep using them.",
+  ],
   held: ["1 linked account", "2 routines", "saved settings", "1 saved Microsoft account", "14 saved conversations"],
   kept: ["3 conversations shared with other people"],
 }

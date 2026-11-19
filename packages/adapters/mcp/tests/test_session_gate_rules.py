@@ -578,30 +578,28 @@ async def test_a_bind_made_with_the_places_toolset_proves_the_card(
     ), "a bind made with the place's toolset must prove the publish card"
 
 
-@pytest.mark.parametrize("thread_pick_asked", [False, True])
+@pytest.mark.parametrize("moves_asked", [False, True])
 @pytest.mark.parametrize("tool", ["request_channel_pin", "request_provider_allowlist", "add_skill"])
-async def test_a_bind_from_when_switches_asked_still_proves_every_other_card(
-    monkeypatch, thread_pick_asked, tool
+async def test_a_bind_from_either_era_of_provider_moves_still_proves_every_other_card(
+    monkeypatch, moves_asked, tool
 ):
-    """A session bound while the provider switches asked keeps proving the cards it gated."""
+    """A session bound while provider moves asked, or while they didn't, proves its other cards."""
     from daimon.core.confirmation import backend_switch_tools
-    from daimon.core.tool_safety import CARDED_TOOLS, WATCH_CONFIRMED_TOOLS
+    from daimon.core.tool_safety import CARDED_TOOLS, PROVIDER_MOVE_TOOLS, WATCH_CONFIRMED_TOOLS
 
     policy = ToolSafetyPolicy(enabled=True)
     runtime = _runtime()
     runtime.settings.tool_safety = policy
     monkeypatch.setattr(_session_gate, "backend_selection_enabled", lambda _: True)
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
-    retired = {"request_agent_backend_switch"} | (
-        {"set_thread_model"} if thread_pick_asked else set()
-    )
     today = WATCH_CONFIRMED_TOOLS | set(CARDED_TOOLS) | {"approve_reach"}
+    switches = backend_switch_tools(enabled=True) - (set() if moves_asked else PROVIDER_MOVE_TOOLS)
     recorded = session_tools(
         AGENT,
         frozenset(),
         tool_safety=policy,
         public_url="https://mcp.example/mcp",
-        confirmed_tools=today | backend_switch_tools(enabled=True) | retired,
+        confirmed_tools=today | switches,
     )
     live = SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
     proven = await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]

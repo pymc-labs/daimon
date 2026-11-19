@@ -13,7 +13,7 @@ import { me } from "./world"
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const READERS: Record<Readers, string> = { any: "Anyone", inside: "Only this channel", own: "Only its own agents" }
 const WRITERS: Record<Writers, string> = { any: "Anyone", own: "Only its own agents", none: "Nobody" }
-const WORKSPACE = { value: "daimon", source: "workspace" } as const
+const WORKSPACE = { value: "default", source: "workspace" } as const
 
 /** A channel as stored: members are sent it without its budget and spend. */
 type Stored = Channel & { spend: NonNullable<Channel["spend"]> }
@@ -30,7 +30,7 @@ const C = (id: string, name: string | null, path: PathNode[], more: Partial<Stor
 })
 const monthly = (spent: number, limit = 25): Channel["budget"] => ({
   limit_usd: limit.toFixed(2), window: "monthly", starts_at: null, ends_at: null, spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)),
-  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+  percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit, on_limit: "stop", alert_channel_id: null,
 })
 const thread = (id: string, name: string, path: PathNode[], more: Partial<Stored> = {}) => C(id, name, path, { kind: "thread", ...more })
 
@@ -69,7 +69,7 @@ const channels: Stored[] = [
   C("s_gone", "retired-team", [], { platform: "slack", status: "gone" }),
 ]
 /** Agent keys as channels store them, and the roster agent each names. A key not found here is an agent that no longer exists. */
-const KEYS: Record<string, string> = { daimon: "ag_daimon", clv: "ag_mmm", "pricing-analyst": "ag_pricing", "board-desk": "ag_sales" }
+const KEYS: Record<string, string> = { default: "ag_default", clv: "ag_mmm", "pricing-analyst": "ag_pricing", "board-desk": "ag_sales" }
 function refOf(key: string): AgentRefs[string] {
   const recs = roster.all()
   const rec = recs.find((r) => r.id === KEYS[key]) ?? recs.find((r) => r.versions.at(-1)!.config.name === key)
@@ -183,7 +183,7 @@ export const channelsHandlers: HttpHandler[] = [
   })),
   http.get("/api/channels", () => HttpResponse.json<ChannelList>({
     platform: "discord", default_agent: WORKSPACE, default_environment: { value: "default", source: "deployment" },
-    channels: channels.filter(listed).map(figures), agents: refs(["daimon", ...channels.filter(listed).flatMap(keysOf)]),
+    channels: channels.filter(listed).map(figures), agents: refs(["default", ...channels.filter(listed).flatMap(keysOf)]),
   })),
   http.get("/api/channels/:id/history", ({ params }) => manage()
     ? HttpResponse.json({ entries: history[params.id as string] ?? [], agents: refs(historyKeys(params.id as string)) })
@@ -306,17 +306,19 @@ export const channelsHandlers: HttpHandler[] = [
     if (!c) return notFound()
     if (c.id === "web") return invalid("Web chat has no channel budget.")
     const body = (await request.json()) as BudgetChange
-    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at }
+    const now = c.budget && { limit_usd: c.budget.limit_usd, window: c.budget.window, starts_at: c.budget.starts_at, ends_at: c.budget.ends_at, on_limit: c.budget.on_limit, alert_channel_id: c.budget.alert_channel_id }
     if (!same(body.expected, now)) return stale()
     if (body.action === "clear") return changed(c, { budget: null }, "budget", now, null)
     const limit = body.action === "raise" ? Number(c.budget?.limit_usd ?? 0) + Number(body.amount_usd) : Number(body.limit_usd)
     if (!(limit > 0)) return invalid("Enter a budget in dollars and pick a window.")
     const spent = c.budget?.spent_usd ?? c.spend.month_usd
+    const onLimit = body.action === "raise" ? (c.budget?.on_limit ?? "stop") : (body.on_limit ?? "stop")
     const budget = {
       limit_usd: limit.toFixed(2), window: body.window ?? c.budget?.window ?? "monthly", starts_at: body.starts_at ?? null, ends_at: body.ends_at ?? null,
-      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: spent >= limit,
+      spent_usd: spent, remaining_usd: Math.max(0, +(limit - spent).toFixed(2)), percent_used: Math.min(100, Math.round((spent / limit) * 100)), active: true, exceeded: onLimit === "stop" && spent >= limit,
+      on_limit: onLimit, alert_channel_id: onLimit === "alert" ? (body.alert_channel_id ?? c.budget?.alert_channel_id ?? null) : null,
     }
-    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at })
+    return changed(c, { budget }, "budget", now, { limit_usd: budget.limit_usd, window: budget.window, starts_at: budget.starts_at, ends_at: budget.ends_at, on_limit: budget.on_limit, alert_channel_id: budget.alert_channel_id })
   }),
   http.get("/api/channel-defaults", async () => {
     await wait()
@@ -329,7 +331,7 @@ export const channelsHandlers: HttpHandler[] = [
     if (what === "agent") {
       const body = (await request.json()) as WorkspaceAgentChange
       if (body.expected !== (defaults.agent.source === "workspace" ? defaults.agent.value : null)) return stale()
-      defaults.agent = body.agent ? { value: body.agent, source: "workspace" } : { value: "daimon", source: "deployment" }
+      defaults.agent = body.agent ? { value: body.agent, source: "workspace" } : { value: "default", source: "deployment" }
     } else if (what === "environment") {
       const body = (await request.json()) as EnvironmentChange
       if (body.expected !== (defaults.environment.source === "workspace" ? defaults.environment.value : null)) return stale()

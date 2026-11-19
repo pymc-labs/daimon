@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
@@ -43,6 +45,7 @@ from daimon.core.turn.gemini_state import (
     SQLiteFlashAccounting,
     SQLiteGeminiStorage,
 )
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.runtime_manifest import (
     ApiKeyEnvironment,
@@ -119,6 +122,10 @@ class GeminiPlan(BaseModel):
     holds_path: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     hold_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
     cap_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+    # Most one turn may spend, enforced host-side while it streams (`host_spend_cap`).
+    spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     agent_name: Nonblank
     system: str | None = None
     # REQUIRED: [] means no tools. Never use the provider's implicit paid tools.
@@ -571,11 +578,12 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise AdmissionDenied(reason="backend_unsupported")
         from mux.drivers.gemini import configured_catalog_transport, configured_transport
 
+        clients = request.deps.provider_clients.gemini
         return GeminiTransportRuntime(
-            configured_transport(api_key=secret, protect_storage_credentials=True)
+            configured_transport(api_key=secret, protect_storage_credentials=True, clients=clients)
             if plan.source_capabilities is not None
-            else configured_transport(api_key=secret),
-            configured_catalog_transport(api_key=secret)
+            else configured_transport(api_key=secret, clients=clients),
+            configured_catalog_transport(api_key=secret, clients=clients)
             if request.admission.backend_revision_origin == "agent"
             else None,
             # A shared thread has no caller to mint for: its session carries no MCP.
@@ -674,11 +682,17 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
 
     # Every attempt (the Flash chain may fall back to other models) checks the cap.
+    provider_key = functools.partial(ProviderKey.from_env, INLINE_REUSE.provider, plan.api_key_env)
     accounting = CappedFlashAccounting(
-        accounting, request, prices, request.deps.gemini_daily_model_cap_usd
+        accounting,
+        request,
+        prices,
+        request.deps.gemini_daily_model_cap_usd,
+        key=provider_key,
     )
     runtime = TurnRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
         # Revokes whatever the turn minted; nothing when it ran on the pinned file.
@@ -689,8 +703,20 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             deployment,
         ),
         # Inline reuse runs no sandbox or container: its usage settles at infrastructure
-        # $0 (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES), never pending forever.
-        usage_store=GeminiUsageRuntime(accounting, prices, known_infrastructure_usd(PROFILE)),
+        # $0 (infrastructure_cost.ZERO_INFRASTRUCTURE_PROFILES), never pending forever.
+        usage_store=GeminiUsageRuntime(
+            accounting,
+            prices,
+            known_infrastructure_usd(PROFILE),
+            spend_guard=None
+            if plan.spend_limit_usd_cents is None or (price := prices.get(revision.model)) is None
+            else SpendGuard(
+                limit_cents=plan.spend_limit_usd_cents,
+                price=price,
+                notify=spend_cap_notifier(request),
+                provider=INLINE_REUSE.provider,
+            ),
+        ),
     )
 
     return runtime

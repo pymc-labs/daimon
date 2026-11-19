@@ -70,6 +70,7 @@ from daimon.core.features.model_input import (
     LIMIT_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
+    TOOL_KEYS,
     TURN_KEYS,
     DmHistoryCap,
     HistoryDepth,
@@ -151,7 +152,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
 )
 from daimon.core.turn.invocation import unattended_invocation
-from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
 from daimon.core.turn_hold import RequesterOrg, TurnHold
@@ -636,6 +637,11 @@ def _observe_admission(observer: AdmissionObserver, decision: AdmissionDecision)
         _log.warning("turn.admission_observer_failed")
 
 
+def _name_backend(revision: ConfigRevision | None) -> None:
+    if (observation := current_outcome.get()) is not None:
+        observation.backend = backend_label(revision)
+
+
 def _refuse_managed_fallback(
     *, daimon_record: bool, revision: AgentBackendRevision | ConfigRevision | None
 ) -> None:
@@ -1108,6 +1114,10 @@ async def _admit_gates(
         backend_revision_origin: Literal["channel", "agent"] | None = (
             "channel" if configured_channel else None
         )
+        # Name the backend as soon as it is known, so a failure while admitting still
+        # says which provider it was on (the default Claude is named once preference is read).
+        if backend_revision is not None:
+            _name_backend(backend_revision)
         backend_footer_profile: str | None = None
         retained_revision: int | None = None
         backend_follow: ThreadFollow | None = None
@@ -1828,6 +1838,7 @@ async def _admit_gates(
 
     if not deps.agent_backends:
         await resolve_preference()
+        _name_backend(backend_revision)
 
     budget_channel_id = agent_permissions(policy, grant.agent.names).budget_channel or (
         dm_source_channel_id if is_dm else channel_id
@@ -1887,7 +1898,6 @@ async def _admit_gates(
                 server_admins=deps.server_admins,
             )
         raise AdmissionDenied(reason="channel_budget_exceeded")
-
     register_spend_recheck(
         partial(
             spend_gate_in_new_session,
@@ -1935,6 +1945,7 @@ async def _admit_gates(
 
     if deps.agent_backends:
         await resolve_preference()
+        _name_backend(backend_revision)
     _refuse_managed_fallback(daimon_record=daimon_record, revision=backend_revision)
     platform_skills = backend_platform_skills(
         platform_skills, None if backend_revision is None else backend_revision.profile
@@ -2009,6 +2020,7 @@ async def _admit_gates(
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     result = replace(result, features=await features_at(result))
+    await require_tool_limits_hold(deps, result)
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
         # still the binding this message read (a concurrent move or card wins).
@@ -2902,6 +2914,28 @@ async def place_features(
         agent_builtins=builtins_of(agent),
         server_setup=False,
     )
+
+
+async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:
+    """Refuse a native turn where a channel or thread switched a built-in tool off.
+
+    Gemini and OpenAI compile one revision per agent, so a switch below the agent never
+    reaches them; the same place on Claude would hide the tool. Running anyway would
+    quietly give the agent a tool the people there turned off.
+    """
+    native = admission.features
+    if native is None or native.place.backend in (None, MANAGED_AGENTS.provider):
+        return
+    claude = await place_features(
+        deps,
+        replace(native.place, backend=MANAGED_AGENTS.provider),
+        admission.agent,
+        keys=TOOL_KEYS,
+    )
+    if any(native.on(key) and not claude.on(key) for key in TOOL_KEYS):
+        raise AdmissionDenied(
+            reason="backend_unsupported", cause="tool_limits", provider=native.place.backend
+        )
 
 
 def running_on(admission: Admission) -> dict[str, str]:

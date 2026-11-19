@@ -7,9 +7,11 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -18,14 +20,16 @@ from uuid import UUID
 import structlog
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
 from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import HOST, OpenAIHostRuntime, driver
@@ -52,10 +56,11 @@ from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
-from mux.drivers.openai import SessionControls, Transport
+from mux.contracts.usage import UsageObservation
+from mux.drivers.openai import OpenAIClients, SessionControls, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
-from mux.profiles.openai import NATIVE_MODELS
+from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -438,6 +443,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             *(("skill", skill) for skill in deployment.skill_ids),
         }
 
+    provider_key = functools.partial(
+        ProviderKey.from_env, PERSISTENT_WORKSPACE.provider, deployment.api_key_env
+    )
+
     def transport(config: ConfigRevision, authorized: Scope) -> Transport:
         check(config, authorized)
         secret = os.environ.get(deployment.api_key_env)
@@ -447,9 +456,17 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # request/stream lifetimes and disables retry of uncertain mutations.
         from mux.drivers.openai import configured_transport
 
-        return configured_transport(
-            api_key=secret, project=deployment.project if deployment.project_header else None
+        inner = configured_transport(
+            api_key=secret,
+            project=deployment.project if deployment.project_header else None,
+            clients=request.deps.provider_clients.openai,
         )
+        gate, key = request.deps.provider_gate, provider_key()
+        if gate is None or key is None or config.model is None:
+            return inner
+        from daimon.core.turn.provider_gate import CooldownTransport
+
+        return CooldownTransport(inner, gate, key, config.model)
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
@@ -572,23 +589,14 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     # the per-model daily cap and the deadline bound it too. Astra included.
     native_limit = spend_limit if native_cap else None
     price = provider_prices(deployment.profile).get((revision.backend, revision.model))
+    infrastructure_usd = known_infrastructure_usd(deployment.profile)
 
-    async def notify_spend_cap() -> None:
-        from daimon.core.stores.agent_notices import record_agent_notices
-
-        async with request.deps.sessionmaker.begin() as db:
-            await record_agent_notices(
-                db,
-                tenant_id=request.tenant_id,
-                platform=request.platform,
-                thread_id=request.thread_id,
-                agent_id=request.admission.agent.id,
-                texts=(HOST_SPEND_CAP_NOTICE,),
-            )
+    async def known_infrastructure(observation: UsageObservation) -> Decimal | None:
+        return infrastructure_usd
 
     guard = None
     if spend_limit is not None and not native_cap and price is not None:
-        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=notify_spend_cap)
+        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=spend_cap_notifier(request))
     # A shared thread on a channel's own deployment has no caller to mint for; an
     # agent's own copy mints each asker's credential, which hides personal sign-ins.
     shared = (
@@ -597,6 +605,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     )
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if deployment.root_materialization else None,
         journal=OpenAIRecoveryJournal(),
@@ -605,8 +614,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         price=price,
         spend_guard=guard,
         late_usage=LATE_USAGE,
-        # A conversation-only session runs no container: its usage settles at $0
-        # infrastructure. A persistent workspace's container cost stays unknown.
+        # Settles at $0 infrastructure (infrastructure_cost), never pending forever.
+        infrastructure=known_infrastructure,
         session_plan=plan,
         authorization=authorize,
         mcp_secrets=None
@@ -631,7 +640,34 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     return runtime
 
 
-def _environments(key: str) -> EnvironmentPort:
+def usage_transport(tenant_id: str, profile: str, account_scope_id: str) -> Transport | None:
+    """A transport that reads a tenant's turn usage outside a turn (no I/O yet).
+
+    The operator's rows for the session's project name the key and whether the
+    project header is sent; with none, the code-default row's. None when no single
+    key applies or it is not set.
+    """
+    from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
+
+    rows = {
+        (row.api_key_env, row.project_header)
+        for row in authorized_deployments(tenant_id, profile=profile)
+        if row.project == account_scope_id
+    }
+    if not rows and account_scope_id == DEFAULT_PROJECT:
+        rows = {(DEFAULT_KEY_ENV[get_profile(profile).provider], False)}
+    if len(rows) != 1:
+        return None
+    ((key_env, header),) = rows
+    secret = os.environ.get(key_env)
+    if secret is None or not secret.strip():
+        return None
+    from mux.drivers.openai import configured_transport
+
+    return configured_transport(api_key=secret, project=account_scope_id if header else None)
+
+
+def _environments(key: str, clients: OpenAIClients) -> EnvironmentPort:
     """The environment port on the install's OpenAI key (no I/O yet).
 
     Like the code-default rows (`runtime_defaults`): no `OpenAI-Project` header, so
@@ -641,7 +677,7 @@ def _environments(key: str) -> EnvironmentPort:
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
     from mux.drivers.openai import Context, OpenAIEnvironments, configured_transport
 
-    transport = configured_transport(api_key=key, project=None)
+    transport = configured_transport(api_key=key, project=None, clients=clients)
     return OpenAIEnvironments(Context(transport, DEFAULT_PROJECT, PROFILE, None))
 
 
@@ -694,7 +730,7 @@ async def prepare_tenant_environment(
     )
     environment_id = await tenant_environment(
         store,
-        _environments(key),
+        _environments(key, request.deps.provider_clients.openai),
         tenant_id=request.scope.tenant_id,
         project=DEFAULT_PROJECT,
         deployment=deployment,

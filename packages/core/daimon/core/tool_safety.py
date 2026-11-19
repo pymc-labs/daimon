@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, cast, get_args
 
 from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_endpoint
 from pydantic import BaseModel, ConfigDict, Field
@@ -79,6 +79,8 @@ __all__ = [
     "ToolVerdict",
     "VerdictReason",
     "backend_switch_tools",
+    "PROVIDER_MOVE_TOOLS",
+    "ProviderMoveTool",
     "get_mcp_server_name_rejection",
     "microsoft_send_tools",
     "classify_tool",
@@ -207,6 +209,9 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_server_skill": "skill",
     "lead_intake_resolve": "resolution",
     "request_provider_allowlist": "preview_digest",
+    # The preview hands out the revision; passing it is the confirming call.
+    "request_agent_backend_switch": "expected_revision",
+    "set_thread_model": "revision",
     "request_channel_pin": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # The card itself is the point: every call asks.
@@ -250,11 +255,11 @@ def confirmation_gated_tools() -> frozenset[str]:
     )
 
 
-#: Asked before a provider switch applied like a model change. An old agent's
-#: stored ask on one is read as none: the call runs.
-RETIRED_GATES: Final[frozenset[str]] = frozenset(
-    {"request_agent_backend_switch", "set_thread_model"}
-)
+#: Tools that move conversations to another provider, which receives them and the
+#: connector data they use: a move asks on the card, a model change within one runs.
+#: Each calls `provider_move_applies` (MCP `_card`), the one rule for a move.
+ProviderMoveTool = Literal["request_agent_backend_switch", "set_thread_model"]
+PROVIDER_MOVE_TOOLS: Final[frozenset[str]] = frozenset(get_args(ProviderMoveTool))
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
@@ -263,6 +268,7 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
         frozenset(
             {
                 "request_provider_allowlist",
+                *PROVIDER_MOVE_TOOLS,
                 "request_channel_pin",
                 "request_channel_pin_clear",
             }
@@ -883,9 +889,14 @@ def decide_tool_call(
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
     inner = unwrap_daimon_call(call, trusted_servers)
-    retired = inner.server_name in trusted_servers and inner.tool_name in RETIRED_GATES
-    if call.permission == "ask" and verdict.outcome == "allow" and not retired:
-        # A retired gate's ask, stored on a session started before it was lifted, runs.
+    # A provider move's preview changes nothing: a stored ask on it (a self-hosted
+    # harness asks every confirmed tool) runs; only the confirming call asks.
+    preview = (
+        inner.server_name in trusted_servers
+        and inner.tool_name in PROVIDER_MOVE_TOOLS
+        and inner.input.get(CONFIRMED_DAIMON_TOOLS[inner.tool_name]) is None
+    )
+    if call.permission == "ask" and verdict.outcome == "allow" and not preview:
         return ToolVerdict(
             outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
         )

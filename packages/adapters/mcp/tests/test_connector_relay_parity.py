@@ -168,7 +168,8 @@ class Rig:
     token: list[str | None]
     posted: list[HostCallCardRow]
     loads: list[tuple[uuid.UUID, uuid.UUID]]
-    features: dict[str, str] = field(default_factory=dict[str, str])
+    # Off by default (the provider receives what connectors return); these tests turn it on.
+    features: dict[str, str] = field(default_factory=lambda: {"mcp_connector_relay": "on"})
 
     def claims(self, **changes: Any) -> dict[str, Any]:
         base: dict[str, Any] = {
@@ -631,10 +632,11 @@ async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig
     assert (owner, legacy) == ("daimon", "ma"), "a record has no vault; MA keeps its own"
 
 
-async def test_turning_the_feature_off_closes_the_route(rig: Rig) -> None:
-    """The rollback switch: off, the relay answers nothing."""
-    rig.features = {"mcp_connector_relay": "off"}
-    assert (await rig.send("tools/list")).status_code == 404, "off closes the route"
+async def test_the_relay_stays_closed_until_turned_on(rig: Rig) -> None:
+    """Off by default and when turned off: the relay answers nothing."""
+    for features in ({}, {"mcp_connector_relay": "off"}):
+        rig.features = features
+        assert (await rig.send("tools/list")).status_code == 404, f"closed with {features}"
     assert rig.upstream.lists == 0, "and reaches no connector"
 
 
@@ -848,7 +850,7 @@ async def test_an_agent_origin_harness_reply_acts_as_its_own_agent(
 
     relay = ConnectorRelay(
         auth=verifier,
-        settings=_settings(),
+        settings=_settings(**rig.features),
         sessionmaker=sessions,
         public_url=_PUBLIC,
         load_connectors=load,

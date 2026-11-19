@@ -20,7 +20,7 @@ from openai import (
 )
 from pydantic import JsonValue, TypeAdapter
 
-from mux.contracts.errors import ProviderErrorCategory
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
 from mux.errors import ProviderError
 
 Object = dict[str, JsonValue]
@@ -178,6 +178,16 @@ def suppress_mcp_error_details(secrets: Collection[str] | None) -> Iterator[None
         raise
 
 
+def _retry_after(error: APIStatusError) -> float | None:
+    """Seconds the 429 asks to wait: `retry-after-ms`, else `retry-after` in seconds."""
+    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        try:
+            return float(error.response.headers[name]) * scale
+        except (KeyError, ValueError):
+            continue
+    return None
+
+
 def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
     if isinstance(error, APIConnectionError | httpx.HTTPError):
         return ProviderError("transient_network", retryable=True)
@@ -200,11 +210,16 @@ def provider_error(error: APIError | httpx.HTTPError) -> ProviderError:
     }
     category = categories.get(status, "upstream")
     # Keep only bounded/redacted diagnostic fields; never retain the raw body.
+    details = _native_error_details(error)
     return ProviderError(
         category,
         retryable=status in (408, 429) or status >= 500,
         native_code=str(status),
-        **_native_error_details(error),
+        # A spent billing quota never refills, so it names no wait.
+        retry_after_s=bounded_retry_after(_retry_after(error))
+        if status == 429 and details.get("native_error_code") != "insufficient_quota"
+        else None,
+        **details,
     )
 
 

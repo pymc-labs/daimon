@@ -34,6 +34,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
+    enable_all_providers,
     make_account,
     make_ledger_entry,
     make_platform_principal,
@@ -53,7 +54,14 @@ TOOLSET = [
         "type": "mcp_toolset",
         "mcp_server_name": "daimon-mcp",
         "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-        "configs": [],
+        # As the deployed agent has it: a provider switch always asks first (the card).
+        "configs": [
+            {
+                "name": "request_agent_backend_switch",
+                "enabled": True,
+                "permission_policy": {"type": "always_ask"},
+            }
+        ],
     }
 ]
 MCP_SERVERS = [{"name": "daimon-mcp", "type": "url", "url": "https://mcp.invalid"}]
@@ -138,6 +146,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     admin = request.param == "admin"
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
+        await enable_all_providers(session, tenant=tenant)
         account = await make_account(session, tenant=tenant)
         await make_platform_principal(
             session, tenant=tenant, account=account, platform="discord", external_id="123"
@@ -304,6 +313,7 @@ async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_cha
         agent_name=copy.name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "the switch applies at once"
     assert "This conversation moves to OpenAI from the next message" in changed.summary
@@ -311,7 +321,7 @@ async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_cha
     off = changed.summary.split("Off on OpenAI: ", 1)[-1]
     assert "memory" in off and "sandbox" in off, changed.summary
     description = await _switch_tool_description(chat.runtime)
-    assert "never ask them to confirm" in " ".join(description.split()), description
+    assert "confirms on a card" in " ".join(description.split()), description
     # The server's default agent is unchanged, for everyone.
     service = AgentBackendService(chat.runtime.session_factory, enabled=True)
     daimon = await load_backend_agent(
@@ -340,7 +350,7 @@ async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_cha
             return made.model_copy(update={"ref": ref})
 
     environments = NativeTemplate()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     sm = chat.runtime.session_factory
     deps = replace(
         deps_for_pinned_mux(chat.runtime.client, sm),
@@ -417,7 +427,7 @@ async def _switch(chat: Chat, name: str, **extra):
         agent_name=name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
-        **extra,
+        **{"expected_revision": 0, **extra},
     )
 
 
@@ -680,7 +690,7 @@ def _wires(chat: Chat, monkeypatch) -> Wires:
             return made.model_copy(update={"ref": ref})
 
     environments = NativeTemplate()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
 
     async def close() -> None:
         gemini_client.close()

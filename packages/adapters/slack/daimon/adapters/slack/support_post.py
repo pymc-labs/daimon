@@ -15,6 +15,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import (
+    ACCEPT,
     CLIENT_NOT_NOTIFIED,
     DECLINE,
     SET_CHARGE,
@@ -23,6 +24,7 @@ from daimon.core.support import (
 )
 
 SETTLE_SET_ACTION_ID: Final = "support_settle"
+SETTLE_ACCEPT_ACTION_ID: Final = "support_accept"
 SETTLE_DECLINE_ACTION_ID: Final = "support_decline"
 NOT_NOTIFIED_LINE: Final = f"_{CLIENT_NOT_NOTIFIED}_"
 _FACTS_BLOCK_ID: Final = "support_status"
@@ -74,10 +76,21 @@ def _button(action_id: str, label: str, value: str, *, primary: bool) -> dict[st
 
 
 def pending_post_blocks(
-    *, head: str, facts: str, rest: Sequence[str], note: str, escalation_id: uuid.UUID
+    *,
+    head: str,
+    facts: str,
+    rest: Sequence[str],
+    note: str,
+    escalation_id: uuid.UUID,
+    accept: bool = False,
 ) -> list[dict[str, Any]]:
-    """The post as blocks: facts, the decision-8 warning and Set charge / Decline."""
+    """The post as blocks: facts, the decision-8 warning, Accept or Set charge, and Decline."""
     value = escalation_id.hex
+    first = (
+        _button(SETTLE_ACCEPT_ACTION_ID, ACCEPT, value, primary=True)
+        if accept
+        else _button(SETTLE_SET_ACTION_ID, SET_CHARGE, value, primary=True)
+    )
     notes = [_section(chunk) for chunk in split_for_slack_safe(note, _SECTION_CHARS) if chunk]
     return [
         _section(head),
@@ -93,7 +106,7 @@ def pending_post_blocks(
             "type": "actions",
             "block_id": _SETTLE_BLOCK_ID,
             "elements": [
-                _button(SETTLE_SET_ACTION_ID, SET_CHARGE, value, primary=True),
+                first,
                 _button(SETTLE_DECLINE_ACTION_ID, DECLINE, value, primary=False),
             ],
         },
@@ -137,6 +150,7 @@ def closed_post(
 
 __all__ = [
     "NOT_NOTIFIED_LINE",
+    "SETTLE_ACCEPT_ACTION_ID",
     "SETTLE_DECLINE_ACTION_ID",
     "SETTLE_SET_ACTION_ID",
     "SupportPost",

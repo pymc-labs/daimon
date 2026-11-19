@@ -10,12 +10,14 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.domain import WebRefusalCard
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.errors import SessionBusyError
-from daimon.core.turn.notices import provider_name
+from daimon.core.turn.notices import RefusalNouns, admission_refusal_lines, provider_name
 
 # Every way spending is stopped reads the same to the person: ask an admin for credit.
 _OUT_OF_CREDIT = frozenset(
     {"balance_depleted", "cap_exceeded", "channel_budget_exceeded", "allowance_exhausted"}
 )
+# Spending stops that name the model or provider: the same words as chat.
+_SHARED_COPY = frozenset({"provider_daily_cap_reached", "provider_daily_ceiling_reached"})
 
 
 def _refusal(
@@ -27,6 +29,14 @@ def _refusal(
 
 
 _NO_ANSWER = "No answer was given."
+
+
+def _shared(err: AdmissionDenied) -> WebRefusalCard:
+    """The card for a refusal worded once in core, so the web says what chat says."""
+    title, help = admission_refusal_lines(
+        err.reason, RefusalNouns.for_caller("web"), cause=err.cause, provider=err.provider
+    )
+    return _refusal(title, _NO_ANSWER, help)
 
 
 def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> WebRefusalCard:
@@ -85,10 +95,29 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
                 "Switch back to Claude." if admin else ask,
                 way_back,
             )
+        case "tool_limits":
+            return _refusal(
+                f"This chat's tool limits can't be applied on {named}.",
+                _NO_ANSWER,
+                "Switch back to Claude, or turn the tools back on." if admin else ask,
+                way_back,
+            )
+        case "provider_busy":
+            return _refusal(
+                f"{named} is busy with other chats.", _NO_ANSWER, "Try again in a minute."
+            )
+        case "provider_cooling":
+            return _refusal(
+                f"{named} asked to slow down.",
+                _NO_ANSWER,
+                "Try again in a few minutes, or switch back to Claude.",
+            )
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
+        case "session_lost":
+            return _shared(err)
         case None:
-            return _refusal(f"{named} can't run right now.", _NO_ANSWER, ask, way_back)
+            return _refusal(f"{named} can't run this chat here.", _NO_ANSWER, ask, way_back)
 
 
 def failed() -> WebRefusalCard:
@@ -106,6 +135,8 @@ def refusal_for(err: Exception, *, agent: str | None = None, admin: bool = False
             return backend_refusal(err, agent=agent, admin=admin)
         if err.cause == "no_credit_yet":
             return backend_refusal(err, agent=agent, admin=admin)
+        if err.reason in _SHARED_COPY:
+            return _shared(err)
         if err.reason in _OUT_OF_CREDIT:
             return _refusal(
                 "Your credit has run out.", "No answer was given.", "Ask an admin to add credit."

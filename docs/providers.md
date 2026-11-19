@@ -23,7 +23,7 @@ in one conversation.
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
-| Routines | Yes | Yes | Yes | Not supported |
+| Routines | Yes | Not supported | Not supported | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
 
@@ -35,11 +35,12 @@ A provider that cannot meet a channel's requirements refuses the reply.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
-- **OpenAI and Gemini:** an agent with an `ask` rule or a
-  channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
-  and import. A connector that OpenAI's size limit cannot hold, or whose tool
-  names clash with Gemini's own, is off there, and so is a web search that
-  must ask first.
+- **OpenAI and Gemini:** routines (one whose agent or channel is on them stops
+  with a message saying so). A channel or thread that switches a built-in
+  tool off is refused, since only the agent's own tool settings apply. An agent with an `ask` rule or a channel-scoped `deny` on a Daimon
+  tool is refused, and so is workspace export and import. A connector that
+  OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
+  is off there, and so is a web search that must ask first.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
@@ -78,6 +79,11 @@ its price. A pick applies at once, like any model change. What the new
 provider can't carry is off there and named after the pick, until you switch
 back. Earlier messages carry over, and so do saved files where the new provider
 keeps a workspace. A refusal names its cause and changes nothing.
+
+Asking an agent in chat to move itself or the conversation to another provider
+is different: `request_agent_backend_switch` and `set_thread_model` preview first,
+then post a card in the thread that names the provider. It runs only when the
+person approves.
 
 Picking a model for one conversation, in chat or with the MCP tool
 `set_thread_model`, leaves the agent on its own model everywhere else. Only the
@@ -125,7 +131,8 @@ Memory settings show as needing setup.
   credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
   agent's permission. Personal connectors need one Reconnect after a switch.
   Self-hosted agents get it too, and their harness asks before an `ask` tool.
-  Turn it off with the `mcp_connector_relay` feature.
+  Off by default, because the provider receives what the connectors return;
+  turn it on with the `mcp_connector_relay` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
   call runs once. An unattended reply runs only what its rules allow. Turn it off
@@ -238,8 +245,9 @@ ambiguous. Unknown fields, a stale digest or a missing resource are refused too.
 An optional `spend_limit_usd_cents` caps each reply, not the whole session. OpenAI
 refuses a native session spend limit, so the host enforces it: it prices the reply's
 usage while it runs (container time not counted), stops it once the limit is passed
-and tells the agent next time. Past 272k input tokens, `gpt-6-luna` counts at its base
-rate, a lower bound. The host refuses `OPENAI_CUSTOM_HEADERS` for configured OpenAI
+and tells the agent next time. A reply sums its requests, so it counts at the base
+rates past 272k input tokens; only one request known to pass that takes the model's
+long-context rates. The host refuses `OPENAI_CUSTOM_HEADERS` for configured OpenAI
 runtimes so ambient headers cannot replace the channel's key or project.
 
 ## Run on Gemini
@@ -281,7 +289,9 @@ project, spend holds or storage:
   refuses SQLite.
 - **Spend.** Each attempt places a hold, an estimate against `cap_usd`.
   Holds release on a refusal, settle when usage is final, and otherwise expire
-  after 24 hours.
+  after 24 hours. An optional `spend_limit_usd_cents` caps each reply as for
+  OpenAI: the host stops it once its priced usage passes the limit. Rows built
+  in code set 50.
 - **Growth.** Records and holds have no size bound or compaction, so monitor
   database storage before raising load.
 

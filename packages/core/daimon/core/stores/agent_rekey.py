@@ -62,6 +62,10 @@ REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
         ("host_call_cards", "executing_agent_id"),
         ("host_call_cards", "executing_ma_agent_id"),
         ("long_job_policy", "agent_id"),
+        # Monitoring follows the agent (feature_values moves), so its kept history and
+        # the "told they are monitored" notices must too, or admins lose the past and
+        # people are told again.
+        ("monitored_events", "agent_id"),
         ("mcp_oauth_flows", "agent_id"),
         ("mcp_tokens", "agent_id"),
         ("pending_skill_adds", "ma_agent_id"),

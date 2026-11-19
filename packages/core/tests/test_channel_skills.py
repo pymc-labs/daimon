@@ -312,7 +312,7 @@ async def test_a_shared_listing_missing_a_skill_the_agent_now_holds_is_read_agai
 def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
     """The seeded default agent as the provider holds it: its 11 custom skills, no built-ins."""
     return ma_agent(
-        name="daimon",
+        name="default",
         tenant_id=uuid.uuid4(),
         metadata={MA_METADATA_KEY_MANAGED: "true"} if managed else None,
         skills=[
@@ -390,7 +390,7 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
             platform="teams",
             channel_id="C1",
             agent=agent,
-            agent_names=("daimon",),
+            agent_names=("default",),
             rows=[_row(f"skill_{i}", f"s{i}") for i in range(count)],
             platform_skills=platform_skills,
         )
@@ -419,7 +419,7 @@ async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read()
     """
     tenant_id = uuid.uuid4()
     agent = _default_agent()
-    limited = {"daimon": (SkillRef(type="custom", skill_id="m365", platforms=("teams",)),)}
+    limited = {"default": (SkillRef(type="custom", skill_id="m365", platforms=("teams",)),)}
     title = tenant_scoped_display_title(tenant_id=tenant_id, name="m365")
     memory = PlatformSkillMemory()
 
@@ -459,7 +459,7 @@ async def test_a_custom_platform_skill_keeps_its_last_id_through_a_failed_read()
 async def test_platform_skills_fill_only_the_room_the_agents_own_skills_leave() -> None:
     """An agent holding 19 skills gets one Office skill on Teams rather than a failing session."""
     agent = ma_agent(
-        name="daimon",
+        name="default",
         tenant_id=uuid.uuid4(),
         metadata={MA_METADATA_KEY_MANAGED: "true"},
         skills=[

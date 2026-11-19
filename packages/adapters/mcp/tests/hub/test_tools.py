@@ -40,6 +40,7 @@ _NOW = datetime(2026, 5, 1, tzinfo=UTC)
 
 def _runtime(client: AsyncAnthropic, session_factory: Any) -> McpRuntime:
     settings = MagicMock()
+    settings.features = {}  # monitoring reads the deployment feature map
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None

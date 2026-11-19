@@ -48,6 +48,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.features.model_input import ANSWER_MESSAGES
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -552,6 +553,10 @@ class DiscordTurnLifecycle(OutputGate):
         ):
             me = self._trigger_message.guild.me
             await self._trigger_message.remove_reaction("👀", me)
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Tell the person, in a card apart from the reply, that admins can read this."""
+        await self._send_message(embed=build_notice_embed(notice.text, neutral=True))
 
     @property
     def message_ref(self) -> discord.Message | None:

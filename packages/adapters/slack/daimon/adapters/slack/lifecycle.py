@@ -77,6 +77,7 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.cost_footer import cost_footer_shown
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.mentions import mentioned_user_ids, untag
@@ -283,6 +284,10 @@ class SlackTurnLifecycle(OutputGate):
             timestamp=self._trigger_ts,
             name="white_check_mark",
         )
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Tell the person, in a card apart from the reply, that admins can read this."""
+        await self.post_notice(notice.text, neutral=True)
 
     async def _clear_acknowledgment(self) -> None:
         if self._trigger_ts is None:

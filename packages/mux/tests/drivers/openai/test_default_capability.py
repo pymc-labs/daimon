@@ -33,7 +33,7 @@ TAPE = Path(__file__).resolve().parents[2] / "fixtures/openai/recordings/F1-scri
 
 @pytest.fixture
 def manifest() -> DefaultManifest:
-    raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+    raw = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     names = tuple(
         item["skill_id"]
         for item in raw["skills"]

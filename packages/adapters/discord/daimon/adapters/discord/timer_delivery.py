@@ -24,7 +24,7 @@ import aiohttp
 import structlog
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
-from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.dm_access import roles_by_membership, sender_admission
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
@@ -71,8 +71,9 @@ async def _deliver[A](
 
     `open_place` raises `LookupError` when the place is definitely gone. Raises
     `AdmissionDenied` when the timer may not start or stops partway. A transient error
-    before the turn raises `DeliveryRetry`; one that outlasts the in-place retries after
-    it raises `DeliveryFailed`. A permanent Discord error propagates and settles.
+    before the turn, or an unknown lookup there, raises `DeliveryRetry`; after the turn
+    neither re-runs it: one that outlasts the in-place retries raises `DeliveryFailed`, an
+    unknown lookup raises `AdmissionDenied`. A permanent Discord error propagates and settles.
     """
     sent = 0
 
@@ -81,6 +82,9 @@ async def _deliver[A](
         for pause in (*DELIVERY_BACKOFF, None):
             try:
                 return await op()
+            except DeliveryRetry:
+                # An unknown lookup after the turn must not put the timer back to run it again.
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
             except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
                 if not is_transient(error):
                     raise
@@ -145,7 +149,7 @@ async def deliver_dm_timer(
         if not dm_policy(row.tenant_id).allows(owner):
             raise AdmissionDenied(reason="invoker_not_allowed")
         # The timer's agent grant, by the owner's current server roles.
-        if not await sender_admits(
+        admitted = await sender_admission(
             sessionmaker,
             tenant_id=row.tenant_id,
             agent_name=row.target_name,
@@ -153,7 +157,11 @@ async def deliver_dm_timer(
             groups=roles_by_membership(
                 membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
             ),
-        ):
+        )
+        if admitted is None:
+            # A failed role lookup says nothing about the owner; settling now would drop the timer.
+            raise DeliveryRetry
+        if not admitted:
             raise AdmissionDenied(reason="invoker_not_allowed")
         guild = int(tenant.external_id)
         try:

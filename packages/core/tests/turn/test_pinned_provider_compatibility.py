@@ -136,6 +136,12 @@ async def test_legacy_pin_keeps_managed_agents_execution_with_saved_native_choic
         monkeypatch.setenv(f"DAIMON_CHANNEL_{provider.upper()}_KEY", "synthetic-key")
     async with host.sessions.begin() as db:
         await clear_access_policy(db, tenant_id=TENANT)
+        if keys:  # a key only makes a provider available; the admin opts in
+            await set_access_policy(
+                db,
+                tenant_id=TENANT,
+                policy=TenantAccessPolicy(enabled_backends=("anthropic", *keys)),
+            )
     if selector == "channel":
         first = (
             BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
@@ -173,9 +179,8 @@ async def test_legacy_pin_keeps_managed_agents_execution_with_saved_native_choic
 
     async with host.sessions() as db:
         policy = await load_access_policy(db, tenant_id=TENANT)
-    expected = ("anthropic", *keys)
-    assert policy.enabled_backends == expected, "default policy should reflect deployment keys"
-    assert not policy.backends_explicit, "the default should remain a read-time choice"
+    assert policy.enabled_backends == ("anthropic", *keys), "the opt-in is the allowlist"
+    assert policy.backends_explicit == bool(keys), "with no opt-in, the default stays Anthropic"
 
     await _run_legacy_turn(host, f"thread-{selector}", turn_io_used)
 
@@ -201,9 +206,7 @@ async def test_explicit_restricted_policy_and_tenant_default_stay_separate(
         default = await load_access_policy(db, tenant_id=other_tenant)
     assert restricted.enabled_backends == ("anthropic",), "explicit restriction should persist"
     assert restricted.backends_explicit, "the restriction should not follow new keys"
-    assert default.enabled_backends == ("anthropic", "openai"), (
-        "the other tenant should follow keys"
-    )
+    assert default.enabled_backends == ("anthropic",), "a key alone opts no tenant in"
     assert not default.backends_explicit, "another tenant should remain on the default"
     async with host.sessions.begin() as db:
         await set_access_policy(

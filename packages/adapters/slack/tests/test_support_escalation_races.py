@@ -37,6 +37,7 @@ from daimon.core.stores.access_policy import (
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.support import PENDING_RECEIVED
 from daimon.core.support_escalation import RECORDED_UNDELIVERED, received_text
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -239,7 +240,9 @@ async def test_an_edit_arriving_while_the_recorder_holds_the_locks_waits_then_ap
 
     assert await _count(factory) == 1, "the request that decided first is recorded"
     assert len(_posts(fake_slack_web_client)) == 1
-    assert _ephemeral_texts(fake_slack_web_client) == [received_text(remaining=19)]
+    assert _ephemeral_texts(fake_slack_web_client) == [
+        f"{received_text(remaining=19)}\n{PENDING_RECEIVED}"
+    ], "recorded, waiting for Accept"
     async with factory() as s:
         policy = await load_access_policy(s, tenant_id=tenant_id)
     assert {c: r.writers for c, r in policy.channel_rules.items()} == {_CHANNEL: "none"}, (

@@ -630,6 +630,10 @@ class UsageEventRow(BaseModel):
     agent_id: str | None = None
 
 
+BudgetOnLimit = Literal["stop", "alert"]
+"""What a channel budget does at its limit: refuse new turns, or only alert."""
+
+
 class ChannelBudgetRow(BaseModel):
     """One channel's spend limit. `window` bounds which debits count (see `ChannelBudget`)."""
 
@@ -647,6 +651,10 @@ class ChannelBudgetRow(BaseModel):
     created_at: datetime
     updated_at: datetime
     exhausted_notice_key: str | None = None
+    on_limit: BudgetOnLimit = "stop"
+    alert_channel_id: str | None = None
+    alert_window_key: str | None = None
+    alert_level: int = 0
 
 
 ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]
@@ -1446,7 +1454,7 @@ class TenantBackendPolicy(_Facts):
     tenant_id: uuid.UUID
     revision: str
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
-    # False: the tenant follows the deployment's keyed providers. A snapshot from
+    # False: the tenant follows the deployment default (Anthropic). A snapshot from
     # before this field reads as an admin's choice, as it was then.
     explicit: bool = True
 
@@ -1943,6 +1951,47 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
+MonitoredKind = Literal["question", "answer", "tool", "notice"]
+
+
+class MonitoredEventRow(BaseModel):
+    """A kept question, answer, MCP tool call or shown notice (`stores.monitoring`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    turn_ref: str | None
+    kind: MonitoredKind
+    content: str | None
+    tool_name: str | None
+    outcome: str | None
+    created_at: datetime
+
+
+class MonitoredConversationRow(BaseModel):
+    """One person's kept conversation with an agent: its question and tool counts and
+    span. MCP tool calls have no conversation, so a day of them is one (`conversation` is
+    None and `day` the UTC date); `cursor_id` pages the list (`stores.monitoring`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    day: str
+    questions: int
+    tools: int
+    first_at: datetime
+    last_at: datetime
+    cursor_id: uuid.UUID
 
 
 class PendingCarryOverRow(BaseModel):

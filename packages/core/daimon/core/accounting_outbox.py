@@ -280,7 +280,9 @@ async def record_observation_usage(
         await accounting_outbox.check_provider_ingest(
             session, binding_id, observation, tenant_id=tenant_id
         )
-    row = await mux_state.record_usage(session, binding_id, observation)
+    row = await mux_state.record_usage(
+        session, binding_id, observation, platform_user_id=platform_user_id, channel_id=channel_id
+    )
     if row is None and accounting_mode_for(observation.session.provider).settles_natively:
         row = await accounting_outbox.pending_revision(
             session, binding_id, observation.id, observation.revision

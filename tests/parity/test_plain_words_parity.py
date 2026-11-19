@@ -9,11 +9,15 @@ from __future__ import annotations
 from daimon.adapters.discord.agent_setup import add_skill as discord_add_skill
 from daimon.adapters.discord.agent_setup import authz as discord_authz
 from daimon.adapters.discord.agent_setup.mcp_access import CODING_TOOLS_REFUSAL
+from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.slack import agent_policy as slack_policy
 from daimon.adapters.slack.agent_setup.coding_tools import NEEDS_ADMIN_MESSAGE
+from daimon.adapters.slack.blockkit import ERROR_COLOR, notice_attachments
 from daimon.adapters.teams import add_skill as teams_add_skill
 from daimon.adapters.teams import credential_requests as teams_requests
 from daimon.adapters.teams import setup_panel as teams_setup
+from daimon.adapters.teams.card import notice_adaptive_card
+from daimon.core.monitoring import CHAT_NOTICE
 
 STARTING = (
     "You can't change a starting agent.\n\n"
@@ -63,3 +67,20 @@ def test_shared_agent_refusals_are_the_same_everywhere() -> None:
 def test_coding_tools_refusal_is_the_same_everywhere() -> None:
     assert {CODING_TOOLS_REFUSAL, NEEDS_ADMIN_MESSAGE} == {CODING_TOOLS}
     assert teams_setup.NEEDS_ADMIN == TEAMS_CODING_TOOLS
+
+
+MONITORED = (
+    "Admins can read what you and this agent say here.\n\nAsk an admin if you have questions."
+)
+
+
+def test_monitoring_notice_is_the_same_neutral_card_everywhere() -> None:
+    """Each DM lifecycle's `on_monitoring_notice` sends `notice.text` through these."""
+    assert CHAT_NOTICE.text == MONITORED
+    discord = build_notice_embed(MONITORED, neutral=True)
+    [slack] = notice_attachments(MONITORED, neutral=True)
+    teams = notice_adaptive_card(MONITORED, error=False)
+    assert discord.description == MONITORED
+    assert slack["blocks"][0]["text"]["text"] == MONITORED and slack["color"] != ERROR_COLOR
+    [block] = teams.body or []
+    assert getattr(block, "text", None) == MONITORED

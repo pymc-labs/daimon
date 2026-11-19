@@ -179,7 +179,8 @@ async def test_a_sealed_channel_marks_the_post_and_an_open_one_does_not(
     async with db_session_factory() as session:
         await _seed(session, sealed=True)
     _bot, escalation, _dm = await _submit(db_session_factory)
-    head, link, marker, note = escalation.send.await_args.args[0].split("\n\n")
+    head, status, link, marker, note = escalation.send.await_args.args[0].split("\n\n")
+    assert status.startswith("Pending: 1 credit\n"), "waits for Accept"
     assert head.startswith("**Human support requested** by ") and link.endswith("/444")
     assert marker == "*Reply in the original channel.*"
     assert note == "help please"

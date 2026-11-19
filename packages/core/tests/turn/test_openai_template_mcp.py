@@ -276,6 +276,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
         manifest.write_text(json.dumps([row]))  # this deploy: the template keeps MCP
     wire.requests.clear()
     yield request, quote, wire, consent
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 
@@ -363,9 +364,9 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
     assert second != first
     assert await _revoked(request, second)
 
-    # What the provider holds during a turn calls Daimon's MCP: the copy's switch
-    # and hand-off tools are offered and run. The switch runs for this credential
-    # too: its confirm call posts Daimon's own card (`daimon.core.switch_cards`).
+    # What the provider holds during a turn calls Daimon's MCP: the copy's hand-off
+    # tools are offered and run. The switch is carded like any gated tool, so the
+    # server refuses it here, where this credential has no card.
     live = await live_token(request)
     await offered_and_run(source_mcp, live)
     switched = await mcp_session(
@@ -374,8 +375,8 @@ async def test_each_turn_puts_its_own_credential_in_the_session_vault_and_revoke
         method="tools/call",
         params={"name": "request_agent_backend_switch", "arguments": {}},
     )
-    assert "confirmation card" not in json.dumps(switched)
-    assert switched["result"]["isError"] is False
+    assert "confirmation card" in json.dumps(switched)
+    assert switched["result"]["isError"] is True
 
 
 async def offered_and_run(source_mcp, token: str) -> None:

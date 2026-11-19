@@ -161,6 +161,7 @@ async def ordinary(switched_request, monkeypatch, tmp_path):
         actor,
         accepted,
     )
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
 
 

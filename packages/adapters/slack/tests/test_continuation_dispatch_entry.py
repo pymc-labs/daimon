@@ -430,6 +430,9 @@ async def _run_continuation_and_capture_controls(
 
     assert run_turn.await_args is not None, "the follow-up turn should have run"
     assert run_turn.await_args.kwargs["attended"] is (row.attended and row.reason != "timer")
+    # The answer is kept with the question the work was queued under, never the seed.
+    assert run_turn.await_args.kwargs["continues"] == row
+    assert run_turn.await_args.kwargs.get("request_text") is None
     user_message = run_turn.await_args.kwargs["user_message"]
     assert isinstance(user_message, str), "user_message should be the rendered controls + seed"
     return user_message

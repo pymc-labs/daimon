@@ -211,6 +211,9 @@
   "POST /api/chat/sessions/{session_id}/messages": {
    "exempt": "web chat"
   },
+  "POST /api/chat/sessions/{session_id}/monitoring/dismiss": {
+   "exempt": "web chat"
+  },
   "POST /api/chat/sessions/{session_id}/stop": {
    "exempt": "web chat"
   },

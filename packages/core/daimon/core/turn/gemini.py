@@ -30,6 +30,7 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime, resource_scope
 from daimon.core.pricing import ProviderPrice
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import (
     TurnCodecRequest,
     TurnConnectionLost,
@@ -115,6 +116,8 @@ class GeminiUsageRuntime:
     accounting: FlashAccounting
     prices: Mapping[str, ProviderPrice]
     infrastructure_usd: Decimal | None = None
+    # The row's per-turn limit (`spend_limit_usd_cents`), enforced while the turn streams.
+    spend_guard: SpendGuard | None = None
 
 
 @dataclass(frozen=True)
@@ -244,8 +247,13 @@ def gemini_backend(
 def compose_gemini_codec(request: TurnCodecRequest) -> GeminiTurnIO:
     if request.config is None or request.model != _runtime_model(request.runtime):
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
+    usage = request.runtime.usage_store if request.runtime is not None else None
     return GeminiTurnIO(
-        request.backend, request.scope, request.session, persistence=request.persistence
+        request.backend,
+        request.scope,
+        request.session,
+        persistence=request.persistence,
+        spend_guard=usage.spend_guard if isinstance(usage, GeminiUsageRuntime) else None,
     )
 
 
@@ -284,6 +292,7 @@ class GeminiTurnIO:
         session: ResourceRef,
         *,
         persistence: TurnPersistence | None = None,
+        spend_guard: SpendGuard | None = None,
     ) -> None:
         if backend.capabilities().profile_id != PROFILE or session.provider != "gemini":
             raise UnsupportedCapability(("gemini_turn_codec",), PROFILE)
@@ -294,7 +303,7 @@ class GeminiTurnIO:
         ):
             raise ScopeViolation(session.id, "Gemini host session differs from authorized scope")
         self.backend, self.scope, self.session = backend, scope, session
-        self.persistence = persistence
+        self.persistence, self._spend_guard = persistence, spend_guard
         if persistence is not None:
             persistence.check_session(scope, session)
         self.root: str | None = None
@@ -637,6 +646,23 @@ class GeminiTurnIO:
             if frame.native is not None
         ]
 
+    async def enforce_spend_limit(self, event: Event) -> None:
+        """Cancel the root once its priced usage passes the row's limit (host-side cap)."""
+        guard = self._spend_guard
+        if guard is None or event.turn_id != self.root or event.type == "session.turn_ended":
+            return
+        try:
+            over = await guard.exceeded(self._local_usage)
+        except (ProviderError, TimeoutError) as error:
+            over = guard.unread(error)
+        if not over:
+            return
+        await self.interrupt(timeout_s=30.0)
+        await guard.notify()
+        from daimon.core.turn.driver import InterruptedDuringRecovery
+
+        raise InterruptedDuringRecovery(phase="replay")
+
     async def replay_usage(self) -> Sequence[UsageObservation]:
         async with asyncio.timeout(REPLAY_TIMEOUT_S):
             await self.backend.usage.reconcile(self.scope, self.session)
@@ -898,7 +924,10 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                             ) from None
                         if event.authority == "preview":
                             continue
-                        frame = self.io.frame(event, await self.io.usage_snapshots())
+                        usage = event.type == "usage.observed"  # only it reads the list
+                        frame = self.io.frame(
+                            event, await self.io.usage_snapshots() if usage else {}
+                        )
                     normalized = frame.normalized
                     if normalized is None or normalized.id in self._seen:
                         continue
@@ -914,6 +943,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                     self.io.check_terminal(normalized)
                     self._ended |= normalized.type == "session.turn_ended"
                     self.io.stream_failures = 0
+                    await self.io.enforce_spend_limit(normalized)
                     return frame
         except _StreamFailure as failure:
             await self.close()

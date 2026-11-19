@@ -33,6 +33,7 @@ from daimon.core.support import (
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
+    OWN_REQUEST,
     SETTLE_ELSEWHERE,
     MenuSpec,
     RequestChoice,
@@ -229,11 +230,16 @@ def _settle_buttons(post: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _settle(
-    data: dict[str, Any], *, post_id: str, channel: str = OPS, **inputs: object
+    data: dict[str, Any],
+    *,
+    post_id: str,
+    channel: str = OPS,
+    user: str = OTHER_AAD_OBJECT_ID,
+    **inputs: object,
 ) -> dict[str, object]:
-    """A staff click on the support post `post_id`, in the channel `channel`."""
+    """A click by `user` (staff unless named) on the support post `post_id`, in `channel`."""
     action = {"type": "Action.Execute", "verb": SETTLE_VERB, "data": data | inputs}
-    click = make_invoke("adaptiveCard/action", {"action": action}, user=OTHER_AAD_OBJECT_ID)
+    click = make_invoke("adaptiveCard/action", {"action": action}, user=user)
     tenant = {"id": ENTRA_TENANT_ID}
     click["conversation"] = {
         "id": f"{channel};messageid={post_id}",
@@ -457,22 +463,30 @@ async def test_send_when_every_field_is_full_then_the_post_shows_each_unclipped(
         assert f"Part {n}: {str(n) * 3000}" in texts, f"part {n} whole, on its own block"
 
 
-async def test_send_when_option_has_a_step_and_fields_then_charged_at_submit(
+async def test_send_when_option_has_a_step_then_held_until_accepted_at_its_price(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    """A step prices the request at once: a text post with nothing left to settle."""
+    """A step waits for Accept, which charges its price with no amount to type."""
     await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
         form = (await _click(service, _button(menu), option=_value("call")))["value"]
         sent = await _click(service, _button(form), step="1", field_topic="Billing export")
+        [request] = _posts(teams_api_fake)
+        assert_teams_accepts(request)
+        post = _card(request)
+        buttons = _settle_buttons(post)
+        before = len(teams_api_fake.activity_requests)
+        said = await post_activity(service, _settle(buttons["accept"], post_id="m-2"))
+        [edit] = teams_api_fake.activity_requests[before:]
 
-    assert "We will confirm" not in _text(sent["value"]), "nothing pending"
-    [post] = _posts(teams_api_fake)
-    text = str(post.body["text"])
-    for line in ("Call, 1 hour: 1 credit", "Charged 1 credit", "Topic: Billing export"):
-        assert line in text, f"the terms, the charge and the answers: {line}"
-    assert "attachments" not in post.body, "no controls"
+    assert "We will confirm the charge." in _text(sent["value"]), "told it is pending"
+    for line in ("Call, 1 hour: 1 credit", "Pending: 1 credit", "Topic: Billing export"):
+        assert line in _text(post), f"the terms, the hold and the answers: {line}"
+    assert set(buttons) == {"accept", "decline"}, "Accept and Decline"
+    assert not [b for b in post["body"] if b["type"] == "Input.Number"], "no amount to type"
+    assert said["value"] == f"Charged 1 credit. {CLIENT_NOT_NOTIFIED}", said
+    assert "Charged 1 credit" in _text(edit.body), "the post closes charged"
 
 
 async def test_send_when_a_field_is_missing_then_the_form_comes_back(
@@ -536,10 +550,10 @@ async def test_ask_a_person_when_limit_has_a_menu_then_the_dialog_continues_to_t
     assert nexted["task"]["type"] == "continue", "the option's card, in the same dialog"
     assert (pick["data"]["stage"], send["data"]["stage"]) == ("pick", "send")
     assert sent["task"]["value"] == (
-        "Request sent. Someone will reply.\nUsed 0.5 credits. 1.5 of 2 credits left."
+        "Request sent. Someone will reply.\nHolding 0.5 credits. We will confirm the charge."
     ), sent
     [post] = _posts(teams_api_fake)
-    assert "Call, 30 min: 0.5 credits" in str(post.body["text"]), "charged at its step"
+    assert "Call, 30 min: 0.5 credits" in _text(post.body), "held at its step"
 
 
 async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
@@ -686,6 +700,41 @@ async def test_decline_when_pending_then_releases_the_hold(
     assert f"Declined by {USER_NAME}" in _text(edit.body), "the post says who declined"
     row = await _row(db_session_factory, post)
     assert (row.status, row.charge, row.settled_by) == ("declined", D(0), OTHER_AAD_OBJECT_ID)
+
+
+async def test_settle_when_the_clicker_is_the_requester_then_refused_and_another_member_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Teams spells an id the same way on the request and the click, so no one settles their own."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        decline = _settle_buttons(post)["decline"]
+        own = await post_activity(
+            service, _settle(decline, post_id="m-2", user=AAD_OBJECT_ID.upper())
+        )
+        pending = await _row(db_session_factory, post)
+        other = await post_activity(service, _settle(decline, post_id="m-2"))
+
+    assert own["value"] == OWN_REQUEST, own
+    assert pending.status == "pending", "the requester's click settled nothing"
+    assert other["value"].startswith("Declined."), other
+    assert (await _row(db_session_factory, post)).status == "declined", "another member settles it"
+
+
+async def test_settle_when_the_clicker_is_a_deployment_admin_requester_then_settles_own_request(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Submit exempts a deployment admin, so settle lets them settle their own request."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+    decline = _settle_buttons(post)["decline"]
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as service:
+        own = await post_activity(service, _settle(decline, post_id="m-2", user=AAD_OBJECT_ID))
+
+    assert own["value"].startswith("Declined."), own
+    assert (await _row(db_session_factory, post)).status == "declined", "settled by its requester"
 
 
 async def test_decline_when_asking_was_turned_off_since_then_the_post_still_settles(

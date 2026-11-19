@@ -35,7 +35,7 @@ async def test_setup_entry_binds_exact_target_before_ready_without_a_billed_turn
         account = await make_account(session, tenant=tenant)
     responder = ma_agent(
         id="agent_daimon",
-        name="daimon",
+        name="default",
         tenant_id=tenant.id,
         metadata={"daimon_managed": "true"},
     )

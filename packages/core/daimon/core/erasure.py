@@ -30,6 +30,7 @@ from daimon.core.stores import (
     identity,
     lead_intake,
     mcp_tokens,
+    monitoring,
     routines,
     slack_turn_contexts,
     slack_user_tokens,
@@ -234,10 +235,11 @@ def by_imported_user(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
 
 
 def by_dm_user(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
-    """DM routing rows naming the person by (tenant, platform user); erased per account."""
-    return Erasable(
+    """DM routing rows naming the person by (tenant, platform user)."""
+    return by_user(
         key,
-        count=lambda s, sub: count(s, keys=sub.user_keys),
+        lambda s, pp: erase(s, keys=[(pp.tenant_id, pp.external_id)], now=datetime.now(UTC)),
+        total=lambda s, sub: count(s, keys=sub.user_keys),
         account=lambda s, sub: erase(s, keys=sub.user_keys, now=datetime.now(UTC)),
     )
 
@@ -504,4 +506,6 @@ ERASABLE: tuple[Erasable, ...] = (
         "web_admin_grants",
         (web_roles.count_admin_grants_for_account, web_roles.delete_admin_grants_for_account),
     ),
+    # What the person asked monitored agents, in every workspace; cascades too, but counted.
+    by_account("monitored_events", (monitoring.count_for_account, monitoring.delete_for_account)),
 )

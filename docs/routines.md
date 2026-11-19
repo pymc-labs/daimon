@@ -93,8 +93,10 @@ Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
-A routine whose channel selects the self-hosted backend stops with `last_error=selfhosted_routines_unsupported`, because headless routines
-need Anthropic Managed Agents. A thread destination with an unknown parent
+A routine whose agent, channel or thread is on another provider is not run. The
+self-hosted backend stops with `last_error=selfhosted_routines_unsupported`;
+OpenAI and Gemini stop with a message saying routines run only on Anthropic.
+Headless routines need Anthropic Managed Agents. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
 
@@ -222,8 +224,7 @@ files. Failure notices never carry files.
 | Read timeout per call | 120 s |
 
 The ceiling covers session assembly and the run. The dispatch
-timeout is an outer guard for a run that hangs outside it, and cannot be set
-below the ceiling. Settings are in [configuration.md](configuration.md#scheduler).
+timeout cannot be set below it. Settings are in [configuration.md](configuration.md#scheduler).
 
 ## Who may do what
 
@@ -282,6 +283,3 @@ that channel's budget, checked last after the agent's rule
 fires again at its next slot. On Discord each fire, and each delivery,
 checks the creator's live membership, roles and admin permissions. Elsewhere
 only the creator's stored admin role exempts them from the allowlist.
-
-A Discord thread destination saved before channel budgets existed has no
-channel until its destination is set again.

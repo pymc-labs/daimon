@@ -240,6 +240,8 @@ async def test_plan_is_scoped_and_credential_access_is_deferred(
 
     assert runtime.account_scope_id == "project"
     assert runtime.price is provider_prices(PROFILE)[("openai", REVISION.model)]
+    # No meter reports the container fee: usage settles at $0 infrastructure, never pending.
+    assert await runtime.infrastructure(cast(Any, None)) == 0
     # Our OpenAI project rejects `spend_control`: Luna never asks for a native cap.
     assert runtime.controls.spend_limit_usd_cents is None
     plan = await runtime.session_plan(application)
@@ -463,8 +465,10 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
         sum(req.method == "POST" and req.url.path.endswith("/events") for req in wire.requests) == 1
     )
     assert all(source.closed for source in wire.sources)
-    assert clients and all(client.is_closed() for client in clients)
-    assert await store.pending_outbox()  # unpriced actual usage remains durable pending
+    assert clients and not any(client.is_closed() for client in clients), "one shared client"
+    await application.deps.provider_clients.aclose()
+    assert all(client.is_closed() for client in clients)
+    assert not await store.pending_outbox()  # settled at $0 infrastructure, none left pending
 
 
 async def test_a_shared_turn_runs_without_any_caller_mcp_credential(

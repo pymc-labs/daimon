@@ -178,7 +178,8 @@ class UndeliveredJson(BaseModel):
 
 
 class SettleBody(BaseModel):
-    charge: str
+    charge: str | None = None
+    """None accepts a fixed or steps price as it is."""
 
 
 class LimitJson(BaseModel):
@@ -211,6 +212,8 @@ class MenuJson(BaseModel):
     summary: str
     options: int
     used_in: list[PlaceRef]
+    channel: NamedJson | None
+    """Where its requests go; None: the request channel."""
     body: dict[str, object]
 
 
@@ -552,9 +555,11 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         open_channels = list(
             dict.fromkeys(r.support_channel_id for r in open_now if r.support_channel_id)
         )
-        extra_destination = {
-            c for c in (own.channel_id if own else None, _default_channel(platform)) if c
-        } | set(open_channels)
+        extra_destination = (
+            {c for c in (own.channel_id if own else None, _default_channel(platform)) if c}
+            | set(open_channels)
+            | {m.channel.id for m in menus if m.channel}
+        )
         names = channels | {
             k: v
             for k, v in (
@@ -654,6 +659,9 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                         for u in uses
                         if u.menu_id == m.id
                     ],
+                    channel=None
+                    if m.channel is None
+                    else NamedJson(id=m.channel.id, name=names.get(m.channel.id, m.channel.id)),
                     body=m.spec.model_dump(mode="json", exclude_none=True),
                 )
                 for m in menus
@@ -901,15 +909,67 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                             for e in exc.errors()
                         ],
                     ) from exc
+                pick = None
+                if spec.channel is not None:
+                    pick, _ = await checked_pick(
+                        caller, platform, spec.channel.id, ["menu", "channel"]
+                    )
                 await set_menu(
                     runtime.sessionmaker,
                     actor,
                     platform=platform,
                     key=key,
                     spec=spec,
+                    channel=pick,
+                    own_allowed=pick is not None and own_channel_allowed(runtime.settings),
                     expected=expected,
                 )
         return await page(caller)
+
+    async def checked_pick(
+        caller: WebCaller, platform: str, channel_id: str, loc: Loc
+    ) -> tuple[ChannelPick, str]:
+        """A channel of the workspace Daimon can post to, and its label; else 404 or 422."""
+        await place_exists(caller, "channel", channel_id, _NO_CHANNEL)
+        row = await one_row(runtime, caller, channel_id)
+        if row.kind != "channel" or row.channel_id == WEB_ROW_ID:
+            raise HTTPException(404, _NO_CHANNEL)
+        async with runtime.sessionmaker() as db:
+            tenant = await get_tenant(db, caller.person.tenant_id)
+            team = next((n.id for n in row.path if n.kind == "team"), None)
+            sub = (
+                await get_teams_channel_subscription(
+                    db, tenant_id=caller.person.tenant_id, channel_id=row.channel_id
+                )
+                if platform == "teams"
+                else None
+            )
+        pick = ChannelPick(
+            platform=platform,
+            channel_id=row.channel_id,
+            discord_guild_id=tenant.external_id if tenant and platform == "discord" else None,
+            slack_team_id=tenant.external_id if tenant and platform == "slack" else None,
+            teams_team_id=team if platform == "teams" else None,
+            teams_service_url=sub.service_url if sub else None,
+        )
+        checked = await request_channel_state(
+            runtime,
+            SupportDestination(
+                platform=platform,
+                channel_id=pick.channel_id,
+                own=True,
+                slack_team_id=pick.slack_team_id,
+                teams_team_id=pick.teams_team_id,
+                teams_service_url=pick.teams_service_url,
+            ),
+            own_allowed=True,
+            label=f"#{row.name.name}" if row.name else "the channel",
+            fresh=True,
+        )
+        # Only a definite answer refuses: a check that could not run saves.
+        if checked[0] == "blocked":
+            raise problem(loc, checked[1] or "Daimon can't post there.")
+        return pick, f"#{row.name.name}" if row.name else row.channel_id
 
     @router.put("/channel")
     async def put_channel(  # pyright: ignore[reportUnusedFunction]
@@ -923,48 +983,7 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         label = "Default"
         with support_refusals():
             if body.channel_id is not None:
-                await place_exists(caller, "channel", body.channel_id, _NO_CHANNEL)
-                row = await one_row(runtime, caller, body.channel_id)
-                if row.kind != "channel" or row.channel_id == WEB_ROW_ID:
-                    raise HTTPException(404, _NO_CHANNEL)
-                async with runtime.sessionmaker() as db:
-                    tenant = await get_tenant(db, caller.person.tenant_id)
-                    team = next((n.id for n in row.path if n.kind == "team"), None)
-                    sub = (
-                        await get_teams_channel_subscription(
-                            db, tenant_id=caller.person.tenant_id, channel_id=row.channel_id
-                        )
-                        if platform == "teams"
-                        else None
-                    )
-                pick = ChannelPick(
-                    platform=platform,
-                    channel_id=row.channel_id,
-                    discord_guild_id=tenant.external_id
-                    if tenant and platform == "discord"
-                    else None,
-                    slack_team_id=tenant.external_id if tenant and platform == "slack" else None,
-                    teams_team_id=team if platform == "teams" else None,
-                    teams_service_url=sub.service_url if sub else None,
-                )
-                label = f"#{row.name.name}" if row.name else row.channel_id
-                checked = await request_channel_state(
-                    runtime,
-                    SupportDestination(
-                        platform=platform,
-                        channel_id=pick.channel_id,
-                        own=True,
-                        slack_team_id=pick.slack_team_id,
-                        teams_team_id=pick.teams_team_id,
-                        teams_service_url=pick.teams_service_url,
-                    ),
-                    own_allowed=True,
-                    label=f"#{row.name.name}" if row.name else "the channel",
-                    fresh=True,
-                )
-                # Only a definite answer refuses: a check that could not run saves.
-                if checked[0] == "blocked":
-                    raise problem(["channel_id"], checked[1] or "Daimon can't post there.")
+                pick, label = await checked_pick(caller, platform, body.channel_id, ["channel_id"])
             actor = _actor(caller, action=_CHANNEL_ACTION, target=label, detail="Request channel")
             await set_support_channel(
                 runtime.sessionmaker,
@@ -976,9 +995,9 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         return await page(caller)
 
     async def settle_request(
-        caller: WebCaller, request_id: str, charge: str | None
+        caller: WebCaller, request_id: str, charge: str | None, *, accept: bool = False
     ) -> SupportPageJson:
-        """Settle (`charge`) or decline (None) a request no person has handled.
+        """Settle (`charge`), accept (a fixed price) or decline (None) a request no person handled.
 
         A request charged at submit keeps its charge on settle and is refunded on decline.
         The client is not told."""
@@ -990,7 +1009,7 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         if charge is not None:
             with located(fallback=["charge"]):
                 amount = parse_credits(charge, name="charge")
-        declining = amount is None
+        declining = amount is None and not accept
         with support_refusals():
             outcome = await settle(
                 runtime.sessionmaker,
@@ -998,12 +1017,17 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                     caller,
                     action=_DECLINE_ACTION if declining else _SETTLE_ACTION,
                     target="Request",
-                    detail="No charge" if amount is None else f"{format_credits(amount)} credits",
+                    detail="Accepted"
+                    if accept
+                    else "No charge"
+                    if amount is None
+                    else f"{format_credits(amount)} credits",
                 ),
                 escalation_id=escalation_id,
                 charge=amount,
                 default_allowance=runtime.settings.support.credits_per_user,
                 expected=Expected(None),
+                accept=accept,
             )
         if outcome.status == "not_found":
             raise HTTPException(404, _NO_REQUEST)
@@ -1019,7 +1043,7 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         request_id: str,
         body: Annotated[SettleBody, Depends(body_of(SettleBody))],
     ) -> SupportPageJson:
-        return await settle_request(caller, request_id, body.charge)
+        return await settle_request(caller, request_id, body.charge, accept=body.charge is None)
 
     @router.post("/requests/{request_id}/decline")
     async def post_decline(  # pyright: ignore[reportUnusedFunction]

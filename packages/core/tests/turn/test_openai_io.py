@@ -638,7 +638,7 @@ async def test_guard_when_meter_fails_then_keeps_the_last_known_total():
 
 
 def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_rate():
-    """gpt-6-luna has no sourced long-context rate; its usage still counts toward the cap."""
+    """A turn total past the limit bills at the base rate and counts toward the cap."""
     from daimon.core.pricing import provider_cost_of
 
     price = ProviderPrice(
@@ -651,8 +651,8 @@ def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_r
         max_priced_input_tokens=1000,
     )
     observation = _observation(2_000_000, 0)
-    assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) is None, (
-        "the tariff itself stays unpriced past its limit"
+    assert provider_cost_of(observation, price, infrastructure_usd=Decimal(0)) == Decimal(2), (
+        "a turn total is not one request, so it bills at the base rate"
     )
     assert priced_cents([observation], price) == Decimal(200), "base rate: 2M at $1/M"
 
@@ -673,3 +673,31 @@ async def test_usage_when_the_turn_resource_lacks_it_then_the_terminal_event_pri
     usage = await io.replay_usage()
     assert [(u.input_tokens, u.output_tokens) for u in usage] == [(100, 20)], usage
     assert priced_cents(usage, _price()) is not None, "the spend cap can price the turn"
+
+
+async def test_history_reads_more_than_five_thousand_events_in_large_pages():
+    from types import SimpleNamespace
+
+    from daimon.core.turn.hosted_codec import OPENAI
+
+    total, requested = 6500, []
+
+    async def list_events(scope, session, *, page):
+        requested.append(page.limit)
+        start = int(page.cursor) + 1 if page.cursor else 0
+        data = [
+            SimpleNamespace(
+                id=str(i), session_id=session.id, native=SimpleNamespace(provider="openai")
+            )
+            for i in range(start, min(start + page.limit, total))
+        ]
+        more = start + len(data) < total
+        return SimpleNamespace(data=data, has_more=more, next_cursor=data[-1].id if more else None)
+
+    backend = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(profile_id=OPENAI.profile),
+        events=SimpleNamespace(list=list_events),
+    )
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=Persistence())
+    assert len(await io._history()) == total
+    assert requested == [1000] * 7

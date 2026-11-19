@@ -127,6 +127,58 @@ def _deps(
     )
 
 
+async def test_admission_names_a_pinned_channels_backend_before_it_refuses(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn refused at admission still says which backend its channel is pinned to, so
+    its failure log and alerts split by provider instead of reading `unknown`."""
+    from daimon.core.channel_backend import channel_ref, set_channel_backend
+    from daimon.core.turn.outcomes import TurnObservation, current_outcome
+    from mux.contracts.config import BackendConfig
+
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await set_channel_backend(
+        db_session,
+        channel_ref(tenant.id, tenant.platform, "chan-1"),
+        BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
+    )
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        channel_backends=True,
+        turn_path="mux",
+    )
+    observation = TurnObservation(db_session_factory, tenant.id, tenant.platform, "chan-1")
+    token = current_outcome.set(observation)
+    try:
+        with pytest.raises(AdmissionDenied) as refused:
+            await admit(
+                deps,
+                origin="chat",
+                tenant_id=tenant.id,
+                requester_org=RequesterOrg.HOST,
+                platform=tenant.platform,
+                external_user_id="user-1",
+                channel_id="chan-1",
+                now=_NOW,
+            )
+    finally:
+        current_outcome.reset(token)
+    assert refused.value.reason == "backend_unsupported", "the pinned provider is not set up here"
+    assert observation.backend == "gemini/gemini.inline_reuse", (
+        "the backend should be named before any admission refusal"
+    )
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_admit_over_balance_tenant_raises_admission_denied_balance_depleted(
     db_session: AsyncSession,
@@ -1212,10 +1264,14 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 
 async def _seed_admittable_tenant(
-    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
+    db_session: AsyncSession,
+    *,
+    policy: TenantAccessPolicy | None,
+    platform: str = "discord",
+    agent_name: str = "daimon",
 ) -> TenantRow:
     tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
-    await _tenant_config(db_session, tenant=tenant)
+    await _tenant_config(db_session, tenant=tenant, agent_name=agent_name)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     if policy is not None:
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
@@ -1227,6 +1283,58 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     return resolved_agent_env_router(
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+
+
+async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Gemini and OpenAI never read a channel's tool switches, so a turn there is refused
+    rather than run with a tool the channel turned off; the same turn on Claude is not."""
+    from daimon.core.features.model_input import TOOL_KEYS
+    from daimon.core.features.snapshot import FeaturePlace
+    from daimon.core.turn.admission import place_features, require_tool_limits_hold
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    admission = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+
+    async def on_gemini() -> Admission:
+        CACHE.clear()
+        place = FeaturePlace.of(
+            tenant.id, "discord", "chan-1", agent_id=admission.agent.id, backend="gemini"
+        )
+        features = await place_features(deps, place, admission.agent, keys=TOOL_KEYS)
+        return replace(admission, features=features)
+
+    await require_tool_limits_hold(deps, await on_gemini())
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("channel", channel_id="chan-1"),
+        key="tool.bash",
+        value="off",
+        set_by=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    with pytest.raises(AdmissionDenied) as refused:
+        await require_tool_limits_hold(deps, await on_gemini())
+    assert (refused.value.reason, refused.value.cause) == ("backend_unsupported", "tool_limits"), (
+        "a channel's switched-off tool should refuse the native turn by name"
     )
 
 
@@ -1335,18 +1443,18 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
 ) -> None:
     """A Teams turn of the seeded agent runs with docx, pptx and xlsx; others run as before.
 
-    They come from `defaults/agents/daimon.yaml`'s `platforms: [teams]` entries
+    They come from `defaults/agents/default.yaml`'s `platforms: [teams]` entries
     and ride the session's skills override, so a Slack or Discord turn adds
     nothing and its agent, skills and session match a deployment without them.
     """
     from daimon.core.defaults.loader import load_platform_skills
     from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 
-    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    tenant = await _seed_admittable_tenant(db_session, policy=None, agent_name="default")
     router = resolved_agent_env_router(
         ma_agent(
             id="ag_1",
-            name="daimon",
+            name="default",
             tenant_id=tenant.id,
             metadata={MA_METADATA_KEY_MANAGED: "true"},
         ),
@@ -1385,7 +1493,7 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
 ) -> None:
     """A Teams turn of the seeded agent runs with the tenant's `microsoft-365` upload.
 
-    It is `platforms: [teams]` in `defaults/agents/daimon.yaml`, so it is found
+    It is `platforms: [teams]` in `defaults/agents/default.yaml`, so it is found
     by its seeded title and added after the Office built-ins, while a Slack or
     Discord turn of the same agent adds no skill at all.
     """
@@ -1395,11 +1503,11 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
         tenant_scoped_display_title,
     )
 
-    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    tenant = await _seed_admittable_tenant(db_session, policy=None, agent_name="default")
     router = resolved_agent_env_router(
         ma_agent(
             id="ag_1",
-            name="daimon",
+            name="default",
             tenant_id=tenant.id,
             metadata={MA_METADATA_KEY_MANAGED: "true"},
         ),

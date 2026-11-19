@@ -20,7 +20,7 @@ export function UndeliveredCount({ n }: { n: number }) {
   return <Button variant="ghost" size="xs" className="text-destructive" onClick={() => open("all")}>{n}<ChevronRight /></Button>
 }
 
-/** Requests no support channel received and nobody handled: settle one with the credits to charge, or decline it. One charged at submit keeps its charge on Settle and is refunded on Decline. */
+/** Requests no support channel received and nobody handled: accept a fixed price, settle one with the credits to charge, or decline it. One charged at submit keeps its charge on Settle and is refunded on Decline. */
 export function UndeliveredDrawer({ d }: { d: SupportPage }) {
   return <Drawer param="undelivered" title="Not delivered">{() => <Requests list={d.undelivered} />}</Drawer>
 }
@@ -52,13 +52,15 @@ function Request({ r }: { r: Undelivered }) {
   const confirm = useConfirm()
   const range = chargeRange(r.price)
   const fixed = range.max === range.min
+  // A fixed or steps price is accepted as it is: the server charges it.
+  const accept = r.price.kind === "fixed" && !r.charged
   const [charge, setCharge] = useState(r.price.min)
   const [error, setError] = useState<{ at: string | null; rest: string | null }>({ at: null, rest: null })
   const bound = chargeError(charge, r)
   const act = async (what: "settle" | "decline") => {
-    const out = await save.run(`requests/${encodeURIComponent(r.id)}/${what}`, what === "settle" ? { charge: r.charged ? r.credits : charge.trim() } : {}, true)
+    const out = await save.run(`requests/${encodeURIComponent(r.id)}/${what}`, what === "settle" && !accept ? { charge: r.charged ? r.credits : charge.trim() } : {}, true)
     if (out.error) { setError({ at: out.problems.find((p) => p.loc[0] === "charge")?.msg ?? null, rest: out.problems.some((p) => p.loc[0] === "charge") ? null : out.error }); return }
-    toast(what === "settle" ? "Request settled" : "Request declined")
+    toast(what === "decline" ? "Request declined" : accept ? "Request accepted" : "Request settled")
   }
   const decline = async () => {
     const ask = r.charged
@@ -91,7 +93,7 @@ function Request({ r }: { r: Undelivered }) {
       <div className="mt-4">
         <Actions>
           <Button variant="outline" disabled={save.pending} onClick={() => void decline()}>Decline</Button>
-          <Button disabled={save.pending || (!r.charged && (!charge.trim() || !!bound))} onClick={() => void act("settle")}>Settle</Button>
+          <Button disabled={save.pending || (!r.charged && (!charge.trim() || !!bound))} onClick={() => void act("settle")}>{accept ? "Accept" : "Settle"}</Button>
         </Actions>
         <Failure>{error.rest}</Failure>
       </div>

@@ -24,7 +24,7 @@ from daimon.core.channel_backend import (
     BackendActor,
     make_backend_service,
 )
-from daimon.core.provider_keys import default_enabled_backends
+from daimon.core.provider_keys import deployment_keyed_providers
 from daimon.core.stores import web_workspace_settings as workspace_settings
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.web_admin import WebAdminError
@@ -68,7 +68,7 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
         if not service.enabled:
             return None
         policy = await service.tenant_policy(tenant_id)
-        keyed = {*default_enabled_backends(), *policy.enabled_backends}
+        keyed = {*deployment_keyed_providers(), *policy.enabled_backends}
         return {
             "offered": [{"id": p, "label": label} for p, label in _PROVIDERS if p in keyed],
             "allowed": list(policy.enabled_backends),

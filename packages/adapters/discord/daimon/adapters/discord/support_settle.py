@@ -1,4 +1,4 @@
-"""Set charge and Decline on a pending support post.
+"""Accept (a fixed price) or Set charge, and Decline, on a pending support post.
 
 Anyone acting in the configured support channel (or a thread in it) may
 settle (decision 4); `settle_from_post` audits it. The requester is never
@@ -14,19 +14,22 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Self, cast
 
 import structlog
-from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.bot import DaimonBot, requester_role
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_post import settled_content, status_line
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import (
+    ACCEPT,
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
     DECLINE,
     LIMIT_GONE,
+    OWN_REQUEST,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
@@ -46,8 +49,8 @@ from discord.ext import commands
 
 _log = structlog.get_logger()
 
-SettleAction = Literal["set", "decline"]
-CUSTOM_ID_TEMPLATE: Final = r"sps:(?P<escalation>[0-9a-f]{32}):(?P<action>set|decline)"
+SettleAction = Literal["accept", "set", "decline"]
+CUSTOM_ID_TEMPLATE: Final = r"sps:(?P<escalation>[0-9a-f]{32}):(?P<action>accept|set|decline)"
 _FAILED = "That didn't work. Try again."
 
 
@@ -55,10 +58,11 @@ def build_settle_id(escalation_id: uuid.UUID, action: SettleAction) -> str:
     return f"sps:{escalation_id.hex}:{action}"
 
 
-def settle_view(escalation_id: uuid.UUID) -> discord.ui.View:
+def settle_view(row: SupportEscalationRow) -> discord.ui.View:
     view = discord.ui.View(timeout=None)
-    view.add_item(SupportSettleButton(escalation_id=escalation_id, action="set"))
-    view.add_item(SupportSettleButton(escalation_id=escalation_id, action="decline"))
+    first: SettleAction = "set" if row.accept_charge is None else "accept"
+    view.add_item(SupportSettleButton(escalation_id=row.id, action=first))
+    view.add_item(SupportSettleButton(escalation_id=row.id, action="decline"))
     return view
 
 
@@ -114,6 +118,9 @@ async def _finish(
     if outcome.status == "not_here":
         await _notice(interaction, SETTLE_ELSEWHERE)
         return
+    if outcome.status == "own_request":
+        await _notice(interaction, OWN_REQUEST)
+        return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
         await _notice(interaction, text)
@@ -136,8 +143,9 @@ async def _settle(
     runtime: DiscordRuntime,
     row: SupportEscalationRow,
     charge: Decimal | None,
+    accept: bool = False,
 ) -> None:
-    """Settle at `charge` (None declines) after the interaction was deferred."""
+    """Settle at `charge` (None declines), or `accept`, after the interaction was deferred."""
     settler = str(interaction.user.id)
     account_id: uuid.UUID | None = None
     if interaction.guild_id is not None:
@@ -157,6 +165,11 @@ async def _settle(
         channel_id=str(interaction.channel_id),
         parent_id=_parent_id(interaction),
         default_channel_id=deployment_channel(runtime.settings.support, "discord"),
+        accept=accept,
+        native_admin=settler == row.platform_user_id
+        and interaction.guild_id is not None
+        and interaction.guild is not None
+        and (await requester_role(interaction.guild, settler))[0] == Role.ADMIN,
     )
     _log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(interaction, before=row, outcome=outcome)
@@ -213,12 +226,14 @@ class SettleModal(discord.ui.Modal, title=SET_CHARGE):
 class SupportSettleButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=CUSTOM_ID_TEMPLATE
 ):
-    """Set charge or Decline; checks the request as it stands now, then its channel."""
+    """Accept, Set charge or Decline; checks the request as it stands now, then its channel."""
 
     def __init__(self, *, escalation_id: uuid.UUID, action: SettleAction) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
-            style=discord.ButtonStyle.primary if action == "set" else discord.ButtonStyle.secondary,
-            label=SET_CHARGE if action == "set" else DECLINE,
+            style=discord.ButtonStyle.secondary
+            if action == "decline"
+            else discord.ButtonStyle.primary,
+            label={"accept": ACCEPT, "set": SET_CHARGE, "decline": DECLINE}[action],
             custom_id=build_settle_id(escalation_id, action),
         )
         super().__init__(button)
@@ -233,7 +248,7 @@ class SupportSettleButton(
         match: re.Match[str],
         /,
     ) -> Self:
-        action: SettleAction = "set" if match["action"] == "set" else "decline"
+        action = cast(SettleAction, match["action"])
         return cls(escalation_id=uuid.UUID(hex=match["escalation"]), action=action)
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -263,9 +278,10 @@ class SupportSettleButton(
                 await interaction.response.defer()
                 outcome = SettleOutcome(status="already_settled", row=row)
                 await _finish(interaction, before=row, outcome=outcome)
-            elif self.action == "decline":
+            elif self.action != "set":
                 await interaction.response.defer()
-                await _settle(interaction, runtime=runtime, row=row, charge=None)
+                accept = self.action == "accept"
+                await _settle(interaction, runtime=runtime, row=row, charge=None, accept=accept)
             else:
                 await interaction.response.send_modal(SettleModal(runtime=runtime, row=row))
         except Exception as err:

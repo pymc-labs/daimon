@@ -102,7 +102,7 @@ function priceText(p: Record<string, unknown>): string {
 const summary = (body: Record<string, unknown>) => list(body.options).map((o) => `${bag(o).label} (${priceText(bag(bag(o).price))})`).join(", ")
 
 const menuOf = (key: string, body: Record<string, unknown>, revision = 1): Omit<Menu, "used_in"> =>
-  ({ key, name: String(body.name ?? key), revision, body, summary: summary(body), options: list(body.options).length })
+  ({ key, name: String(body.name ?? key), revision, body, summary: summary(body), options: list(body.options).length, channel: null })
 let menus: Omit<Menu, "used_in">[] = [
   menuOf("support", { name: "Support", options: [
     { key: "review", label: "Review this thread", price: { kind: "range", min: "1", max: "3" } },

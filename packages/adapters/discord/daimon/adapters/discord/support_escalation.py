@@ -105,7 +105,7 @@ from daimon.core.support_escalation import (
     UNAVAILABLE,
     build_custom_id,
 )
-from daimon.core.support_routing import log_undelivered, support_destination
+from daimon.core.support_routing import log_undelivered, request_destination
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -355,8 +355,12 @@ async def submit_answer_request(
     destination = None
     if offered.on:
         async with runtime.sessionmaker() as session:
-            destination = await support_destination(
-                session, tenant_id=origin.tenant_id, platform="discord", settings=settings
+            destination = await request_destination(
+                session,
+                tenant_id=origin.tenant_id,
+                platform="discord",
+                place=origin.support_place,
+                settings=settings,
             )
     if destination is None:
         # Disabled between the offer and the submit. Nothing is spent.
@@ -383,6 +387,7 @@ async def submit_answer_request(
                 choice=choice,
                 default_allowance=settings.support.credits_per_user,
                 exempt=exempt,
+                support_channel_id=destination.channel_id,
             )
     except SupportError as err:
         await _notice(interaction, str(err))
@@ -398,7 +403,7 @@ async def submit_answer_request(
         bot,
         channel_id=destination.channel_id,
         body=_post_body(interaction, origin, row, view, sealed=sealed),
-        view=settle_view(row.id) if row.status == "pending" else None,
+        view=settle_view(row) if row.status == "pending" else None,
     )
     if post is not None:
         async with runtime.sessionmaker() as session, session.begin():

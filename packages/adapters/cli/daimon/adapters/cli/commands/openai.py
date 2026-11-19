@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.smoke import SmokeCheckError
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_manifest import ConfigurationGrant
@@ -170,7 +171,7 @@ def openai_init_command(
     model: Annotated[str, typer.Option("--model", help="OpenAI model ID for the saved agent.")],
     name: Annotated[
         str, typer.Option("--name", help="Display name for the saved agent.")
-    ] = "daimon",
+    ] = BUILTIN_AGENT_NAME,
     platform: Annotated[
         str,
         typer.Option(

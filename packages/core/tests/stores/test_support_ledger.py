@@ -129,6 +129,7 @@ async def _submit(
     now: datetime | None = None,
     channel: str = "C1",
     place: SupportPlace = PLACE,
+    support_channel: str | None = None,
 ) -> ledger.SubmitOutcome:
     return await ledger.submit_request(
         session,
@@ -143,6 +144,7 @@ async def _submit(
         choice=choice or RequestChoice.default("help"),
         default_allowance=allowance,
         exempt=exempt,
+        support_channel_id=support_channel,
         now=now,
     )
 
@@ -152,6 +154,8 @@ async def _settle(
     escalation_id: uuid.UUID,
     charge: Decimal | None,
     expected: Decimal | None = None,
+    *,
+    accept: bool = False,
 ) -> ledger.SettleOutcome:
     return await ledger.settle_request(
         session,
@@ -161,6 +165,15 @@ async def _settle(
         settled_by_account_id=None,
         default_allowance=20,
         expected_charge=expected,
+        accept=accept,
+    )
+
+
+async def _charged_at_submit(session: AsyncSession, row_id: uuid.UUID) -> None:
+    """Make a pending fixed request one charged at submit, as before Accept."""
+    await session.execute(
+        text("UPDATE support_escalations SET status = 'settled', charge = hold WHERE id = :id"),
+        {"id": row_id},
     )
 
 
@@ -176,11 +189,11 @@ async def test_default_spent_when_legacy_rows_then_equals_their_count(
         await _legacy(db_session, tenant.id, message)
     outcome = await _submit(db_session, tenant.id, message="m3")
     assert outcome.status == "recorded" and outcome.row, "the default ledger records"
-    assert (outcome.row.charged_to, outcome.row.charge, outcome.row.status) == (
+    assert (outcome.row.charged_to, outcome.row.hold, outcome.row.status) == (
         "default",
         D(1),
-        "settled",
-    ), "a default request is charged 1 at submit"
+        "pending",
+    ), "a default request holds 1 until accepted"
     spent = await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1")
     assert spent == D(3), "the sum equals the number of rows"
 
@@ -401,6 +414,24 @@ async def test_submit_when_exempt_then_recorded_settled_and_charged_nowhere(
     assert spent == 0, "an exempt row counts on no ledger"
     settle = await _settle(db_session, row.id, D(1))
     assert settle.status == "invalid", "an exempt request has no amount to set"
+
+
+async def test_settle_when_fixed_then_pending_until_accepted_at_its_price(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    await _menu(db_session, tenant.id)
+    await _limit(db_session, tenant.id, shared=D(2))
+    row = (await _submit(db_session, tenant.id, _choice("quick"), support_channel="S1")).row
+    review = (await _submit(db_session, tenant.id, _choice("review"), message="m2")).row
+    assert row and review, "recorded"
+    assert (row.status, row.hold, row.charge) == ("pending", D("0.5"), None), "held, not charged"
+    assert row.support_channel_id == "S1", "the channel it was sent to, kept at submit"
+    unset = await _settle(db_session, review.id, None, accept=True)
+    assert unset.status == "invalid", "a range has no price to accept"
+    done = await _settle(db_session, row.id, None, accept=True)
+    assert done.status == "settled" and done.row, "accepted"
+    assert (done.row.charge, done.row.settled_by) == (D("0.5"), "staff"), "charged its price"
 
 
 async def test_settle_when_pending_then_charges_once_within_bounds_and_balance(
@@ -666,6 +697,7 @@ async def _handled(db_session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, 
         row = (await _submit(db_session, tenant_id, _choice(key), message=message)).row
         assert row, f"{name} recorded"
         ids[name] = row.id
+    await _charged_at_submit(db_session, ids["charged"])
     assert (await _settle(db_session, ids["settled"], D(2))).status == "settled"
     assert (await _settle(db_session, ids["declined"], None)).status == "declined"
     return ids
@@ -727,7 +759,10 @@ async def test_settle_when_charged_at_submit_declined_then_refunds_the_charge(
     tenant = await make_tenant(db_session, platform="slack")
     await _menu(db_session, tenant.id)
     limit = await _limit(db_session, tenant.id, shared=D(10))
-    row = (await _submit(db_session, tenant.id, _choice("quick"))).row
+    pending = (await _submit(db_session, tenant.id, _choice("quick"))).row
+    assert pending, "recorded"
+    await _charged_at_submit(db_session, pending.id)
+    row = await ledger.get_request(db_session, escalation_id=pending.id)
     assert row and row.status == "settled" and row.charge == D("0.5"), "charged at submit"
     now = datetime.now(UTC)
     shared, person = await ledger.limit_spent(

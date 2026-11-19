@@ -194,7 +194,5 @@ def test_an_expired_side_call_price_warns_at_import(monkeypatch: pytest.MonkeyPa
 def test_side_call_over_the_priced_limit_keeps_long_context_rates() -> None:
     astra = side_call_rates("gpt-6-astra", 300_000)
     assert (astra.input, astra.output) == (20.0, 75.0), "sourced multipliers apply"
-    with capture_logs() as logs:
-        luna = side_call_rates("gpt-6-luna", 300_000)
-    assert luna == side_call_rates("gpt-6-luna"), "no sourced long rate: the base rate floor"
-    assert [entry["event"] for entry in logs] == ["side_call.priced_at_base_rate"]
+    luna = side_call_rates("gpt-6-luna", 300_000)
+    assert (luna.input, luna.output) == (0.2, 0.75), "Luna's sourced multipliers apply"

@@ -21,6 +21,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
     tenant_scoped_display_title,
 )
+from daimon.core.defaults.owned import AgentNameTaken
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
@@ -1210,7 +1211,7 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
     from daimon.core.defaults.loader import load_agent_specs
 
     root = Path(__file__).resolve().parents[4] / "defaults" / "agents"
-    shipped = next(spec for spec in load_agent_specs(root) if spec.name == "daimon")
+    shipped = next(spec for spec in load_agent_specs(root) if spec.name == "default")
     limited = [ref for ref in shipped.skills if ref.platforms is not None]
     assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
         *(("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")),
@@ -1237,7 +1238,7 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
         def on_create(req: httpx.Request, _m: object) -> httpx.Response:
             payload.update(json.loads(req.content))
             return httpx.Response(
-                200, json=_tagged_agent(id_="ag", name="daimon", tenant_id=TENANT_ID)
+                200, json=_tagged_agent(id_="ag", name="default", tenant_id=TENANT_ID)
             )
 
         router.add("POST", r"/v1/agents", on_create)
@@ -1346,3 +1347,37 @@ async def test_reconcile_agent_updates_seeded_daimon_when_a_renamed_default_also
 
     assert outcome.action is Action.UPDATED, "the live seeded agent is still updated"
     assert outcome.anthropic_id == "ag_seeded", "the update targets the seeded daimon"
+
+
+async def test_reconcile_agent_when_creating_daimon_beside_the_renamed_seed_then_refuses() -> None:
+    """The renamed seeded agent still answers `daimon`, so a new one may not take it."""
+    agents = [_tagged_agent(id_="ag_renamed", name="default", tenant_id=TENANT_ID, managed=True)]
+    client = build_fake_anthropic_http(_router_with_agents(agents).dispatch)
+
+    with pytest.raises(AgentNameTaken):
+        await reconcile_agent(
+            client,
+            _agent_spec(),
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            managed=False,
+            create_only=True,
+        )
+
+
+async def test_reconcile_agent_when_creating_default_beside_the_seeded_daimon_then_refuses() -> (
+    None
+):
+    """The seeded `daimon` answers `default` until apply renames it into that name."""
+    agents = [_tagged_agent(id_="ag_seeded", name="daimon", tenant_id=TENANT_ID, managed=True)]
+    client = build_fake_anthropic_http(_router_with_agents(agents).dispatch)
+
+    with pytest.raises(AgentNameTaken):
+        await reconcile_agent(
+            client,
+            _agent_spec().model_copy(update={"name": "default"}),
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            managed=False,
+            create_only=True,
+        )

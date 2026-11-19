@@ -231,6 +231,7 @@ def _runtime(
 ) -> McpRuntime:
     settings = MagicMock()
     settings.tool_safety = OPEN_TOOL_SAFETY
+    settings.features = {}  # monitoring reads the deployment feature map
     settings.mcp.public_url = None
     settings.mcp.jwt_secret = None
     settings.github.fallback_pat = None

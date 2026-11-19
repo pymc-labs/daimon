@@ -536,7 +536,7 @@ async def test_requests_list_when_undelivered_then_only_requests_no_channel_rece
         )
 
 
-async def test_settle_when_charged_at_submit_then_kept_or_refunded_and_leaves_the_list(
+async def test_settle_when_fixed_then_accepted_without_an_amount_or_declined(
     committing_sessionmaker: Factory,
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
@@ -552,17 +552,31 @@ async def test_settle_when_charged_at_submit_then_kept_or_refunded_and_leaves_th
     ]
     kwargs = {"pending": True, "scope": None, "scope_id": None, "limit": 50, "undelivered": True}
     lost = await _list_requests_impl(runtime, auth, **kwargs)
-    assert {(r.status, r.counted) for r in lost} == {("settled", "2")}, "charged, still listed"
+    assert {(r.status, r.counted) for r in lost} == {("pending", "2")}, "held until accepted"
     settle = {"expected_charge": None}
-    with pytest.raises(ToolError, match="Keep that or decline to refund it"):
-        await _settle_request_impl(runtime, auth, request_id=ids[0], charge="1", **settle)
-    kept = await _settle_request_impl(runtime, auth, request_id=ids[0], charge="2", **settle)
-    assert kept.text == f"Charged 2 credits. {CLIENT_NOT_NOTIFIED}", "kept as is"
+    with pytest.raises(ToolError, match="not both"):
+        await _settle_request_impl(
+            runtime, auth, request_id=ids[0], charge="2", accept=True, **settle
+        )
+    kept = await _settle_request_impl(
+        runtime, auth, request_id=ids[0], charge=None, accept=True, **settle
+    )
+    assert kept.text == f"Charged 2 credits. {CLIENT_NOT_NOTIFIED}", "its price"
     refund = await _settle_request_impl(runtime, auth, request_id=ids[1], charge=None, **settle)
-    assert (refund.status, refund.charge) == ("declined", "0"), "refunded"
+    assert (refund.status, refund.charge) == ("declined", "0"), "declined"
     assert await _list_requests_impl(runtime, auth, **kwargs) == [], "both left the list"
-    with pytest.raises(ToolError, match="Already"):
-        await _settle_request_impl(runtime, auth, request_id=ids[0], charge=None, **settle)
+
+
+@pytest.mark.usefixtures("own_channel")
+async def test_menu_set_when_channel_then_stored_on_the_parent_and_shown(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+    body = {**_MENU, "channel": {"id": _THREAD}}
+    await _set_menu_impl(runtime, auth, key="support", body=body, expected_revision=None)
+    (shown,) = await _get_menus_impl(runtime, auth, "support")
+    assert shown.body["channel"] == {"id": _PARENT}, "a thread resolves to its parent"
 
 
 async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(

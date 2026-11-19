@@ -36,6 +36,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSkillParams
 from daimon.core.constants import AGENT_SKILL_CAP
+from daimon.core.defaults.builtin_agent import builtin_lookup_names
 from daimon.core.defaults.ma_index import (
     find_attach_mount_collision,
     find_conflicting_skill_mount,
@@ -478,9 +479,13 @@ async def _find_own_skill(
             f"'{name}' is already a shared or built-in skill here, and the two would "
             f"clash on the agent. Rename this one (e.g. {name}-2)."
         )
-    title = tenant_scoped_display_title(tenant_id=tenant_id, name=name, agent_name=agent_name)
-    own = await find_skill_by_display_title(client, title, on_truncation="raise")
-    return own.id if own is not None else None
+    # The built-in agent's skills keep the title they got under its old name.
+    for owner in builtin_lookup_names(agent_name) or (agent_name,):
+        title = tenant_scoped_display_title(tenant_id=tenant_id, name=name, agent_name=owner)
+        own = await find_skill_by_display_title(client, title, on_truncation="raise")
+        if own is not None:
+            return own.id
+    return None
 
 
 async def _refuse_shared(

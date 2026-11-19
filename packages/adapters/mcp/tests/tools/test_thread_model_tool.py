@@ -236,30 +236,47 @@ def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("carded", [True, False], ids=["card_surface", "no_card_surface"])
-async def test_another_providers_model_is_kept_at_once_and_says_whats_off(
+async def test_another_providers_model_previews_then_applies_only_on_the_card(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     carded: bool,
 ) -> None:
-    """Like a model change: no card and no second call, even where no card can show."""
+    """A move to another provider changes nothing until its confirming call passes the card."""
     from dataclasses import replace
+
+    from daimon.adapters.mcp.tools import _card
 
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    gate = {} if carded else {"host_call_gate": "off"}
-    runtime = _runtime(committing_sessionmaker, mux=True, **gate)
+    runtime = _runtime(committing_sessionmaker, mux=True)
     await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True)
     _with_a_loss(monkeypatch)
+    if carded:
+
+        async def approved(*_args, **_kwargs):
+            return None
+
+        monkeypatch.setattr(_card, "session_card_gap", approved)
     async with discord_turn_origin(
         committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         auth = replace(_auth(tenant.id, caller.id), no_confirmation_surface=not carded)
-        kept = await _set_thread_model_impl(
-            runtime, auth, origin_context_id=str(origin.id), model="openai:gpt-6-luna"
-        )
-    assert kept.model == "gpt-6-luna"
+        pick = {"origin_context_id": str(origin.id), "model": "openai:gpt-6-luna"}
+        shown = await _set_thread_model_impl(runtime, auth, **pick)
+        assert shown.revision == 0 and shown.model == "openai:gpt-6-luna", shown
+        assert "Nothing changed yet" in shown.note and _LIMIT in shown.note, shown.note
+        assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+        if not carded:
+            with pytest.raises(ToolError, match="cannot verify the confirmation card"):
+                await _set_thread_model_impl(runtime, auth, **pick, revision=0)
+            assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+            return
+        with pytest.raises(ToolError, match="changed since you looked"):
+            await _set_thread_model_impl(runtime, auth, **pick, revision=7)
+        kept = await _set_thread_model_impl(runtime, auth, **pick, revision=0)
+    assert kept.model == "gpt-6-luna" and kept.revision is None, kept
     assert _LIMIT in kept.note, "the note says what the new provider limits"
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") == "gpt-6-luna"
 

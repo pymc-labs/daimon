@@ -205,6 +205,7 @@ source_modules = [
     "daimon.core.channel_budget_notice",
     "daimon.core.channel_copies",
     "daimon.core.channel_ids",
+    "daimon.core.channel_post_check",
     "daimon.core.channel_environments",
     "daimon.core.channel_overview",
     "daimon.core.channel_rules",
@@ -275,6 +276,9 @@ source_modules = [
     "daimon.core.ma",
     "daimon.core.ma_identity",
     "daimon.core.ma_resolver",
+    "daimon.core.monitoring",
+    "daimon.core.monitoring_sweep",
+    "daimon.core.monitoring_view",
     "daimon.core.mux_backend",
     "daimon.core.mux_compat",
     "daimon.core.native_admins",
@@ -335,7 +339,10 @@ source_modules = [
     "daimon.core.promo_codes",
     "daimon.core.promo_credit",
     "daimon.core.promo_settlement",
+    "daimon.core.provider_clients",
+    "daimon.core.provider_key_gate",
     "daimon.core.provider_keys",
+    "daimon.core.provider_purge",
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.release",
@@ -577,6 +584,10 @@ ignore_imports = [
     # Generic names (`segment`, `usage`) that stay on their submodule.
     "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.events",
     "daimon.core.turn.selfhosted_deployment -> mux.drivers.selfhosted.normalize",
+    # The Gemini records-row contract, for the storage backends that implement it.
+    "daimon.core.turn.gemini_state -> mux.drivers.gemini.storage",
+    "daimon.core.turn.gemini_retention -> mux.drivers.gemini.storage",
+    "daimon.core.stores.gemini_runtime_state -> mux.drivers.gemini.storage",
 ]
 
 [tool.pytest.ini_options]

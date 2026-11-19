@@ -10,8 +10,9 @@ Credits are `Decimal` with at most two places. JSON and YAML carry them as
 decimal strings ("0.5"); a float is refused so no value is ever rounded on
 the way in. They never touch the USD ledger.
 
-Prices bound the charge: `fixed` and `steps` settle at submit, `range` and
-`quoted` stay pending and hold their minimum until staff settle them.
+Prices bound the charge, and nothing is charged until staff accept a request:
+`fixed` and `steps` hold their price until accepted, `range` and `quoted` hold
+their minimum until settled. A menu may name the channel its requests go to.
 """
 
 from __future__ import annotations
@@ -287,10 +288,19 @@ class SupportOption(_Spec):
         return self
 
 
+class MenuChannel(_Spec):
+    """Where a menu's requests go: a channel of the workspace; Teams adds its team and URL."""
+
+    id: _Text
+    team_id: _Text | None = None
+    service_url: _Text | None = None
+
+
 class MenuSpec(_Spec):
-    """A tenant's menu for Ask a person, as stored in `support_menus.options`."""
+    """A tenant's menu for Ask a person, as stored in `support_menus`."""
 
     name: Annotated[_Text, StringConstraints(max_length=MAX_MENU_NAME)]
+    channel: MenuChannel | None = None
     options: tuple[SupportOption, ...] = Field(min_length=1, max_length=MAX_OPTIONS)
 
     @model_validator(mode="after")
@@ -446,8 +456,8 @@ def cheapest_bounds(price: Price) -> PriceBounds:
     return price_bounds(price)
 
 
-def settles_at_submit(price: Price) -> bool:
-    """Fixed and steps prices are known at submit; range and quoted wait for staff."""
+def has_set_charge(price: Price) -> bool:
+    """Fixed and steps prices are known at submit, so Accept charges them as they are."""
     return isinstance(price, FixedPrice | StepsPrice)
 
 
@@ -496,6 +506,11 @@ class OptionSnapshot(_Spec):
     @property
     def bounds(self) -> PriceBounds:
         return price_bounds(self.price, step=self.step)
+
+    @property
+    def accept_charge(self) -> Decimal | None:
+        """What Accept charges: a fixed or steps price; None when staff set the amount."""
+        return self.bounds.lower if has_set_charge(self.price) else None
 
     @property
     def step_label(self) -> str | None:
@@ -937,11 +952,13 @@ CLIENT_NOT_NOTIFIED: Final = "The client is not notified. Tell them the charge y
 """Decision 8: on every settle control and every settler's confirmation."""
 CHOOSE_OPTION: Final = "Choose an option"
 SET_CHARGE: Final = "Set charge"
+ACCEPT: Final = "Accept"
 DECLINE: Final = "Decline"
 CHARGE_FIELD: Final = "Credits"
 REQUEST_GONE: Final = "This request no longer exists."
 LIMIT_GONE: Final = "This request's limit was removed. Decline it instead."
 SETTLE_ELSEWHERE: Final = "Set the charge in the support channel."
+OWN_REQUEST: Final = "You can't settle your own request. Ask an admin or an owner."
 
 
 def received_text(row: SupportEscalationRow, view: LimitView) -> str:
@@ -1029,6 +1046,8 @@ def post_status_text(
         return f"Charged {credits_text(charge)}"
     if bounds.upper is None:
         return f"Pending: at least {credits_text(bounds.lower)}"
+    if bounds.upper == bounds.lower:
+        return f"Pending: {credits_text(bounds.lower)}"
     return f"Pending: {format_credits(bounds.lower)}-{format_credits(bounds.upper)} credits"
 
 
@@ -1070,6 +1089,7 @@ __all__ = [
     "Balance",
     "OptionSnapshot",
     "LimitSpec",
+    "MenuChannel",
     "PriceBounds",
     "RequestChoice",
     "MenuSpec",
