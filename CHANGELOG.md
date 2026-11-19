@@ -47,9 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only when the person approves it. Everyone in the thread sees the card. A
   model change within the same provider applies at once, as before.
 - **Privacy names every provider that stores your conversations, and Delete
-  reaches OpenAI.** The privacy panel on Discord, Slack and Teams and the
-  privacy policy name OpenAI and Google (Gemini) on servers where an admin
-  enabled them. Deleting your account now also asks OpenAI to delete the
+  reaches OpenAI.** The privacy panel on Discord, Slack and Teams, the web
+  Delete dialog and the privacy policy name OpenAI and Google (Gemini) on
+  servers where an admin enabled them. Deleting your account now also asks OpenAI to delete the
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
