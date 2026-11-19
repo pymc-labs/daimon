@@ -27,6 +27,7 @@ from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.authz import Action
 from daimon.core.channel_budget import (
+    BudgetSpec,
     ChannelBudgetError,
     ChannelBudgetStatus,
     describe_budget,
@@ -43,6 +44,7 @@ from daimon.core.security_audit import record_authz_denial, record_policy_decisi
 from daimon.core.stores import channel_budgets as store
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import get_source_channel
+from daimon.core.stores.domain import ChannelBudgetRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
@@ -338,23 +340,29 @@ async def _set_channel_budget_impl(
     _require_platform_admin(auth)
     require_scope(auth, "channels:write")
     platform = _require_platform(auth)
+
+    def parse(current: ChannelBudgetRow | None) -> BudgetSpec:
+        try:
+            return parse_budget_spec(
+                limit_usd=limit_usd,
+                window=window,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel_id=alert_channel_id,
+                current=current,
+            )
+        except ChannelBudgetError as err:
+            raise ToolError(f"{err}. Nothing was saved.") from err
+
+    parse(None)  # refused before any lookup or write
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
     async with runtime.session_factory() as session:
-        current = await store.get_channel_budget(
-            session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
+        spec = parse(
+            await store.get_channel_budget(
+                session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
+            )
         )
-    try:
-        spec = parse_budget_spec(
-            limit_usd=limit_usd,
-            window=window,
-            starts_at=starts_at,
-            ends_at=ends_at,
-            on_limit=on_limit,
-            alert_channel_id=alert_channel_id,
-            current=current,
-        )
-    except ChannelBudgetError as err:
-        raise ToolError(f"{err}. Nothing was saved.") from err
     if alert_channel_id is not None:
         # As a support channel is: a channel of this workspace the caller can see.
         alert_id = await _budget_channel(runtime, auth, alert_channel_id)

@@ -206,6 +206,7 @@ source_modules = [
     "daimon.core.channel_budget_notice",
     "daimon.core.channel_copies",
     "daimon.core.channel_ids",
+    "daimon.core.channel_post_check",
     "daimon.core.channel_environments",
     "daimon.core.channel_overview",
     "daimon.core.channel_rules",

@@ -36,6 +36,7 @@ from daimon.core.channel_backend import channel_ref, current_backend
 from daimon.core.channel_budget import (
     BUDGET_ON_LIMIT,
     BUDGET_WINDOWS,
+    BudgetSpec,
     ChannelBudgetError,
     describe_budget,
     load_budget_status,
@@ -66,7 +67,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.permissions import RuleRefused, thread_rule_key
 from daimon.core.stores import channel_budgets
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
-from daimon.core.stores.domain import Platform
+from daimon.core.stores.domain import ChannelBudgetRow, Platform
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
@@ -196,6 +197,21 @@ async def budget_set(
     alert_channel: str | None = None,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
+    def parse(current: ChannelBudgetRow | None) -> BudgetSpec:
+        try:
+            return parse_budget_spec(
+                limit_usd=usd,
+                window=window,
+                starts_at=starts_at,
+                ends_at=ends_at,
+                on_limit=on_limit,
+                alert_channel_id=alert_channel,
+                current=current,
+            )
+        except ChannelBudgetError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    parse(None)  # refused before any lookup or write
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     target = await parent_channel(
         rt,
@@ -205,21 +221,11 @@ async def budget_set(
         transport=discord_transport,
     )
     async with rt.sessionmaker() as session:
-        current = await channel_budgets.get_channel_budget(
-            session, tenant_id=tenant_id, platform=platform, channel_id=target
+        spec = parse(
+            await channel_budgets.get_channel_budget(
+                session, tenant_id=tenant_id, platform=platform, channel_id=target
+            )
         )
-    try:
-        spec = parse_budget_spec(
-            limit_usd=usd,
-            window=window,
-            starts_at=starts_at,
-            ends_at=ends_at,
-            on_limit=on_limit,
-            alert_channel_id=alert_channel,
-            current=current,
-        )
-    except ChannelBudgetError as exc:
-        raise typer.BadParameter(str(exc)) from exc
     if alert_channel is not None:
         alert_id = await parent_channel(
             rt,
