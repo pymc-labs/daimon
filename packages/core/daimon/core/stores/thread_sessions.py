@@ -320,31 +320,6 @@ async def get_latest_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
-async def newest_thread_agent(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    platform: str,
-    thread_id: str,
-) -> str | None:
-    """The agent id of the thread's newest session row, of any status; None without one.
-
-    A thread whose sessions all ended still names the agent that answered in it. Like
-    `get_latest_thread_session`, an attribution hint only: never used to bind a session.
-    """
-    result = await session.execute(
-        select(ThreadSession.ma_agent_id)
-        .where(
-            ThreadSession.tenant_id == tenant_id,
-            ThreadSession.platform == platform,
-            ThreadSession.thread_id == thread_id,
-        )
-        .order_by(ThreadSession.created_at.desc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def create_thread_session(
     session: AsyncSession,
     *,
