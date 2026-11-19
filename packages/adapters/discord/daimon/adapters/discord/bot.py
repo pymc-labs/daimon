@@ -127,6 +127,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
+from daimon.core.direct_messages import sealed_channel_ids
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
@@ -2338,7 +2339,7 @@ class DaimonBot(commands.Bot):
                     self.tree.clear_commands(guild=guild_obj)
                     if guild.id in command_guild_ids:
                         self.tree.copy_global_to(guild=guild_obj)
-                        for command in dm_only:
+                        for command in dm_capable:
                             self.tree.remove_command(command.name, guild=guild_obj)
                     await self.tree.sync(guild=guild_obj)
                     self._ready_synced_guild_ids.add(guild.id)
@@ -5753,12 +5754,21 @@ class DaimonBot(commands.Bot):
         # API). Inlined images get a URL line too, a handle for external APIs.
         attachment_prefix, image_blocks = await prepare_attachments(attachments)
         forward_messages = query_messages or (message,)
+        # A forward from a sealed channel stays out of every turn but that channel's own.
+        sealed_sources: frozenset[str] = frozenset()
+        if any(getattr(m, "message_snapshots", None) for m in forward_messages):
+            here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
+            sealed_sources = (
+                await sealed_channel_ids(self.runtime.turn_deps, tenant_id=tenant_id) - here
+            )
 
         def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
             # A forwarded message's content is untrusted text the person could see.
             forwarded = "\n".join(
                 forwarded_lines(
-                    forward_messages, omit_oversized_image_urls=omit_oversized_image_urls
+                    forward_messages,
+                    omit_oversized_image_urls=omit_oversized_image_urls,
+                    sealed_sources=sealed_sources,
                 )
             )
             return "\n".join(part for part in (attachment_prefix, forwarded) if part)

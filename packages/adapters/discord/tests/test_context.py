@@ -2144,6 +2144,13 @@ class TestForwardedInput:
         assert 'oversized="true"' in reseed
         assert huge.url not in reseed, "a replay must never hand the session the huge image"
 
+    def test_a_forward_from_a_sealed_channel_is_left_out(self) -> None:
+        msg = _forward()
+        msg.reference = MagicMock(channel_id=900)
+
+        assert forwarded_lines([msg], sealed_sources=frozenset({"900"})) == []
+        assert forwarded_lines([msg], sealed_sources=frozenset({"901"})), "another channel's seal"
+
     def test_a_plain_message_forwards_nothing(self) -> None:
         msg = _make_message(content="hi")
         msg.message_snapshots = []
