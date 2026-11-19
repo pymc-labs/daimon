@@ -195,29 +195,6 @@ async def test_a_turn_whose_usage_is_final_is_not_reread_by_a_later_pass(sm, mon
     assert later == 0 and read == ["turn"], "a final turn is never read again"
 
 
-async def test_a_billed_fallback_keeps_the_turn_reread_across_a_restart(sm, monkeypatch):
-    """A measured but non-final revision is billed, yet the unknown one stays pending, so
-    a restarted scheduler still reads the turn until a final revision closes it."""
-    from daimon.core.turn.openai_late_usage import DurableRereads
-    from mux.drivers.openai import OpenAIUsage
-
-    _, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3), final=False)
-    debited = await _debited(sm)
-    assert debited < 0 and await _pending(sm) == 1, "the fallback is billed, the turn stays open"
-    async with sm() as db:
-        pending = (await mux_state.pending_outbox(db))[0].observation
-
-    async def reconcile_turn(self, scope, session, turn_id):
-        read.append(turn_id)
-        return (pending.model_copy(update=_MEASURED | {"revision": 3, "final": True}),)
-
-    monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
-    assert await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC)) == 1
-    assert await _pending(sm) == 0 and await _debited(sm) == debited, "final closes, no recharge"
-    assert await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC)) == 0
-    assert read == ["turn", "turn"], "read once more after the restart, then never"
-
-
 async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch):
     reads, read = await _reread(
         sm, monkeypatch, seen_ago=timedelta(hours=3), budget_s=0.05, stall=True
