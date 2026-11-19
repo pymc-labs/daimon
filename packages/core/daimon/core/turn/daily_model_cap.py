@@ -76,8 +76,10 @@ class CappedFlashAccounting:
     The Flash chain may fall back to another model on a 503 (`FLASH_MODELS`), so the
     cap is checked for the model each attempt names, before its hold and its create,
     until the turn's first request is accepted. Later requests (tool-result
-    continuations) are never refused halfway through an answer. A fallback without a
-    current tariff is not run uncounted: the turn ends with the primary's 503.
+    continuations) are never refused halfway through an answer. A model without a
+    current tariff never runs on any request, first or later: its spend could be
+    neither billed nor capped. The turn's own model is refused plainly; a fallback
+    ends the turn with the primary's 503.
     """
 
     def __init__(
@@ -91,22 +93,18 @@ class CappedFlashAccounting:
         self._started = False
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
-        if not self._started:
-            try:
-                await check_daily_model_cap(
-                    self._request,
-                    provider=model.provider,
-                    model=model.id,
-                    price=self._prices.get(model.id),
-                    cap=self._cap,
-                )
-            except AdmissionDenied as error:
-                if attempt == 1 or error.reason != "provider_price_unavailable":
-                    raise
-                from mux.contracts.errors import ProviderError
+        price = self._prices.get(model.id)
+        if price is None or not price.current_on(self._request.now().date()):
+            log.warning("turn.unpriced_model_refused", model=model.id, attempt=attempt)
+            if attempt == 1 and not self._started:
+                raise AdmissionDenied(reason="provider_price_unavailable", provider=model.id)
+            from mux.contracts.errors import ProviderError
 
-                # The primary was busy; an unpriced fallback never runs.
-                raise ProviderError("overloaded", retryable=True, native_code="503") from None
+            raise ProviderError("overloaded", retryable=True, native_code="503")
+        if not self._started:
+            await check_daily_model_cap(
+                self._request, provider=model.provider, model=model.id, price=price, cap=self._cap
+            )
         await self._inner.before_attempt(model=model, attempt=attempt)
 
     async def after_attempt(self, *, receipt: FlashAttempt) -> None:

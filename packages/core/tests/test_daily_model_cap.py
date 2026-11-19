@@ -347,6 +347,11 @@ def _flash_request() -> dict[str, Any]:
     }
 
 
+FLASH = ProviderPrice("gemini", "gemini-3.8-flash", NOW.date(), Decimal(1), Decimal(1), Decimal(1))
+# A request whose clock reads NOW; the cap check itself is stubbed where it would run.
+STUB_REQUEST = cast(Any, SimpleNamespace(now=lambda: NOW))
+
+
 async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(monkeypatch):
     """A 503 on the primary moves down the chain; each fallback model is capped too."""
     from daimon.core.turn import daily_model_cap
@@ -362,7 +367,8 @@ async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(mon
 
     monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
     inner, source = _Inner(), _Source()
-    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    prices = {"gemini-3.8-flash": FLASH, "gemini-flash-latest": FLASH}
+    accounting = CappedFlashAccounting(inner, STUB_REQUEST, prices, Decimal(20))
     with pytest.raises(AdmissionDenied) as refused:
         await FlashTransport(cast(Any, source), accounting).create(_flash_request())
 
@@ -372,41 +378,31 @@ async def test_a_flash_fallback_past_its_cap_is_refused_before_it_is_created(mon
     assert inner.attempts == ["gemini-3.8-flash"], "no hold for the refused fallback"
 
 
-async def test_a_fallback_without_a_tariff_never_runs_and_the_503_stands():
-    """gemini-flash-latest has no dated tariff: never run uncounted, never 'unpriced'."""
-    from contextlib import asynccontextmanager
-
+async def test_a_model_without_a_tariff_never_runs_on_any_request():
+    """gemini-flash-latest has no dated tariff: never run uncounted, first request or later."""
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
-
-    @asynccontextmanager
-    async def no_db():
-        yield None
-
-    request = SimpleNamespace(
-        admission=SimpleNamespace(resolved=lambda key: None),
-        tenant_id=TENANT,
-        now=lambda: NOW,
-        deps=SimpleNamespace(sessionmaker=no_db, markup=Decimal(1)),
-    )
+    from mux.drivers.gemini.flash import FlashAttempt
     from mux.errors import ProviderError
 
     inner = _Inner()
-    accounting = CappedFlashAccounting(inner, cast(Any, request), {}, Decimal(20))
-    with pytest.raises(ProviderError) as busy:
-        await accounting.before_attempt(
-            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=2
-        )
-    assert (busy.value.category, busy.value.native_code) == ("overloaded", "503")
-    assert inner.attempts == [], "no hold for a fallback that never runs"
-    # The turn's own model without a tariff is still refused plainly.
+    accounting = CappedFlashAccounting(inner, STUB_REQUEST, {}, None)
+    alias = ModelRef(provider="gemini", id="gemini-flash-latest")
     with pytest.raises(AdmissionDenied) as refused:
-        await accounting.before_attempt(
-            model=ModelRef(provider="gemini", id="gemini-flash-latest"), attempt=1
-        )
+        await accounting.before_attempt(model=alias, attempt=1)
     assert (refused.value.reason, refused.value.provider) == (
         "provider_price_unavailable",
         "gemini-flash-latest",
+    ), "the turn's own model without a tariff is refused plainly, even uncapped"
+    with pytest.raises(ProviderError) as busy:
+        await accounting.before_attempt(model=alias, attempt=2)
+    assert (busy.value.category, busy.value.native_code) == ("overloaded", "503"), busy.value
+    await accounting.after_attempt(
+        receipt=FlashAttempt(model=alias, attempt=1, outcome="accepted", interaction_id="i1")
     )
+    for attempt in (1, 2):  # a tool-result continuation, and its fallback
+        with pytest.raises(ProviderError):
+            await accounting.before_attempt(model=alias, attempt=attempt)
+    assert inner.attempts == [], "no hold for a model that never runs"
 
 
 async def test_a_continuation_is_never_refused_halfway(monkeypatch):
@@ -422,14 +418,16 @@ async def test_a_continuation_is_never_refused_halfway(monkeypatch):
 
     monkeypatch.setattr(daily_model_cap, "check_daily_model_cap", cap)
     inner = _Inner()
-    accounting = CappedFlashAccounting(inner, cast(Any, None), {}, Decimal(20))
+    accounting = CappedFlashAccounting(
+        inner, STUB_REQUEST, {"gemini-3.8-flash": FLASH}, Decimal(20)
+    )
     flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
     await accounting.before_attempt(model=flash, attempt=1)
     await accounting.after_attempt(
         receipt=FlashAttempt(model=flash, attempt=1, outcome="accepted", interaction_id="i1")
     )
     await accounting.before_attempt(model=flash, attempt=1)  # a tool-result continuation
-    assert checked == [1]
+    assert checked == [1], "the cap is checked once, as the turn starts"
     assert inner.attempts == ["gemini-3.8-flash", "gemini-3.8-flash"]
 
 

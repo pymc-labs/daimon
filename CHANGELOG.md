@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **Gemini never runs a model it can't price.** When Gemini 3.8 Flash was busy
+  partway through a reply, the next request could fall back to the
+  `gemini-flash-latest` alias, which has no tariff, so its tokens were neither
+  billed nor counted against the daily model cap. A model with no current tariff
+  is now refused on every request of a turn, not only the first.
+
 - **GPT spend counts against the right channel budget.** A GPT reply was debited
   to the channel it ran in, not the channel whose budget the turn counts
   against, so a direct message or an agent with its own budget channel charged
