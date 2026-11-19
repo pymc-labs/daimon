@@ -39,6 +39,7 @@ from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.thread_model_flow import thread_pick_result
 from daimon.core.thread_model_switch import pick_thread, pick_value, thread_pick_for
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
+from daimon.core.turn.openai_late_usage import LATE_USAGE
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.testing.shared_helpers import OfflineSettings
 from daimon.testing.sim.anthropic import AnthropicAPI
@@ -187,14 +188,19 @@ async def pick_model(
 
 @contextmanager
 def _compressed_waits() -> Iterator[None]:
-    """Output delivery's settle window, at 1/100 speed: the same polls, in milliseconds."""
+    """Output settling and late usage re-reads at 1/100 speed: the same waits, in milliseconds."""
     saved = output_delivery._POLL_DELAYS_S, output_delivery._MIN_SETTLE_S  # pyright: ignore[reportPrivateUsage]
+    late = LATE_USAGE._delays  # pyright: ignore[reportPrivateUsage]
     output_delivery._POLL_DELAYS_S = tuple(d / 100 for d in saved[0])  # pyright: ignore[reportPrivateUsage]
     output_delivery._MIN_SETTLE_S = saved[1] / 100  # pyright: ignore[reportPrivateUsage]
+    LATE_USAGE._delays = tuple(d / 100 for d in late)  # pyright: ignore[reportPrivateUsage]
     try:
         yield
     finally:
         output_delivery._POLL_DELAYS_S, output_delivery._MIN_SETTLE_S = saved  # pyright: ignore[reportPrivateUsage]
+        LATE_USAGE._delays = late  # pyright: ignore[reportPrivateUsage]
+        for task in LATE_USAGE._tasks.values():  # pyright: ignore[reportPrivateUsage]
+            task.cancel()
 
 
 @asynccontextmanager
