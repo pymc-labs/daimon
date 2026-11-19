@@ -14,11 +14,12 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Self, cast
 
 import structlog
-from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.bot import DaimonBot, requester_role
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_post import settled_content, status_line
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
@@ -165,6 +166,10 @@ async def _settle(
         parent_id=_parent_id(interaction),
         default_channel_id=deployment_channel(runtime.settings.support, "discord"),
         accept=accept,
+        native_admin=settler == row.platform_user_id
+        and interaction.guild_id is not None
+        and interaction.guild is not None
+        and (await requester_role(interaction.guild, settler))[0] == Role.ADMIN,
     )
     _log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(interaction, before=row, outcome=outcome)

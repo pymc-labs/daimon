@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any, Final, cast
 
 import structlog
+from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.click_replies import (
     CLICK_REPLY_ERRORS,
     error_name,
@@ -244,6 +245,11 @@ async def _settle(
         parent_id=None,
         default_channel_id=deployment_channel(runtime.settings.support, "slack"),
         accept=accept,
+        # Asked only of the requester, the one click the answer can change.
+        native_admin=post.user_id == row.platform_user_id
+        and await resolve_is_platform_admin(
+            client, user_id=post.user_id, host_team_id=post.team_id
+        ),
     )
     log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(client, post, before=row, outcome=outcome, message=message)

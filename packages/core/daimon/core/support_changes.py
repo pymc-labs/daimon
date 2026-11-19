@@ -679,6 +679,7 @@ async def settle_from_post(
     parent_id: str | None,
     default_channel_id: str | None,
     accept: bool = False,
+    native_admin: bool = False,
 ) -> ledger.SettleOutcome:
     """Anyone in the request's support channel but its requester settles from its post, with audit.
 
@@ -687,7 +688,8 @@ async def settle_from_post(
     The click must come from the channel the request was posted to (or a thread
     in it); a row from before that was stamped falls back to the workspace's
     channel now (`default_channel_id` is the deployment's). Else "not_here". The requester
-    settles only as an admin of the request's tenant, else "own_request".
+    settles only as an admin, else "own_request": the stored role, or `native_admin`, the
+    platform's own verdict the adapter passes (submit exempts the same people).
     The post may sit in another tenant, so the request is found by id alone. The
     settler's id and account stay on the request (`clear_settler` wipes them on
     a purge). The audit row names an account only of the request's own tenant,
@@ -711,7 +713,11 @@ async def settle_from_post(
             platform=before.platform,
             external_id=settled_by,
         )
-        if settled_by == before.platform_user_id and not await _is_admin(session, principal):
+        if (
+            settled_by == before.platform_user_id
+            and not native_admin
+            and not await _is_admin(session, principal)
+        ):
             return ledger.SettleOutcome(status="own_request", row=before)
         outcome = await ledger.settle_request(
             session,

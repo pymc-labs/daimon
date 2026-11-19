@@ -16,6 +16,7 @@ import pytest
 import yarl
 from cryptography.fernet import Fernet
 from daimon.adapters.slack import support_escalation as slack_support
+from daimon.adapters.slack import support_settle
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
@@ -558,6 +559,26 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
     assert _said(fake) == "Request sent. Someone will reply.\nThis used no credits."
     ((_id, status, hold, *_rest),) = await _rows(db_session_factory)
     assert (status, hold) == ("settled", D(0)), "an admin's request holds nothing"
+
+
+async def test_decline_when_the_clicker_is_a_workspace_admin_requester_then_settles_own_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submit exempts a workspace admin, so settle lets them settle their own request."""
+    key = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory)
+    escalation_id, post = await _pending(runtime, fake)
+    own = _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post)
+    own["user"] = {"id": _USER, "team_id": _TEAM}
+    await handle_settle_click(runtime, own)
+    ((_id, status, *_rest),) = await _rows(db_session_factory)
+    assert status == "pending", "a plain requester settles nothing"
+    monkeypatch.setattr(support_settle, "resolve_is_platform_admin", AsyncMock(return_value=True))
+    await handle_settle_click(runtime, own)
+    ((_id, status, *_rest),) = await _rows(db_session_factory)
+    assert status == "declined", "a workspace admin settles their own request"
 
 
 async def test_set_charge_when_in_range_then_charges_and_closes_the_post(

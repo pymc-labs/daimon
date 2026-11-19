@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord import feedback_reactions, support_escalation
+from daimon.adapters.discord import feedback_reactions, support_escalation, support_settle
 from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
@@ -628,6 +628,27 @@ async def test_decline_when_pending_then_releases_the_hold(
     async with db_session_factory() as session:
         row = await get_request(session, escalation_id=escalation_id)
     assert status == "declined" and row is not None and row.settled_by == "8"
+
+
+async def test_decline_when_the_clicker_is_a_guild_admin_requester_then_settles_own_request(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Submit exempts a guild admin, so settle lets them settle their own request."""
+    view, content = await _pending(db_session_factory)
+    bot = _bot(db_session_factory)
+    refused = _on_post(bot, content)
+    refused.user.id = 7  # the requester
+    refused.guild_id = int(_GUILD)
+    await view.children[1].callback(refused)
+    ((_id, status, _hold, _post),) = await _rows(db_session_factory)
+    assert status == "pending", "a plain requester settles nothing"
+    monkeypatch.setattr(support_settle, "requester_role", AsyncMock(return_value=(Role.ADMIN, [])))
+    click = _on_post(bot, content)
+    click.user.id = 7
+    click.guild_id = int(_GUILD)
+    await view.children[1].callback(click)
+    ((_id, status, _hold, _post),) = await _rows(db_session_factory)
+    assert status == "declined", "a guild admin settles their own request"
 
 
 async def test_settle_button_when_outside_the_support_channel_then_refuses(

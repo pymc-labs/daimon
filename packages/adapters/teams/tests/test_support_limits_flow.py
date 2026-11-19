@@ -722,6 +722,21 @@ async def test_settle_when_the_clicker_is_the_requester_then_refused_and_another
     assert (await _row(db_session_factory, post)).status == "declined", "another member settles it"
 
 
+async def test_settle_when_the_clicker_is_a_deployment_admin_requester_then_settles_own_request(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Submit exempts a deployment admin, so settle lets them settle their own request."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+    decline = _settle_buttons(post)["decline"]
+    async with _running(db_session_factory, teams_api_fake, admins=(AAD_OBJECT_ID,)) as service:
+        own = await post_activity(service, _settle(decline, post_id="m-2", user=AAD_OBJECT_ID))
+
+    assert own["value"].startswith("Declined."), own
+    assert (await _row(db_session_factory, post)).status == "declined", "settled by its requester"
+
+
 async def test_decline_when_asking_was_turned_off_since_then_the_post_still_settles(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:

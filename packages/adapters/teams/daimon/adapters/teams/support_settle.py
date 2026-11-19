@@ -166,6 +166,7 @@ class TeamsSupportSettle:
             parent_id=None,
             default_channel_id=deployment_channel(self._runtime.settings.support, "teams"),
             accept=accept,
+            native_admin=actor.is_platform_admin,
         )
         log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
         return await self._finish(ctx, actor, data, before=row, outcome=outcome)
