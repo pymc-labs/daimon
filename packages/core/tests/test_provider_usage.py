@@ -533,6 +533,40 @@ async def test_late_driver_usage_reaches_the_waiting_footer_as_the_ledger_debit(
     assert shown == [float(-await balance(sessions))] != [0.0], shown
 
 
+async def test_a_stale_revision_never_overwrites_the_newer_debit_in_the_footer(sessions):
+    """A revision recorded after a newer one is stale: the footer keeps the newer debit."""
+    ref, turn, shown = observation().session, {"id": "stale-turn", "usage": None}, list[float]()
+
+    async def show(debit: float) -> bool:
+        shown.append(debit)
+        return True
+
+    def read(revision: int, output: int) -> UsageObservation:
+        usage = {"input_tokens": 1000, "output_tokens": output}
+        usage |= {"input_tokens_details": {"cached_tokens": 0}}
+        return driver_observation({**turn, "usage": usage}, ref, revision=revision)
+
+    unknown = driver_observation(turn, ref, revision=1)
+    LATE_TURN_COSTS.turn_debit(
+        ProviderUsageTotals().add_observation(unknown), markup=Decimal(1), show=show
+    )
+    for reading in (unknown, read(3, 200), read(2, 100)):
+        await record_provider_usage(
+            sessionmaker=sessions,
+            binding_id="binding",
+            observation=reading,
+            tenant_id=TENANT,
+            platform_user_id="user",
+            provider_price=price(),
+            infrastructure_usd=Decimal(0),
+            billing_grain="turn",
+            model_id="model",
+            channel_id="channel",
+        )
+        await LATE_TURN_COSTS.wait()
+    assert shown == [float(-await balance(sessions))] != [0.0], shown
+
+
 async def test_outcomes_replace_revisions_include_actual_and_keep_unknown(sessions):
     outcome = TurnObservation(sessions, TENANT, "slack", session_id="session")
     outcome.note_usage(
