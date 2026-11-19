@@ -13,10 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-hosted record in place, keyless or not, so sessions, threads, routines,
   defaults, tool and access rules keep working; audit history keeps the old name
   and `daimon` stays taken by the renamed agent. A workspace with its own
-  `default` agent, or its own unmanaged `daimon` record, is left as is: apply
-  reports its rename as deferred, exits zero and tries again next time, while
-  requests for `default` still reach the built-in agent. Copies such as
-  `daimon-copy` keep their names, and the `init` commands default to `default`.
+  `default` keeps it, and requests for `default` reach that agent: apply reports
+  the rename as deferred, exits zero and tries again next time. A workspace's own
+  unmanaged `daimon` record is not renamed. Copies such as `daimon-copy` keep
+  their names, the `init` commands default to `default`, and `selfhosted init`
+  reuses an existing `daimon` record. On Discord, a reply from the built-in
+  agent carries no agent label, as on Slack and Teams. Rolling back to an
+  earlier release after the rename labels its Discord replies `-# default`.
 - **Sandbox tools in routines is a setting with levels.** The
   `routine_sandbox_tools` setting is off by default and set for the workspace,
   an agent or one routine; a routine's own value wins over its agent's, and a
