@@ -1,4 +1,4 @@
-"""Discord REST membership transport for gateway, scheduler and MCP hosts.
+"""Discord REST for gateway, scheduler and MCP hosts: membership, sources, error DMs.
 
 Uses the existing bot credential. No gateway/adapter imports. Both the member
 and guild role permissions must resolve: stored account roles are never admin
@@ -169,3 +169,41 @@ async def verify_discord_source(
             return parent_id, channel_id
     except (httpx.HTTPError, ValueError, TimeoutError) as exc:
         raise StoreError("the source channel could not be verified; nothing was saved") from exc
+
+
+#: The Discord adapter's error card colour.
+_ERROR_COLOR = 0xE74C3C
+
+
+async def send_discord_error_dm(
+    bot_token: str,
+    user_id: str,
+    title: str,
+    description: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> None:
+    """DM `user_id` one error card that pings nobody: what happened, what to do.
+
+    For hosts with no gateway client. Raises `httpx.HTTPError` or `ValueError`;
+    neither carries the token or the text.
+    """
+    if not user_id.isascii() or not user_id.isdecimal():
+        raise ValueError("a user id is a decimal number")
+    async with _discord_client(bot_token, transport) as client:
+        opened = await client.post("users/@me/channels", json={"recipient_id": user_id})
+        opened.raise_for_status()
+        reply: object = opened.json()
+        channel = cast("dict[str, object]", reply).get("id") if isinstance(reply, dict) else None
+        if not isinstance(channel, str) or not channel.isascii() or not channel.isdecimal():
+            raise ValueError("no DM channel id in the reply")
+        sent = await client.post(
+            f"channels/{channel}/messages",
+            json={
+                "embeds": [
+                    {"title": title[:256], "description": description[:4096], "color": _ERROR_COLOR}
+                ],
+                "allowed_mentions": {"parse": []},
+            },
+        )
+        sent.raise_for_status()

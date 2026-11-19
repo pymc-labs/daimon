@@ -1,8 +1,8 @@
-"""Nothing a person sees, or the model reads, on one chat platform names another.
+"""Daimon's own wording on one chat platform names that platform, not another.
 
-People on one platform must never learn that Daimon runs on the others, so every
-text shown on platform P, and every text the model receives on a P turn, may name
-P and no other chat app. Two guards:
+Text Daimon ships for platform P, shown on P or given to the model on a P turn, is
+written in P's terms, so it may name P and no other chat app. What the model or a
+tenant writes is passed through as it is. Two guards:
 
 - renderers are called per platform and their output searched for a foreign name;
 - the source is scanned: a prose string literal that names a chat app has to sit in
