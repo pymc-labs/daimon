@@ -5,6 +5,9 @@ bot token this process holds. Slack: `users.conversations` with the workspace's
 stored bot token, for the member and for the bot. Teams: no membership read here,
 so no channel. Any failure hides every channel (fail closed). Answers are cached for
 `CACHE_SECONDS`.
+
+`request_channel_check` asks the same platforms whether Daimon itself can post in one
+channel (where support requests go); a failure there is `unverified`, never `ready`.
 """
 
 from __future__ import annotations
@@ -23,11 +26,24 @@ from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_visibility import (
     DiscordMember,
     DiscordOverwrite,
+    discord_base_permissions,
+    discord_channel_permissions,
     discord_visible_channels,
 )
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.routine_destinations import discord_deliverable_channels, slack_may_deliver
 from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
+from daimon.core.support_channel_check import (
+    READY,
+    UNVERIFIED,
+    ChannelCheck,
+    discord_check,
+    discord_missing,
+    discord_not_text,
+    slack_check,
+    teams_check,
+)
+from daimon.core.support_routing import SupportDestination
 
 log = structlog.get_logger(__name__)
 
@@ -37,6 +53,8 @@ _SLACK_API = "https://slack.com/api"
 _SLACK_PAGES = 20
 _DISCORD_TEXT_TYPES = frozenset({0, 5})
 """Text and announcement channels: the types chat accepts as a routine destination."""
+_DISCORD_TEXT = 0
+"""The one type Daimon posts requests in; announcement channels are refused as at post time."""
 _CACHE_SIZE = 2048
 
 
@@ -49,6 +67,7 @@ class _Reach:
 
 
 _cache: dict[tuple[uuid.UUID, str], tuple[float, _Reach]] = {}
+_post_cache: dict[tuple[str, str, str], tuple[float, ChannelCheck]] = {}
 
 
 class _Unverified(Exception):
@@ -58,6 +77,7 @@ class _Unverified(Exception):
 def forget_visibility() -> None:
     """Drop every cached answer (tests)."""
     _cache.clear()
+    _post_cache.clear()
 
 
 def _json(response: httpx.Response) -> object:
@@ -110,24 +130,25 @@ def _overwrites(raw: object) -> tuple[DiscordOverwrite, ...]:
     )
 
 
-async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
+def _discord_headers(runtime: WebRuntime) -> dict[str, str]:
     discord = runtime.settings.discord
     if discord is None:
         raise _Unverified("no bot token")
-    headers = {"Authorization": f"Bot {discord.bot_token.get_secret_value()}"}
+    return {"Authorization": f"Bot {discord.bot_token.get_secret_value()}"}
+
+
+async def _discord_standing(
+    runtime: WebRuntime, guild_id: str, user_id: str
+) -> tuple[DiscordMember, dict[str, int]]:
+    """The user's roles in the guild, and every role's permissions (the guild's id is @everyone)."""
+    headers = _discord_headers(runtime)
     get = runtime.http_client.get
     guild = _dict(_json(await get(f"{_DISCORD_API}/guilds/{guild_id}", headers=headers)))
     member = _dict(
         _json(await get(f"{_DISCORD_API}/guilds/{guild_id}/members/{user_id}", headers=headers))
     )
-    channels = _dicts(
-        _json(await get(f"{_DISCORD_API}/guilds/{guild_id}/channels", headers=headers))
-    )
     roles = member.get("roles")
-    overwrites = {
-        str(row.get("id")): _overwrites(row.get("permission_overwrites")) for row in channels
-    }
-    member_facts = DiscordMember(
+    facts = DiscordMember(
         user_id=user_id,
         role_ids=frozenset(str(r) for r in cast("list[object]", roles))
         if isinstance(roles, list)
@@ -135,12 +156,28 @@ async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
         is_owner=str(guild.get("owner_id")) == user_id,
         timed_out=_timed_out(member),
     )
-    text_channels = [
-        str(row.get("id")) for row in channels if row.get("type") in _DISCORD_TEXT_TYPES
-    ]
     role_permissions = {
         str(role.get("id")): _int(role.get("permissions")) for role in _dicts(guild.get("roles"))
     }
+    return facts, role_permissions
+
+
+async def _discord(runtime: WebRuntime, guild_id: str, user_id: str) -> _Reach:
+    headers = _discord_headers(runtime)
+    member_facts, role_permissions = await _discord_standing(runtime, guild_id, user_id)
+    channels = _dicts(
+        _json(
+            await runtime.http_client.get(
+                f"{_DISCORD_API}/guilds/{guild_id}/channels", headers=headers
+            )
+        )
+    )
+    overwrites = {
+        str(row.get("id")): _overwrites(row.get("permission_overwrites")) for row in channels
+    }
+    text_channels = [
+        str(row.get("id")) for row in channels if row.get("type") in _DISCORD_TEXT_TYPES
+    ]
     return _Reach(
         readable=discord_visible_channels(
             member_facts,
@@ -316,3 +353,98 @@ async def postable_channels(
         runtime, tenant_id=tenant_id, platform=platform, workspace_id=workspace_id, user_id=user_id
     )
     return reach.postable & frozenset(channel_ids)
+
+
+async def _discord_post_check(runtime: WebRuntime, channel_id: str, label: str) -> ChannelCheck:
+    """Daimon's own permissions in the channel; the channel's guild is read from the channel."""
+    headers = _discord_headers(runtime)
+    get = runtime.http_client.get
+    bot = _dict(_json(await get(f"{_DISCORD_API}/users/@me", headers=headers)))
+    response = await get(f"{_DISCORD_API}/channels/{channel_id}", headers=headers)
+    if response.status_code in (403, 404):
+        # Unknown, or Missing Access: either way Daimon cannot see it.
+        return discord_missing(label)
+    channel = _dict(_json(response))
+    guild_id = channel.get("guild_id")
+    if channel.get("type") != _DISCORD_TEXT or not isinstance(guild_id, str):
+        return discord_not_text(label)
+    member, role_permissions = await _discord_standing(runtime, guild_id, str(bot.get("id")))
+    bits = discord_channel_permissions(
+        member,
+        guild_id=guild_id,
+        base_permissions=discord_base_permissions(
+            member, guild_id=guild_id, role_permissions=role_permissions
+        ),
+        overwrites=_overwrites(channel.get("permission_overwrites")),
+    )
+    return discord_check(bits=bits, label=label)
+
+
+async def _slack_post_check(
+    runtime: WebRuntime, team_id: str | None, channel_id: str, label: str
+) -> ChannelCheck:
+    """Slack's own record of the channel, with the workspace's bot token."""
+    if team_id is None:
+        raise _Unverified("no team")
+    token = await _slack_token(runtime, team_id)
+    body = _dict(
+        _json(
+            await runtime.http_client.get(
+                f"{_SLACK_API}/conversations.info",
+                params={"channel": channel_id},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        )
+    )
+    if body.get("ok") is not True:
+        if body.get("error") == "channel_not_found":
+            # A private channel Daimon is not in answers the same way as a missing one.
+            return slack_check(label=label, found=False)
+        raise _Unverified("slack refused")
+    channel = _dict(body.get("channel"))
+    return slack_check(
+        label=label,
+        found=True,
+        is_archived=bool(channel.get("is_archived")),
+        is_private=bool(channel.get("is_private")),
+        bot_is_member=bool(channel.get("is_member")),
+    )
+
+
+async def request_channel_check(
+    runtime: WebRuntime, destination: SupportDestination, *, label: str, fresh: bool = False
+) -> ChannelCheck:
+    """Whether Daimon can post in the support channel; `unverified` when the platform won't say.
+
+    `label` names the channel in the instruction ("#general"). Answers are cached for
+    `CACHE_SECONDS`; `fresh` skips the cache (a save asks again).
+    """
+    if destination.platform == "teams":
+        if not destination.own:
+            return READY
+        return teams_check(
+            label=label,
+            team_id=destination.teams_team_id,
+            service_url=destination.teams_service_url,
+        )
+    key = (destination.platform, destination.slack_team_id or "", destination.channel_id)
+    cached = _post_cache.get(key)
+    now = time.monotonic()
+    if not fresh and cached is not None and now - cached[0] < CACHE_SECONDS:
+        return cached[1]
+    try:
+        if destination.platform == "discord":
+            check = await _discord_post_check(runtime, destination.channel_id, label)
+        elif destination.platform == "slack":
+            check = await _slack_post_check(
+                runtime, destination.slack_team_id, destination.channel_id, label
+            )
+        else:
+            return UNVERIFIED
+    except (_Unverified, httpx.HTTPError, ValueError, TypeError) as exc:
+        log.info("web.support_channel_unverified", platform=destination.platform, error=str(exc))
+        return UNVERIFIED
+    if len(_post_cache) >= _CACHE_SIZE:
+        _post_cache.clear()
+    _post_cache[key] = (now, check)
+    return check

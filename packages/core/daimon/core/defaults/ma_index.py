@@ -179,10 +179,18 @@ def pick_renamed_seeded_agent(
 
 
 async def find_renamed_seeded_agent(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
-    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None."""
-    return pick_renamed_seeded_agent(await list_agents_by_tenant(client, tenant_id=tenant_id))
+    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None.
+
+    `records` adds the Daimon-owned records, for an install with no Anthropic key.
+    """
+    return pick_renamed_seeded_agent(
+        await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+    )
 
 
 async def find_environments_by_daimon_tag(
@@ -242,6 +250,21 @@ async def list_agents_by_tenant(
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
     return results
+
+
+async def agent_id_in_tenant(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    ref: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> str | None:
+    """The id of the tenant's agent `ref` names (its id or its name), or None when it has none."""
+    if ref.startswith("agent_"):
+        known = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+        return ref if any(a.id == ref for a in known) else None
+    agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=ref, records=records)
+    return None if agent is None else agent.id
 
 
 async def list_agents_for_privacy_deletion(

@@ -196,12 +196,14 @@ an admin. So an admin is exempt only where the output reaches no one else.
 | Surface | Members | Admins |
 | --- | --- | --- |
 | Channel, thread, handoff, routine that posts to a channel | rules apply | rules apply |
-| DM (Teams personal chats included) | agent with a rule refused | agent rule exempt |
-| Hub `ask` / `start_turn` / `continue_turn` | agent with a rule refused | agent rule exempt |
+| DM (Teams personal chats included) | agent with a rule refused | agent rule exempt, except a channel's own agent |
+| Hub `ask` / `start_turn` / `continue_turn` | agent with a rule refused | agent rule exempt, except a channel's own agent |
+| Hub transcript of another person's channel conversation | refused | open channels only; never a sealed or limited channel |
 | Hub `continue_turn` or `ask(handle)` on a channel conversation | refused | refused: continue it in its channel |
 | `fork_agent` of an agent with a rule | refused | refused |
 | Agent chat, and any agent-scoped key or bearer token with no platform user | rules apply | rules apply |
 | An agent key minted in a channel with limited readers, or one its agent's rule names | runs inside that channel only | runs inside that channel only |
+| Settings of a channel with limited readers, or of its own agent | rules apply | change only from inside the channel; web, hub, DM, agent key and routine refused |
 
 - **One decision function.** `daimon.core.authz.authorize` decides channel
   rules, agent rules, the invoker allowlist, [agent invoker

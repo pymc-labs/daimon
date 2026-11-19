@@ -152,6 +152,18 @@ async def list_environment_picks(
     return picks
 
 
+async def list_channels_picking_agent(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_names: Collection[str]
+) -> list[str]:
+    """The channels in one tenant whose own pick names any of `agent_names`."""
+    rows = await session.execute(
+        select(ChannelConfig.channel_id).where(
+            ChannelConfig.tenant_id == tenant_id, ChannelConfig.agent_name.in_(agent_names)
+        )
+    )
+    return list(rows.scalars())
+
+
 async def get_scope(
     session: AsyncSession, *, scope: ScopeRef
 ) -> UserConfigRow | ChannelConfigRow | TenantConfigRow | None:

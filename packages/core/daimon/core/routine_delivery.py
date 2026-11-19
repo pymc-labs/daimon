@@ -73,7 +73,7 @@ from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import ROUTINE_WEB_SENTENCE, words_sentence
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import TenantLinks, links_at, panel_links
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -188,12 +188,25 @@ def teams_thread_id(target: DeliveryTarget) -> str:
 DirectPost = Literal["allowed", "protected", "unverified"]
 
 
+async def routine_links(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
+) -> TenantLinks | None:
+    """A routine fire's web links, with a member's access, where `web_awareness` is On where
+    it fires (`routine_feature_place`)."""
+    from daimon.core.rule_views import routine_feature_place  # imports this module
+
+    place = routine_feature_place(row, platform=platform)
+    return await links_at(
+        sessions, settings, place, panel_links(settings.web, row.tenant_id, admin=False)
+    )
+
+
 def render_routine_controls(
     row: RoutineRow,
     *,
     platform: str,
     direct_post: DirectPost = "allowed",
-    web: WebLinks | None = None,
+    web: TenantLinks | None = None,
     held: bool = False,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
@@ -203,9 +216,9 @@ def render_routine_controls(
     a routine with a destination: a routine without one sends its trigger
     message exactly as before. `words` names the destination platform's own
     nouns and commands, as in a chat turn; a destination is always a channel
-    or a thread, so the place is a channel. `web` adds the routine's own workspace
-    on the web, as a chat turn's controls do, for a reader with a member's access; a `held`
-    fire, into a channel shared with another organisation, gets none.
+    or a thread, so the place is a channel. `web` (`routine_links`) adds the routine's own
+    workspace on the web, as a chat turn's controls do; a `held` fire, into a channel shared
+    with another organisation, gets none.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -234,7 +247,7 @@ def render_routine_controls(
     }
     if platform in CHAT_PLATFORMS:
         controls["words"] = turn_words(platform, place="channel")
-    links = None if web is None or held else web.for_tenant(row.tenant_id, admin=False)
+    links = None if held else web
     if links is not None:
         controls["web"] = {"url": links.root()}
     if row.destination_kind == "dm":

@@ -145,7 +145,7 @@ def _agent_backend_reference(
     thread_id: str | None = None,
 ) -> list[JsonValue] | None:
     """`[agent, local]` for an agent's revision; a conversation's model choice
-    (origin `thread`) adds its conversation and its consent's digest."""
+    (origin `thread`) adds its conversation and its revision's digest."""
     if revision is None:
         return None
     if revision.tenant_id != _tenant(channel.tenant_id) or origin not in ("agent", "thread"):
@@ -1217,10 +1217,29 @@ async def config_origin(session: AsyncSession, channel: ChannelRef, local: int) 
     )
 
 
+async def config_agent_id(
+    session: AsyncSession, channel: ChannelRef, local: int
+) -> uuid.UUID | None:
+    """The agent an `agent` or `thread` revision was made for, else None."""
+    raw = await session.scalar(
+        select(ChannelConfigRevision.agent_backend_ref).where(
+            *_channel_where(channel),
+            ChannelConfigRevision.local == local,
+            ChannelConfigRevision.origin.in_(("agent", "thread")),
+        )
+    )
+    if not isinstance(raw, list) or not raw:
+        return None
+    try:
+        return uuid.UUID(str(cast(list[JsonValue], raw)[0]))
+    except ValueError:
+        return None
+
+
 async def config_thread_pin(
     session: AsyncSession, channel: ChannelRef, local: int
 ) -> tuple[str, str] | None:
-    """The conversation and consent digest a `thread` revision was made with, else None."""
+    """The conversation and revision digest a `thread` revision was made with, else None."""
     raw = await session.scalar(
         select(ChannelConfigRevision.agent_backend_ref).where(
             *_channel_where(channel),
@@ -1237,10 +1256,10 @@ async def config_thread_pin(
 async def get_config_agent_revision(
     session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
 ) -> AgentBackendRevision | None:
-    """Recover only the immutable consent association retained with this effective revision.
+    """Recover the agent backend revision retained with this effective revision.
 
     A conversation's model choice (origin `thread`) recovers that conversation's
-    consent, only while it is still the one the revision was made with."""
+    revision, only while it is still the one the revision was made with."""
     statement = select(ChannelConfigRevision.agent_backend_ref).where(
         *_channel_where(revision.channel),
         ChannelConfigRevision.local == revision.local,
@@ -1274,12 +1293,12 @@ async def get_config_agent_revision(
             thread_id=thread[0],
             agent_id=identity,
         )
-        if consent is None or consent.digest != thread[1] or consent.drop_consent is None:
-            raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
+        if consent is None or consent.digest != thread[1]:
+            raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
         return consent
     retained = await agent_backends.current(
         session, _tenant(revision.channel.tenant_id), identity, local=local, persisted=True
     )
-    if retained is None or retained.drop_consent is None:
-        raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
+    if retained is None:
+        raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
     return retained

@@ -111,6 +111,7 @@ from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import FormPinRefused, agent_pin_names
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.messages import (
     ConfigurationChange,
@@ -533,6 +534,7 @@ class EnvCredentialModal(discord.ui.Modal):
                 value=raw_value,
                 plan=plan,
                 now=datetime.now(UTC),
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
             consumed_row = result.consumed
             if consumed_row is None:
@@ -727,6 +729,7 @@ class EnvFileModal(discord.ui.Modal):
                 platform="discord",
                 entries=entries,
                 now=datetime.now(UTC),
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
             if consumed_row is None:
                 await interaction.followup.send(
@@ -887,7 +890,11 @@ class McpCredentialModal(discord.ui.Modal):
         )
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(
@@ -1202,7 +1209,11 @@ class SkillRepoModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(
@@ -1504,6 +1515,7 @@ class SkillRepoModal(discord.ui.Modal):
                 "credential_modal.skill_repo_attach_failed",
                 agent_id=str(agent_id),
                 err_type=type(err).__name__,
+                causes=backend_refusal_causes(err),
             )
             return "Attaching them did not finish. Try again using the same form."
         return None
@@ -1588,7 +1600,11 @@ class RepoBindModal(discord.ui.Modal):
         now = datetime.now(UTC)
         try:
             consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
+                self._runtime.sessionmaker,
+                row=self._row,
+                agent=agent,
+                now=now,
+                location_verified=is_credential_interaction_valid(interaction, self._row),
             )
         except FormPinRefused as refused:
             await interaction.followup.send(

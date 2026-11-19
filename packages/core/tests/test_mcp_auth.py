@@ -17,7 +17,7 @@ from decimal import Decimal
 import jwt as pyjwt
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import AgentRef, build_subject
+from daimon.core.authz import AgentRef, build_subject, origin_ids
 from daimon.core.mcp_auth import (
     HOST_BUILTINS_CLAIM,
     authorize_coding_token,
@@ -448,12 +448,14 @@ def test_authorize_coding_token_leaves_a_server_admin_unchanged(
     agent = AgentRef.of(*names)
     decision, bound = authorize_coding_token(
         _PINS,
-        subject=build_subject(is_admin=True, platform_user_id="u-admin"),
+        subject=build_subject(
+            is_admin=True, platform_user_id="u-admin", origin_channel_ids=origin_ids(channel_id)
+        ),
         agent=agent,
         channel_id=channel_id,
     )
 
-    assert decision, "a server admin may always mint"
+    assert decision, "a server admin may mint from inside the channel"
     assert bound == coding_token_channel(_PINS, agent=agent, channel_id=channel_id), (
         "the binding is unchanged for a server admin"
     )

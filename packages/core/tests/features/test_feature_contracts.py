@@ -21,7 +21,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
+from daimon.core.features.model_input import HIDING_KEYS, SESSION_KEYS, TOOL_KEYS, SessionToolset
 from daimon.core.features.registry import (
     FEATURES,
     TIERS,
@@ -32,9 +32,10 @@ from daimon.core.features.registry import (
     parse_deployment,
     resolution_order,
 )
-from daimon.core.features.resolver import TierValue, resolve_feature
+from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
-from daimon.core.features.snapshot import may_turn_on
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, may_turn_on
+from daimon.core.features.tool_gate import WEB_APP_TOOLS, server_gate_key
 from daimon.core.long_job_models import LongJobPolicy
 from pydantic import PostgresDsn, SecretStr
 
@@ -51,6 +52,7 @@ _MAY_WRITE = {
     "core/features/service.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}
+_PLACE = FeaturePlace(uuid.UUID(int=1), "slack", "C1", "T1")
 
 
 def _settings(**extra: object) -> Settings:
@@ -82,7 +84,9 @@ _NARROWED: dict[str, str] = {
     "plain_text_mentions": _PRE_AGENT,
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
-    "support_escalation": "the escalation button re-checks at the workspace when pressed",
+    "support_escalation": "set where credits apply: the workspace, an agent or a channel",
+    "support_feedback": "set where credits apply: the workspace, an agent or a channel",
+    "support_own_channel": "operator-only: whether a workspace may pick its own channel",
     "private_channel_messages": "operator-only: read once at startup",
     "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
@@ -99,6 +103,12 @@ _NARROWED: dict[str, str] = {
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
+
+
+def test_no_backend_narrows_what_hides_daimon_tools() -> None:
+    """A switch preview reads these before it knows the target backend."""
+    order = resolution_order(list(HIDING_KEYS))
+    assert not [spec.key for spec in order if spec.backend_tiers or spec.backend_fixed]
 
 
 def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:
@@ -266,7 +276,8 @@ def test_every_chat_listing_of_features_hides_the_not_set_up_ones() -> None:
             filters = [
                 n
                 for n in ast.walk(func)
-                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "listed"
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "id", "") in {"listed", "agent_listed"}
             ]
             assert filters, (
                 f"{path.name}:{func.name} lists features without `listed()`; use it or add the "
@@ -305,6 +316,74 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
 
 
+_LINK_BUILDERS = {"panel_links", "for_tenant", "TenantLinks"}
+_UNGATED_LINKS = {
+    "core/web_links.py::panel_links": "a builder",
+    "core/web_links.py::for_tenant": "a builder",
+    "core/turn/deps.py::build_turn_deps": "a turn's links; `render_turn_origin` drops them",
+    "core/turn/admission.py::_web_links": "same: the test above checks every render's features",
+    "core/features/eval_key.py::sample_controls": "a fixed example turn for the eval, never sent",
+}
+# `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering
+# agent; `_where_aware` asks `aware_at` at the MCP caller's places.
+_LINK_GATES = {"links_at", "aware_at", "load_here_card", "_where_aware"}
+# Tools in the web app's modules that stay with it Off, and why.
+_WEB_KEPT = {
+    "list_web_people": "allowances, owners and turn rules take the person ids it returns",
+    "get_web_person": "same",
+    "list_web_groups": "same, for groups",
+    "change_workspace_settings": "turn rules aren't web-only; it refuses modules and the agent",
+}
+
+
+def _link_builders() -> list[str]:
+    """`path::function` of each function that builds web links without asking a gate."""
+    found = []
+    for path in _PRODUCT:
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = [node for node in ast.walk(fn) if isinstance(node, ast.Call)]
+            names = {getattr(c.func, "id", None) or getattr(c.func, "attr", "") for c in calls}
+            built = names & _LINK_BUILDERS or any(
+                ast.unparse(c.func) == "WebLinks.from_settings" for c in calls
+            )
+            if built and not names & _LINK_GATES:
+                found.append(f"{path.relative_to(_ROOT / 'packages').as_posix()}::{fn.name}")
+    return found
+
+
+def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
+    """Every function that builds web links asks a gate (`links_at`: Off at its place, no
+    link), and the web app's own tools, found from their modules, are hidden and refused while
+    it is Off."""
+    ungated = {item.split("/daimon/", 1)[-1] for item in _link_builders()}
+    assert ungated == _UNGATED_LINKS.keys(), (
+        f"web links built without `links_at`: {sorted(ungated - _UNGATED_LINKS.keys())}; gate "
+        "them or list them with a reason"
+    )
+    modules = ("web_invites.py", "web_people.py", "web_workspace_settings.py")
+    registered = {
+        kw.value.value
+        for path in _PRODUCT
+        if path.name in modules
+        for call in _named_calls(path, "tool")
+        for kw in call.keywords
+        if kw.arg == "name" and isinstance(kw.value, ast.Constant)
+    }
+    assert registered - _WEB_KEPT.keys() == WEB_APP_TOOLS, (
+        "WEB_APP_TOOLS must be exactly the web app's own tools"
+    )
+    settings = next(p for p in _PRODUCT if p.as_posix().endswith("tools/web_workspace_settings.py"))
+    assert "web_aware" in _calls(settings), "it refuses its web-only fields while Off"
+    off = ResolvedFeature("web_awareness", "off", "thread")
+    toolset = SessionToolset.of(FeatureSnapshot(_PLACE, 0, {"web_awareness": off}), {})
+    assert toolset.hidden_daimon_tools >= WEB_APP_TOOLS, "a session is not offered them"
+    assert all(server_gate_key(tool) == "web_awareness" for tool in WEB_APP_TOOLS), (
+        "and the server refuses them"
+    )
+
+
 def test_every_origin_note_follows_origin_fragments() -> None:
     """Each turn's origin note (`context_prompt`) obeys `origin_fragments` at its place."""
     calls = [(p, c) for p in _PRODUCT for c in _named_calls(p, "context_prompt")]
@@ -313,6 +392,16 @@ def test_every_origin_note_follows_origin_fragments() -> None:
         assert any(k.arg == "fragments" for k in call.keywords), (
             f"{path.name}:{call.lineno} must pass fragments="
         )
+
+
+_TURN_PATH = "core/turn/prepare.py"
+# Built once and reused without the turn path's drift check, so their tools stay as built;
+# the server gate still refuses a tool turned Off since, call by call.
+_KEPT_AS_BUILT = {
+    "core/headless_runner.py": "one session per routine fire, never reused",
+    "adapters/cli/commands/sessions.py": "a CLI session its operator keeps",
+    "adapters/mcp/tools/agent_chat.py": "`send_message` continues the `start_turn` session",
+}
 
 
 def test_every_session_creation_gets_the_place_toolset() -> None:
@@ -324,6 +413,13 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
         if isinstance(call.func, ast.Name)
     ]
     assert len(calls) >= 4, "the session creators moved; point this test at them"
+    as_built = {
+        p.relative_to(_ROOT / "packages").as_posix().split("/daimon/", 1)[-1] for p, _ in calls
+    } - {_TURN_PATH}
+    assert as_built == _KEPT_AS_BUILT.keys(), (
+        "a session reused outside the turn path's drift check (`session_compat`) keeps its "
+        "tools as built: list it with a reason and say so in docs/features.md"
+    )
     for path, call in calls:
         assert any(k.arg == "toolset" for k in call.keywords), (
             f"{path.name}:{call.lineno} must pass toolset="

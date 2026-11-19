@@ -12,6 +12,7 @@ from uuid import UUID
 
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core.agent_record_facts import agent_facts, environment_facts
+from daimon.core.defaults.owned import resolve_owned_agent
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from daimon.core.turn.errors import AdmissionDenied
@@ -43,7 +44,7 @@ async def resolve_records(
                 ),
             )
             if responder_id is not None
-            else await agents.resolve(scope, agent_name)
+            else await resolve_owned_agent(sessionmaker, scope, agent_name)
         )
     except ProviderError as error:
         if error.category != "not_found":
@@ -70,7 +71,7 @@ async def names_a_record(
 ) -> bool:
     """A Daimon record answers to `agent_name`, as one a convert moved off Managed Agents does."""
     try:
-        await SelfHostedAgents(sessionmaker).resolve(scope, agent_name)
+        await resolve_owned_agent(sessionmaker, scope, agent_name)
     except ProviderError as error:
         if error.category != "not_found":
             raise

@@ -19,8 +19,11 @@ SESSION_KEYS: Final[tuple[str, ...]] = (
     "agent_env_file",
     *CAPABILITY_KEYS,
 )
-TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
-"""What `SessionToolset.of` reads: `repo_memory` also hides its tools, while it binds per turn."""
+TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory", "web_awareness")
+"""What `SessionToolset.of` reads: `repo_memory` and `web_awareness` also hide their tools,
+while they bind per turn."""
+HIDING_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, "repo_memory", "web_awareness")
+"""What `hidden_daimon_tools` reads; no backend narrows any of them."""
 TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
     "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",
@@ -108,6 +111,8 @@ class SessionToolset:
     """Repository memory is on here, not off or missing its setup: legacy readers step aside."""
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
+    web_app: bool = True
+    """`web_awareness`: the web app's own tools (`WEB_APP_TOOLS`) are offered."""
     off_capabilities: frozenset[str] = frozenset()
     """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
     are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
@@ -134,12 +139,14 @@ class SessionToolset:
             builtins[tool] = found.on
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
+        web = features.features.get("web_awareness")
         return cls(
             daimon_tools=not isolated,
             builtins=builtins,
             repo_memory=memory is None or not hides_tools(memory),
             memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
+            web_app=web is None or not hides_tools(web),
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
@@ -154,6 +161,7 @@ class SessionToolset:
             or bool(self.builtins)
             or not self.repo_memory
             or not self.env_file
+            or not self.web_app
             or bool(self.off_capabilities)
         )
 
@@ -165,7 +173,8 @@ class SessionToolset:
     def hidden_daimon_tools(self) -> frozenset[str]:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
         memory = () if self.repo_memory else ("repo_memory",)
-        return gated_tools((*self.off_capabilities, *memory))
+        web = () if self.web_app else ("web_awareness",)
+        return gated_tools((*self.off_capabilities, *memory, *web))
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""

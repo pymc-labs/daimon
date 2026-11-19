@@ -69,10 +69,12 @@ class OpenAIDriver:
         self.sessions = OpenAISessions(
             context, binding_lookup, controls=session_controls, mcp_secrets=mcp_secrets
         )
-        self.events: Events = (
-            events if events is not None else OpenAIEvents(context, self.sessions, journal)
-        )
         self.usage = OpenAIUsage(context, usage_revisions)
+        self.events: Events = (
+            events
+            if events is not None
+            else OpenAIEvents(context, self.sessions, journal, self.usage.note_terminal)
+        )
         self._artifacts = artifacts if artifacts is not None else OpenAIArtifacts(context)
         self._skills = skills if skills is not None else OpenAISkills(context)
         self._models = models

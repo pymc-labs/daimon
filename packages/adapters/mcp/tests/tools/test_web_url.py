@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _web_url as web_url
 from daimon.adapters.mcp.tools._web_url import admin_links, tenant_links
 from daimon.adapters.mcp.tools.agents import (  # pyright: ignore[reportPrivateUsage]
     AgentInfo,
@@ -64,6 +65,12 @@ def web_role(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(rules, "role_of", role)
     monkeypatch.setattr(roles_store, "get_workspace_role", grant)
     monkeypatch.setattr(accounts_store, "list_roles", no_platform_roles)
+
+    async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
+        return links
+
+    # `web_awareness` itself is checked in core (`links_at`); here it is On.
+    monkeypatch.setattr(web_url, "_where_aware", aware)
     return state
 
 
@@ -208,9 +215,10 @@ async def test_links_when_web_person_is_suspended_then_none(web_role: dict[str, 
     assert links is None, "a suspended person can open nothing, so no link is offered"
 
 
-def test_admin_links_when_web_app_set_then_admin_pages_without_a_lookup() -> None:
-    """A resolved admin gets the admin pages straight from `WebAdmin`, with no database."""
+async def test_admin_links_when_web_app_set_then_admin_pages_without_a_lookup() -> None:
+    """A resolved admin gets the admin pages straight from `WebAdmin`, with no role lookup."""
     actor = WebAdmin(tenant_id=_TENANT, account_id=uuid.uuid4(), role="admin", person_id=None)
-    links = admin_links(_runtime(_WEB), actor)
+    auth = make_identity(tenant_id=_TENANT)
+    links = await admin_links(_runtime(_WEB), auth, actor)
     assert links is not None and links.audit() == f"{_BASE}/admin/audit", "the audit page"
-    assert admin_links(_runtime(None), actor) is None, "no web app, no link"
+    assert await admin_links(_runtime(None), auth, actor) is None, "no web app, no link"

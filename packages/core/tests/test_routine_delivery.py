@@ -41,7 +41,7 @@ from daimon.core.stores.routines import (
     update_routine,
 )
 from daimon.core.turn.state import ToolUseBlock, TurnState
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import panel_links
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -103,7 +103,7 @@ def test_a_teams_thread_destination_is_its_channel_and_root() -> None:
 
 def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() -> None:
     row = _row()
-    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
+    web = panel_links(WebSettings(public_url="https://app.example.com"), row.tenant_id, admin=False)  # type: ignore[call-arg]
     assert render_routine_controls(row, platform="discord", web=None) == render_routine_controls(
         row, platform="discord"
     ), "no web app, the same controls as before"
@@ -118,8 +118,9 @@ def test_routine_controls_link_only_its_own_workspace_and_only_with_a_web_app() 
 
 
 def test_routine_controls_omit_web_links_when_the_channel_is_held() -> None:
-    web = WebLinks.from_settings(WebSettings(public_url="https://app.example.com"))  # type: ignore[call-arg]
-    text = render_routine_controls(_row(), platform="discord", web=web, held=True)
+    row = _row()
+    web = panel_links(WebSettings(public_url="https://app.example.com"), row.tenant_id, admin=False)  # type: ignore[call-arg]
+    text = render_routine_controls(row, platform="discord", web=web, held=True)
     assert "app.example.com" not in text, "a shared channel's readers get no web links"
     assert '"web"' not in text, "and no web control at all"
 

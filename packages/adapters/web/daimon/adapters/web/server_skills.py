@@ -85,14 +85,11 @@ def server_skills_node(runtime: WebRuntime) -> DataServerNode | None:
 
 
 def sync_deps(runtime: WebRuntime, node: SkillsNode) -> SyncDeps:
-    turns = runtime.turns
     return skill_sync_deps(
         node=node,
         exchange=node_exchange_of(runtime),
         shared=runtime.http_client,
         edit=change_deps(runtime).edit,
-        turn_settings=runtime.settings.turn,
-        turn_deps=lambda: None if turns is None else turns.deps,
         now=runtime.now,
     )
 

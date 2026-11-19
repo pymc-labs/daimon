@@ -24,7 +24,7 @@ from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runti
 from pydantic import ValidationError
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_openai_full_source import FullWire
 from .test_openai_runtime_transport import clients_for
 
@@ -53,8 +53,8 @@ def template_row(tenant_id: str, **changes: object) -> dict[str, object]:
 
 
 @pytest.fixture
-async def template(consent_request, monkeypatch, tmp_path):
-    request, *_ = consent_request
+async def template(switched_request, monkeypatch, tmp_path):
+    request, *_ = switched_request
     sessions = request.deps.sessionmaker
     request = replace(
         request,

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
+import re
 import stat
 import struct
 import zipfile
 import zlib
 from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
+from typing import cast
+
+import yaml
 
 from mux.contracts.errors import ProviderError
 from mux.contracts.ids import Page, PageRequest, Scope, SkillRef
@@ -21,8 +26,9 @@ from mux.state.operations import request_digest
 
 _POST_PUBLISH_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
 """Bounded ~15.5s backoff applied to the version-metadata and content reads
-inside skill-pin resolution (`skill_bindings.resolve_pins`), never to
-`retrieve`/`list`/`delete` or any other skill call.
+inside skill-pin resolution (`skill_bindings.resolve_pins`), to content
+verification, and to the read-back that `create` and `publish_version` wait
+for; never to `retrieve`/`list`/`delete`.
 
 Root-caused live against the QA OpenAI key (neutral-core F2-O probe, then
 confirmed independently against the same key): a freshly published version's
@@ -59,11 +65,84 @@ async def retry_not_found[T](call: Callable[[], Awaitable[T]]) -> T:
     return await call()
 
 
-def bundle_digest(bundle: SkillUpload) -> str:
-    """Pin file paths and bytes independently of ZIP ordering and timestamps."""
-    canonical = bundle.model_copy(
-        update={"files": tuple(sorted(bundle.files, key=lambda f: f.path))}
+_FRONTMATTER = re.compile(r"\A---\r?\n(.*?\r?\n)---[ \t]*(?=\r?\n|\Z)", re.DOTALL)
+_KEY = re.compile(r"(name|description)[ \t]*:")
+_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def plain_manifest(content: bytes) -> bytes:
+    """SKILL.md with a multi-line or block `name`/`description` as one quoted line,
+    and a `name` OpenAI refuses as its lowercase hyphen slug.
+
+    OpenAI stores a block scalar (`description: >`) with its line breaks at upload,
+    then refuses every session attaching it: "archive metadata does not match its
+    Skills API version". A one-line value, quoted or commented too, keeps its bytes,
+    so the digests of skills already pinned do not change. Any rewrite that does not
+    load back as the same values keeps the original bytes.
+    """
+    try:
+        match = _FRONTMATTER.match(content.decode())
+        loaded: object = yaml.safe_load(match[1]) if match else None
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return content
+    if match is None or not isinstance(loaded, dict):
+        return content
+    values = cast(dict[object, object], loaded)
+    expected = dict(values)
+    # "\n" only: `str.splitlines` also breaks at U+2028, U+2029 and NEL inside a value.
+    lines, out, index = match[1].split("\n"), list[str](), 0
+    while index < len(lines):
+        line, index = lines[index], index + 1
+        key = _KEY.match(line)
+        value = values.get(key[1]) if key else None
+        if key is None or not isinstance(value, str):
+            out.append(line)
+            continue
+        # A value's own lines: indented ones, and blank ones before another indented.
+        end = index
+        while end < len(lines) and (lines[end][:1] in (" ", "\t") or not lines[end].strip()):
+            end += 1
+        while end > index and not lines[end - 1].strip():
+            end -= 1
+        if key[1] == "name" and _NAME.fullmatch(value) is None:
+            # OpenAI refuses any other name; its slug is written unquoted.
+            plain = written = "-".join(re.findall(r"[a-z0-9]+", value.lower()))
+        elif end > index or "\n" in value:
+            plain = " ".join(value.split())
+            written = json.dumps(plain, ensure_ascii=False)
+        else:
+            plain = written = ""
+        if not plain:  # a one-line value, or a name with no slug, keeps its line
+            out.append(line)
+            continue
+        out.append(f"{key[1]}: {written}")
+        expected[key[1]] = plain
+        index = end
+    try:
+        if out == lines or yaml.safe_load("\n".join(out)) != expected:
+            return content
+    except yaml.YAMLError:
+        return content
+    return (match.string[: match.start(1)] + "\n".join(out) + match.string[match.end(1) :]).encode()
+
+
+def plain_bundle(bundle: SkillUpload) -> SkillUpload:
+    return bundle.model_copy(
+        update={
+            "files": tuple(
+                f.model_copy(update={"content": plain_manifest(f.content)})
+                if f.path == "SKILL.md"
+                else f
+                for f in bundle.files
+            )
+        }
     )
+
+
+def bundle_digest(bundle: SkillUpload) -> str:
+    """Pin file paths and the uploaded bytes independently of ZIP ordering and timestamps."""
+    plain = plain_bundle(bundle)
+    canonical = plain.model_copy(update={"files": tuple(sorted(plain.files, key=lambda f: f.path))})
     return request_digest(canonical.model_dump(mode="json"))
 
 
@@ -151,7 +230,7 @@ def bundle_zip(bundle: SkillUpload) -> bytes:
     manifests: list[str] = []
     result = io.BytesIO()
     with zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file in bundle.files:
+        for file in plain_bundle(bundle).files:
             path = PurePosixPath(file.path)
             if (
                 path.is_absolute()
@@ -191,6 +270,12 @@ class OpenAISkills:
             created_at=timestamp(raw["created_at"]),
         )
 
+    async def _readable(self, skill_id: str, version: str) -> None:
+        # A new version 404s for a few seconds; a session attaching it then fails.
+        await retry_not_found(
+            lambda: self._c.call("GET", f"/skills/{segment(skill_id)}/versions/{segment(version)}")
+        )
+
     @owned
     async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
         self._c.authorize(scope, "skill")
@@ -200,7 +285,9 @@ class OpenAISkills:
         raw = await self._resource.multipart(
             "/skills", files=(("files", "bundle.zip", body, "application/zip"),), fields={}, key=key
         )
-        return self._decode(raw)
+        skill = self._decode(raw)
+        await self._readable(skill.id, text(raw["latest_version"]))
+        return skill
 
     @owned
     async def publish_version(
@@ -222,6 +309,7 @@ class OpenAISkills:
         description = raw.get("description")
         if description is not None and not isinstance(description, str):
             raise ValueError("invalid description")
+        await self._readable(skill_id, version)
         return SkillVersion(
             ref=SkillRef(id=skill_id, version=version),
             version=version,

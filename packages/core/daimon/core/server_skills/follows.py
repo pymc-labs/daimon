@@ -20,7 +20,7 @@ __all__ = ["SkillFollow", "agent_follows", "apply_held_update", "set_agent_follo
 class SkillFollow(BaseModel):
     follow: bool
     status: ServerSkillStatus | Literal["needs_reconfirm", "managed"]
-    """`needs_reconfirm`: the update would change what the agent's backend drops.
+    """`needs_reconfirm`: an earlier sync held the update back; its owner moves it.
     `managed`: the agent comes from settings, so it keeps the version they set."""
     version: str | None
     """The newest version agents can be pinned to."""
@@ -109,11 +109,10 @@ async def apply_held_update(
     skill_id: str,
     audited: ChangeRecorder | None = None,
 ) -> None:
-    """Move the agent to the update its backend consent held back.
+    """Move the agent to an update the sync held back.
 
-    The owner's own edit, like changing the skill by hand: the agent's backend then
-    asks its owner to confirm the drops anew before it answers again. Runs under the
-    skill's lock, so the sync and this see the same follow and hold.
+    The owner's own edit, like changing the skill by hand. Runs under the skill's lock,
+    so the sync and this see the same follow and hold.
     """
     target = await load_target(deps, actor=actor, ma_agent_id=agent_id)
     require_setup(target, "Skills")

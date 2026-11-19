@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, unquote
 import httpx
 import pytest
 import yaml
-from daimon.core.channel_backend import AgentBackendRefused
 from daimon.core.mcp_auth import token_jti
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
@@ -60,7 +59,7 @@ from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.testing.drivers.anthropic.ma import MARouter
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_codec import interaction
 from .test_gemini_runtime_transport import clients_for
 
@@ -198,8 +197,12 @@ def serve_source_skill(router: MARouter, name: str, data: bytes) -> None:
     )
 
 
+#: What a turn runs without when the source has no representation for this provider.
+UNREPRESENTED = ("mcp", "memory", "sandbox", "skills", "tools")
+
+
 @pytest.fixture
-async def source_mcp(consent_request):
+async def source_mcp(switched_request):
     """Actual verifier, identity narrowing and search collapse at the HTTP edge."""
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -214,7 +217,7 @@ async def source_mcp(consent_request):
     from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
     from fastmcp import FastMCP
 
-    request = consent_request[0]
+    request = switched_request[0]
     mcp = FastMCP(
         "source-catalogue",
         auth=DaimonJWTVerifier(
@@ -247,9 +250,9 @@ async def source_mcp(consent_request):
 
 
 @pytest.fixture
-async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
+async def full(switched_request, source_mcp, monkeypatch, tmp_path, request):
     gated = getattr(request, "param", False)
-    request, service, source, actor, accepted, router, source_reads, *_ = consent_request
+    request, service, source, actor, accepted, router, source_reads, *_ = switched_request
     from daimon.core.scope import DeploymentDefault
 
     sessions = request.deps.sessionmaker
@@ -526,36 +529,17 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
     assert source_preservation_pin(represented) == source_preservation_pin(source)
     quote = await service.preview(source, "gemini")
     if not quote.allowed or {"tools", "skills", "mcp"}.intersection(quote.declared_drops):
-        # Full-mode consent never accepts loss of any represented capability.
-        with pytest.raises(AgentBackendRefused):
-            await service.set_backend(
-                source,
-                "gemini",
-                accepted.local,
-                actor,
-                accepted_drops=("memory", "sandbox"),
-                expected_preview_digest=quote.digest,
-            )
+        # A switch that loses a represented capability applies and runs without it.
+        if quote.allowed:
+            await service.set_backend(source, "gemini", accepted.local, actor)
         yield {"quote": quote, "calls": calls, "represented": represented}
         return
     assert not {"tools", "skills", "mcp"}.intersection(quote.declared_drops)
-    if gated:
-        with pytest.raises(AgentBackendRefused, match="drops mismatch"):
-            await service.set_backend(
-                source,
-                "gemini",
-                accepted.local,
-                actor,
-                accepted_drops=("memory", "sandbox"),
-                expected_preview_digest=quote.digest,
-            )
     accepted = await service.set_backend(
         source,
         "gemini",
         accepted.local,
         actor,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
     )
     revision = ConfigRevision.create(
         request.admission.backend_revision.channel, 2, request.admission.backend_revision
@@ -687,8 +671,20 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
     assert all(client.is_closed for client in clients)
 
 
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("full", [False], indirect=True)
+async def test_a_pinned_copy_keeps_its_allowlist_where_a_tool_is_off(full, monkeypatch):
+    """A tool Off here stays in a pinned install's allowlist; the server refuses it on call."""
+    from daimon.core.features.model_input import SessionToolset
+
+    request, *_ = full
+    monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", property(lambda _: {"search_tools"}))
+    selected = await read_preparation_counterpart(scope_channel_runtimes(request)[0])
+    assert selected.verified_counterpart == selected.counterpart
+
+
 @pytest.mark.parametrize(
-    "consent_request,full",
+    "switched_request,full",
     [(PARAMS, False), (LATEST_PARAMS, False), (GATED_PARAMS, True)],
     indirect=True,
     ids=["root-concrete", "root-latest", "gated-mcp-tool"],
@@ -781,7 +777,7 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
     )
 
 
-@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [GATED_PARAMS], indirect=True)
 @pytest.mark.parametrize("full", [True], indirect=True)
 async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     from daimon.core.turn.runtime_manifest import classify_source_obligations
@@ -818,7 +814,7 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [GATED_PARAMS], indirect=True)
 @pytest.mark.parametrize("full", [True], indirect=True)
 async def test_gemini_gated_loss_does_not_waive_runtime_catalogue_verification(full):
     request, _, canonical, _, _, posts, *_ = full
@@ -834,7 +830,7 @@ async def test_gemini_gated_loss_does_not_waive_runtime_catalogue_verification(f
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [GATED_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [GATED_PARAMS], indirect=True)
 @pytest.mark.parametrize("full", [True], indirect=True)
 async def test_gemini_native_readback_cannot_reenable_a_declared_unavailable_tool(full):
     request, _, _, native, _, posts, *_ = full
@@ -845,7 +841,7 @@ async def test_gemini_native_readback_cannot_reenable_a_declared_unavailable_too
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("defect", ["archive", "source_bytes", "native", "permissions", "revoked"])
 async def test_full_source_drift_and_credential_failures_never_post(full, defect):
     request, plan, _, native, _, posts, token, archives, *_ = full
@@ -905,7 +901,7 @@ async def test_full_source_drift_and_credential_failures_never_post(full, defect
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_full_source_credential_cannot_resolve_before_native_verification(full):
     request, _, canonical, _, _, posts, token, *_ = full
     runtime = build_gemini_runtime(canonical)
@@ -916,12 +912,12 @@ async def test_full_source_credential_cannot_resolve_before_native_verification(
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("unusable", ["absent", "malformed"])
 async def test_unrelated_manifest_failure_preserves_ordinary_source_capture(
-    consent_request, monkeypatch, tmp_path, unusable
+    switched_request, monkeypatch, tmp_path, unusable
 ):
-    request, _, source, *_ = consent_request
+    request, _, source, *_ = switched_request
     path = tmp_path / "unusable.json"
     if unusable == "malformed":
         path.write_text("invalid JSON")
@@ -931,7 +927,7 @@ async def test_unrelated_manifest_failure_preserves_ordinary_source_capture(
     assert source_preservation_pin(captured) == source_preservation_pin(source)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("surface", ["other_channel", "dm", "routine", "anthropic"])
 async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monkeypatch, surface):
     request, _, _, _, _, posts, _, archives, *_ = full
@@ -960,7 +956,7 @@ async def test_full_mode_row_does_not_affect_unrelated_source_capture(full, monk
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("defect", ["subset", "nonexistent", "extra"])
 async def test_full_mode_mcp_catalogue_must_equal_actual_source_tools(full, defect):
     request, *_ = full
@@ -976,11 +972,11 @@ async def test_full_mode_mcp_catalogue_must_equal_actual_source_tools(full, defe
     path.write_text(json.dumps(rows))
     captured = await capture_preparation_source(request, fresh=True)
     assert not captured.representations
-    with pytest.raises((AdmissionDenied, UnsupportedCapability, AgentBackendRefused)):
-        await prepare_source(request)
+    prepared = await prepare_source(request)
+    assert prepared.target_spec.declared_drops == UNREPRESENTED, "runs without them"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("phase", ["counterpart_read", "provider_exposure"])
 @pytest.mark.parametrize("defect", ["bytes", "extra", "missing"])
 async def test_live_gcs_drift_refuses_before_provider_send(full, defect, phase):
@@ -1009,7 +1005,7 @@ async def test_live_gcs_drift_refuses_before_provider_send(full, defect, phase):
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_target_credential_must_see_the_complete_captured_mcp_catalogue(full):
     request, _, canonical, _, _, posts, *_ = full
     runtime = build_gemini_runtime(canonical)
@@ -1022,7 +1018,7 @@ async def test_target_credential_must_see_the_complete_captured_mcp_catalogue(fu
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(full):
     from daimon.core.mcp_auth import validate_agent_mcp_token
 
@@ -1050,7 +1046,7 @@ async def test_scoped_mcp_validator_retains_the_shorter_provisioning_deadline(fu
     )
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_readback_cannot_verify_a_receipt_for_an_unmounted_directory(full):
     request, plan, _, _, _, posts, *_ = full
     foreign = replace(
@@ -1068,7 +1064,7 @@ async def test_readback_cannot_verify_a_receipt_for_an_unmounted_directory(full)
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("fault", ["version_unavailable", "provider_unavailable"])
 async def test_optional_skill_proof_outage_does_not_break_native_public_preview(
     full, monkeypatch, fault
@@ -1090,20 +1086,20 @@ async def test_optional_skill_proof_outage_does_not_break_native_public_preview(
     service = AgentBackendService(request.deps.sessionmaker, enabled=True, capture_source=full[13])
     quote = await service.preview(canonical.source, "anthropic")
     assert quote.allowed and "tools" not in quote.declared_drops
-    with pytest.raises(AgentBackendRefused, match="re confirm"):
-        await prepare_source(request)
+    prepared = await prepare_source(request)
+    assert prepared.target_spec.declared_drops == UNREPRESENTED, "runs without it"
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [F2_PARAMS], indirect=True)
-async def test_recorded_restricted_mcp_source_refuses_chat_catalogue_narrowing(full):
+@pytest.mark.parametrize("switched_request", [F2_PARAMS], indirect=True)
+async def test_recorded_restricted_mcp_source_names_the_chat_catalogue_loss(full):
     assert {"tools", "skills", "mcp"}.intersection(full["quote"].declared_drops)
     assert not full["represented"].representations
     assert not any(call.method == "POST" for call in full["calls"])
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [
         {**PARAMS, "tools": PARAMS["tools"][:1]},
         {
@@ -1129,7 +1125,7 @@ async def test_source_must_have_an_enabled_daimon_mcp_toolset(full):
     assert not any(call.method == "POST" for call in full["calls"])
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_registered_chat_catalogue_matches_source_without_expanding_agent_keys(
     full, source_mcp
 ):
@@ -1202,7 +1198,7 @@ async def test_registered_chat_catalogue_matches_source_without_expanding_agent_
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "defect", ["account", "tenant", "agent", "revoked", "extra_claim", "external_mode"]
 )
@@ -1238,7 +1234,7 @@ async def test_registered_chat_runtime_refuses_foreign_revoked_or_expanded_autho
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_an_admin_acting_as_themselves_is_a_provider_caller(full):
     """An admin's own token reaches the provider; another account's or tenant's never does."""
     import uuid
@@ -1272,7 +1268,7 @@ async def test_an_admin_acting_as_themselves_is_a_provider_caller(full):
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("fault", ["register", "revoke"])
 async def test_optional_catalogue_registry_outage_preserves_native_preview(
     full, monkeypatch, fault
@@ -1302,8 +1298,8 @@ async def test_optional_catalogue_registry_outage_preserves_native_preview(
             )
             quote = await service.preview(canonical.source, "anthropic")
             assert quote.allowed and "tools" not in quote.declared_drops
-            with pytest.raises(AgentBackendRefused, match="re confirm"):
-                await prepare_source(request)
+            prepared = await prepare_source(request)
+            assert prepared.target_spec.declared_drops == UNREPRESENTED, "runs without it"
             assert not posts
     finally:
         # Simulate registry recovery and revoke every token owned by this test's
@@ -1316,7 +1312,7 @@ async def test_optional_catalogue_registry_outage_preserves_native_preview(
                 await original_revoke(db, jti=row.jti, now=request.now())
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("defect", ["missing", "expired", "short", "unknown", "permissions"])
 async def test_private_skill_mount_requires_fresh_bounded_storage_credential(full, defect):
     request, plan, canonical, _, _, posts, *_ = full
@@ -1338,7 +1334,7 @@ async def test_private_skill_mount_requires_fresh_bounded_storage_credential(ful
     assert not posts
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_storage_mount_resolver_requires_verified_exact_counterpart_and_sources(full):
     request, plan, canonical, _, _, posts, *_ = full
     runtime = build_gemini_runtime(canonical)

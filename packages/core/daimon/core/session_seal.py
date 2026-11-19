@@ -21,6 +21,7 @@ import anthropic as anthropic_pkg
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.authz import SessionFacts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
@@ -174,6 +175,7 @@ async def inherited_seal_ids(
             "session_seal.predecessor_unreadable",
             predecessor_session_id=predecessor_session_id,
             error=type(error).__name__,
+            causes=backend_refusal_causes(error),
         )
         return frozenset({own_thread_id})
     metadata = predecessor.metadata or {}

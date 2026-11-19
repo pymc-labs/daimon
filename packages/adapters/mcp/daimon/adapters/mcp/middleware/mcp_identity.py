@@ -559,26 +559,15 @@ class IdentityMiddleware(Middleware):
                 context, lambda context: self._run_backend(context, call_next, identity), identity
             )
         if identity.no_confirmation_surface and context.method == "tools/call":
-            from daimon.core.tool_safety import (
-                GATE_OFF_TOOLS,
-                confirmation_gated_tools,
-                host_call_previews,
-                self_carded_tools,
-            )
+            from daimon.core.tool_safety import confirmation_gated_tools
 
             # `call_tool` re-enters here with the inner tool's name, so the proxy is covered.
-            # A self-carded tool posts its own card instead of acting (`switch_cards`).
-            name = str(getattr(context.message, "name", ""))
-            raw: object = getattr(context.message, "arguments", None)
-            args: Mapping[str, object] = (
-                cast("Mapping[str, object]", raw) if isinstance(raw, Mapping) else {}
-            )
-            if name in (confirmation_gated_tools() - self_carded_tools()) and not (
-                host_call_previews(name, args)
-            ):
-                gate = self._require_host_call_gate()
-                if not (name in GATE_OFF_TOOLS and gate.off_for(identity)):
-                    return await gate.ask(context, identity)
+            if str(getattr(context.message, "name", "")) in confirmation_gated_tools():
+                return await self._require_host_call_gate().ask(
+                    context,
+                    identity,
+                    lambda context: self._run_backend(context, call_next, identity),
+                )
         return await self._run_backend(context, call_next, identity)
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:

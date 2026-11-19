@@ -14,7 +14,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from daimon.adapters.discord.credential_origin import resolve_credential_target
+from daimon.adapters.discord.credential_origin import (
+    is_credential_interaction_valid,
+    resolve_credential_target,
+)
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -61,7 +64,12 @@ async def start_mcp_oauth_from_click(
     now = datetime.now(UTC)
     try:
         consumed, flow = await begin_oauth_submit(
-            runtime.sessionmaker, row=row, agent=agent, app_root_url=app_root_url, now=now
+            runtime.sessionmaker,
+            row=row,
+            agent=agent,
+            app_root_url=app_root_url,
+            now=now,
+            location_verified=is_credential_interaction_valid(interaction, row),
         )
     except FormPinRefused as refused:
         await interaction.followup.send(embed=build_notice_embed(refused.refusal), ephemeral=True)

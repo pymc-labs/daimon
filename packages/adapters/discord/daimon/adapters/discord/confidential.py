@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from daimon.adapters.discord.checks import refuse_if_not_admin
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
@@ -44,7 +45,11 @@ class MakeConfidentialView(discord.ui.View):
                 platform="discord",
                 channel_id=self.channel_id,
                 readers="own",
-                subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
+                subject=build_subject(
+                    is_admin=True,
+                    platform_user_id=str(interaction.user.id),
+                    origin_channel_ids=interaction_origin(interaction),
+                ),
                 default=self.runtime.deployment_default,
                 actor_account_id=actor.account_id,
             )

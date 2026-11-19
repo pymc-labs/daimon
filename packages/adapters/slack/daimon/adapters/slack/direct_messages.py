@@ -24,6 +24,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
@@ -273,7 +274,11 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             channel=channel_id, user=user_id, **fields
         )
     except _ERRORS as exc:
-        log.warning("slack.dm.command_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.dm.command_failed",
+            causes=backend_refusal_causes(exc),
+            error_type=type(exc).__name__,
+        )
         if client is not None:
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -421,7 +426,11 @@ async def _answer_burst(
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.dm.identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
 
     async def answer(group: list[dict[str, Any]]) -> None:
         content = "\n\n".join(t for e in group if (t := str(e.get("text") or "")).strip())
@@ -481,7 +490,9 @@ async def _tell_failure(
     thread: dict[str, Any],
 ) -> None:
     """Log a failed DM turn and, when a client is at hand, tell the person why."""
-    log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
+    log.warning(
+        "slack.dm.turn_failed", causes=backend_refusal_causes(exc), error_type=type(exc).__name__
+    )
     if client is None:
         return
     with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):

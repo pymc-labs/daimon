@@ -29,6 +29,7 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.stores import mcp_tokens, platform_names
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import get_account_with_tenant
@@ -313,7 +314,7 @@ async def list_agent_coding_keys(
 ) -> list[CodingKeyEntry]:
     """The coding keys of this agent the actor may see: all for an admin, their own for an owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Coding keys")
+    require_setup(target, "Coding keys", read_only=True)
     access = coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned)
     if access is None:
         return []
@@ -340,6 +341,8 @@ async def revoke_agent_coding_key(
 ) -> None:
     """Revoke one coding key of this agent: any for an admin, the actor's own for an owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    if target.sealed:
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     access = coding_key_access(is_admin=actor.subject.is_admin, owns_agent=target.owned)
     if access is None:
         raise AgentEditError("No such key.", kind="not_found")

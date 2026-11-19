@@ -96,23 +96,6 @@ def is_escalation_reaction(
     return emoji_name == ESCALATE
 
 
-def remaining_credits(*, allowance: int, used: int) -> int:
-    """Credits left for one person, floored at zero.
-
-    Floors rather than returning a negative because `allowance` is
-    deployment config and can be lowered below what somebody has already
-    spent. A negative remaining would render as "-2 credits left" and, worse,
-    invites a caller to compare it with `> 0` somewhere and get a different
-    answer than `has_credit` gives.
-    """
-    return max(allowance - used, 0)
-
-
-def has_credit(*, allowance: int, used: int) -> bool:
-    """Whether one more escalation is permitted."""
-    return remaining_credits(allowance=allowance, used=used) > 0
-
-
 def is_enabled(*, channel_id: str | None, allowance: int) -> bool:
     """Whether a platform offers the escalate affordance at all.
 

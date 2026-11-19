@@ -11,8 +11,10 @@ replaced; the MCP catalogue is the real verifier and middleware.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
+import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,21 +31,22 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.prepare import CONTINUED, admitted_session_scope
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
+from daimon.testing.settings_mock import bare_settings
 from mux.contracts.config import ConfigRevision
 from mux.contracts.resources import EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.errors import ScopeViolation
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import PARAMS, default_skill_bundles, serve_source_skill
+from .test_gemini_full_source import CUSTOM, PARAMS, default_skill_bundles, serve_source_skill
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
 
 @pytest.fixture
-async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
+async def template(switched_request, source_mcp, monkeypatch, tmp_path, request):
     from daimon.core.channel_backend import AgentBackendService
     from daimon.core.scope import DeploymentDefault
     from daimon.testing.asgi import mcp_session
@@ -53,7 +56,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     unreadable_mcp = getattr(request, "param", None) == "unreadable_mcp"
     # "relay": the connector relay is on from consent onward.
     relay = getattr(request, "param", None) == "relay"
-    request, service, source, actor, accepted, router, *_ = consent_request
+    request, service, source, actor, accepted, router, *_ = switched_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
     # The OpenAI code-default template sizes the source's custom skills at capture.
@@ -79,7 +82,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
-            **({"settings": object()} if relay else {}),
+            **({"settings": bare_settings()} if relay else {}),
         ),
     )
     if relay:
@@ -87,17 +90,39 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
 
         monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     native, calls, posts = {}, [], []
+    made: list[str] = []  # environments made before a first interaction
+
+    def environments(call):
+        # Gemini's environment API, for the large skills a session uploads.
+        target = call.url.path.partition("/files/")[2].rstrip("/") + "/"
+        if call.method == "POST":
+            made.append(f"env-{len(calls)}")
+            return httpx.Response(200, json={"id": made[-1]})
+        if call.method == "GET":
+            files = [
+                {"path": p, "type": "FILE", "size_bytes": str(s)}
+                for p, s in _uploaded(calls).items()
+                if p.startswith(target)
+            ]
+            return httpx.Response(200, json={"files": files})
+        return httpx.Response(200, json={})
+
+    def ran(id_):
+        # An interaction runs in the environment made for its session, if any.
+        return interaction(id_) | ({"environment_id": made[-1]} if made else {})
 
     def handle(call):
         calls.append(call)
+        if "/environments" in call.url.path:
+            return environments(call)
         if call.url.path.startswith("/v1beta/agents"):
             if call.method == "POST":
                 native.update(json.loads(call.content))
             return httpx.Response(200, json=native)
         if call.method == "POST":
             posts.append(json.loads(call.content))
-            return httpx.Response(200, json=interaction(f"turn-{len(posts)}"))
-        return httpx.Response(200, json=interaction(call.url.path.rsplit("/", 1)[-1]))
+            return httpx.Response(200, json=ran(f"turn-{len(posts)}"))
+        return httpx.Response(200, json=ran(call.url.path.rsplit("/", 1)[-1]))
 
     async def catalogue(call):
         assert call.url.host == "mcp.invalid"
@@ -173,8 +198,6 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         "gemini",
         accepted.local,
         actor,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
         model=picked,
     )
     linked = ConfigRevision.create(revision.channel, 2, revision)
@@ -184,6 +207,17 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     calls.clear()
     yield request, quote, native, calls, posts
     assert all(client.is_closed for client in clients)
+
+
+def _uploaded(calls) -> dict[str, int]:
+    """Each file the environment uploads placed, with its size."""
+    placed = {}
+    for call in calls:
+        if call.method == "PUT":
+            target = call.url.path.partition("/files/")[2]
+            with tarfile.open(fileobj=io.BytesIO(call.content), mode="r:gz") as tar:
+                placed.update({target + m.name: m.size for m in tar.getmembers() if m.isfile()})
+    return placed
 
 
 def _bound_capture(request, actor):
@@ -227,13 +261,13 @@ def _connection(selected):
     return connection
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert "memory" in quote.declared_drops
-    # Its custom skills attach per session; only one past Gemini's limits is a named loss.
-    assert "skills" not in quote.declared_drops, quote.declared_drops
+    # Its custom skills attach per session; the large one uploads, so none is a loss.
+    assert not any(d == "skills" or d.startswith("skill:") for d in quote.declared_drops)
     # J6b: its execution tools map to code_execution and web search to Google
     # Search; only web fetch is a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -241,7 +275,7 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     assert "builtin_tool:web_search" not in quote.declared_drops
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("template", ["unreadable_mcp"], indirect=True)
 async def test_a_switch_that_dropped_mcp_is_served_with_no_mcp_and_no_credential(template):
     """J2/J3: a copy's confirmed switch to Gemini dropped its MCP. Its first turn on
@@ -271,7 +305,7 @@ def _blip(kind):
     return McpStatusError(503 if kind == "server_error" else 429)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("kind", ["unreachable", "server_error", "rate_limited"])
 async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmation(
     template, monkeypatch, kind
@@ -291,16 +325,44 @@ async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmatio
     )
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("relay_agent", [False, True])
+async def test_a_preview_hides_what_its_turn_hides(
+    template, switched_request, monkeypatch, relay_agent
+):
+    """A tool Off here is never named lost: the preview reads the place's features that
+    hide tools, which no backend narrows, and a relay agent's memory is Off as on its turn."""
+    from daimon.core.features.model_input import HIDING_KEYS
+    from daimon.core.turn import admission, runtime_manifest
+
+    request, *_ = template
+    _, _, source, actor, *_ = switched_request
+    real, seen = runtime_manifest.capture_preparation_source, []
+
+    async def spy(preparation, **kwargs):
+        seen.append(preparation.admission)
+        return await real(preparation, **kwargs)
+
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", spy)
+    monkeypatch.setattr(admission, "agent_has_identity_relay", lambda *_a, **_k: relay_agent)
+    await _bound_capture(request, actor)(source)
+    assert seen, "the preview captured"
+    for read in seen:
+        assert read.toolset.hidden_daimon_tools, "default capabilities are Off: tools hidden"
+        assert set(read.features.features) == set(HIDING_KEYS)
+        assert read.resolved("repo_memory").locked is relay_agent
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("kind", ["unreachable", "server_error"])
 async def test_a_catalogue_blip_at_a_preview_records_no_loss(
-    template, consent_request, monkeypatch, kind
+    template, switched_request, monkeypatch, kind
 ):
     from daimon.core.channel_backend import AgentBackendRefused
     from daimon.core.mcp_oauth import discovery
 
     request, *_ = template
-    _, _, source, actor, *_ = consent_request
+    _, _, source, actor, *_ = switched_request
 
     async def blip(_url, _token):
         raise _blip(kind)
@@ -313,7 +375,7 @@ async def test_a_catalogue_blip_at_a_preview_records_no_loss(
     )
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(template):
     request, _, native, calls, _ = template
     selected, runtime = await _prepared(request)
@@ -343,7 +405,7 @@ async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(te
     await runtime.end_of_turn()  # idempotent once nothing is minted
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_credential_refuses_another_scope_reference_or_destination(template):
     request, *_ = template
     selected, runtime = await _prepared(request)
@@ -360,7 +422,7 @@ async def test_the_credential_refuses_another_scope_reference_or_destination(tem
         )
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_catalogue_that_changed_since_consent_revokes_and_refuses(template, monkeypatch):
     from daimon.core.mcp_oauth import discovery
 
@@ -393,19 +455,22 @@ async def _tokens(db, request):
     ).all()
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_template_without_mcp_capability_still_drops_tools(template, tmp_path):
     request, *_ = template
     manifest = tmp_path / "runtime.json"
     (row,) = json.loads(manifest.read_text())
     row.pop("template_capabilities")
     manifest.write_text(json.dumps([row]))
-    with pytest.raises(AdmissionDenied):
-        # The consent kept MCP; a row that can't represent it refuses the turn.
-        await _prepared(request)
+    # A row that can't represent the MCP runs the turn without it.
+    selected, _ = await _prepared(request)
+    assert selected.target_spec.declared_drops == ("mcp", "memory", "sandbox", "skills", "tools"), (
+        "runs without it"
+    )
+    assert not selected.target_spec.mcp_servers, "nothing of the MCP reaches the provider"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("outcome", ["answered", "provider_failed"])
 async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monkeypatch, outcome):
     import asyncio
@@ -473,12 +538,24 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
             for body in sent
             for t in body.get("tools", [])
         ), "the credential travels only in the MCP server entry"
+        (made,) = [c for c in calls if c.method == "POST" and c.url.path.endswith("/environments")]
         mounted = {
             source["target"].split("/")[2]
-            for source in sent[0]["environment"].get("sources", [])
+            for source in json.loads(made.content).get("sources", [])
             if source["target"].startswith(".agents/skills/")
         }
-        assert mounted, "the template's custom skills mount in its first interaction"
+        assert len(mounted) == len(CUSTOM), "every custom skill is listed in its environment"
+        style = Path(__file__).parents[4] / "defaults/skills/pymc-artifact-style"
+        assets = {
+            p.relative_to(style).as_posix(): p.stat().st_size
+            for p in style.rglob("*")
+            if p.is_file() and p.name != "SKILL.md"
+        }
+        (uploaded,) = {p.split("/")[2] for p in _uploaded(calls)}
+        assert uploaded in mounted
+        prefix = f".agents/skills/{uploaded}/"
+        assert {p.removeprefix(prefix): s for p, s in _uploaded(calls).items()} == assets
+        assert sent[0]["environment"] == f"env-{calls.index(made) + 1}", sent[0]["environment"]
 
 
 GATED = (
@@ -508,7 +585,7 @@ CONNECTOR_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [CONNECTOR_PARAMS], indirect=True)
 async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, monkeypatch):
     """With the relay on the connector is a second server on Daimon's one credential."""
     from daimon.core.features import snapshot
@@ -516,7 +593,7 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     request, quote, native, *_ = template
     assert "mcp_server:linear" in quote.declared_drops, "confirmed while the relay was off"
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     selected, runtime = await _prepared(request)
     daimon, linear = selected.target_spec.mcp_servers
     public = str(request.deps.mcp.public_url).rstrip("/")
@@ -530,7 +607,7 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     assert relayed == token, "the relay authenticates the turn's own Daimon credential"
 
 
-@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [CONNECTOR_PARAMS], indirect=True)
 async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_relays(
     template, monkeypatch
 ):
@@ -543,7 +620,7 @@ async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_rela
         "deployment_on",
         lambda _s, key, platform: key == "mcp_connector_relay" and platform == "slack",
     )
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     both = replace(request, answers_on=("discord", "slack"))
     selected, _ = await _prepared(both)
     assert "mcp_server:linear" in selected.target_spec.declared_drops, (
@@ -556,7 +633,7 @@ async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_rela
     )
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(template, monkeypatch):
     from daimon.core.mcp_oauth import discovery
 
@@ -578,10 +655,9 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     assert represented_source(captured, representation.target) == representation
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, monkeypatch):
-    """With the gate on for the platform each gated call is carded, so it is no loss;
-    a reach approval, tallied under a turn gone by the press, still is."""
+    """With the gate on for the platform each gated call is carded, so it is no loss."""
     from daimon.core.features import snapshot
     from daimon.core.mcp_oauth import discovery
     from daimon.core.turn.runtime_manifest import capture_preparation_source
@@ -594,15 +670,13 @@ async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, mon
 
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, key, _p: key == "host_call_gate")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     captured = await capture_preparation_source(request, fresh=True)
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert set(GATED) <= allowed, "every gated tool is offered behind its card"
-    assert representation.unavailable_mcp_tools == ("mcp_tool:daimon-mcp:approve_reach",), (
-        "a reach approval stays a named loss"
-    )
+    assert {*GATED, "approve_reach"} <= allowed, "every gated tool is offered behind its card"
+    assert representation.unavailable_mcp_tools == ()
 
 
 def _gated(request, gating):
@@ -614,7 +688,7 @@ def _gated(request, gating):
     return replace(request, admission=replace(request.admission, asks_before_publishing=True))
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("gating", ["tool_safety", "asks_before_publishing"])
 async def test_daimon_gating_of_unlisted_tools_keeps_the_mcp_representation(template, gating):
     """Gating writes an ask config for gated tools the provider-turn catalogue
@@ -632,7 +706,7 @@ async def test_daimon_gating_of_unlisted_tools_keeps_the_mcp_representation(temp
     assert allowed and not allowed & {"approve_reach", "publish_report"}
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_an_unlisted_grant_still_represents_no_mcp(template, monkeypatch):
     from daimon.core import tool_safety
     from daimon.core.turn.runtime_manifest import capture_preparation_source
@@ -650,7 +724,7 @@ async def test_an_unlisted_grant_still_represents_no_mcp(template, monkeypatch):
     assert not [r for r in captured.representations if r.target.mcp_servers], "a grant fails closed"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_source_pin_ignores_daimon_gating_but_not_an_agent_edit(template, monkeypatch):
     """A release that gates one more tool, or a place that asks before publishing,
     is not a change to the agent: its confirmed switch must not be asked again."""
@@ -687,7 +761,7 @@ async def test_the_source_pin_ignores_daimon_gating_but_not_an_agent_edit(templa
         assert pin(await capture(changed)) != plain, f"an owner edit re-pins: {sorted(edit)}"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_edit(template):
     """Consents pinned with Daimon's gating keep holding after the upgrade; an owner
     edit still breaks them."""
@@ -710,7 +784,7 @@ async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_ed
     assert not manifest.source_pin_matches(await capture(changed), legacy)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "tool_name",
     [
@@ -1126,7 +1200,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
     """J6: a Gemini root has the same switch and hand-off tools as a GPT one."""
     from .test_openai_template_mcp import handoff_mcp, live_token, offered_and_run
@@ -1137,7 +1211,7 @@ async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
         await offered_and_run(app, await live_token(request))
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimon(
     template, monkeypatch
 ):
@@ -1161,69 +1235,33 @@ async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimo
     assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
 
 
-@pytest.fixture
-def consent_recorded_before_self_cards(monkeypatch):
-    """While on, gated-tool handling is as before Daimon posted the switch card itself.
-
-    The catalogue also lists the switch tool and one other gated tool, so the
-    consent has something to drop.
-    """
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_tool_ungated_after_the_switch_is_offered_at_once(template, monkeypatch):
+    """A release that lets one more Daimon tool run on the provider offers it unasked."""
     from daimon.core import tool_safety
     from daimon.core.mcp_oauth import discovery
 
     listed = discovery.list_mcp_tools
 
-    async def with_gated_tools(url, token):
-        return frozenset(await listed(url, token)) | {"request_agent_backend_switch", "add_skill"}
+    async def with_add_skill(url, token):
+        return frozenset(await listed(url, token)) | {"add_skill"}
 
-    monkeypatch.setattr(discovery, "list_mcp_tools", with_gated_tools)
-    real = tool_safety.self_carded_tools
-    state = {"old": True}
-    monkeypatch.setattr(
-        tool_safety, "self_carded_tools", lambda: frozenset() if state["old"] else real()
-    )
-    return state
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
-    consent_recorded_before_self_cards, template
-):
-    """Agents switched before the switch tool was offered keep working without re-confirming."""
-    request, quote, *_ = template
-    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
-    assert switch_drop in quote.declared_drops, "the consent was recorded the old way"
-    consent_recorded_before_self_cards["old"] = False
-    selected, _ = await _prepared(request)
-    allowed = _connection(selected).tool_policy["allowed_tools"]
-    assert "request_agent_backend_switch" in allowed, "the tool is offered from now on"
-    assert switch_drop not in selected.target_spec.declared_drops
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_an_old_consent_holds_when_another_carded_tool_is_offered(
-    consent_recorded_before_self_cards, template, monkeypatch
-):
-    """Each tool regained runs behind Daimon's card, so neither asks again; any other
-    difference does (`test_consent_upgrade`)."""
-    from daimon.core import tool_safety
-
+    monkeypatch.setattr(discovery, "list_mcp_tools", with_add_skill)
     request, *_ = template
-    consent_recorded_before_self_cards["old"] = False
-    monkeypatch.setattr(
-        tool_safety,
-        "self_carded_tools",
-        lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
-    )
+    gated = tool_safety.confirmation_gated_tools()
+    assert "add_skill" in gated, "add_skill needs a card today"
     selected, _ = await _prepared(request)
-    allowed = _connection(selected).tool_policy["allowed_tools"]
-    assert {"request_agent_backend_switch", "add_skill"} <= set(allowed), "both are offered"
+    assert "add_skill" not in _connection(selected).tool_policy["allowed_tools"]
+    monkeypatch.setattr(tool_safety, "confirmation_gated_tools", lambda: gated - {"add_skill"})
+    selected, _ = await _prepared(request)
+    assert "add_skill" in _connection(selected).tool_policy["allowed_tools"], "offered at once"
+    assert "mcp_tool:daimon-mcp:add_skill" not in selected.target_spec.declared_drops
 
 
 @pytest.fixture
-def consent_recorded_before_template_tools(monkeypatch):
-    """While the consent is recorded, a template maps none of the source's tools and
-    drops them whole, as before #1483."""
+def switched_before_template_tools(monkeypatch):
+    """While the switch is made, a template maps none of the source's tools and drops
+    them whole, as before #1483."""
     import mux.profiles
     from mux.errors import InvalidConfig
 
@@ -1236,17 +1274,16 @@ def consent_recorded_before_template_tools(monkeypatch):
     return lambda: monkeypatch.setattr(mux.profiles, "represented_execution_tools", real)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
-    consent_recorded_before_template_tools, template
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_switch_that_lost_tools_gets_them_back_unasked(
+    switched_before_template_tools, template
 ):
-    """PRE fleet-gemini (smoke 4acca048): switched before #1483, its consent named
-    `tools` a whole loss. It keeps working without re-confirming, and runs with
-    code execution and Google Search from now on."""
+    """Switched while a template mapped no tools, `tools` was a whole loss. Once the
+    template maps them, the next turn runs with code execution and Google Search."""
     request, quote, *_ = template
-    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
+    assert "tools" in quote.declared_drops, "lost while the template mapped none"
     assert not any(drop.startswith("builtin_tool:") for drop in quote.declared_drops)
-    consent_recorded_before_template_tools()  # today's template maps the tools
+    switched_before_template_tools()  # today's template maps the tools
     selected, _ = await _prepared(request)
     assert "tools" not in selected.target_spec.declared_drops
     tools = [tool.name for tool in selected.target_spec.tools or ()]
@@ -1254,8 +1291,8 @@ async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
 
 
 @pytest.fixture
-def consent_recorded_while_search_was_off(monkeypatch):
-    """While the consent is recorded, web search is a named loss, as before it was metered."""
+def switched_while_search_was_off(monkeypatch):
+    """While the switch is made, web search is a named loss, as before it was metered."""
     from daimon.core.turn import runtime_manifest
 
     real = runtime_manifest._WEB_TOOLS  # pyright: ignore[reportPrivateUsage]
@@ -1263,20 +1300,20 @@ def consent_recorded_while_search_was_off(monkeypatch):
     return lambda: monkeypatch.setattr(runtime_manifest, "_WEB_TOOLS", real)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_lost_web_search_prepares_and_runs_google_search(
-    consent_recorded_while_search_was_off, template
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_switch_that_lost_web_search_runs_google_search_once_it_is_on(
+    switched_while_search_was_off, template
 ):
-    """A copy switched while search was off keeps working, with Google Search, unasked."""
+    """A copy switched while search was off gets Google Search back, unasked."""
     request, quote, *_ = template
-    assert "builtin_tool:web_search" in quote.declared_drops, "the consent named it lost"
-    consent_recorded_while_search_was_off()
+    assert "builtin_tool:web_search" in quote.declared_drops, "the switch named it lost"
+    switched_while_search_was_off()
     selected, _ = await _prepared(request)
     assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
     assert "google_search" in [tool.name for tool in selected.target_spec.tools or ()]
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monkeypatch):
     """`tool.web_search` off at a place removes Google Search, as it removes Claude's."""
     from daimon.core.features.model_input import SessionToolset
@@ -1290,44 +1327,26 @@ async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monke
     assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_consent_that_dropped_tools_and_the_switch_tool_still_prepares(
-    consent_recorded_before_self_cards, consent_recorded_before_template_tools, template
-):
-    request, quote, *_ = template
-    switch_drop = "mcp_tool:daimon-mcp:request_agent_backend_switch"
-    assert {"tools", switch_drop} <= set(quote.declared_drops)
-    consent_recorded_before_self_cards["old"] = False
-    consent_recorded_before_template_tools()
-    selected, _ = await _prepared(request)
-    spec = selected.target_spec
-    assert not {"tools", switch_drop} & set(spec.declared_drops)
-    assert [tool.name for tool in spec.tools or ()] == ["code_execution", "google_search"]
-    assert "request_agent_backend_switch" in _connection(selected).tool_policy["allowed_tools"]
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_tool_whose_feature_is_off_here_leaves_the_allowlist_unasked(template, monkeypatch):
+    """A feature Off at the place hides its Daimon tools from a native turn, as from Claude's."""
+    from daimon.core.features.model_input import SessionToolset
 
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_an_old_consent_with_tools_and_any_other_difference_still_needs_a_new_confirmation(
-    consent_recorded_before_self_cards,
-    consent_recorded_before_template_tools,
-    template,
-    monkeypatch,
-):
-    """Tools are explained by #1483; one more gated tool offered is not: a fresh card."""
-    from daimon.core import tool_safety
-    from daimon.core.channel_backend import AgentBackendRefused
-
-    request, quote, *_ = template
-    assert "tools" in quote.declared_drops, "the consent was recorded the old way"
-    consent_recorded_before_template_tools()
-    # The switch tool stays dropped as consented; add_skill is newly offered.
-    monkeypatch.setattr(tool_safety, "self_carded_tools", lambda: frozenset({"add_skill"}))
-    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
-        await _prepared(request)
+    request, *_ = template
+    hidden = property(lambda _: frozenset({"search_tools"}))
+    monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", hidden)
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    assert connection.tool_policy["allowed_tools"] == ["call_tool"], "never listed"
+    assert "mcp_tool:daimon-mcp:search_tools" not in selected.target_spec.declared_drops
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    # The server still lists it: the credential is minted all the same.
+    assert await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    await runtime.end_of_turn()
 
 
 @pytest.mark.parametrize(
-    "consent_request",
+    "switched_request",
     [PARAMS, {**PARAMS, "backend_model": "gemini-4-argon"}],
     indirect=True,
     ids=["provider_default", "picked"],
@@ -1347,16 +1366,9 @@ async def test_a_tool_gated_after_the_switch_still_prepares_without_it(template,
     assert drop in (selected.target_spec.system or ""), "the model is told it is gone"
 
 
-def _asked_again(refused: pytest.ExceptionInfo[BaseException]) -> bool:
-    error = refused.value
-    cause = error.__cause__ if isinstance(error, AdmissionDenied) else error
-    return getattr(cause, "reason", None) == "re_confirm"
-
-
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_moved_provider_default_never_rides_on_the_old_consent(template):
-    """A release that moves the default model asks again, though no loss changed."""
-    from daimon.core.channel_backend import AgentBackendRefused
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_moved_provider_default_just_applies(template):
+    """A release that moves the default model runs the next turn on it, unasked."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_backends
 
@@ -1379,9 +1391,8 @@ async def test_a_moved_provider_default_never_rides_on_the_old_consent(template)
     sessions = request.deps.sessionmaker
     async with sessions.begin() as db:
         setting = await agent_backends.current(db, request.tenant_id, agent_id, persisted=True)
-        assert setting is not None and setting.model is None, "confirmed for the default"
+        assert setting is not None and setting.model is None, "switched to the default"
         await mux_state.put_config_revision(db, moved, origin="agent", agent_revision=setting)
     request = replace(request, admission=replace(request.admission, backend_revision=moved))
-    with pytest.raises((AgentBackendRefused, AdmissionDenied)) as refused:
-        await _prepared(request)
-    assert _asked_again(refused), "another model needs a fresh confirmation"
+    selected, _ = await _prepared(request)
+    assert selected.target_spec.model.id == "gemini-4-argon", "the turn runs on the new default"

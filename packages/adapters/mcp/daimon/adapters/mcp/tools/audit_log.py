@@ -61,8 +61,8 @@ def _day(value: str | None, name: str) -> date | None:
         raise ToolError(f"{name} must be a date like 2026-01-31.") from err
 
 
-def _audit_url(runtime: McpRuntime, actor: WebAdmin) -> str | None:
-    links = admin_links(runtime, actor)
+async def _audit_url(runtime: McpRuntime, auth: AuthIdentity, actor: WebAdmin) -> str | None:
+    links = await admin_links(runtime, auth, actor)
     return links.audit() if links else None
 
 
@@ -95,7 +95,7 @@ async def _log_impl(
                 None,
             )
             if chosen is None:
-                return AuditLog([], _audit_url(runtime, actor))
+                return AuditLog([], await _audit_url(runtime, auth, actor))
             account = chosen.account_id
         found = await audit_trail.list_entries(
             db,
@@ -132,7 +132,7 @@ async def _log_impl(
                     e.row.outcome,
                 )
             )
-    return AuditLog(lines, _audit_url(runtime, actor))
+    return AuditLog(lines, await _audit_url(runtime, auth, actor))
 
 
 async def _kinds_impl(runtime: McpRuntime, auth: AuthIdentity) -> AuditKinds:
@@ -153,10 +153,10 @@ def register_audit_log_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         last: str | None = None,
         limit: int = 50,
     ) -> AuditLog:
-        """List the workspace's audit log, newest first: ``web`` for admin changes in the
-        web app, ``security`` for chat tool calls and panel writes. Filter by acting web
-        person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
-        (YYYY-MM-DD). Admin-only."""
+        """List the workspace's audit log, newest first. ``source`` is where an entry came from:
+        admin changes made outside chat, or ``security`` for chat tool calls and panel writes.
+        Filter by acting person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to
+        ``last`` (YYYY-MM-DD). Admin-only."""
         return await _log_impl(
             runtime,
             await _auth(ctx),

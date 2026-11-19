@@ -219,9 +219,7 @@ async def test_sdk_mcp_auth_uses_the_real_loopback_host_and_revocation(
                 with pytest.raises(ProviderError) as refused:
                     await driver.sessions.create(scope, session_spec, key="revoked-session")
                 assert refused.value.category == "permission"
-                assert refused.value.native_message is None
-                assert refused.value.native_error_code is None
-                assert refused.value.native_param is None
+                assert refused.value.native_message == "[redacted]", "echoed bearer is masked"
                 assert all(token not in json.dumps(body) for body in posted)
                 assert token not in str(refused.value) and token not in repr(refused.value)
                 assert refused.value.__cause__ is None

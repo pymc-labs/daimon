@@ -30,6 +30,7 @@ from daimon.core.agent_details import AgentDetails
 from daimon.core.agent_pins import agent_pin_names, pin_refusal
 from daimon.core.agent_reach import load_target_facts
 from daimon.core.authz import Place, Subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
@@ -248,7 +249,11 @@ class AddSkillModal(discord.ui.Modal):
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
-            log.exception("agent_setup.add_skill.preview_failed", request_id=request_id)
+            log.exception(
+                "agent_setup.add_skill.preview_failed",
+                request_id=request_id,
+                causes=backend_refusal_causes(exc),
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
@@ -373,7 +378,12 @@ class SkillPreviewView(PanelViewBase):
             return
         except (DaimonError, anthropic.APIError) as exc:
             request_id = generate_request_id()
-            log.exception("agent_setup.add_skill.failed", agent_name=name, request_id=request_id)
+            log.exception(
+                "agent_setup.add_skill.failed",
+                agent_name=name,
+                request_id=request_id,
+                causes=backend_refusal_causes(exc),
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(exc, request_id=request_id)), ephemeral=True
             )
