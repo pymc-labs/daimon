@@ -794,10 +794,17 @@ async def test_agent_invoker_roles_cli_refuses_unsupported_platform_or_everyone(
         )
 
 
+class _AlertSettings(FakeCliSettings):
+    """No bot token or keys: the alert channel check cannot run, so it saves."""
+
+    crypto = SimpleNamespace(keys=())
+    discord = None
+
+
 async def test_an_alert_budget_stores_its_alert_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    rt = build_cli_runtime(db_session_factory)
+    rt = build_cli_runtime(db_session_factory, settings=_AlertSettings())
     console = _console()
     tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
     args = {"rt": rt, "console": console, "platform": "slack", "workspace_id": "T1"}
@@ -817,3 +824,19 @@ async def test_an_alert_budget_stores_its_alert_channel(
         )
     assert alert is not None and (alert.on_limit, alert.alert_channel_id) == ("alert", "C9")
     assert "alert only" in _out(console), "the mode is printed"
+
+
+async def test_budget_set_when_only_the_limit_changes_then_an_alert_budget_still_alerts(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_AlertSettings())
+    tenant = await provision_tenant(db_session_factory, platform="slack", workspace_id="T1")
+    args = {"rt": rt, "console": _console(), "platform": "slack", "workspace_id": "T1"}
+    window = {"window": "monthly", "starts_at": None, "ends_at": None}
+    await budget_set(**args, channel_id="C1", usd="20", **window, on_limit="alert")
+    await budget_set(**args, channel_id="C1", usd="30", **window)
+    async with db_session_factory() as s:
+        budget = await channel_budgets.get_channel_budget(
+            s, tenant_id=tenant.tenant_id, platform="slack", channel_id="C1"
+        )
+    assert budget is not None and budget.on_limit == "alert", "no --on-limit keeps alert"

@@ -43,6 +43,7 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.channel_ids import InvalidChannelId, normalize_channel_id
+from daimon.core.channel_post_check import alert_channel_problem
 from daimon.core.channel_rules import (
     READERS_LABELS,
     WRITERS_LABELS,
@@ -141,13 +142,14 @@ def budget_set_command(
         str | None, typer.Option("--ends-at", help="ISO 8601; fixed windows only.")
     ] = None,
     on_limit: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--on-limit",
             help=f"At the limit: {', '.join(BUDGET_ON_LIMIT)} (stop refuses turns; "
-            "alert posts an alert at each full multiple of the limit).",
+            "alert posts an alert at each full multiple of the limit). "
+            "Default: the budget's current mode, stop for a new one.",
         ),
-    ] = "stop",
+    ] = None,
     alert_channel: Annotated[
         str | None,
         typer.Option(
@@ -190,21 +192,10 @@ async def budget_set(
     window: str,
     starts_at: str | None,
     ends_at: str | None,
-    on_limit: str = "stop",
+    on_limit: str | None = None,
     alert_channel: str | None = None,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    try:
-        spec = parse_budget_spec(
-            limit_usd=usd,
-            window=window,
-            starts_at=starts_at,
-            ends_at=ends_at,
-            on_limit=on_limit,
-            alert_channel_id=alert_channel,
-        )
-    except ChannelBudgetError as exc:
-        raise typer.BadParameter(str(exc)) from exc
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     target = await parent_channel(
         rt,
@@ -213,17 +204,45 @@ async def budget_set(
         channel_id=channel_id,
         transport=discord_transport,
     )
+    async with rt.sessionmaker() as session:
+        current = await channel_budgets.get_channel_budget(
+            session, tenant_id=tenant_id, platform=platform, channel_id=target
+        )
+    try:
+        spec = parse_budget_spec(
+            limit_usd=usd,
+            window=window,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            on_limit=on_limit,
+            alert_channel_id=alert_channel,
+            current=current,
+        )
+    except ChannelBudgetError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if alert_channel is not None:
-        spec = replace(
-            spec,
-            alert_channel_id=await parent_channel(
-                rt,
+        alert_id = await parent_channel(
+            rt,
+            platform=platform,
+            workspace_id=workspace_id,
+            channel_id=alert_channel,
+            transport=discord_transport,
+        )
+        keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+        async with httpx.AsyncClient(timeout=10.0, transport=discord_transport) as http:
+            problem = await alert_channel_problem(
+                http,
                 platform=platform,
                 workspace_id=workspace_id,
-                channel_id=alert_channel,
-                transport=discord_transport,
-            ),
-        )
+                channel_id=alert_id,
+                label=alert_id,
+                settings=rt.settings,
+                sessionmaker=rt.sessionmaker,
+                fernet=build_multifernet(keys) if keys else None,
+            )
+        if problem is not None:
+            raise typer.BadParameter(problem)
+        spec = replace(spec, alert_channel_id=alert_id)
     budget = await set_budget(
         rt.sessionmaker, _operator(tenant_id), platform=platform, channel_id=target, spec=spec
     )
