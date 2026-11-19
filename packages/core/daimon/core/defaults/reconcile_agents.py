@@ -32,10 +32,10 @@ from daimon.core.defaults.mcp_merge import (
 )
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_SPEC_HASH,
-    SEEDED_AGENT_RENAME,
     build_metadata,
     compute_spec_fingerprint,
 )
@@ -142,7 +142,7 @@ async def reconcile_agent(
         skills_view=skills_view if dry_run else None,
     )
     renamed = None
-    seeded_name = (managed or create_only) and spec.name == SEEDED_AGENT_RENAME[0]
+    seeded_name = (managed or create_only) and spec.name == LEGACY_BUILTIN_AGENT_NAME
     if agents is not None:
         matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=spec.name)
         renamed = pick_renamed_seeded_agent(agents) if seeded_name else None
@@ -152,9 +152,20 @@ async def reconcile_agent(
         matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
     if create_only and (matches or renamed is not None):
         raise AgentNameTaken(spec.name)  # the renamed seeded agent still answers `daimon`
+    if create_only and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
+        # The seeded `daimon` not yet renamed answers `default` and moves into it.
+        legacy = (
+            match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=LEGACY_BUILTIN_AGENT_NAME)
+            if agents is not None
+            else await find_agents_by_daimon_tag(
+                client, tenant_id=tenant_id, name=LEGACY_BUILTIN_AGENT_NAME
+            )
+        )
+        if any(m.metadata.get(MA_METADATA_KEY_MANAGED) == "true" for m in legacy):
+            raise AgentNameTaken(spec.name)
     # Leave the seeded agent renamed in place alone: creating `daimon` would
     # fork it, updating it would rename it back, and adopting a workspace's
-    # own `daimon` would overwrite that agent (see `SEEDED_AGENT_RENAME`).
+    # own `daimon` would overwrite that agent (see `LEGACY_BUILTIN_AGENT_NAME`).
     if renamed is not None and not any(
         m.metadata.get(MA_METADATA_KEY_MANAGED) == "true" for m in matches
     ):

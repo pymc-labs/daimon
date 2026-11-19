@@ -34,10 +34,11 @@ from daimon.core.defaults.ma_index import (
 )
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
-    SEEDED_AGENT_RENAME,
+    is_renamed_seeded_agent,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
@@ -394,19 +395,18 @@ async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind
 def _route_builtin(
     found: dict[str, str], agents: list[BetaManagedAgentsAgent], tenant_id: uuid.UUID
 ) -> None:
-    """Point the built-in name at the seeded agent, never at a workspace's own.
+    """Point the built-in name at the seeded agent, or at the old one on a miss.
 
+    A workspace's own `default` keeps the name unless the seeded one holds it too.
     `daimon` still answers with the seeded agent once renamed, for a reference
-    a rollback wrote under the old name (`SEEDED_AGENT_RENAME`).
+    a rollback wrote under the old name (`LEGACY_BUILTIN_AGENT_NAME`).
     """
     seeded = route_builtin_agent(agents, tenant_id=tenant_id, surface="ma_resolver")
-    if seeded is None:
-        found.pop(BUILTIN_AGENT_NAME, None)
-    elif seeded:
+    if seeded and (BUILTIN_AGENT_NAME not in found or is_renamed_seeded_agent(seeded[0].metadata)):
         found[BUILTIN_AGENT_NAME] = seeded[0].id
     renamed = pick_renamed_seeded_agent(agents)
     if renamed is not None:
-        found.setdefault(SEEDED_AGENT_RENAME[0], renamed.id)
+        found.setdefault(LEGACY_BUILTIN_AGENT_NAME, renamed.id)
 
 
 async def _lookup_tags(

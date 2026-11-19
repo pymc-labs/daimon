@@ -14,8 +14,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.builtin_agent import builtin_lookup_names, resolve_builtin_agent_name
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
-    MA_METADATA_KEY_MANAGED,
-    SEEDED_AGENT_RENAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     build_metadata,
     is_renamed_seeded_record,
 )
@@ -120,7 +119,7 @@ async def resolve_owned_agent(
 
     `default` reaches the seeded record not yet renamed from `daimon`, and a
     self-hosted workspace's own `daimon` while it has no `default`. `daimon`
-    falls back to the managed `default` once renamed (`SEEDED_AGENT_RENAME`).
+    falls back to the managed `default` once renamed (`LEGACY_BUILTIN_AGENT_NAME`).
     `seeded_rename=False` is for a caller adopting a workspace's own agent.
     Raises `ProviderError` (`not_found`) when nothing answers.
     """
@@ -130,9 +129,9 @@ async def resolve_owned_agent(
     try:
         return await agents.resolve(scope, name)
     except ProviderError as miss:
-        if miss.category != "not_found" or not seeded_rename or name != SEEDED_AGENT_RENAME[0]:
+        if miss.category != "not_found" or not seeded_rename or name != LEGACY_BUILTIN_AGENT_NAME:
             raise
-        renamed = await agents.resolve(scope, SEEDED_AGENT_RENAME[1])
+        renamed = await agents.resolve(scope, BUILTIN_AGENT_NAME)
         if not is_renamed_seeded_record(renamed.spec.name, renamed.spec.metadata):
             raise miss from None
         return renamed
@@ -142,28 +141,18 @@ async def _builtin_record_name(agents: SelfHostedAgents, scope: Scope, name: str
     """The record name a request for the built-in `name` resolves under.
 
     A `daimon` record counts whether managed or not: `selfhosted init` used to
-    name a workspace's agent that. A `default` beside it counts only when managed,
-    as apply refuses to rename into a workspace's own.
+    name a workspace's agent that.
     """
-    live: dict[str, bool] = {}
+    live: list[str] = []
     for candidate in builtin_lookup_names(name):
         try:
-            record = await agents.resolve(scope, candidate)
+            await agents.resolve(scope, candidate)
         except ProviderError as error:
             if error.category != "not_found":
                 raise
         else:
-            live[candidate] = (record.spec.metadata or {}).get(MA_METADATA_KEY_MANAGED) == "true"
-    holders = {
-        held: held != BUILTIN_AGENT_NAME or managed or len(live) == 1
-        for held, managed in live.items()
-    }
-    target = resolve_builtin_agent_name(
-        name, holders, tenant_id=scope.tenant_id, surface="owned_record"
-    )
-    if target is None:
-        raise ProviderError("not_found", retryable=False)
-    return target
+            live.append(candidate)
+    return resolve_builtin_agent_name(name, live, tenant_id=scope.tenant_id, surface="owned_record")
 
 
 async def reconcile_owned_agent(

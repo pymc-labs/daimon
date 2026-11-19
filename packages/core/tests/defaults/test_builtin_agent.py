@@ -1,4 +1,4 @@
-"""Every path resolves the built-in name by one rule: seeded first, never a workspace's own."""
+"""Every path resolves the built-in name by one rule: the agent holding it, else the seeded one."""
 
 from __future__ import annotations
 
@@ -31,26 +31,23 @@ _MANAGED = {"daimon_managed": "true"}
 
 
 @pytest.mark.parametrize(
-    ("requested", "holders", "expected", "event"),
+    ("requested", "live", "expected", "event"),
     [
-        ("specialist", {"daimon": True}, "specialist", None),
-        ("default", {"default": True, "daimon": True}, "default", None),
-        ("default", {"daimon": True}, "daimon", "builtin_agent.fallback_used"),
-        ("Default", {"default": False, "daimon": True}, "daimon", "builtin_agent.fallback_used"),
-        ("default", {"default": False}, None, "builtin_agent.unmanaged_refused"),
-        ("default", {"daimon": False}, "default", None),
-        ("default", {}, "default", None),
+        ("specialist", {"daimon"}, "specialist", None),
+        ("default", {"default", "daimon"}, "default", None),
+        ("default", {"daimon"}, "daimon", "builtin_agent.fallback_used"),
+        ("Default", {"daimon"}, "daimon", "builtin_agent.fallback_used"),
+        ("default", {"default"}, "default", None),
+        ("default", set(), "default", None),
     ],
-    ids=["other", "seeded", "missing", "collision", "own-only", "own-daimon", "none"],
+    ids=["other", "held", "missing", "case", "own-only", "none"],
 )
 def test_resolve_builtin_name_when_holders_vary_then_follows_one_rule(
-    requested: str, holders: dict[str, bool], expected: str | None, event: str | None
+    requested: str, live: set[str], expected: str, event: str | None
 ) -> None:
     with capture_logs() as logs:
-        target = resolve_builtin_agent_name(
-            requested, holders, tenant_id=uuid.uuid4(), surface="test"
-        )
-    assert target == expected, f"{requested!r} with {holders} resolves to {expected!r}"
+        target = resolve_builtin_agent_name(requested, live, tenant_id=uuid.uuid4(), surface="test")
+    assert target == expected, f"{requested!r} with {live} resolves to {expected!r}"
     assert [log["event"] for log in logs] == ([event] if event else []), f"logged: {logs}"
 
 
@@ -73,23 +70,35 @@ async def _noop() -> object:
 _COLLISION = (("ag_daimon", "daimon", True), ("ag_own", "default", False))
 
 
-async def test_resolve_agent_when_own_default_beside_seeded_daimon_then_reaches_seeded() -> None:
+@pytest.mark.parametrize(
+    ("agents", "requested", "expected"),
+    [
+        (_COLLISION, "default", "ag_own"),
+        (_COLLISION, "daimon", "ag_daimon"),
+        ((("ag_own", "default", False),), "default", "ag_own"),
+        ((("ag_daimon", "daimon", True),), "default", "ag_daimon"),
+    ],
+    ids=["own-beside-seeded", "seeded-by-old-name", "own-only", "missing"],
+)
+async def test_resolve_agent_when_default_requested_then_reaches_its_holder_else_seeded(
+    agents: tuple[tuple[str, str, bool], ...], requested: str, expected: str
+) -> None:
     tenant_id = uuid.uuid4()
     found = await resolve_agent(
-        _client(tenant_id, *_COLLISION),
+        _client(tenant_id, *agents),
         tenant_id=tenant_id,
-        daimon_tag="default",
+        daimon_tag=requested,
         apply_callable=_noop,
         cache=new_resolver_cache(),
     )
-    assert found == "ag_daimon", "turns, the scheduler and the CLI reach the seeded agent"
+    assert found == expected, "a workspace's own default keeps its stored references"
 
 
-async def test_resolve_agent_when_only_own_default_then_misses() -> None:
+async def test_resolve_agent_when_nothing_holds_default_then_misses() -> None:
     tenant_id = uuid.uuid4()
     with pytest.raises(MAResolverMissError):
         await resolve_agent(
-            _client(tenant_id, ("ag_own", "default", False)),
+            _client(tenant_id, ("ag_daimon", "daimon", False)),
             tenant_id=tenant_id,
             daimon_tag="default",
             apply_callable=_noop,
@@ -156,8 +165,8 @@ async def test_load_backend_agent_when_default_misses_then_falls_back_to_seeded_
 
 @pytest.mark.parametrize(
     ("names", "expected"),
-    [(["default"], "default"), (["daimon"], "daimon"), (["daimon", "default"], "daimon")],
-    ids=["migrated", "missing", "collision"],
+    [(["default"], "default"), (["daimon"], "daimon"), (["daimon", "default"], "default")],
+    ids=["migrated", "missing", "own-default"],
 )
 async def test_resolve_records_when_builtin_requested_then_follows_the_rule(
     names: list[str],
@@ -271,15 +280,20 @@ _RESOLVERS = {
 # (memory view, routine delivery, channel rules) are not listed and miss while a
 # provider rename keeps failing, since the database moves first. That is
 # transient, the next apply retries it, and turns still route through the resolver.
+# The roster checks after a reconcile use `find_agent_or_builtin`, as a deferred
+# rename leaves the seeded agent under its old name.
 _ALLOWED_DIRECT = {
-    "adapters/discord/daimon/adapters/discord/bot.py": "roster check after a passing reconcile; "
-    "a blocked rename fails the reconcile first",
-    "adapters/slack/daimon/adapters/slack/boot_sweep.py": "same roster check",
-    "adapters/teams/daimon/adapters/teams/provisioning.py": "same roster check",
+    "core/daimon/core/defaults/reconcile_agents.py": "refuses creating `default` while "
+    "the seeded agent still holds the old name",
 }
 _CORE = Path(__file__).resolve().parents[2] / "daimon" / "core"
 _PACKAGES = _CORE.parents[2]
-_HELPERS = {"route_builtin_agent", "resolve_builtin_agent_name", "_find_legacy_builtin"}
+_HELPERS = {
+    "route_builtin_agent",
+    "resolve_builtin_agent_name",
+    "_find_legacy_builtin",
+    "find_agent_or_builtin",
+}
 
 
 def _calls(node: ast.AST) -> set[str]:

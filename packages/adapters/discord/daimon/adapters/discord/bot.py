@@ -130,6 +130,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_threa
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.continuity.watch_reports import run_watch_report_poller
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
+from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
@@ -1482,11 +1483,12 @@ class DaimonBot(commands.Bot):
                 if agent_name is None:
                     log.info("guild_seed_roster_check_skipped", tenant_id=str(tenant_id))
                 else:
-                    default_agent = await find_agent_by_daimon_tag(
+                    default_agent = await find_agent_or_builtin(
                         self.runtime.anthropic,
                         tenant_id=tenant_id,
                         name=agent_name,
                         records=self.runtime.sessionmaker,
+                        surface="discord_roster",
                     )
                     if default_agent is None:
                         seed_ok = False

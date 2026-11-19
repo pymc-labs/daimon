@@ -1,10 +1,10 @@
 """Rename a seeded agent in place when the defaults tree renames it.
 
-While the tree ships a new name from `LEGACY_AGENT_RENAMES` and not the old
-one, apply moves the tenant's managed agent (its id, sessions, threads and
-bindings intact), its reader variant, its self-hosted record and every live
-name reference to the new name. It runs before the agent pass and sweep, so
-the old agent is never archived and no second one is created.
+While the tree ships `default` and not `daimon`, apply moves the tenant's
+managed agent (its id, sessions, threads and bindings intact), its reader
+variant, its self-hosted record and every live name reference to the new name.
+It runs before the agent pass and sweep, so the old agent is never archived and
+no second one is created.
 
 Order: the database references commit first, then the provider renames. A
 failure leaves the managed agent under its old name, so the next apply finds
@@ -23,7 +23,8 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
-    LEGACY_AGENT_RENAMES,
+    BUILTIN_AGENT_NAME,
+    LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
@@ -77,11 +78,8 @@ def _only_unmanaged(agents: Collection[BetaManagedAgentsAgent]) -> bool:
 
 def pending_renames(present_names: Collection[str]) -> list[tuple[str, str]]:
     """The renames this tree asks for: the new name ships and the old one does not."""
-    return [
-        (old, new)
-        for old, new in LEGACY_AGENT_RENAMES.items()
-        if new in present_names and old not in present_names
-    ]
+    old, new = LEGACY_BUILTIN_AGENT_NAME, BUILTIN_AGENT_NAME
+    return [(old, new)] if new in present_names and old not in present_names else []
 
 
 def _managed(agent: BetaManagedAgentsAgent) -> bool:
@@ -203,15 +201,15 @@ async def plan_seeded_rename(
     """The rename the tenant's live `agents` and records call for; None when none is due.
 
     Raises `AgentRenameBlocked` when the tenant's own unmanaged agent or
-    self-hosted record holds `new`, with or without a seeded `old`, and
+    self-hosted record holds `new` while something is due, and
     `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
     case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
     """
     olds = _named(agents, old)
     legacy = [agent for agent in olds if _managed(agent)]
-    if _only_unmanaged(_named(agents, new)):
-        raise AgentRenameBlocked(old=old, new=new)
     readers = _legacy_readers(agents, old=old, new=new, old_agent_live=len(olds) > len(legacy))
+    if (legacy or readers) and _only_unmanaged(_named(agents, new)):
+        raise AgentRenameBlocked(old=old, new=new)
     selfhosted = await inspect_selfhosted_rename(session, tenant_id=tenant_id, old=old, new=new)
     _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
     if not legacy and not readers and selfhosted == "absent":

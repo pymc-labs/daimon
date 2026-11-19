@@ -1445,3 +1445,21 @@ async def test_reconcile_agent_when_creating_daimon_beside_the_renamed_seed_then
             managed=False,
             create_only=True,
         )
+
+
+async def test_reconcile_agent_when_creating_default_beside_the_seeded_daimon_then_refuses() -> (
+    None
+):
+    """The seeded `daimon` answers `default` until apply renames it into that name."""
+    agents = [_tagged_agent(id_="ag_seeded", name="daimon", tenant_id=TENANT_ID, managed=True)]
+    client = build_fake_anthropic_http(_router_with_agents(agents).dispatch)
+
+    with pytest.raises(AgentNameTaken):
+        await reconcile_agent(
+            client,
+            _agent_spec().model_copy(update={"name": "default"}),
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            managed=False,
+            create_only=True,
+        )

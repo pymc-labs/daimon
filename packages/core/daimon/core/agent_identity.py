@@ -11,7 +11,7 @@ from typing import Literal
 
 import structlog
 from daimon.core.config import Settings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.stores.agent_avatars import (
     get_agent_avatar,
     get_or_create_avatar,
@@ -70,9 +70,15 @@ def identity_enabled_for(
 def is_builtin_agent(
     *, name: str, metadata: Mapping[str, str] | None, default_agent_name: str | None
 ) -> bool:
-    """Identify the managed deployment agent without assuming its display name."""
+    """Identify the managed deployment agent without assuming its display name.
+
+    The deployment's default name counts too, except a built-in name, which a
+    workspace's own agent may hold: that one counts only when managed.
+    """
     return (metadata or {}).get(MA_METADATA_KEY_MANAGED) == "true" or (
-        default_agent_name is not None and name == default_agent_name
+        default_agent_name is not None
+        and name == default_agent_name
+        and normalize_agent_name(name) not in BUILTIN_AGENT_NAMES
     )
 
 

@@ -10,8 +10,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.builtin_agent import route_builtin_agent
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
-    BUILTIN_AGENT_NAME,
-    LEGACY_AGENT_RENAMES,
+    BUILTIN_AGENT_NAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -38,7 +37,7 @@ EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add 
 _MAX_SETUP_THREAD_NAME_CHARS: Final = 100
 
 # A setup thread opened before the built-in agent's rename keeps its responder.
-_RESPONDER_NAMES = frozenset({BUILTIN_AGENT_NAME, *LEGACY_AGENT_RENAMES})
+_RESPONDER_NAMES = BUILTIN_AGENT_NAMES
 
 
 def setup_thread_name(target_name: str | None) -> str:
@@ -137,7 +136,7 @@ async def resolve_setup_agents(
         tenant_id=tenant_id,
         surface="setup_conversation",
     )
-    if responders is None or len(responders) != 1:
+    if len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
         )
