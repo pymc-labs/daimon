@@ -18,7 +18,6 @@ async def test_controls_are_forwarded_without_erasing_semantic_kwargs() -> None:
     backend, scope, session_ref = object(), object(), object()
     repo_memory = RepoMemorySettings()
     await turn(
-        path="mux",
         backend=backend,
         scope=scope,
         session_ref=session_ref,
@@ -33,7 +32,6 @@ async def test_controls_are_forwarded_without_erasing_semantic_kwargs() -> None:
     assert turn.call_args.kwargs["backend"] is backend
     assert turn.call_args.kwargs["scope"] is scope
     assert turn.call_args.kwargs["session_ref"] is session_ref
-    assert turn.call_args.kwargs["path"] == "mux"
     assert turn.call_args.kwargs["repo_memory"] is repo_memory
 
 

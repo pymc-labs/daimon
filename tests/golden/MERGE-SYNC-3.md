@@ -25,7 +25,7 @@ N6 supplied the exact agent-fork patch in `inbox/20261009T204914Z-N6-SYNC-3-NOTE
 
 N4 supplied the driver/transport/proof-test patch in `inbox/20261009T205349Z-N4-N3-SYNC-3-TURN-RESOLUTION-NOTE.md`. Main #542/#546 request order, refusal cause, single recovery, stop/deadline bounds and terminal callbacks remain. The new proof checks real SDK wire/effect equivalence and injected-backend isolation.
 
-The explicitly granted recovery cut is recorded by the owner in sprint FOLLOWUPS.md: until N4's cancel/filtered-history seam lands, a definite pending-confirmation 400 on the default Anthropic mux composition switches only that turn to LegacyTurnIO for recovery. An injected backend finalizes the original refusal without SDK recovery calls; uncertain/network failures never trigger this fallback. This remains a gap before M0 certification.
+The explicitly granted recovery cut is recorded by the owner in sprint FOLLOWUPS.md: until N4's cancel/filtered-history seam lands, a definite pending-confirmation 400 on the default Anthropic mux composition switches only that turn to LegacyTurnIO for recovery. An injected backend finalizes the original refusal without SDK recovery calls; uncertain/network failures never trigger this fallback. The legacy path has since been removed: recovery runs on mux through `MuxTurnIO.request_interrupt`.
 
 ## Composed merge and oracle
 
