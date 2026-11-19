@@ -392,9 +392,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 user=member,
                 guild_id="1",
                 guild=SimpleNamespace(owner_id=None),
-                response=SimpleNamespace(
-                    send_message=client.chat_postEphemeral, defer=AsyncMock()
-                ),
+                response=SimpleNamespace(send_message=client.chat_postEphemeral, defer=AsyncMock()),
                 followup=SimpleNamespace(send=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
