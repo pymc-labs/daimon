@@ -94,8 +94,9 @@ the stored access on every path, `dm explain` and "Check a person" included, so
 the stricter wins; the Discord service logs a warning. `daimon dm
 import-policies` stores it: an allowlist becomes a listed grant on every agent
 and `disabled` turns DMs off. The setting can then be removed. A notice no agent
-sends, such as a budget notice, is held to the default agent's grant, so set a
-default agent before removing an allowlist.
+sends, such as a budget notice, is held to the default agent's grant, so an allowlist
+is not imported until a default agent is set (`daimon dm default`). An agent created
+after the import has no grant, so it admits every member: list people on it too.
 
 ## What a person sees
 

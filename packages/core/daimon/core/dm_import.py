@@ -1,7 +1,8 @@
 """Turn the deprecated per-workspace env DM policies into stored access.
 
 `members` stores nothing (it is the default). `allowlist` lists those users on every agent:
-agent-sent messages are held to the sending agent's grant whether or not it takes DMs.
+agent-sent messages are held to the sending agent's grant whether or not it takes DMs;
+an agent made later has no grant. It needs a default agent, which a notice is held to.
 `disabled` turns the workspace feature off. Each write is recorded for the CLI's local
 user, like any other CLI change. Running it again changes nothing.
 """
@@ -16,8 +17,9 @@ from daimon.core import dm_settings
 from daimon.core.config import Settings
 from daimon.core.dm_access import DmAgent
 from daimon.core.dm_settings import DmActor
+from daimon.core.errors import UserFacingError
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import dm_enabled, set_dm_enabled
+from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +56,11 @@ async def import_dm_policies(
                     by = (await actor(tenant_id)).account_id
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=False, account_id=by)
             continue
+        if await get_dm_agent_name(session, tenant_id=tenant_id) is None:
+            raise UserFacingError(
+                f"{tenant.external_id} has an allowlist but no default agent, so notices"
+                " would reach everyone. Set one with `daimon dm default <agent>` first."
+            )
         grants = await store.list_grants(session, tenant_id=tenant_id)
         for agent in await agents_of(tenant_id):
             have = grants.get(agent.name)

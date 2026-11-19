@@ -232,7 +232,7 @@ async def test_rule_remove_for_a_missing_position_fails(
 async def test_import_policies_lists_allowlisted_users_and_is_idempotent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """An env allowlist becomes a listed grant on each agent; a second run does nothing."""
+    """An allowlist needs a default agent, becomes a listed grant on each agent, then is stable."""
     tenant, selector = await _tenant(db_session_factory)
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
@@ -247,6 +247,10 @@ async def test_import_policies_lists_allowlisted_users_and_is_idempotent(
         settings,
     )
     console, out = _console()
+    with pytest.raises(UserFacingError, match="daimon dm default"):
+        await dm_import_policies(rt=rt, console=console, dry_run=False, as_json=True)
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
     await dm_import_policies(rt=rt, console=console, dry_run=True, as_json=True)
     assert len(json.loads(out.getvalue())) == 1, "a dry run reports the step"
     out.truncate(0)
