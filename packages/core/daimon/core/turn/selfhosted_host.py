@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
@@ -19,6 +20,7 @@ from daimon.core.mux_backend import (
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ChangeReason, ReplaceSession, UpdateInPlace
 from daimon.core.shared_threads import shared_owner
+from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import (
@@ -401,7 +403,18 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             raise ScopeViolation(ref.id, "self-hosted plan contains a foreign resource")
     runtime = await _pin_planned_agent(runtime, scope, spec, request.now())
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
-    await store.put_config_revision(revision)
+    if origin == "agent":
+        # A generic write drops the agent's or the conversation's association and conflicts.
+        async with request.deps.sessionmaker.begin() as session:
+            await mux_state.put_agent_config_revision(
+                session,
+                revision,
+                agent_id=derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+                ),
+            )
+    else:
+        await store.put_config_revision(revision)
     slot = Slot(
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
         account_id=None if shared is not None else scope.account_id,

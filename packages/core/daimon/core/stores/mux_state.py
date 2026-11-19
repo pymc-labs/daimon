@@ -1335,3 +1335,24 @@ async def get_config_agent_revision(
     if retained is None:
         raise ScopeViolation(revision.channel.channel_id, "missing original backend revision")
     return retained
+
+
+async def put_agent_config_revision(
+    session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
+) -> AgentBackendRevision | None:
+    """Re-put an agent's revision under the association admission stored it with.
+
+    Admission reports a conversation's model choice (stored as `thread`) as the
+    agent's own, so its thread comes from the row: re-put as `agent`, it conflicts.
+    Returns the retained agent revision; None for a record born on its provider.
+    """
+    retained = await get_config_agent_revision(session, revision, agent_id=agent_id)
+    pin = await config_thread_pin(session, revision.channel, revision.local)
+    await put_config_revision(
+        session,
+        revision,
+        origin="agent" if pin is None else "thread",
+        agent_revision=retained,
+        thread_id=None if pin is None else pin[0],
+    )
+    return retained

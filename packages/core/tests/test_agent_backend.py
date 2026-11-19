@@ -43,6 +43,7 @@ from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ChannelRef
+from mux.state.store import ConfigRevisionConflict
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -261,6 +262,12 @@ async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) 
         assert repeated == first
         put = partial(mux_state.put_config_revision, session, first, origin="agent")
         assert await put(agent_revision=held) == first
+        assert (
+            await mux_state.put_agent_config_revision(session, first, agent_id=agent.agent_id)
+            == held
+        ), "a host re-puts the agent's revision with its association"
+        with pytest.raises(ConfigRevisionConflict):
+            await mux_state.put_config_revision(session, first)
         assert await current_backend(session, channel) is None
     await service.set_backend(agent, "gemini", 1, actor)
     async with sessions.begin() as session:
