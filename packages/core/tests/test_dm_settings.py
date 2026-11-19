@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
 from daimon.core import dm_settings
 from daimon.core.authz import AgentRef
 from daimon.core.dm_access import DmAgent
 from daimon.core.dm_settings import DmActor, DmRuleSpec
+from daimon.core.errors import UserFacingError
+from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.stores import dm_access, web_audit
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -56,3 +59,36 @@ async def test_change_rule_when_a_removal_commits_first_then_changes_the_rule_no
         rows = await web_audit.list_recent(session, tenant_id=tenant.id, action="Changed DM rule")
     assert [(r.subject_id, r.agent_name) for r in stored] == [("g2", "c")], stored
     assert [r.detail for r in rows] == ["Group g2 to c"], "the audit row names the rule changed"
+
+
+async def test_new_groups_when_slack_lacks_the_scope_then_refused_with_a_reinstall_message(
+    db_session: AsyncSession,
+) -> None:
+    """A group Slack cannot read is refused in a grant and a rule; other failures and users pass."""
+    tenant = await make_tenant(db_session)
+    actor = DmActor(tenant.id, None, NOW)
+
+    def failing(error: str) -> dm_settings.GroupsProbe:
+        async def probe() -> object:
+            raise GroupLookupFailed(error)
+
+        return probe
+
+    scope = failing("missing_scope")
+    with pytest.raises(UserFacingError, match="Reinstall"):
+        await dm_settings.set_grant(
+            db_session, actor, AGENTS[0], "a", who="listed", user_ids=[], group_ids=["g1"],
+            probe=scope,
+        )  # fmt: skip
+    with pytest.raises(UserFacingError, match="Reinstall"):
+        await dm_settings.add_rule(
+            db_session, actor, AGENTS, DmRuleSpec("group", "g1", "a"), None, probe=scope
+        )
+    assert await dm_settings.set_grant(
+        db_session, actor, AGENTS[0], "a", who="listed", user_ids=["u1"], group_ids=[],
+        probe=scope,
+    ), "people need no scope"  # fmt: skip
+    assert await dm_settings.set_grant(
+        db_session, actor, AGENTS[0], "a", who="listed", user_ids=["u1"], group_ids=["g1"],
+        probe=failing("ClientError"),
+    ), "another failure is not a missing scope"  # fmt: skip

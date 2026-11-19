@@ -30,6 +30,7 @@ from daimon.core.dm_settings import (
     DmRuleSpec,
     PlatformId,
     dm_platform,
+    slack_groups_probe,
 )
 from daimon.core.errors import UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, feature_in
@@ -141,6 +142,9 @@ async def change_dm_access(
         who=change.who,
         user_ids=change.user_ids,
         group_ids=change.group_ids,
+        probe=await slack_groups_probe(
+            db, caller.person.tenant_id, fernet=runtime.fernet, http=runtime.http_client
+        ),
     )
 
 
@@ -205,7 +209,10 @@ def dm_router(runtime: WebRuntime) -> APIRouter:
         rule = DmRuleSpec(body.subject, body.subject_id, body.agent, body.locked)
 
         async def run(db: AsyncSession, actor: DmActor, agents: list[DmAgent]) -> None:
-            await dm_settings.add_rule(db, actor, agents, rule, body.position)
+            probe = await slack_groups_probe(
+                db, actor.tenant_id, fernet=runtime.fernet, http=runtime.http_client
+            )
+            await dm_settings.add_rule(db, actor, agents, rule, body.position, probe=probe)
 
         return await write(caller, run)
 

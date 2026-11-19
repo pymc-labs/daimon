@@ -114,7 +114,15 @@ async def _change_dm(
                 db, actor, agents, default or None
             ):
                 changes.append(SettingChange("DM default agent", default or "None"))
-            if rules is not None and await dm_settings.replace_rules(db, actor, agents, specs):
+            if rules is not None and await dm_settings.replace_rules(
+                db,
+                actor,
+                agents,
+                specs,
+                probe=await dm_settings.slack_groups_probe(
+                    db, admin.tenant_id, fernet=runtime.fernet
+                ),
+            ):
                 changes.append(SettingChange("DM rules", f"{len(specs)} rules"))
     except UserFacingError as err:
         raise ToolError(str(err)) from err

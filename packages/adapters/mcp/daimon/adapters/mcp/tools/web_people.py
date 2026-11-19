@@ -335,7 +335,7 @@ async def _access_set_impl(
                     db, actor, now(), current, web=web, who=who, groups=groups
                 )
             if dm is not None:
-                await _set_dm(db, actor, agents[0], dm)
+                await _set_dm(runtime, db, actor, agents[0], dm)
             dm_now = await _dm_access(db, actor.tenant_id, agents)
     except WebAdminError as err:
         raise refused(err) from err
@@ -345,7 +345,11 @@ async def _access_set_impl(
 
 
 async def _set_dm(
-    db: AsyncSession, admin: web_admin.WebAdmin, agent: BetaManagedAgentsAgent, dm: AgentDmAccess
+    runtime: McpRuntime,
+    db: AsyncSession,
+    admin: web_admin.WebAdmin,
+    agent: BetaManagedAgentsAgent,
+    dm: AgentDmAccess,
 ) -> None:
     """Who may DM `agent`, as the web's agent access page sets it."""
     if await dm_settings.dm_platform(db, admin.tenant_id) is None:
@@ -361,6 +365,7 @@ async def _set_dm(
         who=dm.who,
         user_ids=dm.user_ids,
         group_ids=dm.group_ids,
+        probe=await dm_settings.slack_groups_probe(db, admin.tenant_id, fernet=runtime.fernet),
     )
 
 

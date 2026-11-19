@@ -8,17 +8,23 @@ agent or a group, never a person. A refusal raises `UserFacingError`.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Final
 
+import httpx
+from cryptography.fernet import MultiFernet
 from daimon.core.dm_access import DmAgent
 from daimon.core.errors import UserFacingError
 from daimon.core.features.registry import FEATURES
+from daimon.core.github_credentials import decrypt_token
+from daimon.core.native_admins import GroupLookupFailed
+from daimon.core.platform_groups import slack_user_groups
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import get_dm_agent_name, set_dm_agent_name
 from daimon.core.stores.domain import DmAgentGrantRow, DmGrantMode, DmRuleSubject
+from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_admin import audit
 from pydantic import StringConstraints
@@ -33,6 +39,11 @@ PlatformId = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1, max_length=100, pattern=r"^[\w:.@-]+$"),
 ]
 """A person's or group's id on the workspace's platform, as pasted or picked."""
+GroupsProbe = Callable[[], Awaitable[object]]
+"""Lists the platform's groups; raises `GroupLookupFailed` when it cannot."""
+REINSTALL: Final = (
+    "Slack can't read user groups here. Reinstall the Slack app to allow it, then try again."
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +77,44 @@ async def dm_platform(db: AsyncSession, tenant_id: uuid.UUID) -> str | None:
     return tenant.platform
 
 
+async def slack_groups_probe(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    fernet: MultiFernet | None,
+    http: httpx.AsyncClient | None = None,
+) -> GroupsProbe | None:
+    """A probe of the workspace's Slack user groups; None off Slack or with no token."""
+    tenant = await get_tenant(db, tenant_id)
+    token = (
+        await get_slack_bot_token(db, team_id=tenant.external_id)
+        if tenant is not None and tenant.platform == "slack" and fernet is not None
+        else None
+    )
+    if token is None or fernet is None:
+        return None
+    secret = decrypt_token(fernet, token.encrypted_token)
+
+    async def probe() -> object:
+        if http is not None:
+            return await slack_user_groups(http, token=secret)
+        async with httpx.AsyncClient() as client:
+            return await slack_user_groups(client, token=secret)
+
+    return probe
+
+
+async def _require_readable(probe: GroupsProbe | None, new_groups: Sequence[str]) -> None:
+    """Refuse new groups when Slack says the app lacks the scope; other failures fail closed."""
+    if probe is None or not new_groups:
+        return
+    try:
+        await probe()
+    except GroupLookupFailed as error:
+        if str(error) == "missing_scope":
+            raise UserFacingError(REINSTALL) from error
+
+
 def require_agent(agents: Sequence[DmAgent], name: str | None) -> None:
     """Refuse an agent name that is not one of the workspace's DM agents."""
     if name is not None and name not in {a.name for a in agents}:
@@ -90,9 +139,14 @@ async def add_rule(
     agents: Sequence[DmAgent],
     rule: DmRuleSpec,
     position: int | None,
+    *,
+    probe: GroupsProbe | None = None,
 ) -> None:
     """Insert a rule at `position`, or last."""
     require_agent(agents, rule.agent)
+    await _require_readable(
+        probe, [rule.subject_id] if rule.subject == "group" and rule.subject_id else []
+    )
     await store.add_rule(
         db,
         tenant_id=actor.tenant_id,
@@ -174,7 +228,12 @@ async def remove_rule(db: AsyncSession, actor: DmActor, position: int) -> bool:
 
 
 async def replace_rules(
-    db: AsyncSession, actor: DmActor, agents: Sequence[DmAgent], rules: Sequence[DmRuleSpec]
+    db: AsyncSession,
+    actor: DmActor,
+    agents: Sequence[DmAgent],
+    rules: Sequence[DmRuleSpec],
+    *,
+    probe: GroupsProbe | None = None,
 ) -> bool:
     """Replace the whole ordered list; False when it is unchanged."""
     for rule in rules:
@@ -185,6 +244,9 @@ async def replace_rules(
     ]
     if current == list(rules):
         return False
+    stored = {r.subject_id for r in current if r.subject == "group"}
+    new = [r.subject_id for r in rules if r.subject == "group" and r.subject_id not in stored]
+    await _require_readable(probe, [g for g in new if g is not None])
     await store.replace_rules(
         db,
         tenant_id=actor.tenant_id,
@@ -206,6 +268,7 @@ async def set_grant(
     who: DmGrantMode,
     user_ids: Sequence[str],
     group_ids: Sequence[str],
+    probe: GroupsProbe | None = None,
 ) -> bool:
     """Replace who may DM `agent` (audited under `label`); False when unchanged."""
     users = [] if who == "members" else list(dict.fromkeys(user_ids))
@@ -213,6 +276,9 @@ async def set_grant(
     before = (await store.list_grants(db, tenant_id=actor.tenant_id)).get(agent.name)
     if _grant_key(before) == (who, sorted(users), sorted(groups)):
         return False
+    await _require_readable(
+        probe, [g for g in groups if before is None or g not in before.group_ids]
+    )
     await store.set_grant(
         db,
         tenant_id=actor.tenant_id,

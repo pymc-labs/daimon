@@ -29,6 +29,7 @@ from daimon.core.dm_import import import_dm_policies
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
 from daimon.core.dm_settings import DmActor, DmRuleSpec
 from daimon.core.errors import StoreError
+from daimon.core.github_credentials import build_multifernet
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.stores.domain import DmGrantMode
@@ -69,6 +70,16 @@ async def _actor(rt: CliRuntime, selector: TenantSelector | None) -> DmActor:
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     return DmActor(tenant_id, principal.account_id, datetime.now(UTC))
+
+
+async def _probe(
+    rt: CliRuntime, session: AsyncSession, tenant_id: uuid.UUID
+) -> dm_settings.GroupsProbe | None:
+    """A check that Slack lets the app read user groups; None when there is no Slack to ask."""
+    keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+    return await dm_settings.slack_groups_probe(
+        session, tenant_id, fernet=build_multifernet(keys) if keys else None
+    )
 
 
 async def _agents(rt: CliRuntime, session: AsyncSession, tenant_id: uuid.UUID) -> list[DmAgent]:
@@ -142,6 +153,7 @@ async def dm_access(
                 who=mode,
                 user_ids=users,
                 group_ids=groups,
+                probe=await _probe(rt, session, tenant_id),
             )
         grant = (await store.list_grants(session, tenant_id=tenant_id)).get(agent)
     who = grant.who if grant else "members"
@@ -187,7 +199,8 @@ async def dm_rules(
             subject = "user" if user else "group" if group else "everyone"
             rule = DmRuleSpec(subject, user or group, agent, locked)
             agents = await _agents(rt, session, tenant_id)
-            await dm_settings.add_rule(session, actor, agents, rule, position)
+            probe = await _probe(rt, session, tenant_id)
+            await dm_settings.add_rule(session, actor, agents, rule, position, probe=probe)
         elif action in ("remove", "move"):
             if position is None or (action == "move" and to is None):
                 raise typer.BadParameter("give the rule's position (and --to for a move)")
