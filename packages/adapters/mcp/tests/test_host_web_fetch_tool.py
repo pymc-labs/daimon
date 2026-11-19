@@ -11,11 +11,10 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.host_web_fetch import check_web_fetch_allowed
-from daimon.core.authz import Subject
 from daimon.core.config import DatabaseSettings, Settings
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role, SandboxPin
-from daimon.core.stores.routines import set_sandbox_tools
+from daimon.core.stores.domain import SANDBOX_KEY, FeatureTarget, Role, SandboxPin, pin_json
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_routine, make_tenant
 from fastmcp.exceptions import ToolError
@@ -56,10 +55,19 @@ async def test_web_fetch_when_conversation_has_no_origin_then_refused(
         await check_web_fetch_allowed(_runtime(sessionmaker), auth, None)
 
 
-@pytest.mark.parametrize("opted_in", [False, True])
-async def test_web_fetch_when_routine_then_follows_its_built_in_tools(
-    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], opted_in: bool
+@pytest.mark.parametrize(
+    ("opted_in", "matched", "allowed"),
+    [(False, False, False), (True, False, False), (True, True, True)],
+    ids=["no_opt_in", "pin_row_but_environment_mismatch", "pin_matched"],
+)
+async def test_web_fetch_when_routine_then_follows_the_runs_own_match(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    opted_in: bool,
+    matched: bool,
+    allowed: bool,
 ) -> None:
+    """A pin row alone never opens it; only the run's signed match does."""
     tenant = await make_tenant(db_session)
     routine = await make_routine(db_session, tenant=tenant)
     if opted_in:
@@ -69,21 +77,20 @@ async def test_web_fetch_when_routine_then_follows_its_built_in_tools(
             environment_id="env_1",
             environment_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
         )
-        await set_sandbox_tools(
-            db_session,
-            routine.id,
-            tenant_id=tenant.id,
-            enabled=True,
-            pin=pin,
-            set_by="admin-1",
-            actor=Subject(is_admin=True, platform_user_id="admin-1"),
-            via="mcp",
-        )
+        await set_feature_value(
+            db_session, tenant_id=tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
+            target=FeatureTarget("routine", routine_id=routine.id), surface="chat",
+            pin=pin_json(pin),
+        )  # fmt: skip
     await db_session.commit()
     auth = _auth(
-        tenant.id, no_confirmation_surface=True, routine_id=routine.id, execution_id=uuid.uuid4()
+        tenant.id,
+        no_confirmation_surface=True,
+        routine_id=routine.id,
+        execution_id=uuid.uuid4(),
+        host_builtins=matched,
     )
-    if opted_in:
+    if allowed:
         await check_web_fetch_allowed(_runtime(sessionmaker), auth, None)
     else:
         with pytest.raises(ToolError, match="off for this routine"):

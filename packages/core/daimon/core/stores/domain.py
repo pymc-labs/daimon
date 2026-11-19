@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
@@ -28,7 +28,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -266,6 +266,40 @@ class SandboxPin:
     environment_updated_at: datetime
 
 
+@dataclass(frozen=True)
+class AgentSandboxPin:
+    """An operator's agent-level opt-in: the agent and the environment, never a version."""
+
+    agent_id: str
+    #: The environment's `daimon` name, resolved at each fire; edits to it are not drift.
+    environment_name: str
+
+
+AnySandboxPin = SandboxPin | AgentSandboxPin
+"""What a `routine_sandbox_tools` On covers at the routine or the agent tier."""
+
+SANDBOX_KEY: Final = "routine_sandbox_tools"
+PinnedTier = Literal["agent", "routine"]
+_AGENT_PIN: Final = TypeAdapter(AgentSandboxPin)
+_ROUTINE_PIN: Final = TypeAdapter(SandboxPin)
+
+
+def pin_json(pin: AnySandboxPin) -> dict[str, JsonValue]:
+    """A pin as its feature value and the change record keep it."""
+    if isinstance(pin, AgentSandboxPin):
+        return _AGENT_PIN.dump_python(pin, mode="json")
+    return _ROUTINE_PIN.dump_python(pin, mode="json")
+
+
+def stored_pin(row: FeatureValueRow) -> AnySandboxPin | None:
+    """The pin an agent's or a routine's `routine_sandbox_tools` row keeps; None without one."""
+    if row.pin is None:
+        return None
+    if row.tier == "agent":
+        return _AGENT_PIN.validate_python(row.pin)
+    return _ROUTINE_PIN.validate_python(row.pin)
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -309,15 +343,6 @@ class RoutineRow(BaseModel):
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
-    #: An admin opted this routine's own runs in to built-in sandbox tools.
-    sandbox_tools_enabled: bool = False
-    sandbox_tools_set_by: str | None = None
-    sandbox_tools_set_at: datetime | None = None
-    #: The agent version and environment revision the opt-in covers.
-    sandbox_agent_id: str | None = None
-    sandbox_agent_version: int | None = None
-    sandbox_environment_id: str | None = None
-    sandbox_environment_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -624,8 +649,9 @@ class ChannelBudgetRow(BaseModel):
     exhausted_notice_key: str | None = None
 
 
-ChangeSurface = Literal["web", "chat", "panel", "cli"]
-"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
+ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]
+"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI, or
+Daimon itself (an opt-in a routine edit or a changed agent no longer covers)."""
 ChannelSetting = str
 """What a change record names: a legacy channel setting, a `thread_*` setting or any feature key.
 The `thread_*` settings are a thread's own, recorded under its channel with the thread id in the
@@ -1196,9 +1222,9 @@ class FileUploadRow(BaseModel):
     created_at: datetime
 
 
-FeatureTier = Literal["workspace", "agent", "channel", "thread"]
+FeatureTier = Literal["workspace", "agent", "channel", "thread", "routine"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
-FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
+FeatureSurface = Literal["web", "chat", "panel", "cli", "system", "spec", "migration"]
 """Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
 
 
@@ -1210,6 +1236,7 @@ class FeatureTarget:
     agent_id: str | None = None
     channel_id: str | None = None
     thread_key: str | None = None
+    routine_id: uuid.UUID | None = None
 
 
 class FeatureValueRow(BaseModel):
@@ -1222,9 +1249,12 @@ class FeatureValueRow(BaseModel):
     agent_id: str
     channel_id: str
     thread_key: str
+    routine_id: uuid.UUID | None = None
     key: str
     value: str
     locked: bool
+    #: What a pinned feature's On covers (`pin_json`); None for every other value.
+    pin: dict[str, JsonValue] | None = None
     set_by: uuid.UUID | None
     surface: FeatureSurface
     set_at: datetime

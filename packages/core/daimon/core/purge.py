@@ -229,6 +229,13 @@ async def _purge_principal_in_session(
     Does NOT open a transaction — caller owns the begin() block. Failures
     propagate so the caller's transaction rolls back.
     """
+    # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
+    is_platform = isinstance(principal, PlatformPrincipalRow)
+    await routines_store.erase_sandbox_setter(
+        session,
+        ids=[] if is_platform else [str(principal.id)],
+        platform_users=[(principal.tenant_id, principal.external_id)] if is_platform else [],
+    )
     return PurgeReport.model_validate(
         {e.key: await e.principal(session, principal) for e in ERASABLE if e.principal}
     )
@@ -338,12 +345,7 @@ async def _purge_account_transaction(
 
     report = PurgeReport()
     github_account_link = await github_links_store.get_account_link(session, account_id=account_id)
-    # Who set a routine's sandbox opt-in: keep the change, drop the person.
-    await routines_store.erase_sandbox_setter(
-        session,
-        ids=[str(account_id), *(str(principal.id) for principal in cli_list)],
-        platform_users=[(pp.tenant_id, pp.external_id) for pp in pp_list],
-    )
+    await routines_store.erase_sandbox_setter(session, ids=[str(account_id)])
     for principal in (*cli_list, *pp_list):
         sub = await _purge_principal_in_session(session, principal=principal)
         report = report.merge(sub)

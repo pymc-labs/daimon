@@ -360,7 +360,8 @@ async def test_routine_effects_match_recording(platform, op, scenario, monkeypat
                 user=member,
                 guild_id="1",
                 guild=SimpleNamespace(owner_id=None),
-                response=SimpleNamespace(send_message=client.chat_postEphemeral),
+                response=SimpleNamespace(send_message=client.chat_postEphemeral, defer=AsyncMock()),
+                followup=SimpleNamespace(send=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
                 state=SimpleNamespace(selected=SimpleNamespace(routine=row)), runtime=runtime
@@ -371,6 +372,8 @@ async def test_routine_effects_match_recording(platform, op, scenario, monkeypat
 
             scope.update(
                 checks=SimpleNamespace(is_guild_admin=discord_admin),
+                # The chat permission check is stubbed: this test covers the transition.
+                _chat_refusal=AsyncMock(return_value=None),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),

@@ -21,6 +21,7 @@ _TIER = {
     "agent": "Agent",
     "channel": "Channel",
     "thread": "Thread",
+    "routine": "Routine",
 }
 _BACKEND = {"gemini": "Gemini", "openai": "OpenAI", "selfhosted": "self-hosted"}
 _CATEGORY = {

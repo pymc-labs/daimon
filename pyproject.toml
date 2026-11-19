@@ -233,6 +233,7 @@ source_modules = [
     "daimon.core.env_file",
     "daimon.core.erasure",
     "daimon.core.direct_messages",
+    "daimon.core.discord_destination",
     "daimon.core.dm_access",
     "daimon.core.dm_carry_over",
     "daimon.core.dm_debounce",
