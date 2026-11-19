@@ -13,7 +13,7 @@ from pydantic import JsonValue
 
 from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
 from mux.contracts.config import ConfigRevision
-from mux.contracts.events import Event, TextPart
+from mux.contracts.events import Event, ImagePart, TextPart
 from mux.contracts.ids import (
     ModelRef,
     Page,
@@ -1402,7 +1402,7 @@ class GeminiEvents(Base):
                 for input_ in events:
                     if not isinstance(input_, UserMessage) or input_.mode != "new_turn":
                         refuse("native_input_or_confirmation_or_steer")
-                    inputs.append({"type": "text", "text": _text(input_.content)})
+                    inputs.extend(_message_content(input_.content))
             overrides.update({"input": inputs, "background": True, "store": True})
             authenticated = any(c.credential_ref is not None for c in connections)
             if record.current is not None:
@@ -1740,6 +1740,33 @@ class GeminiEvents(Base):
                 outcome=outcome,
                 observed_at=now(),
             )
+
+
+_IMAGE_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/heic",
+        "image/heif",
+        "image/gif",
+        "image/bmp",
+        "image/tiff",
+    }
+)
+"""The image types the Interactions API accepts inline."""
+
+
+def _message_content(parts: Sequence[object]) -> list[JsonValue]:
+    """A user message as Interactions input blocks: its text, then its inline images."""
+    images: list[JsonValue] = []
+    for part in parts:
+        if isinstance(part, ImagePart) and part.data_base64 and part.media_type in _IMAGE_TYPES:
+            images.append({"type": "image", "data": part.data_base64, "mime_type": part.media_type})
+        elif not isinstance(part, TextPart):
+            refuse("input_modality")
+    text = _text([part for part in parts if isinstance(part, TextPart)])
+    return [{"type": "text", "text": text}, *images] if text or not images else images
 
 
 def _text(parts: Sequence[object]) -> str:

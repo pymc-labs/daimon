@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.events import NativePart, TextPart, ToolResultPayload
+from mux.contracts.events import ImagePart, NativePart, TextPart, ToolResultPayload
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import ManagedAgents, Steering
@@ -120,6 +120,23 @@ async def test_two_turns_reuse_history_environment_and_immutable_default(setup: 
     )
     assert "usage_observations" in ma.admit(config).satisfied
     assert not ma.capabilities().core
+
+
+@pytest.mark.asyncio
+async def test_a_message_with_an_image_sends_the_image_inline_after_its_text(setup: Setup) -> None:
+    """An inline image rides along as an image block; a type Gemini cannot take is refused."""
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native())
+    picture = ImagePart(media_type="image/png", data_base64="aGk=")
+    message = UserMessage(content=(TextPart(text="what is this?"), picture))
+    await ma.events.send(SCOPE, s.ref, (message,), key="image")
+    assert t.requests[0]["input"] == [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image", "data": "aGk=", "mime_type": "image/png"},
+    ], "the text block should come first, then the image with its media type"
+    odd = UserMessage(content=(ImagePart(media_type="image/svg+xml", data_base64="aGk="),))
+    with pytest.raises(UnsupportedCapability, match="input_modality"):
+        await ma.events.send(SCOPE, s.ref, (odd,), key="svg")
 
 
 @pytest.mark.asyncio
