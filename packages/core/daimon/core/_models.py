@@ -539,60 +539,14 @@ class Routine(Base):
     )
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # An admin's opt-in to built-in sandbox tools for this routine's own runs;
-    # every other unattended run keeps them off. Changed only through
-    # `stores.routines.set_sandbox_tools`, which logs each change.
-    sandbox_tools_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    sandbox_tools_set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_tools_set_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    # What the opt-in covers (`routine_sandbox.SandboxPin`): built-ins run only
-    # while a fire's agent version and environment revision still match.
-    sandbox_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sandbox_environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
-
-class RoutineSandboxHistoryRecord(Base):
-    """One change to a routine's sandbox opt-in: who, when, through what.
-
-    Kept after the routine is deleted, so `routine_id` has no foreign key.
-    """
-
-    __tablename__ = "routine_sandbox_history"
-    __table_args__ = (
-        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        CheckConstraint("via IN ('mcp', 'cli', 'edit')", name="ck_routine_sandbox_history_via"),
-        Index("ix_routine_sandbox_history_routine", "tenant_id", "routine_id", "set_at"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    routine_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    before_enabled: Mapped[bool] = mapped_column(Boolean)
-    after_enabled: Mapped[bool] = mapped_column(Boolean)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    via: Mapped[str] = mapped_column(Text)
-    # The pin an opt-in recorded (`after_enabled`); null otherwise.
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    # 0212 leaves the old `sandbox_*` columns and `routine_sandbox_history` unmapped for the
+    # release still running during a deploy; a later release drops them.
 
 
 class ThreadSession(Base):
@@ -2960,23 +2914,38 @@ class HubOAuthKv(Base):
 class FeatureValue(Base):
     """A feature set at one tier of one place; no row means the tier inherits.
 
-    Rows exist for the workspace, agent, channel and thread tiers (the deployment tier
-    is the `features` setting). Unused place columns hold ''. A thread row is keyed by
-    its thread key alone; its `channel_id` is the channel the thread sits in, '' when
-    unknown. `daimon.core.features.resolver` combines the rows; `locked` is final for
-    every tier below.
+    Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
+    tier is the `features` setting). Unused place columns hold '' (`routine_id` NULL). A
+    thread row is keyed by its thread key alone; its `channel_id` is the channel the thread
+    sits in, '' when unknown. A routine row goes with its routine and holds its id in
+    `channel_id` too, so `uq_feature_values_place` serves every tier but the thread. A
+    pinned feature's On keeps in `pin` what it covers. `daimon.core.features.resolver`
+    combines the rows; `locked` is final for every tier below.
     """
 
     __tablename__ = "feature_values"
     __table_args__ = (
         CheckConstraint(
-            "tier IN ('workspace', 'agent', 'channel', 'thread')", name="ck_feature_values_tier"
+            "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine')",
+            name="ck_feature_values_tier",
         ),
         CheckConstraint(
-            "surface IN ('web', 'chat', 'panel', 'cli', 'spec', 'migration')",
+            "surface IN ('web', 'chat', 'panel', 'cli', 'system', 'spec', 'migration')",
             name="ck_feature_values_surface",
         ),
-        CheckConstraint("NOT (locked AND tier = 'thread')", name="ck_feature_values_lock"),
+        CheckConstraint(
+            "NOT (locked AND tier IN ('thread', 'routine'))", name="ck_feature_values_lock"
+        ),
+        CheckConstraint(
+            "(tier = 'routine') = (routine_id IS NOT NULL)"
+            " AND (routine_id IS NULL OR channel_id = routine_id::text)",
+            name="ck_feature_values_routine",
+        ),
+        CheckConstraint(
+            "key <> 'routine_sandbox_tools' OR value <> 'on'"
+            " OR coalesce(jsonb_typeof(pin), '') = 'object'",
+            name="ck_feature_values_sandbox_pin",
+        ),
         Index(
             "uq_feature_values_place",
             "tenant_id",
@@ -2996,6 +2965,7 @@ class FeatureValue(Base):
             unique=True,
             postgresql_where=text("tier = 'thread'"),
         ),
+        Index("uq_feature_values_routine", "routine_id", "key", unique=True),
         Index("ix_feature_values_channel", "tenant_id", "channel_id"),
     )
 
@@ -3007,9 +2977,13 @@ class FeatureValue(Base):
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     channel_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     thread_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    routine_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=True
+    )
     key: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    pin: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     set_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
@@ -4549,7 +4523,8 @@ class ChannelChange(Base):
     __table_args__ = (
         Index("ix_channel_changes_tenant_channel_at", "tenant_id", "channel_id", "at"),
         CheckConstraint(
-            "surface IN ('web', 'chat', 'panel', 'cli')", name="ck_channel_changes_surface"
+            "surface IN ('web', 'chat', 'panel', 'cli', 'system')",
+            name="ck_channel_changes_surface",
         ),
     )
 

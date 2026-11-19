@@ -127,6 +127,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's
   idle relay vault sweep reads only session vault ids and waits ten minutes
   after a restart before its first run.
+- **Sandbox tools in routines is a setting with levels.** The
+  `routine_sandbox_tools` setting is off by default and set for the workspace,
+  an agent or one routine; a routine's own value wins over its agent's, and a
+  workspace lock wins over both. `daimon routines sandbox-tools --agent NAME`
+  opts in an agent and its environment's name, so editing the agent keeps the
+  built-in tools; it covers DM routines too, which cannot be opted in one by
+  one. A routine's opt-in still covers one agent version and environment.
+  `--off` keeps a routine off under an opted-in agent, `--inherit` clears its
+  own value, and `sandbox-tools-list` shows every agent and routine opted in.
+  Each change shows in the settings history. Existing routine opt-ins carry
+  over. The unattended capabilities setting still wins, and a change of agent
+  provider clears the opt-ins under the old agent. `get_routine` and
+  `list_routines` show `sandbox_tools` in place of the old opt-in fields.
+- **A server admin can let agents make watches without a card.** The new
+  `watch_approval` setting, for the team or for one agent, defaults to Ask,
+  which keeps today's card. Skip makes and resumes a watch straight away, and
+  only the default one: it reports in the same thread, ends after 7 days and
+  reads Daimon's own tools, and the agent cannot pick anything wider without a
+  card. Editing a watch, rotating a key, starting a long job and Fly launches
+  still ask, and a turn nobody is watching still cannot enroll a watch. Only a
+  server admin can change it, and agent owners cannot. It applies to Claude
+  agents; OpenAI and Gemini agents keep their own approval card.
+- **Members can open `/routines` in Discord.** The command no longer needs
+  Manage Server. It follows the same permission as chat and the web app: every
+  member sees the routines they created, and an admin sees all of them. Pause,
+  resume and delete still belong to the creator or an admin, New still needs an
+  admin, and the panel's web links match the role. Nobody sees a routine
+  someone else made unless they are an admin, also after Refresh, Pause or
+  Resume. Pause, resume and moving a routine to a DM check the person's
+  current chat permission, not only that they made it.
+- **Operators can create channel and thread routines from the command line.**
+  `daimon routines create --destination channel` or `thread`, with
+  `--destination-id`, makes a routine for a verified member who owns it, is
+  attributed and is budgeted for it. The same checks as creating one in chat
+  run once: the owner must be able to post there, the channel must be in the
+  server, and the tenant's access rules must allow it. A thread's permissions
+  come from its parent channel. `--dry-run` runs every check and saves nothing.
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the

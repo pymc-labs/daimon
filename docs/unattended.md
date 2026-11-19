@@ -86,7 +86,11 @@ destination-free routine, for its own scheduled runs:
 daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...] --dry-run
 daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...]
 daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --off
+daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --inherit
 ```
+
+`--off` keeps built-ins off for the routine even when its agent is opted in.
+`--inherit` clears the routine's own setting, so its agent's applies.
 
 The opt-in records the agent version and environment the routine runs with.
 A run gets built-ins only while both still match. After anyone edits the agent
@@ -95,13 +99,40 @@ until the operator runs the command again.
 
 Editing the routine's agent, trigger message, destination or budget channel
 also clears it. Changing the schedule, pausing or resuming does not. DM
-routines cannot be opted in, and owning a routine is not enough.
+routines cannot be opted in individually, only through their agent, and
+owning a routine is not enough.
+
+### Per agent
+
+An operator can instead opt in an agent, which covers every routine run of
+that agent, DM routines included:
+
+```bash
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME [--environment NAME] --dry-run
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME --off
+```
+
+This records the agent and the environment's name (the workspace default
+unless `--environment` is given), not a version, so editing the agent keeps
+the built-ins. Another agent or environment still runs without them. A change
+of agent provider clears it, and the routine opt-ins under the old agent.
+A routine's own setting wins over it, and a workspace lock wins over both.
+The `unattended_capabilities` setting still wins: with it off, built-ins stay
+off. Turn it on only for agents whose runs you trust.
+
+The record follows the agent id and the environment's name, so an
+environment recreated under the same name keeps the built-ins. `--off`
+takes the agent by name or, for one renamed or gone, `--agent-id`;
+`daimon routines sandbox-tools-list --tenant TENANT_UUID` shows every agent
+and routine opted in. The `/routines` panel says when the agent holds the opt-in.
 
 The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
-those. Every change is recorded with who, when, the routine and the version it
-covers. `get_routine`, `list_routines` and the Discord `/routines` panel show
-the setting.
+those. The setting is `routine_sandbox_tools` in the [features](features.md)
+table, and each change shows in the settings history with what it covers.
+`get_routine`, `list_routines`, the web Routines page and the Discord
+`/routines` panel show whether a routine is opted in.
 
 The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server
 admin's own token, which no Daimon surface issues yet.

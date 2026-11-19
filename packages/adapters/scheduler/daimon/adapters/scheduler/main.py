@@ -122,7 +122,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
-from daimon.core.routine_sandbox import RoutineSandbox, pin_of
+from daimon.core.routine_sandbox import routine_sandbox
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.rule_views import (
     is_routine_parent_unknown,
@@ -173,7 +173,6 @@ from daimon.core.stores.github_issued_tokens import (
 from daimon.core.stores.github_router_sessions import close_for_ma_session
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import (
-    clear_sandbox_drift,
     pause_for_lapsed_role,
     record_result,
     update_routine_agent_id,
@@ -305,29 +304,6 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
         await conn.close()
         return None
     return conn
-
-
-def _routine_sandbox(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow
-) -> RoutineSandbox | None:
-    """The routine's opt-in for this fire, or None when it has none recorded.
-
-    When the run's agent or environment no longer matches what the admin
-    approved, the run goes ahead without built-ins and the opt-in is cleared,
-    so the admin has to approve the new agent or environment.
-    """
-    pin = pin_of(row)
-    if pin is None:
-        return None
-
-    async def on_drift() -> None:
-        try:
-            async with sm() as session, session.begin():
-                await clear_sandbox_drift(session, row.id, tenant_id=row.tenant_id, pin=pin)
-        except Exception:  # the run already went ahead without built-ins
-            log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))
-
-    return RoutineSandbox(pin=pin, on_drift=on_drift)
 
 
 async def _spend_block(
@@ -545,6 +521,9 @@ async def _build_fire(
                 prompt=prompt,
                 source=source,
                 budget_channel_id=row.channel_id,
+                # Built-ins only under an operator's opt-in for the agent: a DM
+                # routine takes no On of its own.
+                sandbox=await routine_sandbox(sm, settings, row, platform="discord"),
             )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
@@ -1050,9 +1029,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # Built-in sandbox tools only for a routine an admin opted in, and
-            # only while its agent version and environment are the ones approved.
-            sandbox=_routine_sandbox(sm, row),
+            # Built-in sandbox tools only under an admin's opt-in for the routine or
+            # its agent, and only while the run matches what that opt-in pinned.
+            sandbox=await routine_sandbox(sm, settings, row, platform=platform),
             # The owner's personal memory, read-only, only for a routine whose
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=mounts_personal_memory(row),

@@ -12,8 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0214_gemini_records"
-down_revision: str | None = "0213_provider_key_gate"
+revision: str = "0215_gemini_records"
+down_revision: str | None = "0214_provider_key_gate"
 branch_labels: str | None = None
 depends_on: str | None = None
 
