@@ -117,5 +117,7 @@ async def test_an_alert_posts_a_neutral_card_and_a_channel_daimon_left_is_refuse
         assert kwargs == {"channel": "C9", **notice_fields(shown_text(kwargs), neutral=True)}
         client.chat_postMessage.side_effect = SlackApiError("no", {"error": "not_in_channel"})
         assert await alerter(budget_alert()) == "refused", "the next post would be refused too"
+        client.chat_postMessage.side_effect = SlackApiError("no", {"error": "token_revoked"})
+        assert await alerter(budget_alert()) == "refused", "a dead token never recovers on a retry"
         client.chat_postMessage.side_effect = SlackApiError("no", {"error": "ratelimited"})
         assert await alerter(budget_alert()) == "failed", "a rate limit passes on a later poll"

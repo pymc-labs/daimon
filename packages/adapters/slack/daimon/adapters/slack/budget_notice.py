@@ -61,9 +61,23 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
 
 
 _REFUSED_ERRORS: Final = frozenset(
-    {"channel_not_found", "not_in_channel", "is_archived", "access_denied", "restricted_action"}
+    {
+        "channel_not_found",
+        "not_in_channel",
+        "is_archived",
+        "access_denied",
+        "restricted_action",
+        "invalid_auth",
+        "not_authed",
+        "token_revoked",
+        "token_expired",
+        "account_inactive",
+    }
 )
-"""Slack's answers that the next post would get too: the alert waits for the next multiple."""
+"""Slack's answers that the next post would get too (a dead token included).
+
+The alert then waits for the next multiple.
+"""
 
 
 def slack_budget_alerter(runtime: SlackRuntime) -> BudgetAlerter:
