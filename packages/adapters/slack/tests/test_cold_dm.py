@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import anthropic
 import httpx
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
@@ -513,3 +514,19 @@ async def test_decide_cold_when_a_grant_lists_a_user_group_then_slack_membership
     )
 
     assert decision.route == expected, "the user group decides; a failed lookup fails closed"
+
+
+async def test_decide_cold_when_agents_cannot_be_listed_then_the_route_is_unrouted(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing error gives the guidance Slack gave before DM routing, not an error."""
+    await _dms_on(db_session_factory)
+    failing = AsyncMock(side_effect=anthropic.APIConnectionError(request=httpx.Request("GET", "x")))
+    monkeypatch.setattr(dm_module, "list_routable_dm_agents", failing)
+
+    decision, _ = await dm_module._decide_cold(  # pyright: ignore[reportPrivateUsage]
+        _runtime(db_session_factory), _client(monkeypatch), team_id="T_ROUTE", user_id="U1",
+        role=Role.USER,
+    )  # fmt: skip
+
+    assert decision.route == DmRefused("unrouted"), "the workspace is treated as unrouted"

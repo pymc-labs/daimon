@@ -28,6 +28,7 @@ from daimon.core.dm_settings import (
     NO_DMS,
     DmActor,
     DmRuleSpec,
+    GroupsProbe,
     PlatformId,
     dm_platform,
     slack_groups_probe,
@@ -121,14 +122,25 @@ async def dm_access_of(
     return found
 
 
+async def dm_groups_probe(runtime: WebRuntime, caller: WebCaller) -> GroupsProbe | None:
+    """Slack's user-group check, asked before the change's transaction opens."""
+    return await slack_groups_probe(
+        runtime.sessionmaker,
+        caller.person.tenant_id,
+        fernet=runtime.fernet,
+        http=runtime.http_client,
+    )
+
+
 async def change_dm_access(
     runtime: WebRuntime,
     db: AsyncSession,
     caller: WebCaller,
     agent: BetaManagedAgentsAgent,
     change: DmAccessChange,
+    probe: GroupsProbe | None,
 ) -> None:
-    """Replace who may DM `agent`."""
+    """Replace who may DM `agent`; `probe` comes from `dm_groups_probe`."""
     if await dm_platform(db, caller.person.tenant_id) is None:
         raise HTTPException(status_code=409, detail=NO_DMS)
     dm_agents = dm_agents_of([agent])
@@ -142,9 +154,7 @@ async def change_dm_access(
         who=change.who,
         user_ids=change.user_ids,
         group_ids=change.group_ids,
-        probe=await slack_groups_probe(
-            db, caller.person.tenant_id, fernet=runtime.fernet, http=runtime.http_client
-        ),
+        probe=probe,
     )
 
 
@@ -209,11 +219,9 @@ def dm_router(runtime: WebRuntime) -> APIRouter:
         rule = DmRuleSpec(body.subject, body.subject_id, body.agent, body.locked)
 
         async def run(db: AsyncSession, actor: DmActor, agents: list[DmAgent]) -> None:
-            probe = await slack_groups_probe(
-                db, actor.tenant_id, fernet=runtime.fernet, http=runtime.http_client
-            )
             await dm_settings.add_rule(db, actor, agents, rule, body.position, probe=probe)
 
+        probe = await dm_groups_probe(runtime, caller)
         return await write(caller, run)
 
     @router.patch("/dm/rules/{position}")

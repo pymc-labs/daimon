@@ -72,13 +72,14 @@ async def _actor(rt: CliRuntime, selector: TenantSelector | None) -> DmActor:
     return DmActor(tenant_id, principal.account_id, datetime.now(UTC))
 
 
-async def _probe(
-    rt: CliRuntime, session: AsyncSession, tenant_id: uuid.UUID
-) -> dm_settings.GroupsProbe | None:
-    """A check that Slack lets the app read user groups; None when there is no Slack to ask."""
+async def _probe(rt: CliRuntime, tenant_id: uuid.UUID) -> dm_settings.GroupsProbe | None:
+    """A check that Slack lets the app read user groups; None when there is no Slack to ask.
+
+    Asked before the change's transaction opens.
+    """
     keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
     return await dm_settings.slack_groups_probe(
-        session, tenant_id, fernet=build_multifernet(keys) if keys else None
+        rt.sessionmaker, tenant_id, fernet=build_multifernet(keys) if keys else None
     )
 
 
@@ -140,6 +141,7 @@ async def dm_access(
         raise typer.BadParameter("--user and --group need a mode: --mode listed|excluded")
     actor = await _actor(rt, selector)
     tenant_id = actor.tenant_id
+    probe = await _probe(rt, tenant_id) if mode is not None else None
     async with rt.sessionmaker.begin() as session:
         if mode is not None:
             agents = await _agents(rt, session, tenant_id)
@@ -153,7 +155,7 @@ async def dm_access(
                 who=mode,
                 user_ids=users,
                 group_ids=groups,
-                probe=await _probe(rt, session, tenant_id),
+                probe=probe,
             )
         grant = (await store.list_grants(session, tenant_id=tenant_id)).get(agent)
     who = grant.who if grant else "members"
@@ -191,6 +193,7 @@ async def dm_rules(
     """List the rules, or add, remove or move one."""
     actor = await _actor(rt, selector)
     tenant_id = actor.tenant_id
+    probe = await _probe(rt, tenant_id) if action == "add" else None
     async with rt.sessionmaker.begin() as session:
         if action == "add":
             chosen = [user is not None, group is not None, everyone]
@@ -199,7 +202,6 @@ async def dm_rules(
             subject = "user" if user else "group" if group else "everyone"
             rule = DmRuleSpec(subject, user or group, agent, locked)
             agents = await _agents(rt, session, tenant_id)
-            probe = await _probe(rt, session, tenant_id)
             await dm_settings.add_rule(session, actor, agents, rule, position, probe=probe)
         elif action in ("remove", "move"):
             if position is None or (action == "move" and to is None):

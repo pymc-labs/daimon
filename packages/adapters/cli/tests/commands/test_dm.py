@@ -25,6 +25,7 @@ from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import web_audit
 from daimon.core.stores.direct_messages import (
     dm_enabled,
+    dm_turned_off,
     get_dm_agent_name,
     set_dm_agent_name,
     set_dm_enabled,
@@ -290,3 +291,22 @@ async def test_import_policies_turns_a_disabled_workspace_off(
     )
     async with db_session_factory() as session:
         assert not await dm_enabled(session, tenant_id=tenant.id), "private messages are off"
+
+
+async def test_import_policies_writes_off_on_a_default_off_workspace(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A default-off Discord workspace is still set off, so agent-sent messages stay blocked."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id="g-default-off")
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        direct_message_policies={tenant.id: DirectMessagePolicy(mode="disabled")},
+    )
+    console, _ = _console()
+    await dm_import_policies(
+        rt=_runtime(db_session_factory, [], settings), console=console, dry_run=False
+    )
+    async with db_session_factory() as session:
+        assert await dm_turned_off(session, tenant_id=tenant.id), "off is written, not defaulted"

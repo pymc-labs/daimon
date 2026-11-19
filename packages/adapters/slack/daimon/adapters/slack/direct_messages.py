@@ -584,7 +584,11 @@ _UNCHECKED = "I couldn't check your access just now.\n\nTry again in a minute."
 async def _decide_cold(
     runtime: SlackRuntime, client: AsyncWebClient, *, team_id: str, user_id: str, role: Role
 ) -> tuple[DmDecision, frozenset[str] | None]:
-    """Which agent a DM with no conversation reaches, with the person's groups looked up afresh."""
+    """Which agent a DM with no conversation reaches, with the person's groups looked up afresh.
+
+    When the agents cannot be listed the route is `unrouted`, which gets the guidance Slack
+    gave before DM routing, rather than an error.
+    """
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     groups = await lookup_dm_groups(
         runtime.sessionmaker,
@@ -594,12 +598,16 @@ async def _decide_cold(
     )
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        agents = await list_routable_dm_agents(
-            session,
-            tenant_id=tenant_id,
-            anthropic=runtime.turn_deps.anthropic,
-            records=runtime.turn_deps.sessionmaker,
-        )
+        try:
+            agents = await list_routable_dm_agents(
+                session,
+                tenant_id=tenant_id,
+                anthropic=runtime.turn_deps.anthropic,
+                records=runtime.turn_deps.sessionmaker,
+            )
+        except (DaimonError, MAResolverMissError, anthropic.APIError) as error:
+            log.warning("slack.dm.agents_unlisted", error_type=type(error).__name__)
+            return DmDecision(DmRefused("unrouted")), groups
         principal = await find_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )

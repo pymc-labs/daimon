@@ -7,7 +7,12 @@ from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.admin_common import WorkspaceAdmin, admin_of, listed_agents, refused
-from daimon.adapters.web.admin_dm import DmAccessChange, change_dm_access, dm_access_of
+from daimon.adapters.web.admin_dm import (
+    DmAccessChange,
+    change_dm_access,
+    dm_access_of,
+    dm_groups_probe,
+)
 from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.faces import avatars_of
@@ -60,6 +65,7 @@ def access_router(runtime: WebRuntime) -> APIRouter:
         agents = [a for a in await listed_agents(runtime, tenant_id) if a.id == agent_id]
         if not agents:
             raise HTTPException(status_code=404, detail="This agent isn't in the workspace.")
+        probe = await dm_groups_probe(runtime, caller) if body.dm is not None else None
         try:
             async with runtime.sessionmaker.begin() as db:
                 [changed] = await web_admin.agent_access_rows(db, tenant_id, agents)
@@ -74,7 +80,7 @@ def access_router(runtime: WebRuntime) -> APIRouter:
                         groups=body.groups,
                     )
                 if body.dm is not None:
-                    await change_dm_access(runtime, db, caller, agents[0], body.dm)
+                    await change_dm_access(runtime, db, caller, agents[0], body.dm, probe)
                 dm = await dm_access_of(runtime, db, tenant_id, agents)
         except WebAdminError as error:
             raise refused(error) from error

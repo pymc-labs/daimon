@@ -106,6 +106,13 @@ async def _change_dm(
     actor = DmActor(admin.tenant_id, admin.account_id, now())
     specs = [DmRuleSpec(r.subject, r.subject_id, r.agent, r.locked) for r in rules or ()]
     changes: list[SettingChange] = []
+    probe = (
+        await dm_settings.slack_groups_probe(
+            runtime.session_factory, admin.tenant_id, fernet=runtime.fernet
+        )
+        if rules is not None
+        else None
+    )
     try:
         async with runtime.session_factory.begin() as db:
             if await dm_settings.dm_platform(db, admin.tenant_id) is None:
@@ -119,9 +126,7 @@ async def _change_dm(
                 actor,
                 agents,
                 specs,
-                probe=await dm_settings.slack_groups_probe(
-                    db, admin.tenant_id, fernet=runtime.fernet
-                ),
+                probe=probe,
             ):
                 changes.append(SettingChange("DM rules", f"{len(specs)} rules"))
     except UserFacingError as err:

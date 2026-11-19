@@ -28,7 +28,7 @@ from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_admin import audit
 from pydantic import StringConstraints
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TARGET: Final = "Direct messages"
 MAX_SUBJECTS: Final = 100
@@ -78,28 +78,41 @@ async def dm_platform(db: AsyncSession, tenant_id: uuid.UUID) -> str | None:
 
 
 async def slack_groups_probe(
-    db: AsyncSession,
+    sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     *,
     fernet: MultiFernet | None,
     http: httpx.AsyncClient | None = None,
 ) -> GroupsProbe | None:
-    """A probe of the workspace's Slack user groups; None off Slack or with no token."""
-    tenant = await get_tenant(db, tenant_id)
-    token = (
-        await get_slack_bot_token(db, team_id=tenant.external_id)
-        if tenant is not None and tenant.platform == "slack" and fernet is not None
-        else None
-    )
+    """Ask Slack for the workspace's user groups now; None off Slack or with no token.
+
+    Call it before the change's own transaction opens, so the Slack request holds no
+    connection. The probe it returns replays the outcome.
+    """
+    async with sessions() as db:
+        tenant = await get_tenant(db, tenant_id)
+        token = (
+            await get_slack_bot_token(db, team_id=tenant.external_id)
+            if tenant is not None and tenant.platform == "slack" and fernet is not None
+            else None
+        )
     if token is None or fernet is None:
         return None
     secret = decrypt_token(fernet, token.encrypted_token)
+    failure: GroupLookupFailed | None = None
+    try:
+        if http is not None:
+            await slack_user_groups(http, token=secret)
+        else:
+            async with httpx.AsyncClient() as client:
+                await slack_user_groups(client, token=secret)
+    except GroupLookupFailed as error:
+        failure = error
 
     async def probe() -> object:
-        if http is not None:
-            return await slack_user_groups(http, token=secret)
-        async with httpx.AsyncClient() as client:
-            return await slack_user_groups(client, token=secret)
+        if failure is not None:
+            raise failure
+        return None
 
     return probe
 

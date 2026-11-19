@@ -3,7 +3,8 @@
 `members` stores nothing (it is the default). `allowlist` lists those users on every agent:
 agent-sent messages are held to the sending agent's grant whether or not it takes DMs;
 an agent made later has no grant. It needs a default agent, which a notice is held to.
-`disabled` turns the workspace feature off. Each write is recorded for the CLI's local
+`disabled` writes the workspace feature off unless it is already set off (so a default-off
+workspace blocks agent-sent messages too). Each write is recorded for the CLI's local
 user, like any other CLI change. Running it again changes nothing.
 """
 
@@ -19,7 +20,7 @@ from daimon.core.dm_access import DmAgent
 from daimon.core.dm_settings import DmActor
 from daimon.core.errors import UserFacingError
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
+from daimon.core.stores.direct_messages import dm_turned_off, get_dm_agent_name, set_dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,7 +51,7 @@ async def import_dm_policies(
         if tenant is None or policy.mode == "members":
             continue
         if policy.mode == "disabled":
-            if await dm_enabled(session, tenant_id=tenant_id):
+            if not await dm_turned_off(session, tenant_id=tenant_id):
                 steps.append(f"{tenant.external_id}: turn private messages off")
                 if not dry_run:
                     by = (await actor(tenant_id)).account_id

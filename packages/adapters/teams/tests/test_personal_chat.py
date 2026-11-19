@@ -9,6 +9,8 @@ from time import time
 from types import SimpleNamespace
 from typing import Any
 
+import anthropic
+import httpx
 import pytest
 from daimon.adapters.teams import personal_chat
 from daimon.adapters.teams.card_actions import Actor
@@ -139,6 +141,21 @@ async def test_route_personal_chat_when_unrouted_then_the_chats_own_agent_answer
         await set_dm_agent_name(session, tenant_id=TENANT, agent_name="beta")
     assert (await _route(db_session_factory))[0], "the default answers"
     assert await _bound(db_session_factory) == "beta", "and the chat is pinned to it"
+
+
+@pytest.mark.usefixtures("routed")
+async def test_route_personal_chat_when_agents_cannot_be_listed_then_the_chats_own_agent_answers(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing error falls back to the chat's own agent, not a silent or failed chat."""
+
+    async def failing(*_: object, **__: object) -> list[DmAgent]:
+        raise anthropic.APIConnectionError(request=httpx.Request("GET", "https://x"))
+
+    monkeypatch.setattr(personal_chat, "list_routable_dm_agents", failing)
+    answered, posted = await _route(db_session_factory)
+    assert answered and not posted, "the chat's own agent answers, with no card"
+    assert await _bound(db_session_factory) is None, "nothing pinned"
 
 
 @pytest.mark.usefixtures("routed")

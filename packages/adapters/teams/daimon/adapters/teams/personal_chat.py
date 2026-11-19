@@ -18,6 +18,7 @@ from functools import partial
 from time import time
 from typing import Final
 
+import anthropic
 import structlog
 from daimon.adapters.teams.card import notice_adaptive_card, notice_card
 from daimon.adapters.teams.card_actions import (
@@ -42,6 +43,8 @@ from daimon.core.dm_access import (
 )
 from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, React
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
+from daimon.core.errors import DaimonError
+from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.dm_access import set_pick
 from daimon.core.stores.domain import ThreadAgentBindingRow
@@ -87,16 +90,24 @@ async def chat_groups(
 async def _decide(
     runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str
 ) -> tuple[DmDecision, list[DmAgent], uuid.UUID | None]:
-    """The route for a chat with no agent yet, with the person's teams read afresh."""
+    """The route for a chat with no agent yet, with the person's teams read afresh.
+
+    When the agents cannot be listed the chat is `unrouted`: its own agent answers, as
+    before DM routing, rather than the chat going unanswered.
+    """
     groups = await chat_groups(runtime, tenant_id=tenant_id, user_id=user_id, fresh=True)
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        agents = await list_routable_dm_agents(
-            session,
-            tenant_id=tenant_id,
-            anthropic=runtime.turn_deps.anthropic,
-            records=runtime.turn_deps.sessionmaker,
-        )
+        try:
+            agents = await list_routable_dm_agents(
+                session,
+                tenant_id=tenant_id,
+                anthropic=runtime.turn_deps.anthropic,
+                records=runtime.turn_deps.sessionmaker,
+            )
+        except (DaimonError, MAResolverMissError, anthropic.APIError) as error:
+            log.warning("teams.dm.agents_unlisted", error_type=type(error).__name__)
+            return DmDecision(DmRefused("unrouted")), [], None
         principal = await find_platform_principal(
             session, tenant_id=tenant_id, platform="teams", external_id=user_id
         )
