@@ -6719,15 +6719,83 @@ class PendingCarryOver(Base):
     )
 
 
+class MonitoredEvent(Base):
+    """A question, answer, MCP tool call or shown notice, kept while the agent is monitored.
+
+    `agent_id` is the agent's local id (`ma_identity.derive_agent_uuid`). `conversation`
+    is the DM, web chat or MCP session, and `turn_ref` pairs an answer with its question.
+    A tool row has its name and outcome only, never what the call sent or returned. A
+    notice row says when the person was told they are monitored.
+    """
+
+    __tablename__ = "monitored_events"
+    __table_args__ = (
+        Index("ix_monitored_events_agent_created", "tenant_id", "agent_id", "created_at"),
+        Index("ix_monitored_events_created", "created_at"),
+        Index("ix_monitored_events_account", "account_id"),
+        Index(
+            "ix_monitored_events_notice",
+            "tenant_id",
+            "agent_id",
+            "created_at",
+            postgresql_where=text("kind = 'notice'"),
+        ),
+        # One row of each kind per turn, so a retried capture is a no-op.
+        Index(
+            "uq_monitored_events_turn",
+            "tenant_id",
+            "conversation",
+            "turn_ref",
+            "kind",
+            unique=True,
+            postgresql_where=text("turn_ref IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "platform IN ('discord', 'slack', 'teams', 'web', 'mcp')",
+            name="ck_monitored_events_platform",
+        ),
+        CheckConstraint(
+            "kind IN ('question', 'answer', 'tool', 'notice')", name="ck_monitored_events_kind"
+        ),
+        CheckConstraint(
+            "(kind = 'tool') = (tool_name IS NOT NULL)", name="ck_monitored_events_tool_name"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 def _install_erased_account_guards() -> None:
     """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
 
-    Production gets the same statements from migration 0142; this keeps a schema built
+    Production gets the same statements from migrations 0142 and 0206; this keeps a schema built
     by `create_all` (the test schemas) behaving the same.
     """
     for table_name in _erasure_guards.GUARDED_TABLES:
         table = Base.metadata.tables[table_name]
-        for statement in (*_erasure_guards.FUNCTIONS, _erasure_guards.create_trigger(table_name)):
+        for statement in (
+            *_erasure_guards.ALL_FUNCTIONS,
+            _erasure_guards.create_trigger(table_name),
+        ):
             event.listen(table, "after_create", DDL(statement))
 
 

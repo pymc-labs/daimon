@@ -104,6 +104,8 @@ Where each feature can be set, and its default.
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
+| Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 
 ## Approvals
 
@@ -1119,3 +1121,27 @@ A routine the agent makes must name where its results go, or it is not made. Exi
 | Levels | Deployment, Workspace |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` |
+
+## Monitor direct messages
+
+Keeps what people ask this agent in direct messages and web chat, and what it answers, for admins to read. People are told in the conversation. Kept from when it is turned on, for the retention period.
+
+| | |
+| --- | --- |
+| Key | `monitor_direct_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Monitor coding tools
+
+Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
+
+| | |
+| --- | --- |
+| Key | `monitor_mcp` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |

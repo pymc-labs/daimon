@@ -36,6 +36,7 @@ from daimon.adapters.teams.privacy_card import (
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import DELETE_PAUSED, account_other_providers, collect_purge_preview
 from daimon.core.purge import purge_account
@@ -88,10 +89,17 @@ class PrivacyPanel:
             policy_url=policy_url,
             delete_enabled=self._runtime.settings.privacy.delete_enabled,
             microsoft_connected=await self._microsoft_connected(tenant_id, user_id),
+            monitored=await self._monitored(tenant_id),
             providers=await account_other_providers(
                 self._runtime.sessionmaker, account_id=account_id
             ),
         )
+
+    async def _monitored(self, tenant_id: uuid.UUID) -> bool:
+        async with self._runtime.sessionmaker() as session:
+            return await monitors_any(
+                session, self._runtime.settings, tenant_id=tenant_id, platform="teams"
+            )
 
     async def _microsoft_connected(self, tenant_id: uuid.UUID, user_id: str) -> bool:
         # Not gated on the settings: an account saved before they were removed

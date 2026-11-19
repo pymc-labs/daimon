@@ -99,10 +99,10 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
   return { groups, schema, doc, controls, pending: save.pending }
 }
 
-type Props = { place: FeaturePlace; tier: Tier; edit: boolean; /** Keys another page owns. */ hide?: string[] }
+type Props = { place: FeaturePlace; tier: Tier; edit: boolean; /** Keys another page owns. */ hide?: string[]; /** Extra lines under a feature's control, by key. */ notes?: Record<string, React.ReactNode> }
 
 /** A panel's Settings: one section per category, rows as `SettingRow`s. */
-export function FeatureSettings({ place, tier, edit, hide }: Props) {
+export function FeatureSettings({ place, tier, edit, hide, notes }: Props) {
   const [error, setError] = useState<string | null>(null)
   const { groups, schema, doc } = useGroups(place, tier, edit, setError, undefined, hide)
   return (
@@ -111,7 +111,12 @@ export function FeatureSettings({ place, tier, edit, hide }: Props) {
         {groups.map((g) => (
           <PanelSection key={g.name} title={g.name}>
             <div className="space-y-3">
-              {g.rows.map((r) => <SettingRow key={r.key} label={r.label}><div className="flex items-center gap-2">{r.control}</div></SettingRow>)}
+              {g.rows.map((r) => (
+                <SettingRow key={r.key} label={r.label}>
+                  <div className="flex items-center gap-2">{r.control}</div>
+                  {notes?.[r.key]}
+                </SettingRow>
+              ))}
             </div>
           </PanelSection>
         ))}

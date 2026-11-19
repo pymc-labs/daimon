@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Admins can monitor an agent, and people are told.** Two features, Monitor
+  direct messages and Monitor coding tools, are off by default and set per
+  workspace or agent. While one is on, Daimon keeps what people ask that agent
+  and what it answers, from the switch on and never before it. For other tool
+  calls from coding tools it keeps only the name, time and outcome. Only
+  workspace admins turn it on and read it, never an agent's owner, on the agent
+  page, in a Monitoring tab in admin, or with the `list_monitored_activity` and
+  `get_monitored_conversation` tools. Operators see counts and times with
+  `daimon monitoring list`. People see a neutral notice once per agent, at their first direct
+  message, in web chat (where they can dismiss it), in the MCP descriptions and
+  in their first tool result.
+  The privacy panel says what admins can read. Rows are deleted with the
+  person's account and after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
+
 - **Late GPT usage survives a restart.** OpenAI can report a turn's usage long
   after the turn ends. Daimon re-read it only for about an hour, in the process
   that ran the turn, so a restart or a later answer left the turn unbilled. The

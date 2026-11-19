@@ -2022,6 +2022,47 @@ class WebMessageRow(BaseModel):
     created_at: datetime
 
 
+MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
+MonitoredKind = Literal["question", "answer", "tool", "notice"]
+
+
+class MonitoredEventRow(BaseModel):
+    """A kept question, answer, MCP tool call or shown notice (`stores.monitoring`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    turn_ref: str | None
+    kind: MonitoredKind
+    content: str | None
+    tool_name: str | None
+    outcome: str | None
+    created_at: datetime
+
+
+class MonitoredConversationRow(BaseModel):
+    """One person's kept conversation with an agent: its question and tool counts and
+    span. MCP tool calls have no conversation, so a day of them is one (`conversation` is
+    None and `day` the UTC date); `cursor_id` pages the list (`stores.monitoring`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    day: str
+    questions: int
+    tools: int
+    first_at: datetime
+    last_at: datetime
+    cursor_id: uuid.UUID
+
+
 class PendingCarryOverRow(BaseModel):
     """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
 

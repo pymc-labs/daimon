@@ -476,6 +476,7 @@ class WebTurns:
                 external_user_id=principal.external_id,
                 user_message=f"{controls}\n\n{prefix}{message.content}",
                 request_text=message.content,
+                request_ref=str(message.id),
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

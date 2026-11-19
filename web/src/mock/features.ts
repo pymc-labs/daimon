@@ -6,16 +6,19 @@ import { wait } from "./util"
 
 const ON_OFF = [{ value: "on", label: "On" }, { value: "off", label: "Off" }]
 const ALL: Tier[] = ["deployment", "workspace", "agent", "channel", "thread"]
-const schema = (key: string, name: string, tiers: Tier[] = ALL, fallback = "on"): FeatureSchema => ({
+const schema = (key: string, name: string, tiers: Tier[] = ALL, fallback = "on", more: Partial<FeatureSchema> = {}): FeatureSchema => ({
   key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: fallback, tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
-  platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "",
+  platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "", ...more,
 })
+const GUARDRAILS = { category: "guardrails", categoryName: "Guardrails", default: "off" }
+const KEPT: Tier[] = ["deployment", "workspace", "agent"]
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
   schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "Thumbs-down feedback", ["deployment", "workspace", "agent", "channel"], "off"),
   schema("support_own_channel", "Own request channel", ["deployment"]),
   schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]),
   schema("direct_messages", "Direct messages", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
+  schema("monitor_direct_messages", "Monitor direct messages", KEPT, "off", GUARDRAILS), schema("monitor_mcp", "Monitor coding tools", KEPT, "off", GUARDRAILS),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])
@@ -26,6 +29,13 @@ const REASON = "Needs a sandbox. Ask an admin."
 const own = new Map<string, string>([["ag_review//|agent|direct_messages", "off"], ["//|workspace|support_escalation", "on"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
 /** Set `?support=unmet` to see Ask a person without a request channel. */
 const flag = () => (typeof location === "undefined" ? "" : new URLSearchParams(location.search).get("support") ?? "")
+/** Monitoring on an agent's own tier: seeded for two agents so the admin pages have something to show. */
+const SEEDED: [string, string, string][] = [
+  ["ag_pricing", "monitor_direct_messages", "on"], ["ag_pricing", "monitor_mcp", "on"], ["ag_mmm", "monitor_direct_messages", "on"],
+]
+for (const [agent, key, value] of SEEDED) own.set(`${agent}//|agent|${key}`, value)
+/** Whether a monitoring key is on for an agent, as the features set it. */
+export const monitoringOn = (agent: string, key: "monitor_direct_messages" | "monitor_mcp") => (own.get(`${agent}//|agent|${key}`) ?? "off") === "on"
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
 /** The workspace tier is set once for the whole workspace; the others per place. */
 const at = (url: URL, tier: Tier) => (tier === "workspace" ? "//" : place(url))

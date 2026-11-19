@@ -118,6 +118,7 @@ class CascadePreviewView(discord.ui.LayoutView):
         allowed_user_id: int,
         user_name: str,
         preview: PurgePreview,
+        monitored: bool = False,
         providers: tuple[str, ...] = (),
     ) -> None:
         super().__init__(timeout=600)
@@ -127,6 +128,7 @@ class CascadePreviewView(discord.ui.LayoutView):
         self.allowed_user_id = allowed_user_id
         self.user_name = user_name
         self.preview = preview
+        self.monitored = monitored
 
         # Programmatic buttons — decorator pattern does not work on LayoutView subclasses
         confirm_btn: discord.ui.Button[CascadePreviewView] = discord.ui.Button(
@@ -179,6 +181,7 @@ class CascadePreviewView(discord.ui.LayoutView):
             account_id=self.account_id,
             allowed_user_id=self.allowed_user_id,
             user_name=self.user_name,
+            monitored=self.monitored,
             providers=self.providers,
         )
         await interaction.response.edit_message(

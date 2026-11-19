@@ -112,3 +112,30 @@ export type DmExplain = {
 }
 /** The platform's groups, live, then stored ids it no longer lists (no name). */
 export type PlatformGroups = { platform: string; groups: { id: string; name: string | null }[]; problem: "reinstall" | "unavailable" | null }
+
+// Monitoring: what an admin may read of a monitored agent's conversations.
+export type MonitoredWhere = "direct_messages" | "web" | "coding_tools"
+export type MonitoredConversation = {
+  id: string
+  person: { id: string | null; name: string }
+  where: MonitoredWhere
+  questions: number
+  tools: number
+  first_at: string
+  last_at: string
+}
+/** One kept line: a question, the answer, a tool call with how it ended, or when the person was told. */
+export type MonitoredEvent = {
+  id: string
+  at: string
+  kind: "question" | "answer" | "tool" | "notice"
+  content: string | null
+  tool: string | null
+  outcome: "completed" | "error" | "denied" | "cancelled" | null
+}
+export type AgentMonitoring = {
+  id: string
+  name: string
+  direct_messages: { on: boolean; since: string | null }
+  coding_tools: { on: boolean; since: string | null }
+}

@@ -61,6 +61,7 @@ def panel_card(
     delete_enabled: bool = True,
     microsoft_connected: bool = False,
     providers: tuple[str, ...] = (),
+    monitored: bool = False,
 ) -> AdaptiveCard:
     """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
@@ -73,7 +74,7 @@ def panel_card(
         actions.append(button(VERB, "🗑 Delete…", "delete", style="destructive"))
     body: list[CardElement] = [
         heading(PRIVACY_TITLE),
-        *_spaced(*privacy_lines(bot, providers)),
+        *_spaced(*privacy_lines(bot, providers, monitored=monitored)),
         ActionSet(actions=actions, spacing="Medium"),
     ]
     return AdaptiveCard(body=body, fallback_text="Privacy")

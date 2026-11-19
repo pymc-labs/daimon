@@ -18,6 +18,7 @@ typo is silent — check the spelling here.
 - [Core](#core)
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
+- [Monitoring](#monitoring)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -243,6 +244,17 @@ Maximum launching and running long jobs per tenant.
 `int` · optional · default `2`
 
 Maximum launching and running long jobs per owner within a tenant.
+
+## Monitoring
+
+Read from `daimon.core.config.MonitoringSettings`. Prefix `DAIMON_MONITORING__`.
+
+### `DAIMON_MONITORING__RETENTION_DAYS`
+
+`int` · optional · default `90`
+
+Days a monitored question, answer or tool call is kept before the scheduler deletes it,
+default 90.
 
 ## Database
 

@@ -17,7 +17,7 @@ platform-user-scoped, after the principal row on purpose: see the call) ->
 teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
 Entra user)).
 Account-level deletes (mcp_tokens, connector_tokens, GitHub connect requests and click intents,
-message_feedback, tag_opt_outs, user_configs, accounts)
+message_feedback, tag_opt_outs, monitored_events, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
 message_feedback are keyed by account_id and are deleted before delete_account
 so their CASCADE FKs to accounts.id are satisfied. message_feedback is deleted
@@ -173,6 +173,7 @@ from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
+from daimon.core.stores import monitoring as monitoring_store
 from daimon.core.stores import mux_erasure as mux_erasure_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import privacy_session_deletes as privacy_deletes_store
@@ -247,6 +248,7 @@ class PurgeReport(BaseModel):
     microsoft_user_tokens: int = 0
     lead_intakes: int = 0
     web_people: int = 0
+    monitored_events: int = 0
     web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
     mux_slots: int = 0
@@ -304,6 +306,7 @@ class PurgeReport(BaseModel):
             teams_messages=self.teams_messages + other.teams_messages,
             microsoft_user_tokens=self.microsoft_user_tokens + other.microsoft_user_tokens,
             web_people=self.web_people + other.web_people,
+            monitored_events=self.monitored_events + other.monitored_events,
             web_admin_grants=self.web_admin_grants + other.web_admin_grants,
             mux_slots=self.mux_slots + other.mux_slots,
             mux_binding_generations=self.mux_binding_generations + other.mux_binding_generations,
@@ -807,6 +810,8 @@ async def _purge_account_transaction(
     web_admin_grants_count = await web_roles_store.delete_admin_grants_for_account(
         session, account_id=account_id
     )
+    # What the person asked monitored agents, in every workspace; cascades too, but counted.
+    monitored_count = await monitoring_store.delete_for_account(session, account_id=account_id)
     await github_issued_tokens_store.erase_requester_identity(session, account_id=account_id)
     # Revoke the person's GitHub router bearers before SET NULL detaches them.
     await github_router_sessions_store.close_for_account(session, account_id=account_id)
@@ -855,6 +860,7 @@ async def _purge_account_transaction(
             dm_grant_users=dm_grant_users_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,
+            monitored_events=monitored_count,
         )
     )
     return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list)), provider_sessions

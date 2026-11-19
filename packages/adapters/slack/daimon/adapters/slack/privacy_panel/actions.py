@@ -43,6 +43,7 @@ from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import account_other_providers, summary_line
 from daimon.core.slack_oauth import build_slack_connect_url
@@ -128,6 +129,9 @@ async def handle_privacy_command(
             account_id = await resolve_privacy_account(
                 s, tenant_id=tenant_id, platform_user_id=user_id
             )
+            monitored = account_id is not None and await monitors_any(
+                s, runtime.settings, tenant_id=tenant_id, platform="slack"
+            )
 
         if account_id is None:
             await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -156,6 +160,7 @@ async def handle_privacy_command(
                 policy_url=str(runtime.settings.privacy_policy_url),
                 display_name=resolve_bot_display_name(runtime.settings),
                 delete_enabled=runtime.settings.privacy.delete_enabled,
+                monitored=monitored,
                 providers=await account_other_providers(
                     runtime.sessionmaker, account_id=account_id
                 ),

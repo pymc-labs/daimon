@@ -104,6 +104,8 @@ _NARROWED: dict[str, str] = {
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
+    "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
+    "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
     "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",

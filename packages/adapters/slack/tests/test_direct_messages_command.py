@@ -89,7 +89,7 @@ async def test_an_unknown_action_shows_the_usage_lines(monkeypatch: pytest.Monke
     assert "text" not in sent and sent["attachments"]
     assert shown_text(sent) == (
         "That option isn't recognized.\n\n"
-        "Run `/dm-me` in a channel to continue privately. "
+        "Run `/dm-me` in a channel to continue in a direct message. "
         "Admins: `/dm-me enable` or `/dm-me disable`."
     )
 

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 232 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -410,6 +410,15 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
+
+## `monitored_activity`
+
+Monitored agents from chat: the conversations kept for an agent and one transcript.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `get_monitored_conversation` | admin only | Read one kept conversation (a ``conversation_id`` from list_monitored_activity) in order: questions, answers, coding-tool calls with their outcome, and ``notice`` when the person was told. |
+| `list_monitored_activity` | admin only | List the conversations kept for a monitored agent, most recent first, with when each monitoring switch was turned on. |
 
 ## `my_data`
 

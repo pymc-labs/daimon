@@ -101,6 +101,20 @@ describe("a refused turn", () => {
   })
 })
 
+describe("monitoring begun while the page is open", () => {
+  it("keeps the notice the turn sends, apart from the reply", async () => {
+    const qc = new QueryClient()
+    const sid = "s-monitored"
+    hydrate(sid, { messages: [] })
+    const notice = { line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." }
+    server({ [`POST /api/chat/sessions/${sid}/messages`]: [() => events([{ type: "monitoring", notice }, { type: "done", message: reply("Hello") }])] })
+    const { result } = renderHook(() => useThread(sid))
+    await send(qc, sid, "hi")
+    expect(result.current.monitoring).toEqual(notice)
+    expect(result.current.messages.at(-1)?.content).toBe("Hello")
+  })
+})
+
 describe("the credit meter", () => {
   it("is read from the meter after a reply, without fetching the account again", async () => {
     const qc = new QueryClient()

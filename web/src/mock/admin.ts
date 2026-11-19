@@ -1,10 +1,12 @@
 // Admin: people, invites, agent web access, audit log and workspace settings.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { AdminPerson, AgentAccess, AuditEntry, AuditKind, AuditTarget, DmExplain, DmGrant, DmGrantChange, DmPerson, DmRule, DmRuleAdd, DmRuleChange, DmSettings, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
+import type { AdminPerson, AgentAccess, AgentMonitoring, AuditEntry, AuditKind, AuditTarget, DmExplain, DmGrant, DmGrantChange, DmPerson, DmRule, DmRuleAdd, DmRuleChange, DmSettings, Feedback, Invite, SettingsPatch, WorkspaceSettings } from "@/modules/admin/types"
 import { forbidden, notFound, paged, wait } from "./util"
 import { agent, AGENTS, DOMAIN, me, visitorFiles } from "./world"
 import { face } from "./face"
+import { monitoringOn } from "./features"
+import { conversationsOf, transcriptOf } from "./monitoring"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
@@ -277,6 +279,29 @@ export const adminHandlers: HttpHandler[] = [
     return HttpResponse.json(q ? CHAT_PEOPLE.filter((p) => p.name!.toLowerCase().includes(q)).slice(0, 8) : [])
   }),
   http.get("/api/admin/platform-groups", () => HttpResponse.json({ platform: "discord", groups: ROLES, problem: null })),
+  http.get("/api/admin/monitoring/agents/:agent", ({ params }) => {
+    const a = AGENTS.find((x) => x.id === params.agent)
+    if (!a) return notFound()
+    const since = (on: boolean) => ({ on, since: on ? ago(24 * 9) : null })
+    return HttpResponse.json<AgentMonitoring>({
+      id: a.id, name: a.name, direct_messages: since(monitoringOn(a.id, "monitor_direct_messages")), coding_tools: since(monitoringOn(a.id, "monitor_mcp")),
+    })
+  }),
+  http.get("/api/admin/monitoring/agents/:agent/conversations", ({ params, request }) => {
+    const a = AGENTS.find((x) => x.id === params.agent)
+    if (!a) return notFound()
+    const { person, where, from, to } = Object.fromEntries(new URL(request.url).searchParams)
+    const day = (iso: string) => iso.slice(0, 10)
+    if (!from && !person && !where) log("Viewed monitored activity", a.name)
+    return paged(request, conversationsOf(a.id).filter((c) =>
+      (!person || c.person.id === person) && (!where || c.where === where) && (!from || day(c.last_at) >= from) && (!to || day(c.last_at) <= to)))
+  }),
+  http.get("/api/admin/monitoring/agents/:agent/conversations/:id", ({ params, request }) => {
+    const events = transcriptOf(String(params.agent), String(params.id))
+    if (!events) return notFound()
+    log("Opened monitored conversation", agent(String(params.agent)).name)
+    return paged(request, events)
+  }),
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
     const b = (await request.json()) as SettingsPatch

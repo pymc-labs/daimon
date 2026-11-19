@@ -469,6 +469,8 @@ _TIME_LIMITS: Final[Mapping[str, str]] = {
 """Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
+# Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
+_ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
     "chat", "agents", "channels", "routines", "credits", "integrations",
 )  # fmt: skip
@@ -805,6 +807,40 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
         legacy_env=("DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION",),
+    ),
+    *(
+        FeatureSpec(
+            key=key,
+            name=name,
+            category="guardrails",
+            effect="capability",
+            values=_ON_OFF,
+            default="off",
+            tiers=("deployment", "workspace", "agent"),
+            # Read on every recorded turn, so a conversation begun before it is turned on
+            # is recorded from then on, and nothing from before.
+            binds="turn",
+            doc=doc,
+            platforms=EVERY_PLATFORM,
+            authority=_ADMIN_NOT_OWNER,
+        )
+        for key, name, doc in (
+            (
+                "monitor_direct_messages",
+                "Monitor direct messages",
+                "Keeps what people ask this agent in direct messages and web chat, and what "
+                "it answers, for admins to read. People are told in the conversation. "
+                "Kept from when it is turned on, for the retention period.",
+            ),
+            (
+                "monitor_mcp",
+                "Monitor coding tools",
+                "Keeps what people ask this agent from their coding tools and what it answers, "
+                "and the name, time and outcome of each other tool they call on it, never what "
+                "the call sent or returned. People are told in the conversation or their first "
+                "tool result. Kept from when it is turned on, for the retention period.",
+            ),
+        )
     ),
 )
 

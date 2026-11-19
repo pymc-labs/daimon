@@ -22,9 +22,12 @@ Tool handlers always read via `await ctx.get_state("auth")`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import functools
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TypedDict, cast
 
 import structlog
@@ -47,6 +50,13 @@ from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
+from daimon.core.monitoring import (
+    MCP_NOTICE,
+    capture_tool_call,
+    may_monitor,
+    mcp_notice_due,
+    record_notice,
+)
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -54,6 +64,7 @@ from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
+from daimon.core.stores.monitoring import MonitoredSubject
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
@@ -61,7 +72,10 @@ from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
+from fastmcp.tools import ToolResult
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+
+from mcp.types import CallToolResult, TextContent
 
 if TYPE_CHECKING:
     from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
@@ -80,6 +94,10 @@ _AUTHORITY_METHODS = _TOOL_METHODS | {
     "prompts/list",
     "prompts/get",
 }
+
+#: Agent-chat tools whose call is the person's question: `agent_chat` keeps it, with
+#: its answer, so a monitored agent shows each turn once, not also as a tool call.
+MONITORED_QUESTION_TOOLS: frozenset[str] = frozenset({"start_turn", "continue_turn", "ask"})
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -189,6 +207,9 @@ class IdentityMiddleware(Middleware):
         self._audit_timeout = 2.0
         self._audit_max_pending = 128
         self._audit_slots = asyncio.Semaphore(2)
+        # Monitoring writes queue apart, so a burst of them never delays the audit.
+        self._monitoring_tasks: set[asyncio.Task[None]] = set()
+        self._monitoring_slots = asyncio.Semaphore(2)
         self._host_call_gate: HostCallGate | None = None
 
     async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
@@ -203,6 +224,10 @@ class IdentityMiddleware(Middleware):
         agent_id = _uuid_or_none(await self._agent_id_resolver(context))
         token = get_access_token()
         claims = token.claims if token is not None else {}
+        monitored_agent = await self._monitored_agent(
+            tenant_id, _person_agent(agent_id, claims) if context.method == "tools/call" else None
+        )
+        started_at = datetime.now(UTC)
         chat_agent = claims.get("chat_agent_id")
         if agent_id is None and isinstance(chat_agent, str):
             agent_id = _uuid_or_none(chat_agent)
@@ -228,6 +253,20 @@ class IdentityMiddleware(Middleware):
                     "policy_allow",
                 }:
                     decision.reason = "tool_error"
+                elif (
+                    monitored_agent is not None
+                    and account_id is not None
+                    and tool_name in MONITORED_QUESTION_TOOLS
+                ):
+                    self._note_shown_notice(
+                        MonitoredSubject(tenant_id, monitored_agent, "mcp", account_id, None),
+                        result,
+                    )
+                elif monitored_agent is not None and account_id is not None:
+                    result = await self._tell_on_first_call(
+                        MonitoredSubject(tenant_id, monitored_agent, "mcp", account_id, None),
+                        result,
+                    )
                 return result
             except BaseException as exc:
                 if isinstance(exc, (AuthorizationError, NotFoundError)):
@@ -270,6 +309,126 @@ class IdentityMiddleware(Middleware):
                         scope=decision.scope,
                     )
                 )
+                if monitored_agent is not None and tool_name not in MONITORED_QUESTION_TOOLS:
+                    outcome = (
+                        "denied"
+                        if decision.denied
+                        else "cancelled"
+                        if decision.reason == "cancelled"
+                        else "error"
+                        if decision.reason in {"tool_error", "request_error"}
+                        else "completed"
+                    )
+                    self._queue_monitoring(
+                        "tool",
+                        functools.partial(
+                            capture_tool_call,
+                            self._audit_sessionmaker,
+                            self._settings,
+                            tenant_id=tenant_id,
+                            agent_id=monitored_agent,
+                            account_id=account_id,
+                            tool_name=tool_name,
+                            outcome=outcome,
+                            at=started_at,
+                        ),
+                    )
+
+    async def _tell_on_first_call(self, subject: MonitoredSubject, result: object) -> object:
+        """Add the notice to the person's first call result since monitoring was switched
+        on, as one more text block, and note it once that result is built. Their calls are
+        kept only from then on, so a refused call before it is not."""
+        if not isinstance(result, ToolResult | CallToolResult):
+            return result
+        try:
+            async with asyncio.timeout(self._audit_timeout):
+                if not await mcp_notice_due(
+                    self._audit_sessionmaker,
+                    self._settings,
+                    tenant_id=subject.tenant_id,
+                    agent_id=subject.agent_id,
+                    account_id=subject.account_id,
+                ):
+                    return result
+        except TimeoutError:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="notice", error_type="TimeoutError"
+            )
+            return result
+        told = result.model_copy(
+            update={"content": [*result.content, TextContent(type="text", text=MCP_NOTICE.text)]}
+        )
+        try:
+            # Noted before it goes back, so the person's next call sees it.
+            async with asyncio.timeout(self._audit_timeout):
+                await record_notice(self._audit_sessionmaker, subject, MCP_NOTICE)
+        except TimeoutError:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="notice", error_type="TimeoutError"
+            )
+        return told
+
+    def _note_shown_notice(self, subject: MonitoredSubject, result: object) -> None:
+        """Note the notice an agent-chat result carries as `monitoring` (its handle and
+        turn place it), now that the person gets it."""
+        structured = getattr(result, "structured_content", None)
+        if not isinstance(structured, dict):
+            return
+        fields = cast("Mapping[str, object]", structured)
+        handle, turn = fields.get("handle"), fields.get("turn_event_id")
+        if not fields.get("monitoring") or not isinstance(handle, str):
+            return
+        self._queue_monitoring(
+            "notice",
+            functools.partial(
+                record_notice,
+                self._audit_sessionmaker,
+                dataclasses.replace(subject, conversation=handle),
+                MCP_NOTICE,
+                turn_ref=turn if isinstance(turn, str) else None,
+            ),
+        )
+
+    async def _monitored_agent(
+        self, tenant_id: uuid.UUID, agent_id: uuid.UUID | None
+    ) -> uuid.UUID | None:
+        """`agent_id` while the workspace monitors any agent over MCP (a memo, seldom a
+        read); None skips every monitoring step of the call."""
+        if agent_id is None:
+            return None
+        try:
+            async with asyncio.timeout(self._audit_timeout):
+                on = await may_monitor(
+                    self._audit_sessionmaker, self._settings, tenant_id=tenant_id, platform="mcp"
+                )
+        # Unknown: the steps behind it check the agent itself, each bounded and best effort.
+        except Exception:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="tool", exc_info=True
+            )
+            on = True
+        return agent_id if on else None
+
+    def _queue_monitoring(self, kind: str, write: Callable[[], Awaitable[object]]) -> None:
+        """Keep a monitored agent's row in the background, bounded on its own slots."""
+        if len(self._monitoring_tasks) >= self._audit_max_pending:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind=kind, error_type="QueueFull"
+            )
+            return
+
+        async def bounded() -> None:
+            try:
+                async with asyncio.timeout(self._audit_timeout), self._monitoring_slots:
+                    await write()
+            except TimeoutError:
+                structlog.get_logger(__name__).warning(
+                    "monitoring.capture_failed", kind=kind, error_type="TimeoutError"
+                )
+
+        task = asyncio.create_task(bounded(), name=f"monitoring-{kind}-write")
+        self._monitoring_tasks.add(task)
+        task.add_done_callback(self._monitoring_tasks.discard)
 
     def _queue_audit(self, event: SecurityAuditEntry) -> None:
         if len(self._audit_tasks) >= self._audit_max_pending:
@@ -303,8 +462,8 @@ class IdentityMiddleware(Middleware):
 
     async def drain_audit(self) -> None:
         """Wait for tracked, timeout-bounded writes during orderly teardown."""
-        if self._audit_tasks:
-            await asyncio.gather(*tuple(self._audit_tasks), return_exceptions=True)
+        if pending := (*self._audit_tasks, *self._monitoring_tasks):
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _resolve_request(
         self,
@@ -692,6 +851,18 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
             else frozenset()
         ),
     )
+
+
+def _person_agent(agent_id: uuid.UUID | None, claims: Mapping[str, object]) -> uuid.UUID | None:
+    """The agent a person's own key drives, or None for an agent's own turn or a routine:
+    those calls are the agent's, not something the person asked."""
+    if agent_id is None or claims.get(TOKEN_KIND_CLAIM) != "agent":
+        return None
+    if claims.get(CHAT_EXECUTION_CLAIM) is True or any(
+        claims.get(key) is not None for key in ("chat_agent_id", "routine_id", "execution_id")
+    ):
+        return None
+    return agent_id
 
 
 def _uuid_or_none(raw: str | None) -> uuid.UUID | None:
