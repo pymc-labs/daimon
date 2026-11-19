@@ -65,6 +65,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a chat admin. The reason is required, and the audit log records the
   operator, the old and new value and the reason. Other features refuse
   `--reason`. Chat users who are not admins and agent keys are refused as before.
+- **Direct messages take files, forwards and replies.** A picture or a file sent in a
+  direct message reaches the agent as it does in a channel, and a message with only a
+  picture is answered. A forwarded message is passed as untrusted content, and a
+  reply shows the message it answers. A forward is also passed in channels.
+- **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
+  messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
+  deployment, workspace and agent levels. The smallest setting wins. It applies to
+  Discord, Slack and web direct messages. A higher setting costs more.
+- **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3
+  or 5 seconds at the deployment or workspace) holds a direct message until nothing new
+  has arrived for that long, up to ten seconds after the first, then answers everything
+  sent in one turn.
+  Messages sent while a reply runs are answered together by the next one. Each held
+  message gets an eyes reaction until it is answered. An approval reply such as "yes"
+  is answered on its own, at once. A restart answers held messages at once. If
+  `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
+  sent. It applies to Discord and Slack, set per workspace or deployment.
+- **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
+  with no model, written by a new pod, makes old pods fail turns in that conversation
+  until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+- **Earlier turns are no longer sent again into a continuing session.** A Discord direct
+  message into a session that already answered a turn sends only the new message. A new,
+  replaced or recovered session, or one whose first turn failed, still gets the history.
+- **`/model` works in direct messages, with an effort choice.** `/model` in a direct
+  message sets the model for that conversation, and a new `effort` option (low, medium,
+  high, xhigh, max) sets how hard Claude thinks. Effort alone keeps the agent's model, and
+  a later model pick keeps the effort. `default` clears both. The `thread_model` MCP tool
+  takes the same `effort`. Effort has no effect on other providers.
+- **Fable is a model choice.** `/model` and the model pickers offer Fable, applied
+  like the other models.
 - **GPT threads start with skills whose description spans lines.** A SKILL.md
   block scalar (`description: >`) made OpenAI refuse the session. `name` and
   `description` now upload as one line, an invalid name such as

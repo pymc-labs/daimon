@@ -16,7 +16,7 @@ what is off on the new provider.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -35,9 +35,14 @@ from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.thread_model_switch import ThreadPick, pick_thread
 from daimon.core.thread_models import (
+    EFFORT_NOT_CLAUDE,
+    EFFORT_OFF_CLAUDE,
     THREAD_MODEL_CHOICES,
     ThreadModelRefused,
     choose_thread_model,
+    model_efforts,
+    model_label,
+    resolve_effort,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -58,6 +63,8 @@ class ThreadModelResult:
     """The model now chosen, 'default' for the agent's own."""
     note: str
     """What changed, and what is off on the new provider; report it back to the person."""
+    effort: str | None = None
+    """The effort now chosen, None for the agent's own."""
 
 
 async def _set_thread_model_impl(
@@ -65,11 +72,54 @@ async def _set_thread_model_impl(
     auth: AuthIdentity,
     *,
     origin_context_id: str,
-    model: str,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> ThreadModelResult:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError(_UNATTENDED)
+    try:
+        resolve_effort(effort)  # a bad effort refuses before anything changes
+    except ThreadModelRefused as exc:
+        raise ToolError(f"{exc} Nothing changed.") from exc
+    wants_effort = effort is not None and bool(effort.strip())
+    if model is None or not model.strip():
+        if not wants_effort:
+            raise ToolError("Name a model, an effort, or both. Nothing changed.")
+        if await _off_claude(runtime, auth, origin):
+            raise ToolError(EFFORT_OFF_CLAUDE + " Nothing changed.")
+        return await _choose_claude(runtime, auth, origin, None, effort)
+    chosen, _reset = resolve_effort(effort)
+    model_id = THREAD_MODEL_CHOICES.get(model.strip().lower())
+    if (
+        chosen is not None
+        and model_id is not None
+        and chosen not in model_efforts(model_id)
+        and not await _off_claude(runtime, auth, origin)
+    ):
+        # Refuse before the model is saved: a refusal changes nothing.
+        raise ToolError(f"{model_label(model_id)} doesn't take an effort. Nothing changed.")
+    result = await _set_model(runtime, auth, origin, model)
+    if not wants_effort:
+        return result
+    if ":" in result.model and not result.model.startswith(f"{DEFAULT_BACKEND}:"):
+        return _with_note(result, EFFORT_NOT_CLAUDE)
+    if await _off_claude(runtime, auth, origin):
+        return _with_note(result, EFFORT_OFF_CLAUDE)
+    # The pick is kept as a Claude model: keep the effort beside it.
+    return await _choose_claude(runtime, auth, origin, None, effort)
+
+
+def _with_note(result: ThreadModelResult, extra: str) -> ThreadModelResult:
+    return replace(result, note=f"{result.note} {extra}")
+
+
+async def _set_model(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    model: str,
+) -> ThreadModelResult:
     word = model.strip().lower()
     if word == "default":
         return await _choose_claude(runtime, auth, origin, word)
@@ -88,7 +138,11 @@ async def _set_thread_model_impl(
 
 
 async def _choose_claude(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, word: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    word: str | None,
+    effort: str | None = None,
 ) -> ThreadModelResult:
     try:
         change = await choose_thread_model(
@@ -97,10 +151,13 @@ async def _choose_claude(
             platform=origin.platform,
             thread_id=origin.thread_id,
             choice=word,
+            effort=effort,
         )
     except ThreadModelRefused as exc:
         raise ToolError(str(exc)) from exc
-    return ThreadModelResult(model=change.model_id or "default", note=change.note)
+    return ThreadModelResult(
+        model=change.model_id or "default", note=change.note, effort=change.effort
+    )
 
 
 async def _pick(runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow) -> ThreadPick:
@@ -181,19 +238,24 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def set_thread_model(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
-        model: str,
+        model: str | None = None,
+        effort: str | None = None,
         digest: str | None = None,  # Ignored: from before every pick applied at once.
         revision: int | None = None,  # Ignored, as `digest`.
     ) -> ThreadModelResult:
-        """Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here".
+        """Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder".
 
         Only on the person's direct instruction in this conversation, never on
         your own judgement or because a model is mentioned. ``model`` is
-        ``haiku``, ``sonnet``, ``opus``, ``default`` (the agent's own model) or
-        a model from ``list_models`` as ``provider:id``. "Think harder" means
-        ``opus``. There is no effort setting. The conversation keeps the choice
-        for every later reply until someone changes it; the reply in progress
-        keeps its model. Other conversations are unaffected.
+        ``haiku``, ``sonnet``, ``opus``, ``fable``, ``default`` (the agent's own
+        model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
+        ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
+        agent's own), and may be given alone: "think harder" means a higher
+        ``effort``, not another model. A model pick keeps the chosen effort; only
+        Claude models take one, and the note says when it was not set. The
+        conversation keeps the choice for every later reply until someone
+        changes it; the reply in progress keeps its model. Other conversations
+        are unaffected.
 
         A pick applies at once. What the new provider can't carry is off
         there; the note says what.
@@ -207,4 +269,5 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             await _auth(ctx),
             origin_context_id=origin_context_id,
             model=model,
+            effort=effort,
         )

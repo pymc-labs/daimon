@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
@@ -134,7 +134,7 @@ def _reply_target_id(msg: discord.Message) -> int | None:
     return reference.message_id if isinstance(reference.message_id, int) else None
 
 
-def _embed_text(msg: discord.Message) -> str:
+def _embed_text(msg: discord.Message | discord.MessageSnapshot) -> str:
     """Title and description text of ``msg``'s embeds.
 
     A bot answer or status card is an embed with no message text; without this a
@@ -285,6 +285,118 @@ async def _reply_target_lines(
     if not body:
         return []
     return untrusted_block("reply_targets", body, _HISTORY_SOURCE)
+
+
+def compose_queued_content(messages: list[discord.Message]) -> str:
+    """Compose pending mention contents into a single composite user message.
+
+    Single-author: contents joined by blank lines so the model sees them as
+    one continuing thought from the same speaker. Multi-author: each prefixed
+    with ``[display_name]: `` so the agent can attribute who said what.
+    """
+    if not messages:
+        return ""
+    author_ids = {m.author.id for m in messages}
+    if len(author_ids) == 1:
+        return "\n\n".join(m.content for m in messages)
+    return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
+
+
+def _oversized_note(omit_url: bool) -> str:
+    if omit_url:
+        return (
+            f"Larger than {MAX_VISION_IMAGE_DIMENSION}px on an edge. Its URL is withheld: "
+            "reading it at full size already ended a conversation."
+        )
+    return (
+        f"Larger than {MAX_VISION_IMAGE_DIMENSION}px on an edge. Do NOT read this at full "
+        "size, which the API rejects and ends this conversation. Downscale a copy "
+        "first, then read the copy."
+    )
+
+
+def forwarded_lines(
+    messages: Sequence[discord.Message],
+    *,
+    omit_oversized_image_urls: bool = False,
+    sealed_sources: frozenset[str] = frozenset(),
+    parent_of: Callable[[int], int | None] = lambda _: None,
+) -> list[str]:
+    """The ``<forwarded>`` block for messages that forward another message, else nothing.
+
+    A forward carries a snapshot of the original: its text, embeds and attachments.
+    The person could see it, but it is someone else's text, so it is untrusted
+    content. Attachments are URL lines (the agent fetches them), never vision blocks.
+    An image over the API's pixel cap is marked, and with ``omit_oversized_image_urls``
+    (a rebuild after a dead session) its URL is left out. A forward whose source channel,
+    or the parent of a source thread (``parent_of``), is in ``sealed_sources`` is left out.
+    """
+    body: list[str] = []
+    for message in messages:
+        source = getattr(getattr(message, "reference", None), "channel_id", None)
+        if source is not None and sealed_sources & {str(source), str(parent_of(source))}:
+            continue
+        for snapshot in getattr(message, "message_snapshots", None) or ():
+            text = snapshot.content or _embed_text(snapshot)
+            attrs = f" timestamp={quoteattr(snapshot.created_at.isoformat())}"
+            lines = [f"<message{attrs}>", escape(text)]
+            if snapshot.attachments:
+                lines.append("<attachments>")
+                for att in snapshot.attachments:
+                    oversized = is_oversized_image(att)
+                    omit = oversized and omit_oversized_image_urls
+                    url = "" if omit else f" url={quoteattr(att.url)}"
+                    mark = (
+                        f' oversized="true" note={quoteattr(_oversized_note(omit))}'
+                        if oversized
+                        else ""
+                    )
+                    lines.append(
+                        f"<attachment filename={quoteattr(att.filename)}{url}"
+                        f" content_type={quoteattr(att.content_type or 'unknown')}"
+                        f" size={quoteattr(str(att.size))}{mark}/>"
+                    )
+                lines.append("</attachments>")
+            lines.append("</message>")
+            body.extend(lines)
+    return untrusted_block("forwarded", body, _HISTORY_SOURCE) if body else []
+
+
+def forwarded_names(messages: Sequence[discord.Message]) -> list[str]:
+    """File names of the attachments in the forwarded messages."""
+    return [
+        att.filename
+        for message in messages
+        for snapshot in getattr(message, "message_snapshots", None) or ()
+        for att in snapshot.attachments
+    ]
+
+
+async def input_context(
+    home: discord.abc.Messageable,
+    messages: Sequence[discord.Message],
+    *,
+    bot_user_id: int | None,
+    bot_display_name: str,
+    omit_oversized_image_urls: bool = False,
+) -> str:
+    """Reply targets and forwarded content of messages sent without a history rendering.
+
+    A direct message turn is the person's text alone; this adds what they replied to
+    and what they forwarded. Empty when neither applies. Never raises.
+    """
+    lines = [
+        *await _reply_target_lines(
+            home,
+            messages,
+            (),
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=omit_oversized_image_urls,
+        ),
+        *forwarded_lines(messages, omit_oversized_image_urls=omit_oversized_image_urls),
+    ]
+    return "\n".join(lines)
 
 
 def _render_message(

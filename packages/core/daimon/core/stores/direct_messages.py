@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -185,11 +186,14 @@ async def claim_message(
     *,
     fence: OwnerDmFence,
     route_key: str,
-    message_id: str,
+    message_ids: Sequence[str],
     expected_scope_id: str,
     claimed_at: datetime,
 ) -> DirectMessageRow | None:
-    """Claim the conversation of `fence`'s owner for `message_id`; None for a duplicate delivery.
+    """Claim the conversation of `fence`'s owner for the turn that answers `message_ids`.
+
+    A merged turn answers several messages. None means every one was seen before (a
+    redelivery); otherwise the unseen ids are recorded and the turn runs.
 
     `claimed_at` identifies the claim: finish and delivery check it is still the set one.
     Each claim's turn holds the owner's fence until it finishes, and the fence frees when
@@ -209,7 +213,8 @@ async def claim_message(
         )
     if row.scope_id != expected_scope_id:
         raise UserFacingError("That private conversation changed. Please send your message again.")
-    if message_id in row.recent_message_ids:
+    unseen = [i for i in dict.fromkeys(message_ids) if i not in row.recent_message_ids]
+    if not unseen:
         return None
     if row.claimed_at is not None:
         if not await fence_held(session, fence):
@@ -221,7 +226,7 @@ async def claim_message(
             "dm.claim_taken_over", platform=fence.platform, claimed_at=row.claimed_at.isoformat()
         )
     row.claimed_at = claimed_at
-    row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
+    row.recent_message_ids = [*row.recent_message_ids, *unseen][-50:]
     await session.flush()
     return DirectMessageRow.model_validate(row)
 

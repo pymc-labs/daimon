@@ -30,6 +30,9 @@ from anthropic.types.beta.beta_managed_agents_agent_with_overrides_params import
 from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import (
     BetaManagedAgentsMemoryStoreResourceParam,
 )
+from anthropic.types.beta.beta_managed_agents_model_config_params import (
+    BetaManagedAgentsModelConfigParams,
+)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -129,6 +132,7 @@ from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_access import MAX_SESSION_VAULT_CREDENTIALS
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
+from daimon.core.thread_models import sent_effort
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -719,6 +723,7 @@ async def create_session(
     on_app_access: Callable[[AppSessionAccess], None] | None = None,
     channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
+    model_effort: str | None = None,
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
     relay_routine_id: uuid.UUID | None = None,
@@ -768,7 +773,8 @@ async def create_session(
     ``channel_skills`` and ``system_override`` by it (`SessionIdentity`).
 
     ``model_override`` replaces the model for this session through
-    ``agent_with_overrides``. It never changes the stored agent.
+    ``agent_with_overrides``, at ``model_effort`` when given. It never changes the
+    stored agent.
 
     ``agent_chat`` records headless surface provenance at creation. Only those
     sessions may later be continued, cancelled or archived through agent chat.
@@ -1285,8 +1291,25 @@ async def create_session(
                     cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
                 ],
             }
+            carried = (
+                None if model_override is None else sent_effort(agent, model_override, model_effort)
+            )
             if model_override is not None:
-                overrides["model"] = model_override
+                overrides["model"] = (
+                    model_override
+                    if carried is None
+                    # The API takes an effort the SDK's param type doesn't list yet.
+                    else cast(
+                        BetaManagedAgentsModelConfigParams,
+                        {
+                            "id": model_override,
+                            "speed": agent.model.speed
+                            if model_override == agent.model.id
+                            else "standard",
+                            "effort": carried,
+                        },
+                    )
+                )
             if system_override is not None:
                 overrides["system"] = system_override
             if channel_skills or not identity.agent_skills:
@@ -1451,6 +1474,7 @@ async def create_session(
                         mcp_hold=hold_key(hold) if account_id is not None else None,
                         memory_scope=memory_scope(memory_hold),
                         identity_features=identity.stored(),
+                        model_effort=model_effort,
                     )
                     if app_session_unmapped
                     else None

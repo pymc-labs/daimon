@@ -24,6 +24,7 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Web |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -54,6 +55,7 @@ Where each feature can be set, and its default.
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -186,6 +188,18 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 | Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
 | Default | `100` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Lowest wins |
+
+## Direct message memory
+
+Earlier direct messages each reply carries; more costs more. The smallest wins.
+
+| | |
+| --- | --- |
+| Key | `dm_history_depth` |
+| Values | `12` (12 messages), `25` (25 messages), `50` (50 messages), `100` (100 messages) |
+| Default | `12` |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 
 ## Channel background
@@ -599,6 +613,18 @@ Conversations may move to a direct message with the agent. The agent that answer
 | Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
+
+## Direct message wait
+
+Holds a direct message for more, so a burst gets one reply; at most ten seconds, and never an approval reply.
+
+| | |
+| --- | --- |
+| Key | `dm_debounce_seconds` |
+| Values | `0` (Off), `1` (1 second), `3` (3 seconds), `5` (5 seconds) |
+| Default | `0` |
+| Levels | Deployment, Workspace |
+| Combines | Most specific wins |
 
 ## Read-only memory in direct messages
 

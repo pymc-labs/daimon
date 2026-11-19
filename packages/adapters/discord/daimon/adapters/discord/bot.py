@@ -22,7 +22,7 @@ import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
-from daimon.adapters.discord.attachments import build_attachment_url_prefix
+from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
@@ -30,6 +30,8 @@ from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
     build_delta_xml,
+    compose_queued_content,
+    forwarded_lines,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import (
@@ -96,12 +98,6 @@ from daimon.adapters.discord.typed_stop import (
     is_stop_request,
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
-from daimon.adapters.discord.vision import (
-    build_image_url_prefix,
-    build_skipped_image_prefix,
-    download_as_image_blocks,
-    is_vision_image_attachment,
-)
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
@@ -131,6 +127,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
+from daimon.core.direct_messages import sealed_channel_ids
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
@@ -514,21 +511,6 @@ async def _resolve_agent_display_name(
             if name:
                 return str(name)
     return "the previous agent"
-
-
-def _compose_queued_content(messages: list[discord.Message]) -> str:
-    """Compose pending mention contents into a single composite user message.
-
-    Single-author: contents joined by blank lines so the model sees them as
-    one continuing thought from the same speaker. Multi-author: each prefixed
-    with ``[display_name]: `` so the agent can attribute who said what.
-    """
-    if not messages:
-        return ""
-    author_ids = {m.author.id for m in messages}
-    if len(author_ids) == 1:
-        return "\n\n".join(m.content for m in messages)
-    return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
 def _log_bg_task_exception(task: asyncio.Task[Any]) -> None:
@@ -1102,6 +1084,8 @@ class DaimonBot(commands.Bot):
         recovery, not abandoned: see `docs/architecture.md`.
         """
         self.draining = True
+        # Held direct messages are answered now, inside the grace window.
+        self.dispatch("drain")
         # Pending auto batches are unasked-for turns that have not started;
         # dropping them is free, whereas letting a timer fire mid-drain would
         # admit a new turn the drain is trying to stop.
@@ -2334,16 +2318,11 @@ class DaimonBot(commands.Bot):
                 )
             )
         if non_production:
-            # Replace commands left by a production deployment with the DM-only ones:
-            # only the global scope reaches DMs, and a DM-only command never shows in
+            # Replace commands left by a production deployment with the DM-capable ones:
+            # only the global scope reaches DMs. A DM-capable command is left out of the
+            # per-guild copy, so it shows once in a guild; a DM-only one never shows in
             # a guild, so registering it globally widens nothing.
-            dm_only = [
-                command
-                for command in self.tree.get_commands()
-                if isinstance(command, app_commands.Command)
-                and command.allowed_contexts is not None
-                and not command.allowed_contexts.guild
-            ]
+            dm_capable = self._dm_capable_commands()
             if not self._global_tree_synced:
                 if self.application_id is None:
                     log.warning("tree_sync_global_clear_failed", reason="missing_application_id")
@@ -2351,10 +2330,10 @@ class DaimonBot(commands.Bot):
                 try:
                     await self.http.bulk_upsert_global_commands(
                         self.application_id,
-                        payload=[command.to_dict(self.tree) for command in dm_only],
+                        payload=[command.to_dict(self.tree) for command in dm_capable],
                     )
                     self._global_tree_synced = True
-                    log.info("tree_cleared_global", dm_only=[c.name for c in dm_only])
+                    log.info("tree_cleared_global", dm_capable=[c.name for c in dm_capable])
                 except discord.HTTPException as exc:
                     log.warning("tree_sync_global_clear_failed", error=str(exc))
                     return
@@ -2366,7 +2345,7 @@ class DaimonBot(commands.Bot):
                     self.tree.clear_commands(guild=guild_obj)
                     if guild.id in command_guild_ids:
                         self.tree.copy_global_to(guild=guild_obj)
-                        for command in dm_only:
+                        for command in dm_capable:
                             self.tree.remove_command(command.name, guild=guild_obj)
                     await self.tree.sync(guild=guild_obj)
                     self._ready_synced_guild_ids.add(guild.id)
@@ -2386,6 +2365,16 @@ class DaimonBot(commands.Bot):
             log.info("tree_synced_global")
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))
+
+    def _dm_capable_commands(self) -> list[app_commands.Command[Any, ..., Any]]:
+        """The global commands that also work in DMs; a guild copy leaves them out."""
+        return [
+            command
+            for command in self.tree.get_commands()
+            if isinstance(command, app_commands.Command)
+            and command.allowed_contexts is not None
+            and command.allowed_contexts.dm_channel
+        ]
 
     def _running_reconcile_tasks(self) -> set[asyncio.Task[Any]]:
         """Every task holding either in-flight reconcile guard right now.
@@ -2544,6 +2533,8 @@ class DaimonBot(commands.Bot):
                 self.tree.clear_commands(guild=guild_obj)
                 if self._non_production:
                     self.tree.copy_global_to(guild=guild_obj)
+                    for command in self._dm_capable_commands():
+                        self.tree.remove_command(command.name, guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
                 log.info("synced_commands_on_join", guild_id=guild_id, guild_name=guild.name)
             except discord.HTTPException as exc:
@@ -3599,7 +3590,7 @@ class DaimonBot(commands.Bot):
                     messages[0],
                     guild_id,
                     tenant_id,
-                    content_override=_compose_queued_content(messages),
+                    content_override=compose_queued_content(messages),
                     attachments_override=[a for m in messages for a in m.attachments],
                     admitted_message_ids=tuple(str(m.id) for m in messages),
                     query_messages=tuple(messages),
@@ -5815,11 +5806,7 @@ class DaimonBot(commands.Bot):
         attachments = (
             attachments_override if attachments_override is not None else message.attachments
         )
-        trigger_image_atts = [a for a in attachments if is_vision_image_attachment(a)]
-        data_atts = [a for a in attachments if not is_vision_image_attachment(a)]
         target = thread or message.channel
-
-        synthetic_prefix = build_attachment_url_prefix(data_atts)
 
         # --- Build user message (XML history for thread mentions, raw for channel) ---
         # Continuation turns (reused session with a watermark) use delta context
@@ -5895,25 +5882,34 @@ class DaimonBot(commands.Bot):
 
         # Inline only the trigger message's images as base64 vision blocks.
         # Images we can't inline (too large, too many, unsupported, fetch error)
-        # are not dropped — their signed CDN URL is surfaced below so the agent
-        # can still reach them (curl + read to view, or pass to an external API).
-        downloaded_blocks, images_skipped = await download_as_image_blocks(trigger_image_atts)
-        skipped_ids = {att.id for att, _ in images_skipped}
-        inlined_image_atts = [a for a in trigger_image_atts if a.id not in skipped_ids]
-        image_blocks = downloaded_blocks or None
-
-        # Surface a signed-CDN-URL line for every trigger image: inlined images
-        # get a handle they can forward to external APIs; skipped images get the
-        # only path left for the agent to reach them.
-        synthetic_prefix = "\n".join(
-            part
-            for part in (
-                synthetic_prefix,
-                build_image_url_prefix(inlined_image_atts),
-                build_skipped_image_prefix(images_skipped),
+        # are not dropped: their signed CDN URL is surfaced in the prefix so the
+        # agent can still reach them (curl + read to view, or pass to an external
+        # API). Inlined images get a URL line too, a handle for external APIs.
+        attachment_prefix, image_blocks = await prepare_attachments(attachments)
+        forward_messages = query_messages or (message,)
+        # A forward from a sealed channel stays out of every turn but that channel's own.
+        sealed_sources: frozenset[str] = frozenset()
+        if any(getattr(m, "message_snapshots", None) for m in forward_messages):
+            here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
+            sealed_sources = (
+                await sealed_channel_ids(self.runtime.turn_deps, tenant_id=tenant_id) - here
             )
-            if part
-        )
+
+        def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
+            # A forwarded message's content is untrusted text the person could see.
+            forwarded = "\n".join(
+                forwarded_lines(
+                    forward_messages,
+                    omit_oversized_image_urls=omit_oversized_image_urls,
+                    sealed_sources=sealed_sources,
+                    parent_of=lambda channel_id: getattr(
+                        self.get_channel(channel_id), "parent_id", None
+                    ),
+                )
+            )
+            return "\n".join(part for part in (attachment_prefix, forwarded) if part)
+
+        synthetic_prefix = _prefix_with_forwards(omit_oversized_image_urls=False)
         if synthetic_prefix:
             user_message = synthetic_prefix + "\n" + user_message
 
@@ -5953,8 +5949,9 @@ class DaimonBot(commands.Bot):
                     *(i for i in (lifecycle_holder[0].card_message_id,) if i is not None),
                 ),
             )
-            if synthetic_prefix:
-                full_message = synthetic_prefix + "\n" + full_message
+            reseed_prefix = _prefix_with_forwards(omit_oversized_image_urls=True)
+            if reseed_prefix:
+                full_message = reseed_prefix + "\n" + full_message
             async with self.runtime.sessionmaker() as session:
                 recovery_origin = await get_active_origin(
                     session,

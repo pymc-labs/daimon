@@ -201,6 +201,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
     )
     message = MagicMock()
+    message.add_reaction = message.remove_reaction = AsyncMock()
     message.author.bot = False
     message.author.id = 999
     message.channel = MagicMock(spec=discord.DMChannel)
@@ -275,6 +276,7 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
         platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
     )
     message = MagicMock()
+    message.add_reaction = message.remove_reaction = AsyncMock()
     message.author.bot = False
     message.author.id = 999
     message.channel = MagicMock(spec=discord.DMChannel)

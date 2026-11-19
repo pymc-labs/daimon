@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import anthropic
 import structlog
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
@@ -27,6 +28,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
+from daimon.core.features.model_input import DEFAULT_DM_HISTORY, DmHistoryCap
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
@@ -67,6 +69,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     mark_dead,
     retire_dm_scope,
+    update_watermark,
 )
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S, turn_deadline
@@ -286,11 +289,13 @@ def dm_permission_text(platform: ChatPlatform) -> str:
     )
 
 
-def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
-    """Keep a small text-only context, newest selected, oldest rendered first."""
-    remaining = 16_000
+def bounded_turns(
+    turns: Sequence[TranscriptTurn], cap: DmHistoryCap = DEFAULT_DM_HISTORY
+) -> list[TranscriptTurn]:
+    """Keep a bounded text-only context, newest selected, oldest rendered first."""
+    remaining = cap.chars
     selected: list[TranscriptTurn] = []
-    for turn in reversed(turns[-12:]):
+    for turn in reversed(turns[-cap.turns :]):
         if remaining <= 0:
             break
         text = turn.text[:remaining]
@@ -437,7 +442,10 @@ async def start_dm(
         source_thread_id=source_thread_id,
         source_thread_keys=sorted(set(source_thread_keys)),
         context=render_previous_session(
-            [TranscriptTurn(role="user", text=f"Source: {source_url}"), *bounded_turns(context)],
+            [
+                TranscriptTurn(role="user", text=f"Source: {source_url}"),
+                *bounded_turns(context, admission.dm_history),
+            ],
             from_agent_name="source conversation",
         ),
         memory_read_only=admission.memory_read_only,
@@ -618,6 +626,21 @@ async def _dm_destination(
                 await delete_slack_turn_context(session, id=context.id)
 
 
+async def _reseed_prompt(context: str, prefix: Callable[[], Awaitable[str]], text: str) -> str:
+    part = await prefix()
+    return f"{context}\n\n{part}\n{text}" if part else f"{context}\n\n{text}"
+
+
+@dataclass(frozen=True)
+class _DmTurn:
+    """A finished private turn: its text, and the session and mapping that answered."""
+
+    text: str
+    session_id: str
+    mapping_id: uuid.UUID | None
+    outputs: OutputRuntime | None
+
+
 async def _run_admitted_dm_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -639,7 +662,9 @@ async def _run_admitted_dm_turn(
     request_text: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
-) -> tuple[str, str, OutputRuntime | None]:
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    reseed_prompt: Callable[[], Awaitable[str]] | None = None,
+) -> _DmTurn:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
@@ -680,7 +705,8 @@ async def _run_admitted_dm_turn(
         user_message = f"{controls}\n{prompt}"
 
         async def reseed() -> str:
-            return user_message
+            # A recovery rebuilds the prompt, without what ended the dead session.
+            return f"{controls}\n{await reseed_prompt()}" if reseed_prompt else user_message
 
         cancel = asyncio.Event()
         lifecycle = (
@@ -696,6 +722,7 @@ async def _run_admitted_dm_turn(
                 external_user_id=external_user_id,
                 user_message=user_message,
                 request_text=request_text,
+                image_blocks=image_blocks,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -719,7 +746,7 @@ async def _run_admitted_dm_turn(
             "execution_incomplete", message="The run did not complete."
         )
     answer = extract_final_response(outcome.state.content) or "The reply finished without text."
-    return answer, outcome.ma_session_id, outcome.outputs
+    return _DmTurn(answer, outcome.ma_session_id, outcome.mapping_id, outcome.outputs)
 
 
 async def reply_to_dm(
@@ -733,6 +760,7 @@ async def reply_to_dm(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     platform_channel_id: str | None = None,
@@ -744,6 +772,7 @@ async def reply_to_dm(
         route_key=route_key,
         external_user_id=external_user_id,
         message_id=message_id,
+        merged_message_ids=merged_message_ids,
         expected_scope_id=expected_scope_id,
         text=text,
         role=role,
@@ -766,6 +795,11 @@ async def reply_to_dm_result(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
+    prefix: str = "",
+    reseed_prefix: Callable[[], Awaitable[str]] | None = None,
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    history_notes: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
@@ -775,7 +809,16 @@ async def reply_to_dm_result(
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     `platform_channel_id` is the DM channel as the platform's API names it, recorded
-    on the turn's origin with `message_id`.
+    on the turn's origin with `message_id`. A turn that merges several messages
+    names the others in `merged_message_ids`.
+
+    `text` is the person's own words. `prefix` is what the adapter adds before it
+    (attachment lines, quoted or forwarded content) and `image_blocks` are inline
+    images; both go to this turn only. The stored history keeps `text` and
+    `history_notes` (such as `[attachment: name]`), never the prefix, whose
+    signed links expire. `reseed_prefix` builds the prefix again when a dead
+    session is rebuilt, so it can leave out what ended that session (an
+    oversized image's link).
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
@@ -793,7 +836,7 @@ async def reply_to_dm_result(
                 session,
                 fence=fence,
                 route_key=route_key,
-                message_id=message_id,
+                message_ids=(message_id, *merged_message_ids),
                 expected_scope_id=expected_scope_id,
                 # Old images read this as a deadline: keep it live for them, and unique per claim.
                 claimed_at=now + timedelta(seconds=LONGEST_TURN_CEILING_S + 60),
@@ -801,6 +844,7 @@ async def reply_to_dm_result(
         if conversation is None:
             return None
         history: list[dict[str, str]] | None = None
+        answered: uuid.UUID | None = None
         bound = False
         try:
             async with deps.sessionmaker() as session:
@@ -893,10 +937,25 @@ async def reply_to_dm_result(
                 conversation.context
                 + "\n"
                 + render_previous_session(
-                    bounded_turns(previous), from_agent_name="private conversation"
+                    bounded_turns(previous, prepared.admission.dm_history),
+                    from_agent_name="private conversation",
                 )
             )
-            answer, _session_id, outputs = await _run_admitted_dm_turn(
+            whole = f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}"
+            # A session that answered a turn here (its watermark) holds the earlier turns;
+            # a new or replaced one, or one whose first turn never got through, has seen
+            # none, and a recovery rebuilds `whole` for the same reason.
+            holds_history = (
+                prepared.reused
+                and prepared.watermark is not None
+                and prepared.continuity.state in ("continued", "updated")
+            )
+            sent = (f"{prefix}\n{text}" if prefix else text) if holds_history else whole
+
+            async def reseed_whole() -> str:
+                return whole
+
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
@@ -905,7 +964,7 @@ async def reply_to_dm_result(
                 scope_id=conversation.scope_id,
                 external_user_id=external_user_id,
                 role=role,
-                prompt=f"{context}\n\n{text}",
+                prompt=sent,
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
@@ -916,15 +975,23 @@ async def reply_to_dm_result(
                 request_text=text,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
+                image_blocks=image_blocks,
+                reseed_prompt=(
+                    reseed_whole
+                    if reseed_prefix is None
+                    else lambda: _reseed_prompt(context, reseed_prefix, text)
+                ),
             )
             turns = bounded_turns(
                 [
                     *previous,
-                    TranscriptTurn(role="user", text=text),
-                    TranscriptTurn(role="agent", text=answer),
-                ]
+                    TranscriptTurn(role="user", text="\n".join([text, *history_notes]).strip()),
+                    TranscriptTurn(role="agent", text=done.text),
+                ],
+                prepared.admission.dm_history,
             )
             history = [{"role": turn.role, "text": turn.text} for turn in turns]
+            answered = done.mapping_id
             grant = prepared.admission.grant
             if grant is None:
                 raise DirectMessageAccessRevoked(
@@ -932,12 +999,12 @@ async def reply_to_dm_result(
                 )
             revision = prepared.admission.backend_revision
             reply = DirectMessageReply(
-                text=answer,
+                text=done.text,
                 conversation=conversation.model_copy(update={"claimed_at": None}),
                 grant=grant,
                 outputs=None
                 if revision is not None and revision.backend == "selfhosted"
-                else outputs,
+                else done.outputs,
             )
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
@@ -948,6 +1015,9 @@ async def reply_to_dm_result(
         finally:
             async with deps.sessionmaker.begin() as session:
                 finished = await finish_message(session, conversation=conversation, history=history)
+                if finished and history is not None and answered is not None:
+                    # The session now holds this conversation; its next turn sends only new words.
+                    await update_watermark(session, id=answered, watermark_message_id=message_id)
         if not finished:
             # A later message took the claim over: this turn's fence dropped mid-turn.
             raise DirectMessageClaimLost()
@@ -1147,7 +1217,7 @@ async def _run_dm_fire(
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
         try:
-            text, session_id, _outputs = await _run_admitted_dm_turn(
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=tenant_id,
@@ -1173,8 +1243,8 @@ async def _run_dm_fire(
                 )
             raise
         return DmRoutineReply(
-            text=text,
-            session_id=session_id,
+            text=done.text,
+            session_id=done.session_id,
             producing_agent_id=prepared.admission.agent.id,
         )
 

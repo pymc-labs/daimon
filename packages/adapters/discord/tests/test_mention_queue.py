@@ -20,8 +20,8 @@ import pytest_asyncio
 from daimon.adapters.discord.bot import (  # pyright: ignore[reportPrivateUsage]
     GLOBAL_CAP_NOTICE,
     DaimonBot,
-    _compose_queued_content,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.discord.context import compose_queued_content
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.config import McpSettings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -121,7 +121,7 @@ def _make_thread_message(
 
 
 # ---------------------------------------------------------------------------
-# _compose_queued_content pure unit tests
+# compose_queued_content pure unit tests
 # ---------------------------------------------------------------------------
 
 
@@ -129,17 +129,17 @@ def test_compose_single_author_joins_contents_with_blank_lines() -> None:
     m1 = _make_channel_message(content="hello", author_id=42, display_name="Alice")
     m2 = _make_channel_message(content="anyone there?", author_id=42, display_name="Alice")
     m3 = _make_channel_message(content="please respond", author_id=42, display_name="Alice")
-    assert _compose_queued_content([m1, m2, m3]) == "hello\n\nanyone there?\n\nplease respond"
+    assert compose_queued_content([m1, m2, m3]) == "hello\n\nanyone there?\n\nplease respond"
 
 
 def test_compose_multi_author_prefixes_display_name() -> None:
     m1 = _make_channel_message(content="foo", author_id=1, display_name="Alice")
     m2 = _make_channel_message(content="bar", author_id=2, display_name="Bob")
-    assert _compose_queued_content([m1, m2]) == "[Alice]: foo\n\n[Bob]: bar"
+    assert compose_queued_content([m1, m2]) == "[Alice]: foo\n\n[Bob]: bar"
 
 
 def test_compose_empty_list_returns_empty_string() -> None:
-    assert _compose_queued_content([]) == ""
+    assert compose_queued_content([]) == ""
 
 
 # ---------------------------------------------------------------------------

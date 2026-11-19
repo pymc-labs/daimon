@@ -448,6 +448,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
+_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "web"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
@@ -596,6 +597,27 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Conversations may move to a direct message with the agent. The agent that answers "
             "there is the team's DM agent, which is chosen apart from this."
+        ),
+        platforms=_DM_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="dm_debounce_seconds",
+        name="Direct message wait",
+        category="chat",
+        effect="display",
+        values={
+            "0": "Off",
+            "1": "1 second",
+            "3": "3 seconds",
+            "5": "5 seconds",
+        },
+        default="0",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
+            "and never an approval reply."
         ),
         platforms=_DM_PLATFORMS,
         authority=_ADMIN,
@@ -1187,6 +1209,24 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "thread and from the channel around it. The smallest setting wins."
         ),
         platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="dm_history_depth",
+        name="Direct message memory",
+        category="model_input",
+        effect="limit",
+        values={
+            "12": "12 messages",
+            "25": "25 messages",
+            "50": "50 messages",
+            "100": "100 messages",
+        },
+        default="12",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),
+        platforms=_DM_MEMORY_PLATFORMS,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(

@@ -2174,6 +2174,58 @@ def _agent_with_personal_server() -> BetaManagedAgentsAgent:
 
 
 @pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize(
+    ("model_effort", "expected"),
+    [
+        (None, "claude-opus-5-5"),
+        ("low", {"id": "claude-opus-5-5", "speed": "standard", "effort": "low"}),
+    ],
+)
+async def test_create_session_sends_the_chosen_model_with_its_effort(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    model_effort: str | None,
+    expected: str | dict[str, str],
+) -> None:
+    tenant = await make_tenant(db_session)
+    agent_uuid = uuid.uuid4()
+    account_id = uuid.UUID("00000000-0000-0000-0000-00000000dd03")
+    public_url = "https://mcp.example.com/mcp"
+    session_bodies: list[dict[str, Any]] = []
+    client = build_fake_anthropic_http(
+        _warm_vault_mirror_handler(
+            chat_metadata=await _registered_vault_metadata(
+                db_session_factory, account_id, agent_uuid, tenant_id=tenant.id
+            ),
+            account_id=account_id,
+            agent_uuid=agent_uuid,
+            public_url=public_url,
+            credential_post_bodies=[],
+            credential_deletes=[],
+            session_create_bodies=session_bodies,
+            session_id="sess_model",
+        )
+    )
+
+    await create_session(
+        client,
+        agent=_agent_with_personal_server(),
+        environment=_make_env(anthropic_id="env_personal"),
+        account_id=account_id,
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tool_safety=OPEN_TOOL_SAFETY,
+        model_override="claude-opus-5-5",
+        model_effort=model_effort,
+    )
+
+    assert session_bodies[0]["agent"]["model"] == expected
+
+
+@pytest.mark.usefixtures("empty_app_vault")
 async def test_create_session_leaves_off_a_server_only_another_member_signed_in_to(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

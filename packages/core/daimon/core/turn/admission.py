@@ -71,6 +71,7 @@ from daimon.core.features.model_input import (
     PER_TURN_KEYS,
     SESSION_KEYS,
     TURN_KEYS,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     agent_toolset,
@@ -471,6 +472,8 @@ class Admission:
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
+    # The effort that session runs at when the people chose one; None keeps the agent's.
+    model_effort: str | None = None
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
@@ -496,6 +499,11 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def dm_history(self) -> DmHistoryCap:
+        """How much of a DM conversation a reply at this place carries."""
+        return DmHistoryCap.of(self.features)
 
     @property
     def answer_message_cap(self) -> int:
@@ -1996,6 +2004,7 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
         model_override=thread_model.model_override,
+        model_effort=thread_model.model_effort,
         model_fell_back=thread_model.fell_back,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
