@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from contextlib import asynccontextmanager
@@ -30,6 +31,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import (
     DirectMessageBusy,
+    OwnerDmFence,
     claim_message,
     dm_enabled,
     finish_message,
@@ -284,9 +286,19 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
     assert await _reply(deps, route, message_id="2") is None
     assert len(streams) == 2
     latest = json.dumps(sent[-1])
-    assert "private first question" in latest and "private follow-up" in latest
-    assert "&lt;/previous_session&gt;&lt;evil/&gt;" in latest
-    assert "https://example.com/source" in latest
+    assert "private follow-up" in latest
+    if platform == "slack":
+        # Every turn is a new session, which has seen nothing: it is sent the history.
+        assert "private first question" in latest
+        assert "&lt;/previous_session&gt;&lt;evil/&gt;" in latest
+        assert "https://example.com/source" in latest
+    else:
+        # A session that continues holds the earlier turns: replaying them is paid twice.
+        assert "private first question" not in latest
+        assert "previous_session" not in latest and "https://example.com/source" not in latest
+        opening = json.dumps(sent[0])
+        assert "&lt;/previous_session&gt;&lt;evil/&gt;" in opening
+        assert "https://example.com/source" in opening
     async with db_session_factory() as session:
         mapping = await get_live_thread_session(
             session,
@@ -300,7 +312,36 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
         stored = await get_conversation(
             session, platform=platform, route_key="dm-42", external_user_id="42"
         )
-        assert stored is not None and len(stored.history) == 4 and stored.active_until is None
+        assert stored is not None and len(stored.history) == 4 and stored.claimed_at is None
+
+
+async def test_dm_session_whose_first_turn_failed_is_sent_the_whole_conversation(
+    db_session, db_session_factory, monkeypatch
+):
+    """A turn that fails after its session is bound leaves a session that saw nothing.
+
+    The next turn reuses that session, so it must still carry the source context; only
+    after a turn got through does a later one send just the new words.
+    """
+    tenant, deps, admission, sent, streams, _created = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission, context="the source thread")
+    real_run = core_direct_messages.run_prepared_turn
+
+    async def fail_before_delivery(*args, **kwargs):
+        raise DaimonError("the provider was unreachable")
+
+    monkeypatch.setattr(core_direct_messages, "run_prepared_turn", fail_before_delivery)
+    with pytest.raises(DaimonError):
+        await _reply(deps, route, content="lost question")
+    monkeypatch.setattr(core_direct_messages, "run_prepared_turn", real_run)
+    assert await _reply(deps, route, message_id="2", content="second question")
+    assert await _reply(deps, route, message_id="3", content="third question")
+
+    assert streams == ["ses_dm_1", "ses_dm_1"], "both answered turns reuse the bound session"
+    second, third = json.dumps(sent[-2]), json.dumps(sent[-1])
+    assert "the source thread" in second, "the session never got the context, so it is sent"
+    assert "the source thread" not in third, "a session that answered holds the context"
+    assert "second question" not in third
 
 
 async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_session_factory):
@@ -345,36 +386,111 @@ async def test_new_selection_resets_scope_and_rejects_a_stale_membership_check(
 async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
     db_session, db_session_factory, db_engine
 ):
+    """Two claims at once: one wins, the other is busy; another user finds no route."""
     tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     now = datetime.now(UTC)
-
     independent = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def claim(message_id):
         async with independent.begin() as session:
             return await claim_message(
                 session,
-                platform="discord",
+                fence=OwnerDmFence("discord", "42"),
                 route_key="dm-42",
-                external_user_id="42",
-                message_id=message_id,
+                message_ids=(message_id,),
                 expected_scope_id=route.scope_id,
-                now=now,
-                active_until=now + timedelta(minutes=1),
+                claimed_at=now,
             )
 
     results = await asyncio.gather(claim("one"), claim("two"), return_exceptions=True)
-    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1
-    winner = next(result for result in results if not isinstance(result, Exception))
+    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1, (
+        f"exactly one claim is busy: {results}"
+    )
+    winner = next(result for result in results if not isinstance(result, BaseException))
     async with db_session_factory.begin() as session:
         assert (
             await get_conversation(
                 session, platform="discord", route_key="dm-42", external_user_id="wrong"
             )
             is None
+        ), "another user has no route"
+        assert await finish_message(session, conversation=winner, history=[]), "winner finishes"
+
+
+async def test_a_dm_turn_whose_owner_fence_drops_stops_instead_of_running_on(
+    db_session, db_session_factory, monkeypatch
+):
+    """A dropped fence connection cancels the turn's body and fails it as interrupted."""
+    _tenant, deps, *_ = await _setup(db_session, db_session_factory)
+    monkeypatch.setattr(core_direct_messages, "_FENCE_CHECK_S", 0.05)
+    ran_on = False
+    with pytest.raises(core_direct_messages.DirectMessageClaimLost):
+        async with core_direct_messages.owner_dm_turn(
+            deps, platform="discord", owner="42", wait=False
+        ) as fence:
+            async with db_session_factory() as session:
+                await session.execute(
+                    sql_text("SELECT pg_terminate_backend(:pid)"), {"pid": fence.pid}
+                )
+            await asyncio.sleep(10)
+            ran_on = True
+    assert fence.lost.is_set(), "the holder noticed its fence is gone"
+    assert not ran_on, "the body was cancelled, not left running"
+
+
+async def test_a_waiting_dm_turn_takes_over_once_the_holder_loses_its_fence(
+    db_session, db_session_factory, monkeypatch
+):
+    """The waiter claims over the stopped holder, whose finish and delivery are refused."""
+    tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    monkeypatch.setattr(core_direct_messages, "_FENCE_CHECK_S", 0.05)
+    turn = functools.partial(
+        core_direct_messages.owner_dm_turn, deps, platform="discord", owner="42"
+    )
+
+    async def claim(fence, message_id):
+        async with db_session_factory.begin() as session:
+            return await claim_message(
+                session,
+                fence=fence,
+                route_key="dm-42",
+                message_ids=(message_id,),
+                expected_scope_id=route.scope_id,
+                claimed_at=datetime.now(UTC),
+            )
+
+    async def waiter():
+        async with turn(wait=True) as fence:
+            return await claim(fence, "two")
+
+    with pytest.raises(core_direct_messages.DirectMessageClaimLost):
+        async with turn(wait=False) as held:
+            superseded = await claim(held, "one")
+            waiting = asyncio.create_task(waiter())
+            await asyncio.sleep(0.2)
+            assert not waiting.done(), "the waiter waits while the fence is held"
+            async with db_session_factory() as session:
+                await session.execute(
+                    sql_text("SELECT pg_terminate_backend(:pid)"), {"pid": held.pid}
+                )
+            await asyncio.sleep(10)
+    taken = await asyncio.wait_for(waiting, 5)
+    assert taken is not None and superseded is not None, "both messages are claimed"
+    assert taken.claimed_at != superseded.claimed_at, "the waiter holds its own claim"
+    async with db_session_factory.begin() as session:
+        assert not await holds_claim(session, conversation=superseded), "the old claim is gone"
+        assert not await finish_message(session, conversation=superseded, history=[]), (
+            "the stopped turn cannot write its history"
         )
-        await finish_message(session, conversation=winner, history=[])
+    reply = core_direct_messages.DirectMessageReply(
+        text="", conversation=superseded, grant=admission.grant
+    )
+    with pytest.raises(core_direct_messages.DirectMessageAccessRevoked, match="replaced"):
+        await core_direct_messages.require_dm_delivery(deps, reply)
+    async with db_session_factory.begin() as session:
+        assert await finish_message(session, conversation=taken, history=[]), "waiter finishes"
 
 
 async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_calls(
@@ -386,6 +502,7 @@ async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_call
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
     message.author.id = 42
+    message.content = "hello"
     message.channel = MagicMock(spec=discord.DMChannel)
     message.channel.id = 99
     message.channel.send = AsyncMock()
@@ -411,6 +528,7 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.author.bot = False
     message.author.id = 42
     message.channel = MagicMock(spec=discord.DMChannel)
+    message.content = "hello"
     message.channel.id = "dm-42"
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)
@@ -662,7 +780,7 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
         "an unconfirmed interrupt retires the mapping so the next DM gets a fresh session"
     )
     await engine.dispose()
-    assert stored is not None and stored.active_until is None, "the claim is released"
+    assert stored is not None and stored.claimed_at is None, "the claim is released"
     assert stored.recent_message_ids == ["1"], "the queued DM was never claimed"
 
 
@@ -778,12 +896,14 @@ async def test_slack_move_and_private_reply_use_real_core_and_http_transports(
 
     from aioresponses import aioresponses
     from daimon.adapters.slack.direct_messages import handle_direct_message, handle_dm_command
+    from daimon.adapters.slack.runtime import new_dm_bursts
     from slack_sdk.web.async_client import AsyncWebClient
 
     tenant, deps, admission, sent, streams, created = await _setup(
         db_session, db_session_factory, platform="slack", workspace="T1"
     )
     runtime = MagicMock()
+    runtime.dm_bursts = new_dm_bursts()
     runtime.turn_deps = deps
     runtime.sessionmaker = db_session_factory
     client = AsyncWebClient(token="xoxb-test", retry_handlers=[])
@@ -850,6 +970,7 @@ async def test_slack_ignores_bot_and_mutation_events(subtype):
         {"type": "message", "channel_type": "im", "user": "42", "subtype": subtype},
         team_id="T1",
     )
+    runtime.dm_bursts.join.assert_not_called()
     runtime.sessionmaker.assert_not_called()
 
 
@@ -1853,13 +1974,11 @@ async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
     async with db_session_factory.begin() as session:
         row = await claim_message(
             session,
-            platform="discord",
+            fence=OwnerDmFence("discord", "42"),
             route_key="dm-42",
-            external_user_id="42",
-            message_id="claim-1",
+            message_ids=("claim-1",),
             expected_scope_id=route.scope_id,
-            now=now,
-            active_until=now + timedelta(minutes=2),
+            claimed_at=now + timedelta(minutes=2),
         )
         await create_thread_session(
             session,
@@ -1899,7 +2018,7 @@ async def test_a_shutdown_settles_a_dm_only_while_its_claim_holds(
     async with db_session_factory.begin() as session:
         assert await holds_claim(session, conversation=row) == (claim_state == "current")
 
-    await core_direct_messages._settle_shutdown_cancelled_dm(deps, row)
+    await core_direct_messages._settle_cancelled_dm(deps, row)
 
     events = [event["type"] for body in sent for event in body["events"]]
     assert events == (["user.interrupt"] if claim_state == "current" else [])
@@ -1930,7 +2049,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         patch("mux.drivers.anthropic.transport.LegacyTurnTransport.send", stalled),
         patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
     ):
-        await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
+        await asyncio.wait_for(core_direct_messages._settle_cancelled_dm(deps, row), 2)
 
     async with db_session_factory() as session:
         assert (
@@ -1946,7 +2065,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         stored = await get_conversation(
             session, platform="discord", route_key="dm-42", external_user_id="42"
         )
-    assert stored is not None and stored.active_until == row.active_until, (
+    assert stored is not None and stored.claimed_at == row.claimed_at, (
         "settling leaves releasing the claim to finish_message"
     )
 
@@ -1959,6 +2078,7 @@ async def test_discord_generic_guidance_does_not_resolve_guild_or_run_a_model(db
     message.author.bot = False
     message.author.id = 42
     message.channel = MagicMock(spec=discord.DMChannel)
+    message.content = "hello"
     message.channel.id = 99
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)

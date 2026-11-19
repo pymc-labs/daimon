@@ -9,11 +9,18 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
+from daimon.adapters.discord import budget_notice
 from daimon.adapters.discord.budget_notice import send_member_notice, send_watch_notice
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.stores.watches import REFUSED, UNCLEAR, NoticeAttempt, SentNotice
 
 TEXT = "Watch 1 expired."
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default agent's grant admits everyone: the stand-in runtime holds no database."""
+    monkeypatch.setattr(budget_notice, "_default_agent_admits", AsyncMock(return_value=True))
 
 
 @pytest.mark.parametrize("closed,allowed", [(False, True), (True, True), (False, False)])

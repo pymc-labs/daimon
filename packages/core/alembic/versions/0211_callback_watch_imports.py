@@ -35,8 +35,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0208_callback_watch_imports"
-down_revision: str | None = "0207_skill_manifest_bytes"
+revision: str = "0211_callback_watch_imports"
+down_revision: str | None = "0210_dm_access"
 branch_labels = None
 depends_on = None
 

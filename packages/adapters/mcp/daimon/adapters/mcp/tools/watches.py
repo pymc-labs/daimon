@@ -21,7 +21,7 @@ from daimon.adapters.mcp import watch_polling as polling
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
-from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -39,7 +39,7 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.config import DirectMessagePolicy, load_watches_settings
+from daimon.core.config import env_dm_policy, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -47,6 +47,7 @@ from daimon.core.continuity.poll_tools import (
     require_listed,
     validate_mcp_poll,
 )
+from daimon.core.dm_access import member_roles, roles_by_membership
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
@@ -190,7 +191,7 @@ async def private_owner_message(
     runtime: McpRuntime, auth: AuthIdentity, watch: WatchRow, *, content: str
 ) -> None:
     """DM a secret to the owner. Never return it in an MCP result or post it in a conversation."""
-    policy = runtime.settings.direct_message_policies.get(watch.tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, watch.tenant_id)
     if not policy.allows(watch.owner_external_id):
         raise ToolError("Private owner delivery is disabled")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=watch.owner_external_id)
@@ -202,6 +203,12 @@ async def private_owner_message(
         member = await guild.fetch_member(int(watch.owner_external_id))
         if member.bot:
             raise ToolError("Watch secrets require a human owner")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=watch.owner_external_id,
+            groups=member_roles(str(role.id) for role in member.roles),
+        )
         dm = await member.create_dm()
         await dm.send(content, allowed_mentions=discord.AllowedMentions.none())
 
@@ -325,12 +332,22 @@ async def require_delivery_allowed(
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
     if delivery == "dm":
-        policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+        policy = env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id)
         async with runtime.session_factory() as db:
             enabled = await dm_enabled(db, tenant_id=auth.tenant_id)
         if not enabled or not policy.allows(auth.platform_user_id):
             raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
         await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
+        if auth.external_id is None:
+            raise ToolError("Missing team")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=auth.platform_user_id,
+            groups=roles_by_membership(
+                runtime.membership_resolver, tenant_id=auth.tenant_id, guild_id=auth.external_id
+            ),
+        )
         return
     async with rest_client(_require_bot_token(runtime)) as client:
         try:

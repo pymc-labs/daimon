@@ -14,7 +14,8 @@ const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
   schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "Thumbs-down feedback", ["deployment", "workspace", "agent", "channel"], "off"),
   schema("support_own_channel", "Own request channel", ["deployment"]),
-  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
+  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]),
+  schema("direct_messages", "Direct messages", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])
@@ -22,7 +23,7 @@ const locks = new Map<string, string>([["cost_footer", "off"]])
 const NO_SANDBOX = "c_general"
 const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
-const own = new Map<string, string>([["//|workspace|support_escalation", "on"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+const own = new Map<string, string>([["ag_review//|agent|direct_messages", "off"], ["//|workspace|support_escalation", "on"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
 /** Set `?support=unmet` to see Ask a person without a request channel. */
 const flag = () => (typeof location === "undefined" ? "" : new URLSearchParams(location.search).get("support") ?? "")
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")

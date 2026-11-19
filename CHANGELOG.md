@@ -22,7 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Moving people in never messages them. A timers or callback import names its
   agent: held timers belong to it, so another agent's `go-live` and `--full` run
   leave them alone. Reminders in a private conversation or channel only fire for an
-  agent on Managed Agents; `go-live` lists the others by name and schedules none.
+  agent on Managed Agents (a plain channel's own backend setting wins over the agent's);
+  `go-live` lists the others by name and schedules none.
   Each watch imports in its own transaction, so watch ingress never waits for a
   whole import. Importing the same files again after a privacy purge restores the
   purged rows, so delete the import files after use. `daimon watches confirm` is
@@ -35,6 +36,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listed Discord members out of being tagged. `daimon dm import-history` holds
   each person's earlier private conversation for their first DM here with the
   agent it names, which starts from it once, without saying so.
+- **Answer and unattended run time limits.** Two new workspace and agent settings, set
+  by server admins, limit how long one turn may run: `turn_time_limit` for a person's
+  message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
+  nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
+  Each takes 15, 20, 30 or 45 minutes, 45 by default, and the smallest setting wins.
+- **Hide the server name on tool lines.** A new workspace or agent setting,
+  `tool_server_names`, drops the connected server's name from the working card's tool lines.
+- **Model and effort reactions in Discord.** A new setting, off by default, reacts
+  to the first message in a thread, and to the first after the model or effort
+  changes, with an emoji for the model and one for the effort.
+- **An answer message cap setting.** In Discord, an answer posts up to 5 messages
+  as before, and past that is attached as a file. A setting from 1 to 1000
+  changes the cap for a workspace, agent, channel or thread.
+- **A channel background setting.** A new setting, `channel_history`, sets how many recent
+  channel messages (none, 10, 25, 50 or 100; 25 by default) a thread started from a channel
+  message reads for background, never more than its chat history setting allows.
+- **Answers in a thread another bot already opened.** When a channel's other
+  bot threads every message, Discord answers in that thread instead of
+  reporting that it could not open one.
+- **An edit that adds a mention gets an answer.** Editing a message to mention
+  the bot in Discord answers it like a new mention, once.
+- **Routines can run role-gated agents for an owner who holds the role.**
+  Before, a routine on an agent limited to certain Discord roles was always
+  refused. Now it runs as its owner, whose membership is read live at each
+  run and each send; it needs every required role, and an admin without them
+  does not qualify. Saving or editing such a routine needs the same of the
+  person saving. If the owner loses a role the run is skipped, the owner gets
+  one direct message on Discord, and the routine is paused until someone
+  resumes it. `daimon routines check-roles` lists the routines whose owner
+  would be paused or refused. Long jobs are still refused.
+- **A remote MCP server can attribute writes to the person who asked.** An
+  identity relay server set to `"auth": "bearer"` is called with one key from
+  `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the
+  workspaces and agents that may use it. With `"requester_meta": true` Daimon
+  removes any `requester_platform_user_id`, `requester_conversation` or
+  `requester_kind` a tool call carries in `params._meta`, then sets them from
+  the person's own turn (their user id, where it runs, kind `"person"`) or any
+  unattended run such as a routine, watch, timer, wake or DM routine (the person
+  it runs for, its place, kind `"routine"`). A routine's owner is signed into
+  its credential and must still match at call time. Keys are removed under every
+  method's `_meta`. Senders from another organisation, replaced sessions and two
+  turns at once carry none. A body that is not strict JSON, or cannot be
+  re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
+  in the servers JSON only after every service runs this release; older images
+  reject unknown keys.
+- **Other chat apps' names are no longer replaced.** Replies, status lines, routine
+  posts, tool sends and edits, and Discord thread names keep whatever the model
+  wrote. The instruction not to name another chat app, and the quote clause that
+  went with it, are gone from the prompt, and a prompt line that names another chat
+  app is no longer dropped, so a line a tenant wrote such as "post the summary in
+  Slack" stays; each platform's prompt still says where Daimon works there.
+  Because the system prompt changed, existing Discord, Slack and Teams sessions
+  are replaced once.
+- **The operator can set Approvals from the command line.** `daimon features set
+  approvals <on|off> --reason "..."` works for a workspace, channel or thread,
+  without a chat admin. The reason is required, and the audit log records the
+  operator, the old and new value and the reason. Other features refuse
+  `--reason`. Chat users who are not admins and agent keys are refused as before.
+- **Choose who may DM which agent.** Each agent has a DM grant (every member, only those
+  listed, or all but those listed, by person or group: a Discord role, Slack user group
+  or Teams team), and a server has a default agent and ordered rules that send a person,
+  a group or everyone to an agent. A locked rule decides alone. When several agents
+  admit a person, a picker lets them choose, answers the messages sent meanwhile in one
+  turn and remembers the choice. A server with no rules or narrower grants keeps its
+  earlier DM behaviour: only the default agent answers, and a Teams personal chat
+  without one keeps its own agent. `/dm-me`, cold DMs (Slack too), Teams personal chats
+  (DMs on by default there), hand-overs and agents that send DMs follow the same grants,
+  and a failed group lookup refuses. Slack user groups need the `usergroups:read` scope
+  and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web
+  app (Admin > Agent access and Admin > Workspace, with a "Check a person" box that
+  reads the person's groups from the platform) or from chat, each change checked and
+  audited; `daimon features set direct_messages on|off` turns DMs on or off
+  (`daimon tenants dm-policy` is gone: `dm default` and `features set` replace it).
+  `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
+  access; until it is removed the env setting applies with it on every path, `dm
+  explain` included. Erasing a person removes their pick, rules and grant entries.
+- **Teams personal chats follow the DM settings.** The DM wait, DM history depth
+  and read-only DM memory apply to them as they do to Discord and Slack DMs.
+- **Direct messages take files, forwards and replies.** A picture or a file sent in a
+  direct message reaches the agent as it does in a channel, and a message with only a
+  picture is answered. A forwarded message is passed as untrusted content, and a
+  reply shows the message it answers. A forward is also passed in channels.
+- **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
+  messages each direct message reply carries: 12 (the default; 100 on Teams), 25, 50 or 100, at the
+  deployment, workspace and agent levels. The smallest setting wins. It applies to
+  Discord, Slack and web direct messages. A higher setting costs more.
+- **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3
+  or 5 seconds at the deployment or workspace) holds a direct message until nothing new
+  has arrived for that long, up to ten seconds after the first, then answers everything
+  sent in one turn.
+  Messages sent while a reply runs are answered together by the next one. Each held
+  message gets an eyes reaction until it is answered. An approval reply such as "yes"
+  is answered on its own, at once. A restart answers held messages at once. If
+  `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
+  sent. It applies to Discord, Slack and Teams, set per workspace or deployment.
+- **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
+  with no model, written by a new pod, makes old pods fail turns in that conversation
+  until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+- **Earlier turns are no longer sent again into a continuing session.** A Discord direct
+  message into a session that already answered a turn sends only the new message. A new,
+  replaced or recovered session, or one whose first turn failed, still gets the history.
+- **`/model` works in direct messages, with an effort choice.** `/model` in a direct
+  message sets the model for that conversation, and a new `effort` option (low, medium,
+  high, xhigh, max) sets how hard Claude thinks. Effort alone keeps the agent's model, and
+  a later model pick keeps the effort. `default` clears both. The `thread_model` MCP tool
+  takes the same `effort`. Effort has no effect on other providers.
+- **Fable is a model choice.** `/model` and the model pickers offer Fable, applied
+  like the other models.
 - **GPT threads start with skills whose description spans lines.** A SKILL.md
   block scalar (`description: >`) made OpenAI refuse the session. `name` and
   `description` now upload as one line, an invalid name such as

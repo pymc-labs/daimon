@@ -215,6 +215,7 @@ class _Delivery:
             open_dm=AsyncMock(return_value=self.channel, side_effect=self.open_error),
             member_present=AsyncMock(return_value=self.present, side_effect=self.member_error),
             dm_policy=lambda _tenant: policy,
+            membership_resolver=None,
         )
 
 
@@ -284,6 +285,22 @@ async def test_no_turn_runs_when_the_owner_cannot_receive_dms(
 
     delivery.run_turn.assert_not_awaited()
     delivery.channel.send.assert_not_awaited()
+
+
+async def test_no_turn_runs_when_the_timers_agent_grant_leaves_the_owner_out(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admits = AsyncMock(return_value=False)
+    monkeypatch.setattr(timer_delivery, "sender_admits", admits)
+    delivery = await _delivery(db_session_factory)
+
+    with pytest.raises(AdmissionDenied):
+        await delivery.run(db_session_factory)
+
+    assert admits.await_args is not None
+    assert admits.await_args.kwargs["agent_name"] == "target-agent"
+    assert admits.await_args.kwargs["user_id"] == _OWNER
+    delivery.run_turn.assert_not_awaited()
 
 
 async def test_a_closed_dm_settles_as_not_allowed(

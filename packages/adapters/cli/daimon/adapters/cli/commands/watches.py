@@ -14,9 +14,11 @@ from typing import Annotated
 import typer
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.channel_backend import backend_selection_enabled
 from daimon.core.config import load_settings, load_watches_settings
 from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExport
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.held_timers import (
     TimerImport,
     agent_runs_scope_timers,
@@ -33,7 +35,6 @@ from daimon.core.stores.watches import (
     NoticeReceipt,
     OwnerCapExceeded,
     WatchActivity,
-    WatchRow,
     callback_lifetime,
     confirm_import,
     import_callback_watch,
@@ -396,9 +397,9 @@ def go_live_command(
     Each imported watch is confirmed on the owner, channel and thread the import
     printed, and resumes unless it was paused where it came from. Each unpaused held
     timer still more than a minute away is scheduled once; a due one is skipped. DM and
-    channel timers of an agent not on Managed Agents never fire: they are listed by name,
-    counted as not_scheduled and left held. A watch that cannot go live is listed with
-    the reason and stays as it was.
+    channel timers that would run off Managed Agents never fire (a channel's own backend
+    wins over the agent's): they are listed by name, counted as not_scheduled and left
+    held. A watch that cannot go live is listed with the reason and stays as it was.
     """
 
     async def run() -> tuple[Counter[str], Counter[str]]:
@@ -432,13 +433,14 @@ def go_live_command(
                     continue
                 watches["live" if row.status == "active" else "kept_paused"] += 1
             async with runtime.sessionmaker() as db:
-                scope_timers = await agent_runs_scope_timers(
-                    db, tenant_id=tenant, agent_id=agent_id
-                )
-                unrunnable = (
-                    []
-                    if scope_timers
-                    else await list_unrunnable_timers(db, tenant_id=tenant, agent_id=agent_id)
+                unrunnable = await list_unrunnable_timers(
+                    db,
+                    tenant_id=tenant,
+                    agent_id=agent_id,
+                    agent_runs=await agent_runs_scope_timers(
+                        db, tenant_id=tenant, agent_id=agent_id
+                    ),
+                    channel_backends=backend_selection_enabled(runtime.settings.turn),
                 )
             for source_id in unrunnable:
                 typer.echo(
@@ -451,7 +453,7 @@ def go_live_command(
                 agent_id=agent_id,
                 agent_name=agent_name,
                 now=datetime.now(UTC),
-                scope_timers=scope_timers,
+                skip=unrunnable,
             )
         counts = Counter({str(k): n for k, n in timers.items()})
         if unrunnable:

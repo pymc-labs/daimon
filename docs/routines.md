@@ -44,7 +44,8 @@ numbers"). Each platform also has a panel:
   resume or delete one.
 
 The CLI creates owner-DM routines (`daimon routines create`), sets
-[sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and
+[sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools), checks
+[owners' roles](admins.md#limit-an-agent-to-roles) and
 [moves routines in from another system](routine-migration.md).
 
 `create_routine` refuses a caller with no platform user identity (a CLI-only
@@ -69,8 +70,8 @@ tool checks, before saving, that:
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
 uses the caller's own Discord id; nobody can send another person's routine to
 their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
-the owner's personal memory, and needs the server's DMs on. See
-[direct messages](direct-messages.md).
+the owner's personal memory, and needs the server's DMs on and the agent's
+[DM grant](direct-messages.md#choose-who-may-dm-which-agent) for the owner.
 
 To make a destination mandatory, set
 `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`
@@ -145,9 +146,8 @@ get unattended-run framing, which an agent can override with
 
 Routine sessions mount the agent's shared memory read-only. A routine with no
 destination or channel also mounts its owner's personal memory read-only. An
-owner-DM routine runs as a live DM turn, with the owner's memory under the DM
-policy. It is skipped as
-`owner_busy` if the owner already has a DM turn running. A routine in a
+owner-DM routine is skipped as `owner_busy` if the owner already has a DM turn
+running. A routine in a
 channel shared with another organisation runs held to that channel, with only
 that channel's memory and no DM fallback.
 
@@ -193,7 +193,7 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim is not posted again, as the poster may have posted already. A raising poster is not retried. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim or a raising poster is not retried, as it may have posted. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files
@@ -212,14 +212,14 @@ files. Failure notices never carry files.
 
 | Bound | Default |
 | --- | --- |
-| Per-turn ceiling | 45 minutes |
-| `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S` | ceiling plus 300 s |
+| Per-turn ceiling | 45 minutes, or the `unattended_time_limit` feature (15 to 45 minutes) |
+| `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S` | longest ceiling plus 300 s |
 | `DAIMON_SCHEDULER__TICK_INTERVAL_S` | 30 s |
 | `DAIMON_SCHEDULER__MAX_AGE_S` | 900 s |
 | `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES` | 10 |
 | Read timeout per call | 120 s |
 
-The 45-minute ceiling covers session assembly and the run. The dispatch
+The ceiling covers session assembly and the run. The dispatch
 timeout is an outer guard for a run that hangs outside it, and cannot be set
 below the ceiling. Settings are in [configuration.md](configuration.md#scheduler).
 
@@ -236,7 +236,8 @@ below the ceiling. Settings are in [configuration.md](configuration.md#scheduler
 Ownerless routines are admin-only, and a refusal reads as "not found".
 Non-admins see only their own routines, since output often holds business
 data. A routine runs with its agent's repo, keys and connectors, so a member
-may schedule only the agent they are talking to.
+may schedule only the agent they are talking to. Admins too need a role-gated
+agent's roles.
 
 In a `readers: own` channel, a routine of that channel's own agent is visible
 and editable only from inside it. Each run re-checks the agent's rule at the
@@ -244,8 +245,10 @@ destination and skips a run that would cross the line (`own_agents_only`).
 
 ## When a run fails
 
-The scheduler does not retry a failed run, count failures or disable a routine.
-A failing routine waits for its next slot and tries again, enabled. A failed run
+The scheduler does not retry a failed run or count failures; a failing routine
+tries again at its next slot. It pauses one whose owner lost a
+[role its agent needs](admins.md#limit-an-agent-to-roles)
+(`owner_lacks_agent_role`). A failed run
 writes `last_error` and clears `last_result_tail`, and a success does the
 reverse. The panels show a failure whenever `last_error` is set.
 
@@ -257,7 +260,7 @@ routine that keeps failing posts once and stays quiet until a run succeeds.
 
 The `last_error` values are a closed set: `invoker_not_allowed` (the creator was
 removed from the allowlist), `access_policy_unreadable`, `balance_depleted`,
-`cap_exceeded`, `channel_budget_exceeded`, `scheduler_shutdown`,
+`cap_exceeded`, `channel_budget_exceeded`, `owner_lacks_agent_role`, `scheduler_shutdown`,
 `timeout: exceeded <n>s`, and otherwise `<ExceptionType>: <message>` cut to 500
 characters. A ceiling breach reads `TurnError: ceiling: ...`.
 
@@ -277,9 +280,6 @@ that channel's budget, checked last after the agent's rule
 fires again at its next slot. On Discord each fire, and each delivery,
 checks the creator's live membership, roles and admin permissions. Elsewhere
 only the creator's stored admin role exempts them from the allowlist.
-
-An agent limited to [invoker roles](admins.md#limit-an-agent-to-roles) cannot
-run routines at all.
 
 A Discord thread destination saved before channel budgets existed has no
 channel until its destination is set again.

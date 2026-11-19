@@ -9,7 +9,9 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
 
-@pytest.mark.parametrize("name", ["0134_cold_dm_agent", "0135_routine_dm_destination"])
+@pytest.mark.parametrize(
+    "name", ["0134_cold_dm_agent", "0135_routine_dm_destination", "0210_dm_access"]
+)
 def test_dm_upgrade_sets_lock_timeout_before_ddl(name: str) -> None:
     path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
     spec = importlib.util.spec_from_file_location(name, path)
@@ -24,4 +26,4 @@ def test_dm_upgrade_sets_lock_timeout_before_ddl(name: str) -> None:
         migration.upgrade()
     statements = output.getvalue().split(";\n")
     assert statements[1].strip() == "SET LOCAL lock_timeout = '5s'"
-    assert statements[2].strip().startswith("ALTER TABLE ")
+    assert statements[2].strip().startswith(("ALTER TABLE ", "CREATE TABLE "))

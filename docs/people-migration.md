@@ -103,8 +103,9 @@ runs unattended, as its owner, and only if the agent can still post there and th
 owner can still see it; otherwise it is settled with a reason and nothing is sent.
 
 Reminders in a private conversation or a plain channel fire only for an agent on
-Managed Agents. For any other agent `go-live` lists them by name, counts them as
-`not_scheduled`, schedules none and leaves them held for a rerun.
+Managed Agents. A plain channel's own backend setting, when it has one, wins over the
+agent's. For the others `go-live` lists them by name, counts them as `not_scheduled`,
+schedules none and leaves them held for a rerun.
 
 Channel reminders whose channel id is not numeric are counted. Any past the 25
 pending a person may hold are skipped. Notes and instructions over their limit

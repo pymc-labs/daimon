@@ -135,6 +135,7 @@ import random
 import uuid
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
@@ -154,6 +155,7 @@ from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import dm_access as dm_access_store
 from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
@@ -222,6 +224,9 @@ class PurgeReport(BaseModel):
     dm_carry_overs: int = 0
     held_timers: int = 0
     tag_opt_outs: int = 0
+    dm_picks: int = 0
+    dm_rules: int = 0
+    dm_grant_users: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -277,6 +282,9 @@ class PurgeReport(BaseModel):
             dm_carry_overs=self.dm_carry_overs + other.dm_carry_overs,
             held_timers=self.held_timers + other.held_timers,
             tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
+            dm_picks=self.dm_picks + other.dm_picks,
+            dm_rules=self.dm_rules + other.dm_rules,
+            dm_grant_users=self.dm_grant_users + other.dm_grant_users,
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
@@ -758,6 +766,15 @@ async def _purge_account_transaction(
         session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
     )
     tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
+    # The person's agent picks, personal routing rules and listed-grant entries.
+    dm_now = datetime.now(UTC)
+    dm_picks_count = await dm_access_store.delete_picks_for_account(session, account_id=account_id)
+    dm_rules_count = await dm_access_store.delete_user_rules(
+        session, keys=platform_user_keys, now=dm_now
+    )
+    dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
+        session, keys=platform_user_keys, now=dm_now
+    )
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
@@ -807,6 +824,9 @@ async def _purge_account_transaction(
             dm_carry_overs=dm_carry_overs_count,
             held_timers=held_timers_count,
             tag_opt_outs=tag_opt_outs_count,
+            dm_picks=dm_picks_count,
+            dm_rules=dm_rules_count,
+            dm_grant_users=dm_grant_users_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,
         )

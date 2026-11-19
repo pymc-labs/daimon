@@ -651,7 +651,7 @@ harder").
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here". |
+| `set_thread_model` | all callers | Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_overrides`
 
@@ -750,7 +750,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message settings. |
 
 ## `wizard`
 

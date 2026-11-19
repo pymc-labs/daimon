@@ -3,7 +3,6 @@
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,9 +112,7 @@ async def test_people_who_already_have_a_private_conversation_still_get_theirs_a
                 memory_read_only=False,
                 history=[],
                 recent_message_ids=[],
-                active_until=None,
             ),
-            now=datetime.now(UTC),
         )
     export = CarryOverExport.model_validate(body())
 

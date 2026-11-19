@@ -767,7 +767,7 @@ async def test_send_when_own_channels_are_off_then_posts_in_the_deployment_chann
     await _own_channel(db_session_factory)
     runtime = build_teams_runtime(db_session_factory)
     runtime.settings.support = SupportSettings(teams_escalation_channel_id=OPS)
-    runtime.settings.features = {"support_own_channel": "off"}
+    runtime.settings.features = {**runtime.settings.features, "support_own_channel": "off"}
     async with running_service(runtime, teams_api_fake) as service:
         _sent, post = await _pending(service, teams_api_fake)
 

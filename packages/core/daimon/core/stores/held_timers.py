@@ -13,7 +13,7 @@ from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.continuity.timers import MAX_PENDING_TIMERS
 from daimon.core.continuity.watch_imports import NOTE_LIMIT, clip
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import agent_backends
+from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import (
     count_pending_timer_rows,
@@ -21,6 +21,8 @@ from daimon.core.stores.task_continuations import (
     record_continuation,
 )
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ChannelRef
+from mux.profiles import MANAGED_AGENTS
 from sqlalchemy import (
     Boolean,
     ColumnElement,
@@ -234,16 +236,40 @@ def _open_timers(tenant_id: uuid.UUID, agent_id: str) -> tuple[ColumnElement[boo
 
 
 async def list_unrunnable_timers(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    agent_runs: bool,
+    channel_backends: bool,
 ) -> list[str]:
-    """Source ids of the agent's open DM and channel timers; they stay held, never scheduled."""
-    return list(
-        await session.scalars(
-            select(HeldTimer.source_id)
-            .where(*_open_timers(tenant_id, agent_id), HeldTimer.place_type.in_(SCOPE_PLACES))
-            .order_by(HeldTimer.source_id)
-        )
+    """Source ids of the agent's open DM and channel timers that would never fire.
+
+    A channel timer runs on its channel's own backend when one is set, else on the agent's
+    (`agent_runs`), as its turn's admission decides. Such timers stay held, never scheduled.
+    """
+    timers = await session.execute(
+        select(HeldTimer.source_id, HeldTimer.place_type, HeldTimer.channel_id)
+        .where(*_open_timers(tenant_id, agent_id), HeldTimer.place_type.in_(SCOPE_PLACES))
+        .order_by(HeldTimer.source_id)
     )
+    unrunnable: list[str] = []
+    for source_id, place_type, channel_id in timers:
+        runs = agent_runs
+        if place_type == "channel" and channel_backends:
+            channel = ChannelRef(
+                tenant_id=str(tenant_id), platform="discord", channel_id=channel_id
+            )
+            revision = await mux_state.latest_config_revision(session, channel, overrides_only=True)
+            if (
+                revision is not None
+                and await mux_state.config_origin(session, channel, revision.local)
+                != "channel_clear"
+            ):
+                runs = revision.profile == MANAGED_AGENTS.profile_id
+        if not runs:
+            unrunnable.append(source_id)
+    return unrunnable
 
 
 async def settle_held_timers(
@@ -253,16 +279,16 @@ async def settle_held_timers(
     agent_id: str,
     agent_name: str,
     now: datetime,
-    scope_timers: bool = True,
+    skip: Collection[str] = (),
 ) -> Counter[Outcome]:
     """Schedule each of the agent's held timers, once. Each settles in its own transaction.
 
-    With `scope_timers` false, DM and channel timers are left held: they would never fire.
+    Timers named in `skip` (see `list_unrunnable_timers`) are left held: they would never fire.
     """
     async with sessionmaker() as session:
         query = select(HeldTimer.source_id).where(*_open_timers(tenant_id, agent_id))
-        if not scope_timers:
-            query = query.where(HeldTimer.place_type.not_in(SCOPE_PLACES))
+        if skip:
+            query = query.where(HeldTimer.source_id.not_in(skip))
         keys = list(await session.scalars(query.order_by(HeldTimer.fire_at, HeldTimer.source_id)))
     counts: Counter[Outcome] = Counter()
     for source_id in keys:

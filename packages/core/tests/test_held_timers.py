@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from daimon.core.channel_backend import set_channel_backend
 from daimon.core.continuity.watch_imports import ImportedTimer
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account, purge_principal
@@ -19,6 +20,8 @@ from daimon.core.stores.held_timers import (
 )
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from mux.contracts.config import BackendConfig
+from mux.contracts.ids import ChannelRef
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -139,14 +142,20 @@ async def test_dm_and_channel_timers_stay_held_for_an_agent_off_managed_agents(
     await hold(db_session_factory, tenant, "thread", place="thread")
 
     async with db_session_factory() as session:
-        named = await list_unrunnable_timers(session, tenant_id=tenant.id, agent_id="agent-1")
+        named = await list_unrunnable_timers(
+            session,
+            tenant_id=tenant.id,
+            agent_id="agent-1",
+            agent_runs=False,
+            channel_backends=True,
+        )
     counts = await settle_held_timers(
         db_session_factory,
         tenant_id=tenant.id,
         agent_id="agent-1",
         agent_name="a",
         now=datetime.now(UTC),
-        scope_timers=False,
+        skip=named,
     )
 
     assert named == ["t-dm", "t-room"]
@@ -158,12 +167,40 @@ async def test_dm_and_channel_timers_stay_held_for_an_agent_off_managed_agents(
     }
 
 
+async def test_a_channels_own_backend_wins_over_the_agents_for_its_timers(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="700000102")
+    await db_session.commit()
+    await hold(db_session_factory, tenant, "room", place="channel")  # channel "900"
+    channel = ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="900")
+
+    async def unrunnable(*, agent_runs: bool, channel_backends: bool = True) -> list[str]:
+        async with db_session_factory() as session:
+            return await list_unrunnable_timers(
+                session,
+                tenant_id=tenant.id,
+                agent_id="agent-1",
+                agent_runs=agent_runs,
+                channel_backends=channel_backends,
+            )
+
+    assert await unrunnable(agent_runs=False) == ["t-room"], "no channel setting: the agent's"
+    async with db_session_factory.begin() as session:
+        await set_channel_backend(session, channel, BackendConfig())  # Managed Agents
+    assert await unrunnable(agent_runs=False) == [], "the channel runs it though the agent won't"
+    assert await unrunnable(agent_runs=False, channel_backends=False) == ["t-room"]
+    async with db_session_factory.begin() as session:
+        await set_channel_backend(session, channel, BackendConfig(backend="openai", model="gpt-5"))
+    assert await unrunnable(agent_runs=True) == ["t-room"], "the channel's other backend wins"
+
+
 async def test_the_migration_settles_due_dm_timers_and_no_others(
     db_session: AsyncSession,
 ) -> None:
     spec = importlib.util.spec_from_file_location(
-        "migration_0208",
-        Path(__file__).parents[1] / "alembic/versions/0208_callback_watch_imports.py",
+        "migration_0211",
+        Path(__file__).parents[1] / "alembic/versions/0211_callback_watch_imports.py",
     )
     assert spec and spec.loader
     migration = importlib.util.module_from_spec(spec)

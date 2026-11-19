@@ -2,10 +2,11 @@
 
 The bot's wake opener hands each `dm:<uuid>` or `ch:<uuid>` timer row here (via
 `dispatch_scope_timer`). Before the turn and before each chunk the place is checked
-afresh: for a DM the tenant's DMs must be on, the owner allowed to receive them and
-still a human member of the guild; for a channel the guild, channel and owner are read
-over REST into an empty state, never from the gateway cache, and the owner must still
-see the channel, the bot may post there and the channel rules allow it. Anything else
+afresh: for a DM the tenant's DMs must be on, the owner allowed to receive them (the
+agent's DM grant included) and still a human member of the guild; for a channel the
+guild, channel and owner are read over REST into an empty state, never from the gateway
+cache, and the owner must still see the channel, the bot may post there and the channel
+rules allow it. Anything else
 settles this timer only, with no message to anyone. A transient error (5xx, 429,
 network) before the turn puts the timer back, capped by the dispatcher; after the turn
 delivery is retried in place and then settles, so a turn never runs twice. Any other
@@ -23,6 +24,8 @@ import aiohttp
 import structlog
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
+from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow
@@ -125,6 +128,7 @@ async def deliver_dm_timer(
     open_dm: Callable[[int, int], Awaitable[discord.abc.Messageable]],
     member_present: Callable[[int, int], Awaitable[bool]],
     dm_policy: Callable[[uuid.UUID], DirectMessagePolicy],
+    membership_resolver: MembershipResolver | None,
 ) -> int:
     """Run the DM turn and send its text to the owner in chunks; how many were sent.
 
@@ -139,6 +143,17 @@ async def deliver_dm_timer(
         if tenant is None or tenant.archived_at is not None or not enabled:
             raise AdmissionDenied(reason="invoker_not_allowed")
         if not dm_policy(row.tenant_id).allows(owner):
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        # The timer's agent grant, by the owner's current server roles.
+        if not await sender_admits(
+            sessionmaker,
+            tenant_id=row.tenant_id,
+            agent_name=row.target_name,
+            user_id=owner,
+            groups=roles_by_membership(
+                membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
+            ),
+        ):
             raise AdmissionDenied(reason="invoker_not_allowed")
         guild = int(tenant.external_id)
         try:

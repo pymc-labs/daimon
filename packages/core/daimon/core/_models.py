@@ -703,6 +703,13 @@ class ThreadSession(Base):
         DateTime(timezone=True), nullable=True
     )
     active_turn_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The running turn's own deadline, so a turn allowed longer than the standard window
+    # is not read as abandoned. NULL keeps the standard window.
+    active_turn_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The model and effort emoji a turn on this session last showed in its thread.
+    model_marks: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -3023,6 +3030,10 @@ class ThreadModelSetting(Base):
     __tablename__ = "thread_model_settings"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "platform", "thread_id", name="pk_thread_model_settings"),
+        CheckConstraint(
+            "effort IN ('low', 'medium', 'high', 'xhigh', 'max')",
+            name="ck_thread_model_settings_effort",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -3030,12 +3041,15 @@ class ThreadModelSetting(Base):
     )
     platform: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str] = mapped_column(Text)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
+    # Null when only the effort was chosen: the agent's own model runs (0206).
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # The model's provider; null is a Claude model chosen before providers could be (0197).
     provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The chosen effort; null keeps the agent's own (0206).
+    effort: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ThreadModelConsent(Base):
@@ -4343,6 +4357,74 @@ class DirectMessagePolicy(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
+class DmAgentGrant(Base):
+    """Who may start a direct message with one agent. No row: every member."""
+
+    __tablename__ = "dm_agent_grants"
+    __table_args__ = (
+        CheckConstraint("who IN ('members', 'listed', 'excluded')", name="ck_dm_agent_grants_who"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    who: Mapped[str] = mapped_column(Text, nullable=False, server_default="members")
+    user_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    group_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DmRule(Base):
+    """One ordered routing rule: who lands on which agent, optionally locked."""
+
+    __tablename__ = "dm_rules"
+    __table_args__ = (
+        CheckConstraint("subject IN ('user', 'group', 'everyone')", name="ck_dm_rules_subject"),
+        CheckConstraint(
+            "(subject = 'everyone') = (subject_id IS NULL)", name="ck_dm_rules_subject_id"
+        ),
+        CheckConstraint("NOT locked OR agent_name IS NOT NULL", name="ck_dm_rules_locked_agent"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DmAgentPick(Base):
+    """The agent a person chose for their direct messages in a workspace."""
+
+    __tablename__ = "dm_agent_picks"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DirectMessageConversation(Base):
     """One user's selected workspace for a private platform conversation."""
 
@@ -4370,7 +4452,12 @@ class DirectMessageConversation(Base):
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set while a delivery's turn holds the conversation: an identity compared on finish
+    # and delivery, written as a time past the longest turn so an older image, which reads
+    # it as a deadline (the column keeps its first name), still sees the claim live.
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        "active_until", DateTime(timezone=True), nullable=True
+    )
 
 
 class PlatformUserName(Base):
