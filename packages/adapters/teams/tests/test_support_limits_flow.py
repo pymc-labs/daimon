@@ -33,6 +33,7 @@ from daimon.core.support import (
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
+    OWN_REQUEST,
     SETTLE_ELSEWHERE,
     MenuSpec,
     RequestChoice,
@@ -229,11 +230,16 @@ def _settle_buttons(post: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _settle(
-    data: dict[str, Any], *, post_id: str, channel: str = OPS, **inputs: object
+    data: dict[str, Any],
+    *,
+    post_id: str,
+    channel: str = OPS,
+    user: str = OTHER_AAD_OBJECT_ID,
+    **inputs: object,
 ) -> dict[str, object]:
-    """A staff click on the support post `post_id`, in the channel `channel`."""
+    """A click by `user` (staff unless named) on the support post `post_id`, in `channel`."""
     action = {"type": "Action.Execute", "verb": SETTLE_VERB, "data": data | inputs}
-    click = make_invoke("adaptiveCard/action", {"action": action}, user=OTHER_AAD_OBJECT_ID)
+    click = make_invoke("adaptiveCard/action", {"action": action}, user=user)
     tenant = {"id": ENTRA_TENANT_ID}
     click["conversation"] = {
         "id": f"{channel};messageid={post_id}",
@@ -694,6 +700,26 @@ async def test_decline_when_pending_then_releases_the_hold(
     assert f"Declined by {USER_NAME}" in _text(edit.body), "the post says who declined"
     row = await _row(db_session_factory, post)
     assert (row.status, row.charge, row.settled_by) == ("declined", D(0), OTHER_AAD_OBJECT_ID)
+
+
+async def test_settle_when_the_clicker_is_the_requester_then_refused_and_another_member_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Teams spells an id the same way on the request and the click, so no one settles their own."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        decline = _settle_buttons(post)["decline"]
+        own = await post_activity(
+            service, _settle(decline, post_id="m-2", user=AAD_OBJECT_ID.upper())
+        )
+        pending = await _row(db_session_factory, post)
+        other = await post_activity(service, _settle(decline, post_id="m-2"))
+
+    assert own["value"] == OWN_REQUEST, own
+    assert pending.status == "pending", "the requester's click settled nothing"
+    assert other["value"].startswith("Declined."), other
+    assert (await _row(db_session_factory, post)).status == "declined", "another member settles it"
 
 
 async def test_decline_when_asking_was_turned_off_since_then_the_post_still_settles(
