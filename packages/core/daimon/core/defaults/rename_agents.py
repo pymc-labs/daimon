@@ -158,7 +158,9 @@ async def _rename_on_provider(
         name = metadata.get(MA_METADATA_KEY_NAME, "")
         # Compare as `_named` does, which picked this agent; a reader's suffix is plain ASCII.
         folded, folded_old = normalize_agent_name(name), normalize_agent_name(old)
-        renamed = new + folded.removeprefix(folded_old) if folded.startswith(folded_old) else new
+        if not folded.startswith(folded_old):
+            return fresh  # a concurrent apply renamed it first
+        renamed = new + folded.removeprefix(folded_old)
         metadata[MA_METADATA_KEY_NAME] = renamed
         if MA_METADATA_KEY_READER_SOURCE in metadata:
             metadata[MA_METADATA_KEY_READER_SOURCE] = "\n".join(
