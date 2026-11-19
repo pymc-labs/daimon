@@ -272,7 +272,7 @@ async def delete_picks_for_account(session: AsyncSession, *, account_id: uuid.UU
 
 
 async def count_user_rules(session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]]) -> int:
-    """User rules naming one of these (tenant, platform user id) pairs."""
+    """Unlocked user rules naming one of these (tenant, platform user id) pairs."""
     total = 0
     for tenant_id, user_id in keys:
         total += (
@@ -283,6 +283,7 @@ async def count_user_rules(session: AsyncSession, *, keys: Sequence[tuple[uuid.U
                     DmRule.tenant_id == tenant_id,
                     DmRule.subject == "user",
                     DmRule.subject_id == user_id,
+                    DmRule.locked.is_(False),
                 )
             )
         ) or 0
@@ -292,12 +293,17 @@ async def count_user_rules(session: AsyncSession, *, keys: Sequence[tuple[uuid.U
 async def delete_user_rules(
     session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]], now: datetime
 ) -> int:
-    """Remove user rules naming these people and close the gaps they leave."""
+    """Remove unlocked user rules naming these people and close the gaps they leave.
+
+    Locked rules and `excluded` lists stay: they restrict a person, and a purge must not lift that.
+    """
     deleted = 0
     for tenant_id in {t for t, _ in keys}:
         ids = {u for t, u in keys if t == tenant_id}
         rules = await list_rules_for_update(session, tenant_id=tenant_id)
-        kept = [r for r in rules if not (r.subject == "user" and r.subject_id in ids)]
+        kept = [
+            r for r in rules if not (r.subject == "user" and r.subject_id in ids and not r.locked)
+        ]
         if len(kept) != len(rules):
             deleted += len(rules) - len(kept)
             await _rewrite_rules(session, tenant_id, kept, now)
@@ -307,23 +313,27 @@ async def delete_user_rules(
 async def count_grants_listing(
     session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]]
 ) -> int:
-    """Grants whose user list holds one of these (tenant, platform user id) pairs."""
+    """`listed` grants whose user list holds one of these (tenant, platform user id) pairs."""
     total = 0
     for tenant_id in {t for t, _ in keys}:
         ids = {u for t, u in keys if t == tenant_id}
         grants = await list_grants(session, tenant_id=tenant_id)
-        total += sum(1 for g in grants.values() if ids.intersection(g.user_ids))
+        total += sum(
+            1 for g in grants.values() if g.who == "listed" and ids.intersection(g.user_ids)
+        )
     return total
 
 
 async def scrub_user_from_grants(
     session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]], now: datetime
 ) -> int:
-    """Remove these people's ids from every grant's user list in their workspaces."""
+    """Remove these people's ids from `listed` grants; `excluded` stays (restricts)."""
     changed = 0
     for tenant_id in {t for t, _ in keys}:
         ids = {u for t, u in keys if t == tenant_id}
         for name, grant in (await list_grants(session, tenant_id=tenant_id)).items():
+            if grant.who != "listed":
+                continue
             kept = [u for u in grant.user_ids if u not in ids]
             if len(kept) != len(grant.user_ids):
                 changed += 1

@@ -168,10 +168,19 @@ async def test_person_scoped_rows_when_purged_then_picks_user_rules_and_grant_id
         db_session, tenant_id=tenant.id, agent_name="a", who="listed",
         user_ids=["gone", "kept"], group_ids=["gone"], set_by=None, now=NOW,
     )  # fmt: skip
+    await dm_access.add_rule(
+        db_session, tenant_id=tenant.id, subject="user", subject_id="gone",
+        agent_name="a", locked=True, set_by=None, now=NOW,
+    )  # fmt: skip
+    await dm_access.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="b", who="excluded",
+        user_ids=["gone"], group_ids=[], set_by=None, now=NOW,
+    )  # fmt: skip
     keys = [(tenant.id, "gone")]
 
-    assert await dm_access.count_user_rules(db_session, keys=keys) == 1, "only user rules count"
+    assert await dm_access.count_user_rules(db_session, keys=keys) == 1, "only unlocked user rules"
     assert await dm_access.delete_user_rules(db_session, keys=keys, now=NOW) == 1
+    assert await dm_access.count_grants_listing(db_session, keys=keys) == 1, "only listed grants"
     assert await dm_access.scrub_user_from_grants(db_session, keys=keys, now=NOW) == 1
     assert await dm_access.delete_picks_for_account(db_session, account_id=account.id) == 1
 
@@ -179,10 +188,13 @@ async def test_person_scoped_rows_when_purged_then_picks_user_rules_and_grant_id
     assert [(r.subject, r.subject_id, r.position) for r in rules] == [
         ("group", "gone", 0),
         ("user", "kept", 1),
-    ], "group rule stays and positions close up"
+        ("user", "gone", 2),
+    ], "group and locked rules stay and positions close up"
     grant = (await dm_access.list_grants(db_session, tenant_id=tenant.id))["a"]
     assert grant.user_ids == ("kept",), "the person's id leaves the list"
     assert grant.group_ids == ("gone",), "group ids are not personal"
+    barred = (await dm_access.list_grants(db_session, tenant_id=tenant.id))["b"]
+    assert barred.user_ids == ("gone",), "an exclusion restricts them, so a purge keeps it"
 
 
 async def test_update_rule_when_changed_then_keeps_its_place_and_a_lock_needs_an_agent(
