@@ -248,14 +248,6 @@ async def set_pick(
     )
 
 
-async def clear_pick(session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID) -> None:
-    await session.execute(
-        delete(DmAgentPick).where(
-            DmAgentPick.tenant_id == tenant_id, DmAgentPick.account_id == account_id
-        )
-    )
-
-
 async def count_picks_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     return (
         await session.scalar(

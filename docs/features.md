@@ -619,7 +619,7 @@ People may message the agent directly; on for the team, every agent takes part u
 
 ## Direct message wait
 
-Holds a direct message for more, so a burst gets one reply; at most ten seconds, and never an approval reply.
+Holds a direct message for more, so a burst gets one reply; at most five seconds, and never an approval reply.
 
 | | |
 | --- | --- |
