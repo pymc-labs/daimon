@@ -957,6 +957,54 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
     assert bool(dms.sent) == (agent_state == "unrelated_rule")
 
 
+@pytest.mark.parametrize(("roles", "delivered"), [(("123",), True), ((), False)])
+async def test_dm_delivery_of_a_role_gated_alias_needs_the_owner_to_hold_its_roles(
+    db_session_factory, roles, delivered
+):
+    """The live names are checked against the owner's fresh roles, not an empty subject."""
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.stores.routines import update_routine
+
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        assert row is not None
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(
+                agent_rules={"pinned name": AgentRule(invoker_role_ids=("123",))}
+            ),
+        )
+    dms = _Dms()
+
+    async def member(*args):
+        return Membership(is_member=True, role_ids=roles)
+
+    async def names(_):
+        return ("daimon", "pinned name")
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=AssertionError("not a channel")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),
+        resolve_agent_names=names,
+    )
+    result = await poster(row.model_copy(update={"delivery_payload": "private"}))
+    assert result.status == ("delivered" if delivered else "skipped"), result.note
+    assert bool(dms.sent) == delivered, "only a role holder gets the private delivery"
+
+
 @pytest.mark.parametrize("destination", ["channel", "dm"])
 @pytest.mark.parametrize("scenario", ["success", "failure", "oversize"])
 async def test_generated_files_share_the_at_most_once_outbox(

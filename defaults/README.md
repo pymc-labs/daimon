@@ -75,7 +75,7 @@ binding Google or collecting keys; every user of an agent can use its credential
 
 Audience restrictions must match the platform. On Discord, configure
 `AgentRule.invoker_role_ids` for the permitted roles (admins are checked too;
-role-gated agents deny routines). Slack and Teams have no per-user agent gate:
+a routine runs only while its owner holds them). Slack and Teams have no per-user agent gate:
 route credential holders only to private channels with restricted membership,
 and limit channel reach with `runs_in`. CLI `--agent NAME` is unchecked, so
 only trusted operators should have local CLI access. Keep credential holders

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from daimon.core.stores.turn_origins import get_active_origin
@@ -151,3 +151,40 @@ async def test_unattended_provider_origin_is_unattended_and_removed_after(
         )
     assert gone is None, "the origin must not outlive the turn"
     assert uuid.UUID(str(origin.id))
+
+
+async def test_native_owner_gate_refuses_a_role_gated_agent_once_the_owner_lost_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.turn import unattended
+
+    policy = TenantAccessPolicy(agent_rules={"worker": AgentRule(invoker_role_ids=("1",))})
+
+    async def load(_db: object, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+        return policy
+
+    monkeypatch.setattr("daimon.core.stores.access_policy.load_access_policy", load)
+    owner_holds = False
+
+    def owner_check(*_args: object, **_kwargs: object):
+        async def check(_policy: object, _ref: object) -> bool:
+            return owner_holds
+
+        return check
+
+    monkeypatch.setattr(unattended, "grant_owner_check", owner_check)
+
+    @asynccontextmanager
+    async def session():
+        yield object()
+
+    deps = SimpleNamespace(sessionmaker=session)
+    admission = SimpleNamespace(agent=SimpleNamespace(name="worker", metadata={}))
+    gate = unattended.native_owner_gate(cast("Any", deps), cast("Any", admission), uuid.uuid4())
+    with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+        await gate()
+    owner_holds = True
+    await gate()

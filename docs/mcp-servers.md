@@ -113,6 +113,59 @@ long-term memory, and its sessions are sealed to the channel.
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 
+### Servers that attribute writes to the requester
+
+A server that trusts one key rather than a signature, and attributes each write
+to the person who asked, is listed with `"auth": "bearer"` and
+`"requester_meta": true`. Its key goes in
+[`DAIMON_MCP_IDENTITY__BEARERS`](configuration.md#daimon_mcp_identity__bearers),
+a JSON object by server name, kept apart from the server list so it can be a
+secret. Because the key is shared, a bearer server must also list the
+`workspaces` and the `agents` (by name) allowed to use it; any other agent
+gets a 403. No signing key is needed when every server is bearer.
+
+```bash
+DAIMON_MCP_IDENTITY__SERVERS='[{"name": "tools", "url": "https://tools.example.com/mcp",
+  "auth": "bearer", "requester_meta": true, "workspaces": ["discord:<guild id>"],
+  "agents": ["<agent name>"]}]'
+DAIMON_MCP_IDENTITY__BEARERS='{"tools": "<key>"}'
+```
+
+Daimon sends the key in place of the caller's own credential, which never
+reaches the server. On every `tools/call` it first removes any
+`params._meta.requester_platform_user_id`, `requester_conversation` and
+`requester_kind` the caller supplied, then sets them from the live run. Those
+keys are removed under `_meta` of every method, not only tool calls.
+
+- `requester_platform_user_id`: the asker's user id (Discord only). For an
+  unattended run, the person it runs for: a routine's owner, or whoever set up
+  the watch, timer or wake.
+- `requester_conversation`: `{"place_type": "channel" | "thread" | "dm",
+  "channel_id": ..., "parent_channel_id": ...}`. `parent_channel_id` is a
+  thread's channel and null otherwise. For a routine, its delivery place. A routine
+  with no place (no destination, or a thread with no parent) is stamped with the
+  asker and kind but no place, so a server that requires a place refuses every read
+  from it (fails closed); writes are unaffected.
+- `requester_kind`: `"person"` only while a person's own message or click is
+  being answered. `"routine"` means any unattended run: a routine, watch,
+  timer, continuation wake or DM routine.
+
+A DM that is not open yet is `{"place_type": "dm", "channel_id": null,
+"parent_channel_id": null}`; a routine can only DM its owner.
+
+A routine run is stamped only while its routine still exists, belongs to the
+same organisation and agent, and still has the owner signed into its
+credential when it started. A changed owner or agent means no stamp.
+`requester_conversation` is left out for a legacy thread with no recorded
+channel, or nowhere. A sender from another organisation, a replaced session and
+two turns at once carry none of the three fields, so a server must not treat a
+call with no `requester_kind` as a routine.
+
+A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
+a tool call without object `params` is refused with a 400. GET and DELETE
+requests are forwarded without a body. Rotating
+the key means changing the secret and restarting the MCP service.
+
 ## Add a skill a server serves
 
 A server that implements the MCP Skills extension (`io.modelcontextprotocol/skills`,

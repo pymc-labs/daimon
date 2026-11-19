@@ -3,10 +3,12 @@
 from datetime import UTC, datetime
 
 import pytest
+from daimon.core._models import Routine
 from daimon.core.errors import StoreError
 from daimon.core.stores import routines
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -130,3 +132,77 @@ async def test_private_transfer_redirects_to_editor_and_erases_prior_output(
     assert changed.created_by_user_id == changed.destination_id == "222222222222222222"
     assert changed.last_result_tail is None and changed.delivery_payload is None
     assert changed.delivery_lease_owner is None
+
+
+async def test_resume_after_a_lapsed_role_pause_clears_the_pause_error(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await routines.create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agent",
+        agent_name="Helper",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="task",
+    )
+    assert await routines.pause_for_lapsed_role(db_session, row, error="owner_lacks_agent_role")
+    resumed = await routines.resume_routine(
+        db_session, row.id, tenant_id=tenant.id, now=datetime.now(UTC)
+    )
+    assert resumed is not None and resumed.enabled
+    assert resumed.last_error is None
+
+
+async def _fired_routine(db_session: AsyncSession, *, fired_at: datetime):
+    tenant = await make_tenant(db_session)
+    row = await routines.create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agent",
+        agent_name="Helper",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="task",
+    )
+    await db_session.execute(
+        update(Routine).where(Routine.id == row.id).values(last_fired_at=fired_at)
+    )
+    claimed = await routines.get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert claimed is not None
+    return tenant, claimed
+
+
+async def test_a_role_pause_finishes_the_fire_it_was_claimed_for(db_session: AsyncSession) -> None:
+    fired = datetime(2026, 1, 1, 9, tzinfo=UTC)
+    tenant, claimed = await _fired_routine(db_session, fired_at=fired)
+    assert await routines.pause_for_lapsed_role(db_session, claimed, error="owner_lacks_agent_role")
+    after = await routines.get_routine(db_session, claimed.id, tenant_id=tenant.id)
+    assert after is not None and not after.enabled
+    assert after.last_finished_at is not None and after.last_finished_claim_at == fired
+
+
+async def test_a_lost_pause_fence_still_finishes_the_fire(db_session: AsyncSession) -> None:
+    fired = datetime(2026, 1, 1, 9, tzinfo=UTC)
+    tenant, claimed = await _fired_routine(db_session, fired_at=fired)
+    await routines.update_routine(
+        db_session, claimed.id, tenant_id=tenant.id, edited_by="owner", trigger_message="edited"
+    )
+    assert not await routines.pause_for_lapsed_role(db_session, claimed, error="again")
+    after = await routines.get_routine(db_session, claimed.id, tenant_id=tenant.id)
+    assert after is not None and after.enabled
+    assert after.last_finished_claim_at == fired
+
+
+async def test_resume_keeps_an_error_that_is_not_the_role_pause(db_session: AsyncSession) -> None:
+    tenant, row = await _fired_routine(db_session, fired_at=datetime(2026, 1, 1, tzinfo=UTC))
+    await db_session.execute(
+        update(Routine).where(Routine.id == row.id).values(enabled=False, last_error="boom")
+    )
+    resumed = await routines.resume_routine(
+        db_session, row.id, tenant_id=tenant.id, now=datetime.now(UTC)
+    )
+    assert resumed is not None and resumed.enabled and resumed.last_error == "boom"
