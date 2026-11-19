@@ -1,7 +1,8 @@
 """Backend controls on the confirmation gate.
 
-Admin settings cards still ask; a switch never does. A switch card posted
-before switches applied at once still answers its press.
+Admin settings cards ask, and so does a move to another provider once it carries
+its revision; a thread's model pick never does. A switch card posted before
+switches applied at once still answers its press.
 """
 
 from datetime import UTC, datetime
@@ -41,15 +42,14 @@ def _call(**changes: object) -> ToolCall:
     ids=["safety-off", "safety-on"],
 )
 @pytest.mark.parametrize("attended", [False, True])
-@pytest.mark.parametrize("tool", ["request_agent_backend_switch", "set_thread_model"])
-def test_a_switch_is_never_gated_whoever_is_watching(tool, attended, policy) -> None:
-    """A switch runs like a model change: even an old caller's digest asks for no card."""
+def test_a_thread_model_pick_is_never_gated_whoever_is_watching(attended, policy) -> None:
+    """A thread's model pick runs like a model change: even an old digest asks for no card."""
     from daimon.core.tool_safety import backend_switch_tools, confirmation_gated_tools
 
     call = ToolCall(
         tool_use_id="switch",
         server_name=DAIMON_SERVER_NAME,
-        tool_name=tool,
+        tool_name="set_thread_model",
         input={"agent_name": "Researcher", "preview_digest": "a" * 64, "digest": "a" * 64},
     )
     verdict = decide_tool_call(
@@ -59,8 +59,39 @@ def test_a_switch_is_never_gated_whoever_is_watching(tool, attended, policy) -> 
         trusted_servers=frozenset({DAIMON_SERVER_NAME}),
         confirmed_tools=backend_switch_tools(enabled=True),
     )
-    assert verdict.outcome == "allow", f"{tool} runs without a card: {verdict}"
-    assert tool not in confirmation_gated_tools(), f"{tool} is no fixed gate"
+    assert verdict.outcome == "allow", f"a thread pick runs without a card: {verdict}"
+    assert "set_thread_model" not in confirmation_gated_tools()
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [ToolSafetyPolicy(), ToolSafetyPolicy(enabled=True, unattended_writes=("*",))],
+    ids=["safety-off", "safety-on"],
+)
+@pytest.mark.parametrize("attended", [False, True])
+def test_a_provider_switch_asks_only_once_it_carries_the_revision(attended, policy) -> None:
+    """The preview carries no revision and changes nothing; the confirming call needs the card."""
+    from daimon.core.tool_safety import backend_switch_tools
+
+    def verdict(data):
+        call = ToolCall(
+            tool_use_id="switch",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="request_agent_backend_switch",
+            input={"agent_name": "Researcher", "target_backend": "openai", **data},
+        )
+        return decide_tool_call(
+            policy,
+            call,
+            attended=attended,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=backend_switch_tools(enabled=True),
+        ).outcome
+
+    assert verdict({}) == "allow", "the preview changes nothing"
+    assert verdict({"expected_revision": 0}) == ("ask" if attended else "deny"), (
+        "the confirming call waits for the card, and an unattended run is refused"
+    )
 
 
 _DEPS = SimpleNamespace()
@@ -840,3 +871,22 @@ async def test_an_old_card_with_a_stale_preview_and_accepted_losses_still_applie
     current = await service.current(agent)
     assert current is not None and current.backend == "openai", "the switch it named was written"
     assert await _card_status(owned_preview, card.id) == "applied", "the row is closed once"
+
+
+@pytest.mark.parametrize(("everyone", "who"), [(True, "everyone"), (False, "next message")])
+def test_the_switch_card_names_the_provider_and_who_it_moves(everyone, who) -> None:
+    call = ToolCall(
+        tool_use_id="switch",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name="request_agent_backend_switch",
+        input={
+            "agent_name": "Researcher",
+            "target_backend": "gemini",
+            "for_everyone": everyone,
+            "expected_revision": 0,
+        },
+    )
+    card = prompt_for_tool_call(call, requester_platform_user_id="1", now=datetime.now(UTC))
+    assert card.title == "Move Researcher to Gemini?", card.title
+    assert who in (card.consequence or ""), card.consequence
+    assert "Gemini receives" in (card.consequence or ""), "the card says who gets the data"

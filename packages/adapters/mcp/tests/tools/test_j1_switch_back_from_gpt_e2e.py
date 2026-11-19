@@ -27,7 +27,9 @@ async def _agent(runtime, auth, queue):
     )
 
 
-async def test_j1_a_gpt_root_switches_back_and_forth_at_once_with_no_card(active_chat, monkeypatch):
+async def test_j1_a_gpt_root_switches_back_and_forth_without_posting_a_card(
+    active_chat, monkeypatch
+):
     """To GPT, back to Claude from the GPT turn, and to GPT again: each applies at once."""
     runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
     _without_own_tools(payload)
@@ -40,6 +42,7 @@ async def test_j1_a_gpt_root_switches_back_and_forth_at_once_with_no_card(active
         "target_backend": "openai",
         "model": "gpt-6-luna",
         "origin_context_id": str(origin.id),
+        "expected_revision": 0,
     }
     agent()
     first = await _request_agent_backend_switch_impl(runtime, auth, **to_gpt)
@@ -51,6 +54,7 @@ async def test_j1_a_gpt_root_switches_back_and_forth_at_once_with_no_card(active
         "agent_name": "Researcher",
         "target_backend": "anthropic",
         "origin_context_id": str(origin.id),
+        "expected_revision": 1,
     }
     agent()
     applied = await _request_agent_backend_switch_impl(runtime, gpt_turn, **back)
@@ -59,7 +63,9 @@ async def test_j1_a_gpt_root_switches_back_and_forth_at_once_with_no_card(active
     assert now is not None and now.backend in (None, "anthropic"), "the agent is on Claude"
 
     agent()
-    again = await _request_agent_backend_switch_impl(runtime, gpt_turn, **to_gpt)
+    again = await _request_agent_backend_switch_impl(
+        runtime, gpt_turn, **{**to_gpt, "expected_revision": 2}
+    )
     assert again.status == "changed", "a lossy switch from a GPT turn applies too"
     assert "come back when you switch back" in again.summary, again.summary
     current = await service.current(await _agent(runtime, auth, agent))

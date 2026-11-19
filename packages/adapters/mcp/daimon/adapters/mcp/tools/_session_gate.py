@@ -290,13 +290,12 @@ async def _recorded_as_gated(
         before_pin_set,
         before_pin_clear,
     )
-    # A bind from before the provider switches stopped asking holds them gated; it
-    # still proves every other card. Older still, the thread-model pick didn't ask.
+    # A bind from before the thread-model pick stopped asking holds it gated, and one
+    # from while provider switches didn't ask holds that tool ungated; each still
+    # proves every other card, never a provider switch.
     if selection:
-        candidates += tuple(
-            candidate | switch
-            for switch in (RETIRED_GATES, RETIRED_GATES - {"set_thread_model"})
-            for candidate in candidates
+        candidates += tuple(candidate | RETIRED_GATES for candidate in candidates) + tuple(
+            candidate - {"request_agent_backend_switch"} for candidate in candidates
         )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and

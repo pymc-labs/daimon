@@ -69,7 +69,7 @@ def test_a_stored_ask_on_a_retired_gate_runs(attended: bool, proxied: bool) -> N
     """A session started before a gate was lifted still stores its ask; the call runs."""
     policy = ToolSafetyPolicy(enabled=True)
     trusted = frozenset({"daimon-mcp"})
-    name = "request_agent_backend_switch"
+    name = "set_thread_model"
     call = ToolCall(
         tool_use_id="one",
         server_name="daimon-mcp",

@@ -206,6 +206,8 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_server_skill": "skill",
     "lead_intake_resolve": "resolution",
     "request_provider_allowlist": "preview_digest",
+    # The preview hands out the revision; passing it is the confirming call.
+    "request_agent_backend_switch": "expected_revision",
     "request_channel_pin": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # The card itself is the point: every call asks.
@@ -244,11 +246,9 @@ def confirmation_gated_tools() -> frozenset[str]:
     )
 
 
-#: Asked before a provider switch applied like a model change. An old agent's
+#: Asked before a thread's model pick applied like a model change. An old agent's
 #: stored ask on one is read as none: the call runs.
-RETIRED_GATES: Final[frozenset[str]] = frozenset(
-    {"request_agent_backend_switch", "set_thread_model"}
-)
+RETIRED_GATES: Final[frozenset[str]] = frozenset({"set_thread_model"})
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
@@ -257,6 +257,7 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
         frozenset(
             {
                 "request_provider_allowlist",
+                "request_agent_backend_switch",
                 "request_channel_pin",
                 "request_channel_pin_clear",
             }

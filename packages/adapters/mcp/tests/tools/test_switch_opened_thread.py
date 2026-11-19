@@ -41,6 +41,7 @@ async def test_a_copy_cloned_in_a_mention_switches_to_gemini_at_once(fresh_chat)
         target_backend="gemini",
         model="gemini-4-hydrogen",
         origin_context_id=str(chat.origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", "the switch applies on the first call"
     assert changed.target_backend == "gemini", changed

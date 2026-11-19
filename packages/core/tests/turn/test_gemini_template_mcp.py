@@ -567,6 +567,7 @@ GATED = (
     "rotate_watch_key",
     "lead_intake_resolve",
     "set_routine_sandbox_tools",
+    "request_agent_backend_switch",
 )
 
 
@@ -1212,14 +1213,12 @@ async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
-async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimon(
-    template, monkeypatch
-):
-    """The switch tool posts Daimon's own card, so a template may call it; the rest stay out."""
+async def test_a_retired_gate_is_offered_in_a_template_the_rest_stay_out(template, monkeypatch):
+    """A tool whose ask was retired runs in a template; the gated ones stay out."""
     from daimon.core.mcp_oauth import discovery
 
     request, *_ = template
-    catalogue = frozenset({"search_tools", "call_tool", "request_agent_backend_switch", *GATED})
+    catalogue = frozenset({"search_tools", "call_tool", "set_thread_model", *GATED})
 
     async def listed(_url, _token):
         return catalogue
@@ -1231,7 +1230,7 @@ async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimo
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch"}
+    assert allowed == {"search_tools", "call_tool", "set_thread_model"}
     assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
 
 
