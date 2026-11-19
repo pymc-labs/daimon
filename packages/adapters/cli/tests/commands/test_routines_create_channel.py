@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
 from daimon.adapters.cli.commands.routines import run_create_channel_routine
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import CachedMembershipResolver, Membership
-from daimon.core.routine_service import Placement, RoutineRefused
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL, Placement, RoutineRefused
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.testing import ma_agent
@@ -63,7 +63,9 @@ def _resolver(placement=None, refusal=None):
     return resolve
 
 
-async def _create(rt, tenant, kind, destination_id, resolver, *, dry_run=False, paused=False):
+async def _create(
+    rt, tenant, kind, destination_id, resolver, *, dry_run=False, paused=False, member=_member
+):
     output = StringIO()
     await run_create_channel_routine(
         rt=rt,
@@ -76,7 +78,7 @@ async def _create(rt, tenant, kind, destination_id, resolver, *, dry_run=False, 
         trigger="summarize",
         kind=kind,
         destination_id=destination_id,
-        resolver=CachedMembershipResolver(_member),
+        resolver=CachedMembershipResolver(member),
         destination_resolver=resolver,
         dry_run=dry_run,
         paused=paused,
@@ -160,6 +162,30 @@ async def test_access_policy_still_applies_to_the_destination(db_session_factory
         await _create(rt, tenant, "channel", "555", _resolver(Placement(channel_id="555")))
 
     assert await _rows(db_session_factory, tenant) == [], "nothing saved"
+
+
+async def test_a_role_gated_agent_asks_for_the_roles_not_for_a_live_read(db_session_factory):
+    """The owner's roles are read live, so a missing role is named as one, never as unreadable."""
+    tenant, rt = await _setup(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("7",))}),
+        )
+
+    async def holder(*_args):
+        return Membership(is_member=True, role_ids=("7",))
+
+    with pytest.raises(UserFacingError) as refused:
+        await _create(rt, tenant, "channel", "555", _resolver(Placement(channel_id="555")))
+    assert str(refused.value) == ROLES_REQUIRED_REFUSAL, "asks for the role"
+    assert await _rows(db_session_factory, tenant) == [], "nothing saved"
+
+    await _create(
+        rt, tenant, "channel", "555", _resolver(Placement(channel_id="555")), member=holder
+    )
+    assert len(await _rows(db_session_factory, tenant)) == 1, "a role holder creates it"
 
 
 async def test_unverified_owner_is_refused_before_any_destination_lookup(db_session_factory):

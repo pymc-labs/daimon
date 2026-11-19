@@ -430,11 +430,18 @@ async def run_create_channel_routine(
         resolve_destination=destination_resolver,
         on_change=stop_if_dry,
     )
+
+    async def fresh_subject() -> Subject:
+        return await resolve_subject(
+            rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+        )
+
     caller = RoutineCaller(
         tenant_id=tenant_id,
         subject=subject,
         platform="discord",
         own_agent_ids=frozenset({derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)}),
+        fresh_subject=fresh_subject,
     )
     new = NewRoutine(
         agent_name=agent_name,
