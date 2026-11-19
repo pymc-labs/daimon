@@ -75,6 +75,7 @@ class DmBurst[T]:
         self._flush = is_affirmative(text_of(first))
         self._stopped = False
         self._refused = False
+        self._picked = False
         self.seconds: float | None = None
         """The wait, once known; 0 means every message gets its own turn, as with no hold."""
 
@@ -122,14 +123,14 @@ class DmBurst[T]:
 
         The pick is durable, so a click any process handled is found: at once after
         `wake` or a message joining, else within `RECHECK_S`. What was held is then
-        answered without a further wait.
+        answered in one turn without a further wait, even when the wait is 0.
         """
         await self.mark(self.unanswered[0], react)
         deadline = monotonic() + seconds
         while not self._stopped:
             self._wake.clear()
             if (found := await picked()) is not None:
-                self._flush = True
+                self._flush = self._picked = True
                 return found
             remaining = deadline - monotonic()
             if self._refused or remaining <= 0:
@@ -186,9 +187,9 @@ class DmBurst[T]:
             self._wake.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), remaining)
-        batch = list(self.unanswered if seconds > 0 else self.unanswered[:1])
+        batch = list(self.unanswered if seconds > 0 or self._picked else self.unanswered[:1])
         self.closed = not batch
-        self._first, self._flush = math.inf, False
+        self._first, self._flush, self._picked = math.inf, False, False
         return batch
 
     async def _unmark(self) -> None:

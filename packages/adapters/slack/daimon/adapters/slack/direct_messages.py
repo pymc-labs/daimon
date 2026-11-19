@@ -606,7 +606,11 @@ async def _decide_cold(
                 records=runtime.turn_deps.sessionmaker,
             )
         except (DaimonError, MAResolverMissError, anthropic.APIError) as error:
-            log.warning("slack.dm.agents_unlisted", error_type=type(error).__name__)
+            log.warning(
+                "slack.dm.agents_unlisted",
+                causes=backend_refusal_causes(error),
+                error_type=type(error).__name__,
+            )
             return DmDecision(DmRefused("unrouted")), groups
         principal = await find_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id

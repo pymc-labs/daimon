@@ -34,6 +34,7 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.authz import build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
 from daimon.core.dm_access import (
     DmAgent,
@@ -106,7 +107,11 @@ async def _decide(
                 records=runtime.turn_deps.sessionmaker,
             )
         except (DaimonError, MAResolverMissError, anthropic.APIError) as error:
-            log.warning("teams.dm.agents_unlisted", error_type=type(error).__name__)
+            log.warning(
+                "teams.dm.agents_unlisted",
+                causes=backend_refusal_causes(error),
+                error_type=type(error).__name__,
+            )
             return DmDecision(DmRefused("unrouted")), [], None
         principal = await find_platform_principal(
             session, tenant_id=tenant_id, platform="teams", external_id=user_id
