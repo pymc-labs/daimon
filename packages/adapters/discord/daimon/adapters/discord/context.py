@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
@@ -320,6 +320,7 @@ def forwarded_lines(
     *,
     omit_oversized_image_urls: bool = False,
     sealed_sources: frozenset[str] = frozenset(),
+    parent_of: Callable[[int], int | None] = lambda _: None,
 ) -> list[str]:
     """The ``<forwarded>`` block for messages that forward another message, else nothing.
 
@@ -327,13 +328,13 @@ def forwarded_lines(
     The person could see it, but it is someone else's text, so it is untrusted
     content. Attachments are URL lines (the agent fetches them), never vision blocks.
     An image over the API's pixel cap is marked, and with ``omit_oversized_image_urls``
-    (a rebuild after a dead session) its URL is left out. A forward whose source channel
-    is in ``sealed_sources`` is left out.
+    (a rebuild after a dead session) its URL is left out. A forward whose source channel,
+    or the parent of a source thread (``parent_of``), is in ``sealed_sources`` is left out.
     """
     body: list[str] = []
     for message in messages:
         source = getattr(getattr(message, "reference", None), "channel_id", None)
-        if source is not None and str(source) in sealed_sources:
+        if source is not None and sealed_sources & {str(source), str(parent_of(source))}:
             continue
         for snapshot in getattr(message, "message_snapshots", None) or ():
             text = snapshot.content or _embed_text(snapshot)

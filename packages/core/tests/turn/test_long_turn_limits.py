@@ -99,7 +99,7 @@ async def _claim(
         session,
         fence=fence or OwnerDmFence(row.platform, row.external_user_id),
         route_key=row.route_key,
-        message_id=message_id,
+        message_ids=(message_id,),
         expected_scope_id=row.scope_id,
         claimed_at=at,
     )

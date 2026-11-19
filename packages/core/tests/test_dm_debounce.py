@@ -141,17 +141,17 @@ async def test_an_approval_alone_is_answered_unmarked() -> None:
     assert turns.groups == [["yes"]] and turns.marks == [], "nothing waited"
 
 
-async def test_zero_seconds_answers_at_once_and_still_merges_what_joined() -> None:
-    """With the wait off, a message that joined during the lookups is held and merged."""
-    burst = DmBurst("one", str)
+async def test_zero_seconds_answers_each_message_alone_and_unmarked() -> None:
+    """With the wait off, nothing merges or is marked, as before the setting existed."""
+    bursts: DmBursts[str, str] = DmBursts(str)
+    burst = bursts.open("k", "one")
+    burst.add("two")  # joined during the lookups, before the wait was known
     turns = _Turns()
-    burst.add("two")
-    await burst.mark("two", turns.react)
     started = monotonic()
     await burst.answer(0, turns.react, turns.answer)
-    assert turns.groups == [["one", "two"]], "nothing more is awaited"
-    assert turns.marks == [("two", True), ("two", False)], "only the held one was marked"
+    assert turns.groups == [["one"], ["two"]], "one turn each"
     assert monotonic() - started < 0.2, "no wait"
+    assert bursts.join("k", "three") is None, "a turn that waits for none takes nothing more"
 
 
 async def test_the_cap_counts_from_the_first_message_not_the_wait(monkeypatch) -> None:

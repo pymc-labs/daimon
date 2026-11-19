@@ -456,7 +456,7 @@ async def test_a_waiting_dm_turn_takes_over_once_the_holder_loses_its_fence(
                 session,
                 fence=fence,
                 route_key="dm-42",
-                message_id=message_id,
+                message_ids=(message_id,),
                 expected_scope_id=route.scope_id,
                 claimed_at=datetime.now(UTC),
             )

@@ -2164,6 +2164,14 @@ class TestForwardedInput:
         assert forwarded_lines([msg], sealed_sources=frozenset({"900"})) == []
         assert forwarded_lines([msg], sealed_sources=frozenset({"901"})), "another channel's seal"
 
+    def test_a_forward_from_a_thread_of_a_sealed_channel_is_left_out(self) -> None:
+        msg = _forward()
+        msg.reference = MagicMock(channel_id=950)
+        parents = {950: 900}.get
+
+        assert forwarded_lines([msg], sealed_sources=frozenset({"900"}), parent_of=parents) == []
+        assert forwarded_lines([msg], sealed_sources=frozenset({"901"}), parent_of=parents)
+
     def test_a_plain_message_forwards_nothing(self) -> None:
         msg = _make_message(content="hi")
         msg.message_snapshots = []

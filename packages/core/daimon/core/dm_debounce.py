@@ -66,6 +66,8 @@ class DmBurst[T]:
         self._wake = asyncio.Event()
         self._flush = is_affirmative(text_of(first))
         self._stopped = False
+        self.seconds: float | None = None
+        """The wait, once known; 0 means every message gets its own turn, as with no hold."""
 
     def add(self, item: T) -> None:
         """Join the burst. Never awaits, so a message cannot slip between a close and a join.
@@ -102,6 +104,7 @@ class DmBurst[T]:
         The first message is marked only when it waits. A group's own failures are its
         handler's to report; anything it raises ends the burst with the rest unanswered.
         """
+        self.seconds = seconds
         if seconds > 0 and not (self._flush or self._stopped):
             await self.mark(self.unanswered[0], react)
         while batch := await self._take(seconds):
@@ -130,7 +133,7 @@ class DmBurst[T]:
             self._wake.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), remaining)
-        batch = list(self.unanswered)
+        batch = list(self.unanswered if seconds > 0 else self.unanswered[:1])
         self.closed = not batch
         self._first, self._flush = math.inf, False
         return batch
@@ -152,9 +155,9 @@ class DmBursts[K: Hashable, T]:
         self._stopping = False
 
     def join(self, key: K, item: T) -> DmBurst[T] | None:
-        """Add `item` to the conversation's open burst; None when it has none."""
+        """Add `item` to the conversation's open burst; None when it has none or holds none."""
         burst = self._open.get(key)
-        if burst is None or burst.closed:
+        if burst is None or burst.closed or burst.seconds == 0:
             return None
         burst.add(item)
         return burst

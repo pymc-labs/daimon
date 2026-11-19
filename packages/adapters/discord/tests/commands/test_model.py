@@ -332,3 +332,46 @@ async def test_an_effort_alone_is_refused_on_an_agent_off_claude(
 
     assert "this agent doesn't run on Anthropic. Nothing changed." in content
     assert await _stored(db_session_factory, guild_id) is None
+
+
+async def test_default_with_an_effort_on_an_agent_off_claude_clears_and_notes(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000015
+    await _registered_guild(db_session_factory, guild_id)
+    _with_selection(monkeypatch)
+    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=True))
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+
+    content = await _run(interaction, "default", "high")
+
+    assert content.endswith("The effort was not set: this agent doesn't run on Anthropic.")
+    async with db_session_factory() as session:
+        assert (
+            await get_thread_effort(
+                session,
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
+                platform="discord",
+                thread_id=str(_THREAD_ID),
+            )
+            is None
+        )
+
+
+async def test_a_guild_off_the_lane_allowlist_changes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild_id = 720000016
+    await _registered_guild(db_session_factory, guild_id)
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+    bot = MagicMock()
+    bot._allows_guild.return_value = False
+    cog = ModelCog(bot)
+
+    await cog.model.callback(cog, interaction, "opus", None)  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+    assert (
+        "isn't set up to answer in this server"
+        in (interaction.edit_original_response.call_args.kwargs["content"])
+    )
+    assert await _stored(db_session_factory, guild_id) is None

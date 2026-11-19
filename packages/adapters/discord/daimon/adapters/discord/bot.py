@@ -2322,13 +2322,7 @@ class DaimonBot(commands.Bot):
             # only the global scope reaches DMs. A DM-capable command is left out of the
             # per-guild copy, so it shows once in a guild; a DM-only one never shows in
             # a guild, so registering it globally widens nothing.
-            dm_capable = [
-                command
-                for command in self.tree.get_commands()
-                if isinstance(command, app_commands.Command)
-                and command.allowed_contexts is not None
-                and command.allowed_contexts.dm_channel
-            ]
+            dm_capable = self._dm_capable_commands()
             if not self._global_tree_synced:
                 if self.application_id is None:
                     log.warning("tree_sync_global_clear_failed", reason="missing_application_id")
@@ -2371,6 +2365,16 @@ class DaimonBot(commands.Bot):
             log.info("tree_synced_global")
         except discord.HTTPException as exc:
             log.warning("tree_sync_global_failed", error=str(exc))
+
+    def _dm_capable_commands(self) -> list[app_commands.Command[Any, ..., Any]]:
+        """The global commands that also work in DMs; a guild copy leaves them out."""
+        return [
+            command
+            for command in self.tree.get_commands()
+            if isinstance(command, app_commands.Command)
+            and command.allowed_contexts is not None
+            and command.allowed_contexts.dm_channel
+        ]
 
     def _running_reconcile_tasks(self) -> set[asyncio.Task[Any]]:
         """Every task holding either in-flight reconcile guard right now.
@@ -2529,6 +2533,8 @@ class DaimonBot(commands.Bot):
                 self.tree.clear_commands(guild=guild_obj)
                 if self._non_production:
                     self.tree.copy_global_to(guild=guild_obj)
+                    for command in self._dm_capable_commands():
+                        self.tree.remove_command(command.name, guild=guild_obj)
                 await self.tree.sync(guild=guild_obj)
                 log.info("synced_commands_on_join", guild_id=guild_id, guild_name=guild.name)
             except discord.HTTPException as exc:
@@ -5896,6 +5902,9 @@ class DaimonBot(commands.Bot):
                     forward_messages,
                     omit_oversized_image_urls=omit_oversized_image_urls,
                     sealed_sources=sealed_sources,
+                    parent_of=lambda channel_id: getattr(
+                        self.get_channel(channel_id), "parent_id", None
+                    ),
                 )
             )
             return "\n".join(part for part in (attachment_prefix, forwarded) if part)
