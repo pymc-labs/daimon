@@ -66,7 +66,9 @@ async def test_skip_refuses_anything_but_the_defaults(
 async def test_skip_refuses_a_callback_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     """A callback watch keeps the card: skip refuses it and says to set approval to Ask."""
     _patch(monkeypatch, skipped=True)
-    with pytest.raises(ToolError, match="Callback watches always need the approval card. Ask a server admin"):
+    with pytest.raises(
+        ToolError, match="Callback watches always need the approval card. Ask a server admin"
+    ):
         await _check(source="callback")
     _patch(monkeypatch, skipped=False)
     await _check(source="callback")
