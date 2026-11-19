@@ -303,7 +303,7 @@ class TenantAccessPolicyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # False: an admin never chose; the tenant follows the deployment's keyed providers
+    # False: an admin never chose; the tenant follows the deployment default (Anthropic)
     # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
     enabled_backends_explicit: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")

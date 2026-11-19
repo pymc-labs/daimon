@@ -127,7 +127,8 @@ Memory settings show as needing setup.
   credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
   agent's permission. Personal connectors need one Reconnect after a switch.
   Self-hosted agents get it too, and their harness asks before an `ask` tool.
-  Turn it off with the `mcp_connector_relay` feature.
+  Off by default, because the provider receives what the connectors return;
+  turn it on with the `mcp_connector_relay` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
   call runs once. An unattended reply runs only what its rules allow. Turn it off

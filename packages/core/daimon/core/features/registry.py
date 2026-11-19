@@ -651,12 +651,13 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="on",
+        default="off",
         tiers=("deployment",),
         binds="turn",
         doc=(
             "An agent's own connectors work on OpenAI and Gemini agents: Daimon calls "
-            "them for the agent with the person's sign-in. Off leaves them out there."
+            "them for the agent with the person's sign-in, and that provider receives what "
+            "they return. Off leaves them out there."
         ),
         platforms=_CALL_GATE_PLATFORMS,
         authority=_ADMIN,

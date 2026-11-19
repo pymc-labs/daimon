@@ -88,7 +88,7 @@ def tenants_backend_policy_command(
         str | None,
         typer.Option(
             "--backends",
-            help="Comma-separated providers, or 'default' to follow the keyed providers.",
+            help="Comma-separated providers, or 'default' for the deployment default (Anthropic).",
         ),
     ] = None,
     expected_revision: Annotated[str | None, typer.Option("--expected-revision")] = None,
@@ -201,7 +201,7 @@ async def tenants_backend_policy(
     assert revision is not None
     try:
         # `--backends default` and a snapshot taken while defaulted both go back to
-        # following the deployment's keyed providers.
+        # following the deployment default.
         if operation == "apply":
             proposed: tuple[Provider, ...] | None = (
                 None

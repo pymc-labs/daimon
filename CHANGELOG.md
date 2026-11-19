@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gemini.** The scheduler quietly ran them on Claude. A routine whose agent,
   channel or thread is on another provider now stops with a message saying
   routines run only on Anthropic.
+- **A provider key no longer turns that provider on for every server.** A
+  server that never chose its allowed providers now uses Anthropic only, even
+  when the deployment holds an OpenAI or Gemini key. An admin opts in with
+  the allowed-providers setting in chat, on the web or from the CLI, and the
+  card says that the provider then receives the server's conversations and
+  the connector data they use. A server that already saved a list keeps it. The
+  web admin page still offers every keyed provider. Connector relay to another
+  provider (`mcp_connector_relay`) is now off until an operator turns it on.
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's

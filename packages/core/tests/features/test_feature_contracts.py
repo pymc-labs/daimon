@@ -92,7 +92,7 @@ _NARROWED: dict[str, str] = {
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
-    "mcp_connector_relay": "operator-only rollback switch",
+    "mcp_connector_relay": "operator-only: sends connector data to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",

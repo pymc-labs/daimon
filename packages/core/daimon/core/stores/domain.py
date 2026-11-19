@@ -1491,7 +1491,7 @@ class TenantBackendPolicy(_Facts):
     tenant_id: uuid.UUID
     revision: str
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
-    # False: the tenant follows the deployment's keyed providers. A snapshot from
+    # False: the tenant follows the deployment default (Anthropic). A snapshot from
     # before this field reads as an admin's choice, as it was then.
     explicit: bool = True
 
