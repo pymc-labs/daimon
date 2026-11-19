@@ -5,12 +5,18 @@ external MCP clients and agent keys reach the server directly, so the server ref
 `call_tool` re-enters the middleware with the inner tool's name, so proxied calls are covered.
 
 tools/list is filtered for every caller except a chat-execution credential: the native turn
-checks its live catalogue against its allowlist (`turn/runtime_manifest.py`), and Claude
-sessions already hide the tools in their session config. Such a caller is refused at call time.
+checks this catalogue against its consent, less the tools Off at its place, which a template's
+allowlist leaves out (`turn/template_mcp.py`); Claude sessions hide them in their session
+config. Such a caller is refused at call time.
+
+A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
+and its call is refused as not set up: a worker can't judge that setup, and the server's
+settings, so that catalogue, stay fixed while it runs.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from typing import Final
 
@@ -18,17 +24,23 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.tool_gate import (
     GATED_KEYS,
     gated_tools,
     hides_tools,
     server_gate_key,
 )
+from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
+from daimon.core.mux_backend import resource_scope
+from daimon.core.rule_views import routine_feature_place
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.stores.tenants import get_tenant
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -39,12 +51,21 @@ log = structlog.get_logger(__name__)
 
 #: Audit reason for a call refused because its capability is Off.
 DENIAL_REASON: Final = "capability_off"
+#: Audit reason for a call refused because this deployment lacks its capability's setup.
+UNSET_REASON: Final = "capability_unset"
 
 
 def _refusal(tool: str, key: str) -> str:
     return (
         f"{FEATURES[key].name} is turned off here, so {tool} can't run. Nothing was done. "
         "Ask an admin or an owner to turn it on."
+    )
+
+
+def _unset_refusal(tool: str, key: str) -> str:
+    return (
+        f"{FEATURES[key].name} isn't set up here yet, so {tool} can't run. Nothing was done. "
+        "Ask whoever runs Daimon to set it up."
     )
 
 
@@ -67,7 +88,7 @@ async def caller_places(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: object
 ) -> list[FeaturePlace]:
     """Where the call may run, from verified facts only: its turn origin, its routine, an
-    agent key's channel, or else the workspace.
+    agent key's agent and channel, or else the workspace.
 
     Several running turns of one session, when none is named, cannot be told apart. Turns
     in one channel and thread are one place; otherwise each place is returned and a gate
@@ -83,19 +104,52 @@ async def caller_places(
     if auth.routine_id is not None:
         async with runtime.session_factory() as session:
             routine = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-        if routine is not None:
-            # As the scheduler reads it (`scheduler.py`).
-            return [FeaturePlace(auth.tenant_id, "", routine.channel_id, agent_id=routine.agent_id)]
-    return [FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth))]
+            tenant = await get_tenant(session, auth.tenant_id)
+        if routine is not None and tenant is not None:
+            # As its session's toolset reads it (`headless_runner.py`).
+            return [routine_feature_place(routine, platform=tenant.platform)]
+    agent_id = None if auth.agent_id is None else await _key_agent_id(runtime, auth, auth.agent_id)
+    return [
+        FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth), agent_id=agent_id)
+    ]
+
+
+async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:
+    """An agent key's own agent id, so its agent-tier values apply rather than the channel's.
+    Cached; a failed lookup is logged and leaves the agent tier out, never refusing."""
+    key = (auth.tenant_id, derived)
+    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
+        return cached
+    try:
+        if auth.anthropic_disabled or anthropic_disabled():
+            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+                resource_scope(tenant_id=str(auth.tenant_id)), derived
+            )
+            found = None if record is None else record.ref.id
+        else:
+            agent = await find_agent_by_derived_uuid_cached(
+                runtime.client,
+                runtime.resolver_cache,
+                tenant_id=auth.tenant_id,
+                agent_id=derived,
+                records=runtime.session_factory,
+            )
+            found = None if agent is None else agent.id
+    except Exception:  # named boundary: the agent tier is extra; its lookup never refuses
+        log.warning("capability_gate.key_agent_lookup_failed", exc_info=True)
+        return None
+    if found is not None:
+        runtime.resolver_cache.derived_agent_ids[key] = found
+    return found
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:
-    """A chat-execution credential: its native catalogue must match its allowlist."""
+    """A chat-execution credential: its native turn checks the whole catalogue (`mint`)."""
     return auth.chat_agent_id is not None and auth.agent_id is None
 
 
 class CapabilityGateMiddleware(Middleware):
-    """Refuses a call to a tool whose capability is Off at the caller's place."""
+    """Refuses a call to a tool whose capability is Off at the caller's place or not set up."""
 
     def __init__(self, runtime: McpRuntime) -> None:
         self._runtime = runtime
@@ -111,6 +165,9 @@ class CapabilityGateMiddleware(Middleware):
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
+        if not server_setup_met(FEATURES[key], self._runtime.settings):
+            record_denial(UNSET_REASON)
+            raise ToolError(_unset_refusal(tool, key))
         try:
             places = await caller_places(
                 self._runtime, auth, (context.message.arguments or {}).get("origin_context_id")
@@ -140,7 +197,12 @@ class CapabilityGateMiddleware(Middleware):
         tools = await call_next(context)
         ctx = context.fastmcp_context
         auth = await ctx.get_state("auth") if ctx is not None else None
-        if not isinstance(auth, AuthIdentity) or _lists_everything(auth):
+        if not isinstance(auth, AuthIdentity):
+            return tools
+        settings = self._runtime.settings
+        unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
+        tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
+        if _lists_everything(auth):
             return tools
         try:
             places = await caller_places(self._runtime, auth, None)

@@ -8,13 +8,16 @@ from datetime import UTC, datetime
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._owner import caller_owned_ids, owned_in
 from daimon.adapters.mcp.tools._rule_view import load_caller_view, load_isolation_view
+from daimon.core.agent_target import sealed_agent_refusal
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import CHAT_PLATFORMS, TurnOriginRow
 from daimon.core.stores.thread_agent_bindings import get_binding, update_target
 from daimon.core.stores.turn_origins import (
@@ -164,6 +167,17 @@ async def resolve_setup_agent(
             "Which current agent should I configure? Nothing was changed."
         )
     return agents[0]
+
+
+async def require_unsealed_agent(
+    runtime: McpRuntime, auth: AuthIdentity, agent: BetaManagedAgentsAgent
+) -> None:
+    """Refuse a change to a private channel's own agent from outside its channel, admins too."""
+    async with runtime.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=auth.tenant_id)
+    refusal = sealed_agent_refusal(policy, mcp_subject(auth, is_admin=auth.is_admin), agent)
+    if refusal is not None:
+        raise ToolError(f"{refusal} Nothing was changed. Do not retry.")
 
 
 async def get_chat_origin(

@@ -26,6 +26,7 @@ from daimon.core.turn import session_skills
 from daimon.core.turn.admission import PREVIEW_CAPTURE_BUDGET_S
 from daimon.testing.factories import make_tenant
 from mux.contracts.ids import SkillRef
+from mux.contracts.resources import SESSION_CREATED
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -417,3 +418,161 @@ async def test_a_remembered_latest_version_still_checks_the_skills_source(
             client, scope, custom.model_copy(update={"source": "anthropic"})
         )
     assert len(hits) == 2, f"the other source asked again: {hits}"
+
+
+async def test_a_size_stored_without_its_manifest_is_measured_once_more(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row stored before SKILL.md sizes were kept can't place a large skill in
+    Gemini's upload tier, so it is read again; until that works, its size still counts."""
+    from daimon.core.stores.skill_copies import put_skill_size
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    measured = session_skills.measure_archive(tenant.id, "s0", "1", ARCHIVE)
+    legacy = measured.model_copy(update={"manifest_bytes": None})
+    async with db_session_factory.begin() as db:
+        await put_skill_size(db, legacy)
+    failures: list[Exception] = [_api_error(503), _api_error(404)]
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        if failures:
+            raise failures.pop(0)
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+
+    async def measure() -> object:
+        sizes = await session_skills.measure_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            pins=[("s0", "1")],
+        )
+        return sizes[("s0", "1")]
+
+    assert await measure() == legacy, "a blip keeps the stored size"
+    assert await measure() == legacy, "so does a failed read"
+    assert await measure() == measured and measured.manifest_bytes == 51
+    assert await measure() == measured, "stored: never read again"
+    assert downloads == ["s0"] * 3
+
+
+async def test_a_skill_md_that_is_not_text_is_checked_once_and_a_profile_without_uploads_never(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A binary SKILL.md can't mount inline, so it never fits the upload tier; the
+    row says so, and neither it nor a legacy row is read again for a manifest
+    the profile has no use for."""
+    from daimon.core.stores.skill_copies import put_skill_size
+    from mux.profiles.gemini import INLINE_REUSE
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    binary = io.BytesIO()
+    with zipfile.ZipFile(binary, "w") as archive:
+        archive.writestr("SKILL.md", b"---\nname: x\n---\n\xff\xfe")
+    measured = session_skills.measure_archive(tenant.id, "s0", "1", binary.getvalue())
+    assert measured.manifest_bytes == session_skills.NOT_TEXT
+    assert session_skills.skill_spend(INLINE_REUSE, measured) is None
+    legacy = session_skills.measure_archive(tenant.id, "s1", "1", ARCHIVE)
+    async with db_session_factory.begin() as db:
+        await put_skill_size(db, measured)
+        await put_skill_size(db, legacy.model_copy(update={"manifest_bytes": None}))
+    downloads: list[str] = []
+
+    async def download(*_a: object, skill_id: str, **_k: object) -> bytes:
+        downloads.append(skill_id)
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+
+    async def measure(*, manifests: bool) -> None:
+        await session_skills.measure_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            pins=[("s0", "1"), ("s1", "1")],
+            manifests=manifests,
+        )
+
+    await measure(manifests=False)
+    assert downloads == [], "no upload tier, no second look"
+    await measure(manifests=True)
+    assert downloads == ["s1"], "only the legacy row is read; the checked one is not"
+
+
+async def test_session_files_read_each_copys_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mux asks by copy; the bytes come from its source version. A blip retries the
+    session; anything else leaves that skill out."""
+    from typing import cast
+
+    from mux.errors import ProviderError
+
+    files = session_skills.SessionSkillFiles(
+        cast("async_sessionmaker[AsyncSession]", None), build_fake_anthropic(MARouter().dispatch)
+    )
+    files.sources[("copy-0", "7")] = SkillRef(id="s0", version="1")
+    scope, copy = resource_scope(tenant_id=str(uuid.uuid4())), SkillRef(id="copy-0", version="7")
+    reads: list[tuple[str, str]] = []
+
+    async def download(*_a: object, skill_id: str, version: str, **_k: object) -> bytes:
+        reads.append((skill_id, version))
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    upload = await files(scope, copy)
+    assert [f.path for f in upload.files] == ["SKILL.md"] and reads == [("s0", "1")]
+    with pytest.raises(ProviderError) as unknown:
+        await files(scope, SkillRef(id="copy-1", version="7"))
+    assert not unknown.value.retryable
+    for failure, retryable in ((_api_error(503), True), (_api_error(404), False), (None, False)):
+
+        async def failing(*_a: object, error: Exception | None = failure, **_k: object) -> bytes:
+            if error is not None:
+                raise error
+            return b"not an archive"
+
+        monkeypatch.setattr(session_skills, "download_skill_version", failing)
+        with pytest.raises(ProviderError) as raised:
+            await files(scope, copy)
+        assert raised.value.retryable is retryable, failure
+
+
+async def test_a_new_session_names_the_skills_it_went_without(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copy losses and failed uploads reach the agent in one notice, by source name."""
+    from typing import cast
+
+    told: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    async def tell(_request: object, losses: tuple[str, ...], names: dict[str, str]) -> None:
+        told.append((tuple(losses), dict(names)))
+
+    monkeypatch.setattr(session_skills, "_tell_missing_skills", tell)
+    files = session_skills.SessionSkillFiles(
+        cast("async_sessionmaker[AsyncSession]", None), build_fake_anthropic(MARouter().dispatch)
+    )
+    files.sources[("copy-0", "7")] = SkillRef(id="s0", version="1")
+    files.losses, files.names = ("skill:s1",), {"s0": "fonts", "s1": "pdf"}
+    request = cast("Any", object())
+    made = {"skills_left_out": ["copy-0"], SESSION_CREATED: True}
+    await session_skills.tell_left_out(request, files, made)
+    assert told == [(("skill:s1", "skill:s0"), {"s0": "fonts", "s1": "pdf"})]
+    await session_skills.tell_left_out(request, files, {"skills_left_out": ["copy-0"]})
+    assert len(told) == 1, "a replayed create (no created mark) tells nothing again"
+    files.losses = ()
+    await session_skills.tell_left_out(
+        request, files, {"skills_left_out": [], SESSION_CREATED: True}
+    )
+    await session_skills.tell_left_out(request, files, None)
+    assert len(told) == 1, "nothing left out, nothing told"

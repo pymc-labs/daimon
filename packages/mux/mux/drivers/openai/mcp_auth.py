@@ -87,9 +87,9 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
         # An authenticated override may copy only resolver-bound MCP tools.
         # Anonymous-only agents retain their credential-free native requests.
         raise context.unsupported("unbound_mcp_destination")
-    if len(authenticated) == 1:
-        value = json.dumps([authenticated[0].model_dump(mode="json")], separators=(",", ":"))
-    else:
+    value = json.dumps([authenticated[0].model_dump(mode="json")], separators=(",", ":"))
+    if len(authenticated) > 1 or len(value) > METADATA_LIMIT:
+        # A long tool list binds by digest, as several servers do.
         value = _shared_intent(authenticated, context)
     if len(value) > METADATA_LIMIT:
         raise context.unsupported("mcp_credential_metadata_size")
@@ -126,9 +126,9 @@ def fits_shared_credential(connections: Sequence[MCPConnection]) -> bool:
 
 
 def shared_intent(connections: Sequence[MCPConnection]) -> str | None:
-    """Several servers on one credential, all under the first one's URL (a host's own
-    routes), in a form that fits OpenAI's 512-character metadata value; None if they
-    don't share one. A host checks `fits_shared_credential` before it builds a request.
+    """Servers on one credential, all under the first one's URL (a host's own routes),
+    in a form that fits OpenAI's 512-character metadata value; None if they don't
+    share one. A host checks `fits_shared_credential` before it builds a request.
 
     The digest binds every name, URL and tool policy; decoding rebuilds them from
     the native tools and must reproduce it.
@@ -277,7 +277,7 @@ class _SharedIntent(BaseModel):
 def _decode_shared(value: str, tools: Sequence[Object]) -> tuple[MCPConnection, ...]:
     """Rebuild a shared-credential intent from the native tools; its digest must match."""
     intent = _SharedIntent.model_validate_json(value)
-    if len(intent.servers) < 2:
+    if not intent.servers:
         raise ValueError("invalid MCP credential references")
     native = {text(t["server_label"]): t for t in tools if t.get("type") == "mcp"}
     connections: list[MCPConnection] = []
@@ -285,14 +285,13 @@ def _decode_shared(value: str, tools: Sequence[Object]) -> tuple[MCPConnection, 
         found = native.get(name)
         if found is None:
             raise ValueError("MCP credential destination or policy changed")
+        policy = {"allowed_tools": found["allowed_tools"]} if "allowed_tools" in found else {}
+        if found.get("required"):
+            # The API echoes an unset `required` as false; keep it only when set.
+            policy["required"] = True
         connections.append(
             MCPConnection(
-                name=name,
-                url=intent.url + suffix,
-                credential_ref=intent.ref,
-                tool_policy={
-                    key: found[key] for key in ("allowed_tools", "required") if key in found
-                },
+                name=name, url=intent.url + suffix, credential_ref=intent.ref, tool_policy=policy
             )
         )
     if _digest(connections) != intent.digest:

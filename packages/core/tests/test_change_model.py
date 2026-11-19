@@ -38,7 +38,7 @@ class _Backends:
         )
 
     async def current(self, _agent: BackendAgent) -> Any:
-        return None if self.on is None else SimpleNamespace(backend=self.on)
+        return None if self.on is None else SimpleNamespace(backend=self.on, local=4)
 
     async def may_edit(self, *_: Any) -> bool:
         return True
@@ -113,11 +113,14 @@ async def test_a_claude_model_works_without_provider_choice(
 async def test_another_provider_writes_the_setting_with_its_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Moving to OpenAI writes the provider setting, consent and digest included."""
+    """Moving to OpenAI writes the provider setting at the current revision, unasked."""
     backends = _Backends(on=None)
     deps, edits = _deps(monkeypatch, backends)
     await change_model(
-        **deps, agent=_agent(), model=LUNA, actor=_actor(), accepted_drops=("skill:x",)
+        **deps,
+        agent=_agent(),
+        model=LUNA,
+        actor=_actor(),
     )
     assert edits == [], "the record is untouched"
     assert backends.writes == [
@@ -125,20 +128,19 @@ async def test_another_provider_writes_the_setting_with_its_preview(
             "set",
             {
                 "target": "openai",
-                "revision": 4,
-                "expected_preview_digest": "digest-openai",
-                "accepted_drops": ("skill:x",),
+                "revision": 0,
                 "model": "gpt-6-luna",
                 "settings": None,
             },
         )
-    ], "set_backend gets the fresh preview's digest and revision and the accepted drops"
+    ], "set_backend gets the current revision and the model"
+    assert backends.previews == 0, "no preview first: the write reads the source itself"
 
 
-async def test_a_digest_the_person_saw_is_the_one_checked(
+async def test_the_callers_revision_guards_the_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A caller's digest and revision reach the write, so a moved preview is refused there."""
+    """A caller's revision reaches the write, so a setting moved since is refused there."""
     backends = _Backends(on=None)
     deps, _ = _deps(monkeypatch, backends)
     await change_model(
@@ -146,14 +148,9 @@ async def test_a_digest_the_person_saw_is_the_one_checked(
         agent=_agent(),
         model=LUNA,
         actor=_actor(),
-        expected_digest="seen",
         expected_revision=2,
     )
-    write = backends.writes[0][1]
-    assert (write["expected_preview_digest"], write["revision"]) == ("seen", 2), (
-        "the caller's preview is what the service checks"
-    )
-    assert backends.previews == 0, "the write re-previews; no second read before it"
+    assert backends.writes[0][1]["revision"] == 2, "the caller's revision is what is checked"
 
 
 async def test_back_to_claude_edits_the_record_then_clears_the_pin(

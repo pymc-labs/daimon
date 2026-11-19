@@ -133,7 +133,11 @@ async def resolve_setup_agents(
             anthropic, tenant_id=tenant_id, name="daimon", records=records
         )
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ] or [ag for ag in [await find_renamed_seeded_agent(anthropic, tenant_id=tenant_id)] if ag]
+    ] or [
+        ag
+        for ag in [await find_renamed_seeded_agent(anthropic, tenant_id=tenant_id, records=records)]
+        if ag
+    ]
     if len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."

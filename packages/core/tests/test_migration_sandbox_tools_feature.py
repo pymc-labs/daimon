@@ -1,4 +1,4 @@
-"""Migration 0206: routine sandbox opt-ins move into the feature system and back."""
+"""Migration 0208: routine sandbox opt-ins move into the feature system and back."""
 
 import importlib.util
 import json
@@ -21,7 +21,7 @@ _TABLES = ("feature_values", "channel_changes", "routines")
 
 
 def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0206_sandbox_tools_feature.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0208_sandbox_tools_feature.py"
     spec = importlib.util.spec_from_file_location("sandbox_tools_feature_migration", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -30,8 +30,8 @@ def migration() -> ModuleType:
 
 
 def test_the_migration_follows_web_search_usage() -> None:
-    """0206 sits on main's head; a sibling adding 0206 renumbers."""
-    assert migration().down_revision == "0205_web_search_usage", "on main's head"
+    """0208 sits on main's head; a sibling adding 0208 renumbers."""
+    assert migration().down_revision == "0207_skill_manifest_bytes", "on main's head"
 
 
 def _rows(sync: Connection, sql: str) -> list[tuple[object, ...]]:
@@ -285,7 +285,7 @@ async def test_the_downgrade_drops_what_has_no_older_form(db_session: AsyncSessi
     await connection.run_sync(cycle)
 
 
-# What a release before 0206 maps and writes, still running for minutes after a deploy
+# What a release before 0208 maps and writes, still running for minutes after a deploy
 # migrates: `Routine` with these columns, `RoutineSandboxHistoryRecord`, and the upsert
 # `set_feature_value` names its index with.
 _OLD_SANDBOX_COLUMNS = (

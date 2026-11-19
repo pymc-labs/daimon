@@ -47,13 +47,6 @@ def test_a_refusal_card_offers_the_way_back_only_to_an_admin() -> None:
         assert member.help == "Ask an admin.", f"{cause}: a member is sent to an admin"
 
 
-def test_a_switch_that_needs_confirming_again_is_wording_only() -> None:
-    """The web has no confirm card to raise, so it names who can apply the switch again."""
-    card = backend_refusal(_denied("re_confirm"), agent="Scout", admin=True)
-    assert card.action is None, "no button for a card the web cannot show"
-    assert "again" in card.help, "the help says to apply it again"
-
-
 async def test_the_way_back_answers_with_a_line_or_the_words_that_refuse(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -117,9 +110,6 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         offered = (await client.get(f"{base}/models", headers=_OWN)).json()
         assert haiku in {c["value"] for c in offered["choices"]}, offered
         assert offered["current"] is None
-        shown = (await client.get(f"{base}/model-preview?value={haiku}", headers=_OWN)).json()
-        assert shown["moves"] is False and shown["refusal"] is None, shown
-        assert shown["card"] is False, "a pick that loses nothing shows no card"
         kept = await client.put(base + "/model", json={"value": haiku}, headers=_OWN)
         assert kept.status_code == 200, kept.text
         assert (await client.get(f"{base}/models", headers=_OWN)).json()["current"] == haiku
@@ -132,7 +122,5 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         agents, owner.tenant_id, db_session_factory, token, settings=settings, with_turns=True
     ) as client:
         base = f"/api/chat/sessions/{threads[1].id}"
-        refused = (await client.get(f"{base}/model-preview?value={luna}", headers=_OWN)).json()
-        assert refused["refusal"] is not None and refused["allowed"] is False, refused
         put = await client.put(base + "/model", json={"value": luna}, headers=_OWN)
         assert put.status_code == 403, put.text

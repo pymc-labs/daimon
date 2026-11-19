@@ -23,7 +23,7 @@ from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, host_call_carded_tools
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 MISMATCH_TEXT = "This call isn't the one that was approved. Nothing ran."
+REACH_PLAN_TEXT = "Nothing was asked: threads, places and people must be whole numbers."
 _OUTCOME_MAX = 2000
 
 
@@ -138,25 +139,33 @@ class HostCallGate:
         """Whether the host call gate is off on this credential's platform."""
         return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
 
-    async def ask(self, context: MiddlewareContext, identity: AuthIdentity) -> ToolResult:
-        """Record the gated call and post its card; fail closed on anything missing."""
+    async def ask(
+        self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
+    ) -> object:
+        """Record the gated call and post its card; fail closed on anything missing.
+        A call Claude's session runs without a card runs through `run` here too."""
         from daimon.adapters.mcp.tools._own_card import post_own_card
-        from daimon.core.turn.approvals import tool_call_verdict
+        from daimon.core.confirmation import reach_title
+        from daimon.core.turn.approvals import (
+            agent_rule_lookup,
+            channel_for_tool_rules,
+            read_error_verdict,
+            rule_for,
+            tool_call_verdict,
+        )
         from daimon.core.turn.unattended_capabilities import protected_tools
+        from daimon.core.turn_origin import origin_place
 
         name, args = _call_of(context)
         settings = self._runtime.settings
         platform = identity.platform or ""
         if self.off_for(identity):
             raise _refuse("off")
-        if name not in host_call_carded_tools():
-            # A reach approval is tallied under the asking turn, which is gone by the press.
-            raise _refuse("reach")
+        # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
             identity.chat_agent_id is None
             or identity.chat_session_id is None
             or identity.platform_user_id is None
-            or identity.hold is not None
         ):
             raise _refuse("no_claim")
         now = datetime.now(UTC)
@@ -183,22 +192,54 @@ class HostCallGate:
             raise _refuse("no_tool")
         if (problem := schema_problem(tool.parameters, args)) is not None:
             raise ToolError(problem)
+        title = None
+        if name == "approve_reach":
+            try:
+                title = reach_title(args)
+            except ValueError:
+                raise ToolError(REACH_PLAN_TEXT) from None
         policy = settings.tool_safety
+        call = ToolCall(
+            tool_use_id=f"host-{uuid.uuid4()}",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name=name,
+            input=args,
+        )
+        # The agent's and the channel's tool rules, read as Claude's decider reads them.
+        rule, read_error = await rule_for(
+            policy,
+            call,
+            agent_rule_lookup(
+                self._runtime.session_factory,
+                tenant_id=identity.tenant_id,
+                agent_id=origin.responder_ma_agent_id,
+                server_urls={DAIMON_SERVER_NAME: self._server},
+                also_urls={DAIMON_SERVER_NAME: self._server},
+                # Never a DM's channel, and a Slack thread's parent channel.
+                channel_id=None
+                if origin_place(origin) == "dm"
+                else channel_for_tool_rules(
+                    platform=origin.platform,
+                    channel_id=origin.parent_channel_id,
+                    private_dm_id=None,
+                ),
+            ),
+        )
         verdict = await tool_call_verdict(
             policy,
-            ToolCall(
-                tool_use_id=f"host-{uuid.uuid4()}",
-                server_name=DAIMON_SERVER_NAME,
-                tool_name=name,
-                input=args,
-            ),
+            call,
             attended=origin.attended,
             trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            confirmed_tools=protected_tools(policy),
-            agent_rule=None,
+            # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
+            confirmed_tools=protected_tools(policy) | {"approve_reach"},
+            agent_rule=rule,
         )
+        if read_error:
+            verdict = read_error_verdict(verdict, attended=origin.attended)
+        if verdict.outcome == "allow":
+            return await run(context)
         if verdict.outcome != "ask":
-            # A gated tool is never `allow` here; `deny` is an unattended or operator refusal.
+            # An unattended or operator refusal, as on Claude.
             raise _refuse(f"verdict_{verdict.reason}")
         expires_at = now + timedelta(seconds=min(policy.confirmation_timeout_s, SWITCH_CARD_MAX_S))
         async with self._runtime.session_factory.begin() as session:
@@ -220,6 +261,7 @@ class HostCallGate:
                     "route": host_calls.ROUTE_DAIMON,
                     "server": self._server,
                     "args": args,
+                    "title": title,
                     # An admin's ask is pressed by a person who must still be one.
                     "admin": identity.is_admin,
                 },

@@ -335,7 +335,7 @@ class AdminBindings:
                 channel_id=channel_id,
                 readers=as_readers(readers),
                 writers=as_writers(writers),
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default=self.default,
                 actor_account_id=actor,
             )

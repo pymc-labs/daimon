@@ -11,7 +11,8 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, NoReturn, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 
 import httpx
 from google import genai
@@ -41,6 +42,18 @@ class Transport(Protocol):
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None
     ) -> AsyncIterator[Object]: ...
+
+
+@runtime_checkable
+class EnvironmentTransport(Protocol):
+    """The Environments API: one made before any interaction, to upload files into."""
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str: ...
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None: ...
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]: ...
+    async def delete_environment(self, environment_id: str) -> None: ...
 
 
 #: The one tool an agent request with no tools of its own allows: listing it keeps
@@ -99,7 +112,7 @@ MOUNT_ECHO_LIMIT = 1024
 
 
 class MountEchoBook:
-    """Interaction id -> digests of the mount headers sent for it, bounded LRU.
+    """Interaction id -> digests of the mount and MCP headers sent for it, bounded LRU.
 
     A long-lived deployment transport sees every interaction it serves, so the
     book keeps only the most recently used ones. Losing an entry is safe: the
@@ -136,6 +149,15 @@ class MountEchoBook:
 def mount_header_digest(header: str) -> str:
     """The persisted fingerprint of a mount Authorization header we sent; never the token."""
     return hashlib.sha256(header.encode()).hexdigest()
+
+
+def mcp_header_digest(header: str) -> str:
+    """The persisted fingerprint of an MCP Authorization header we sent; never the token.
+
+    Domain-separated from `mount_header_digest`, so a digest recorded for one
+    location never clears an echo at the other.
+    """
+    return hashlib.sha256(b"mcp_server\0" + header.encode()).hexdigest()
 
 
 def _known_digest(candidate: str, digests: AbstractSet[str]) -> bool:
@@ -299,7 +321,13 @@ def _secret_path(value: JsonValue, secret: str, path: str = "$") -> str | None:
     return None
 
 
-def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Object:
+def scrub_mcp_echo(
+    value: Object,
+    tokens: AbstractSet[RedactedCredential],
+    *,
+    interaction_id: str | None = None,
+    digests: AbstractSet[str] = frozenset(),
+) -> tuple[Object, set[RedactedCredential]]:
     """Remove the echo of our own MCP server credential header, and nothing else.
 
     If an interaction echoes its request tools, our `mcp_server` entry may carry
@@ -307,11 +335,14 @@ def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Ob
     template turns alike). Only that exact location is cleaned:
     `tools[i].headers` of an `mcp_server` tool on the interaction or on a stream
     event's `interaction`, equal to a header we sent, either as that object or
-    as a list of exactly one such object (the shape the storage echo took).
-    Any other shape, key, casing or value refuses with its key path.
+    as a list of exactly one such object (the shape the storage echo took), or,
+    for `interaction_id` only, matching a recorded digest (a worker restart).
+    Any other shape, key, casing or value refuses with its key path. Returns the
+    scrubbed copy and the tokens matched by digest, for the caller's leak check.
     """
     result = copy.deepcopy(value)
     ours = [{"Authorization": "Bearer " + token} for token in tokens]
+    matched: set[RedactedCredential] = set()
     nested = result.get("interaction")
     owners = [("$", result)] + ([("$.interaction", nested)] if isinstance(nested, dict) else [])
     for base, owner in owners:
@@ -332,9 +363,20 @@ def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Ob
             if set(headers) != {"Authorization"}:
                 raise _mcp_echo_refused(path, "header_keys")
             if headers not in ours:
-                raise _mcp_echo_refused(path, "header_value_not_dispatched")
+                # Otherwise only a digest recorded for this very interaction.
+                header = headers["Authorization"]
+                if (
+                    interaction_id is None
+                    or owner.get("id") != interaction_id
+                    or not isinstance(header, str)
+                    or not header.startswith("Bearer ")
+                    or len(header) == len("Bearer ")
+                    or not _known_digest(mcp_header_digest(header), digests)
+                ):
+                    raise _mcp_echo_refused(path, "header_value_not_dispatched")
+                matched.add(RedactedCredential(header[len("Bearer ") :]))
             del tool["headers"]
-    return result
+    return result, matched
 
 
 def checked_storage_response(
@@ -354,8 +396,12 @@ def checked_storage_response(
         value, tokens or set(), interaction_id=interaction_id, digests=digests
     )
     known = {*(tokens or ()), *matched}
-    if mcp:
-        value = scrub_mcp_echo(value, mcp)
+    mcp_known = set(mcp)
+    if mcp or digests:
+        value, mcp_matched = scrub_mcp_echo(
+            value, mcp, interaction_id=interaction_id, digests=digests
+        )
+        mcp_known |= mcp_matched
     # The token anywhere else (model output, a tool result, another field, a
     # key) is a leak: check decoded keys/values and the re-encoded bytes of the
     # scrubbed payload FIRST, before any diagnostic path is built or logged.
@@ -363,7 +409,7 @@ def checked_storage_response(
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
-    for token in mcp:
+    for token in mcp_known:
         if contains_secret(value, token) or token.encode() in encoded:
             raise _mcp_echo_refused(
                 _secret_path(value, token) or "$", "token_outside_header", code="mcp_token_echo"
@@ -573,6 +619,7 @@ class SDKTransport:
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
         self._interactions = nextgen.with_options(max_retries=0).interactions
+        self._raw = nextgen.with_options(max_retries=0)
         self._files = client.aio.files
         self._models = client.aio.models
 
@@ -625,6 +672,92 @@ class SDKTransport:
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
 
+    def _environment_path(
+        self, environment_id: str, path: str = "", *, upload: bool = False
+    ) -> str:
+        prefix = "/upload" if upload else ""
+        name = quote(environment_id, safe="")
+        tail = f"/files/{quote(path)}" if path else ""
+        return f"{prefix}/{self._raw.api_version}/environments/{name}{tail}"
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        response = await provider_call(
+            self._raw.post(
+                f"/{self._raw.api_version}/environments",
+                cast_to=httpx.Response,
+                body=dict(config),
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+        try:
+            return string(object_value(cast(JsonValue, response.json()))["id"])
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_environment"
+            ) from None
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        params = {"extract": "true", **({"overwrite": "true"} if overwrite else {})}
+        await provider_call(
+            self._raw.put(
+                # A trailing slash names the directory the archive unpacks into.
+                self._environment_path(environment_id, path.rstrip("/") + "/", upload=True),
+                cast_to=httpx.Response,
+                content=archive,
+                options={
+                    "headers": {
+                        "Api-Revision": API_REVISION,
+                        "Content-Type": "application/gzip",
+                    },
+                    "params": params,
+                },
+            )
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        """Each file's size under `path`, by its path relative to `path`."""
+        prefix = path.strip("/") + "/"
+        sizes: dict[str, int] = {}
+        token: str | None = None
+        for _ in range(100):
+            params = {"recursive": "true", **({"page_token": token} if token else {})}
+            response = await provider_call(
+                self._raw.get(
+                    self._environment_path(environment_id, path),
+                    cast_to=httpx.Response,
+                    options={"headers": {"Api-Revision": API_REVISION}, "params": params},
+                )
+            )
+            try:
+                body = object_value(cast(JsonValue, response.json()))
+                files = body.get("files") or []
+                for item in files if isinstance(files, list) else ():
+                    entry = object_value(item)
+                    size = entry.get("size_bytes", "0")  # an int64, sent as a string
+                    if entry.get("type", "FILE") == "FILE" and isinstance(size, str | int):
+                        listed = string(entry["path"]).lstrip("/")
+                        sizes[listed.partition(prefix)[2] or listed] = int(size)
+                next_token = body.get("next_page_token")
+            except (KeyError, ValueError, TypeError):
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="malformed_file_list"
+                ) from None
+            if not isinstance(next_token, str) or not next_token:
+                return sizes
+            token = next_token
+        raise ProviderError("upstream", retryable=False, native_code="file_list_unbounded")
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await provider_call(
+            self._raw.delete(
+                self._environment_path(environment_id),
+                cast_to=httpx.Response,
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         # An omitted list is made explicit here, but for an AGENT request an empty
         # list still means Gemini's built-ins (billable search among them). That is
@@ -642,7 +775,8 @@ class SDKTransport:
         token = storage_request_token(bounded)
         if token is not None:
             self._storage_tokens.add(token)
-        self._mcp_tokens |= mcp_request_tokens(bounded)
+        mcp_sent = mcp_request_tokens(bounded)
+        self._mcp_tokens |= mcp_sent
         protected = (
             self._protect_storage_credentials
             or bool(self._storage_tokens)
@@ -682,6 +816,9 @@ class SDKTransport:
         if token is not None and isinstance(identity, str) and identity:
             # Keyed to the accepted interaction, so it can clear only that echo later.
             self._mount_echoes.add(identity, {mount_header_digest("Bearer " + token)})
+        if isinstance(identity, str) and identity:
+            # Persisted with the acceptance, so a restarted worker can clear this echo.
+            self._mount_echoes.add(identity, {mcp_header_digest("Bearer " + t) for t in mcp_sent})
         return created
 
     async def get(self, interaction_id: str) -> Object:

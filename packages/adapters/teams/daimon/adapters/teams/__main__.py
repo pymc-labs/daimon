@@ -16,6 +16,7 @@ from daimon.core.config import load_settings
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import log_runtime_started
+from daimon.core.turn.runtimes import preload_channel_runtimes
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 log = structlog.get_logger()
@@ -50,6 +51,7 @@ async def main() -> None:
             )
         )
         log_runtime_started("teams")  # Teams has no health heartbeat to log it
+        await preload_channel_runtimes()
         log.info("starting_teams_adapter", port=settings.teams.port)
         await server.serve()
 

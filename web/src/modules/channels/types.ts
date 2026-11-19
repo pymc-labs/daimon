@@ -118,6 +118,7 @@ export type ChannelSetting =
   | "default_agent" | "kept_agents" | "access" | "budget" | "participation" | "progress_plans" | "environment"
   | "skills" | "provider_pin" | "channel_copy" | "thread_participation" | "thread_progress_plans" | "thread_rule"
   | "thread_handoff" | "tool_rule" | "approvals" | "thread_approvals" | "cost_footer"
+  | "support_limit" | "support_menu" | "support_menu_use" | "support_channel" | "support_settle"
 
 export type SwitchMode = "on" | "off" | "disabled"
 /** Following threads or progress plans. `own` is this tier's own mode (null: inherits); `value` and `source` are what applies. */

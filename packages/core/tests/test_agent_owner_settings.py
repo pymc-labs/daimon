@@ -135,7 +135,7 @@ async def test_an_agent_key_or_a_client_is_never_the_owner(people, trust) -> Non
 
 async def test_ownership_is_read_at_the_write_not_at_the_preview(people) -> None:
     service, agent, actors, sessions = people
-    preview = await service.preview(agent, "openai")
+    await service.preview(agent, "openai")
     assert await service.may_edit(agent, actors["owner"])
     async with sessions.begin() as session:
         await agent_owners.set_owner(
@@ -148,7 +148,10 @@ async def test_ownership_is_read_at_the_write_not_at_the_preview(people) -> None
     assert not await service.may_edit(agent, actors["owner"])
     with pytest.raises(AgentBackendRefused, match="owner or admin required"):
         await service.set_backend(
-            agent, "openai", 0, actors["owner"], expected_preview_digest=preview.digest
+            agent,
+            "openai",
+            0,
+            actors["owner"],
         )
     async with sessions.begin() as session:
         assert await agent_owners.clear_owner(
@@ -237,7 +240,7 @@ async def test_old_revisions_keep_their_digest(people) -> None:
     revision = await service.set_backend(agent, "openai", 0, actors["admin"])
     from daimon.core.channel_backend import _revision_digest
 
-    assert revision.digest == _revision_digest(agent, "openai", None, None, None)
+    assert revision.digest == _revision_digest(agent, "openai", None, None)
 
 
 async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) -> None:
@@ -247,17 +250,26 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
     assert preview.target_settings == {"thread_mode": "shared"}
     with pytest.raises(AgentBackendRefused, match="owner or admin required"):
         await service.set_settings(
-            agent, settings, 0, actors["member"], expected_preview_digest=preview.digest
+            agent,
+            settings,
+            0,
+            actors["member"],
         )
     assert await service.current(agent) is None
     # Sharing threads stays an admin's call: the owner is refused, an admin is not.
     with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
         await service.set_settings(
-            agent, settings, 0, actors["owner"], expected_preview_digest=preview.digest
+            agent,
+            settings,
+            0,
+            actors["owner"],
         )
     assert await service.current(agent) is None
     revision = await service.set_settings(
-        agent, settings, 0, actors["admin"], expected_preview_digest=preview.digest
+        agent,
+        settings,
+        0,
+        actors["admin"],
     )
     assert revision.thread_mode == "shared" and revision.backend is None
     assert revision_selection(revision) == agent_selection("anthropic", None, settings)
@@ -266,7 +278,8 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
     moved = await service.set_backend(agent, "openai", 1, actors["owner"])
     assert moved.backend == "openai" and moved.thread_mode == "shared"
     await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 2, actors["owner"])
-    switched = await service.set_backend(agent, "openai", 3, actors["owner"])
+    # A different model is a new revision (naming the saved one again writes nothing).
+    switched = await service.set_backend(agent, "openai", 3, actors["owner"], model="gpt-6-astra")
     assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
     reverted = await service.revert(agent, actors["owner"], expected_revision=4)
     assert reverted.backend == "openai" and reverted.requires == REQUIRES_TOOLS
@@ -292,15 +305,13 @@ def test_effort_joins_a_revision_digest_only_once_set() -> None:
     agent = BackendAgent(
         tenant_id=uuid.UUID(int=1), agent_id=uuid.UUID(int=2), name="a", configuration_digest="d"
     )
-    unset = _revision_digest(agent, "openai", None, None, AgentSettings())
+    unset = _revision_digest(agent, "openai", None, AgentSettings())
     assert unset == _PRE_EFFORT_DIGESTS[(None, None)]
-    shared = _revision_digest(
-        agent, "openai", None, "gpt-6-luna", AgentSettings(thread_mode="shared")
-    )
+    shared = _revision_digest(agent, "openai", "gpt-6-luna", AgentSettings(thread_mode="shared"))
     assert shared == _PRE_EFFORT_DIGESTS[("gpt-6-luna", "shared")]
     effort = AgentSettings(effort="high")
     assert effort.facts() == {"effort": "high"} and not effort.is_default()
-    assert _revision_digest(agent, "openai", None, None, effort) != unset
+    assert _revision_digest(agent, "openai", None, effort) != unset
 
 
 def test_effort_belongs_to_the_agent_selection_and_not_the_default_backend() -> None:

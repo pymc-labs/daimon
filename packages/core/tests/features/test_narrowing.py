@@ -18,6 +18,7 @@ from daimon.core.config import (
     RepoMemorySettings,
     ReportHostSettings,
     Settings,
+    SupportSettings,
 )
 from daimon.core.features.registry import FEATURES, Tier
 from daimon.core.features.service import (
@@ -83,6 +84,7 @@ def _integrated_settings() -> Settings:
             ),
             "gemini": GeminiSettings(api_key=SecretStr("s")),
             "repo_memory": RepoMemorySettings(enabled=True),
+            "support": SupportSettings(escalation_channel_id="9"),
         }
     )
 

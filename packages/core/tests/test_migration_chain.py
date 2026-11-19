@@ -167,7 +167,9 @@ TAIL = (
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
     "0205_web_search_usage",
-    "0206_sandbox_tools_feature",
+    "0206_support_plans",
+    "0207_skill_manifest_bytes",
+    "0208_sandbox_tools_feature",
 )
 HEAD = TAIL[-1]
 
@@ -268,7 +270,7 @@ CHAIN = [
 TOP = (PREVIEW_HEAD, *TAIL)
 
 
-# Heads with the routine sandbox columns and history; from 0206 on they are unmapped, kept
+# Heads with the routine sandbox columns and history; from 0208 on they are unmapped, kept
 # for the release still running during a deploy.
 SANDBOX_HEADS = (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, ADMINS_HEAD, *TOP)
 

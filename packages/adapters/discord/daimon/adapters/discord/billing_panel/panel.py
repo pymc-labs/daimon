@@ -33,6 +33,7 @@ import httpx
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.billing_panel.read import (
     invoking_channel_id,
+    invoking_thread_id,
     is_platform_admin,
     load_billing_snapshot,
 )
@@ -78,13 +79,14 @@ from daimon.core.billing_panel import (
     timed_credit_note,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.usage_events import (
     cost_for_user_in_tenant_since,
     turn_count_for_user_in_tenant_since,
 )
-from daimon.core.web_links import OPEN_IN_WEB, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, Assignment, links_at, panel_links
 
 import discord
 from discord import Interaction
@@ -409,10 +411,20 @@ class _InvokerOnly(discord.ui.LayoutView):
         return True
 
 
-def web_spend_url(runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool) -> str | None:
-    """The web page of this server's spend, or None with no web app."""
+async def web_spend_url(
+    runtime: DiscordRuntime, guild_id: int | str, *, is_admin: bool, interaction: BotInteraction
+) -> str | None:
+    """The web page of this server's spend, or None with no web app or where
+    `web_awareness` is Off at the invoking channel or thread."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
-    links = panel_links(runtime.settings.web, tenant_id, admin=is_admin)
+    channel_id, thread_id = invoking_channel_id(interaction), invoking_thread_id(interaction)
+    links = await links_at(
+        runtime.sessionmaker,
+        runtime.settings,
+        FeaturePlace.of(tenant_id, "discord", channel_id, thread_id),
+        panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+        Assignment(runtime.deployment_default, runtime.anthropic, runtime.resolver_cache),
+    )
     return None if links is None else links.spend()
 
 
@@ -588,7 +600,12 @@ async def _rerender(
         account_id=view.account_id,
         now=now,
         since=since,
-        web_url=web_spend_url(runtime, interaction.guild_id, is_admin=is_admin),
+        web_url=await web_spend_url(
+            runtime,
+            interaction.guild_id,
+            is_admin=is_admin,
+            interaction=bot_interaction,
+        ),
     )
     await interaction.edit_original_response(
         view=new_view,

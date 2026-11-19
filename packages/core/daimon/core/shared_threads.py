@@ -91,10 +91,13 @@ async def resolve_shared_thread(
     platform: str,
     channel_id: str,
     thread_id: str,
+    agent_id: uuid.UUID | None = None,
 ) -> SharedThread | None:
     """The thread's shared binding, or None when the thread runs per caller.
 
-    A thread already bound shared keeps the revision it was bound under. One
+    A thread already bound shared keeps the revision it was bound under, unless
+    that revision was made for another agent than `agent_id` (the thread was
+    handed over): the new agent runs per caller under its own revision. One
     not yet bound is shared only if the channel's current revision says so
     and it is a new thread: one where someone already has a session (of any
     status) stays per caller, so configuring a channel to share never moves
@@ -129,6 +132,12 @@ async def resolve_shared_thread(
     )
     if pinned is None:
         raise BackendUnsupported(f"revision {binding.config_revision} of the thread is missing")
+    if agent_id is not None:
+        made_for = await mux_state.config_agent_id(
+            session, slot.thread.channel, binding.config_revision
+        )
+        if made_for is not None and made_for != agent_id:
+            return None
     check_backend(pinned)
     return SharedThread(slot=slot, owner=owner, revision=pinned, binding=binding)
 

@@ -11,7 +11,9 @@ from typing import Literal, NamedTuple
 import structlog
 from daimon.core._models import AgentToolRuleHistoryRecord, AgentToolRuleRecord, Tenant
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
+from daimon.core.permissions import SEALED_REFUSAL
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WILDCARD_TOOL,
@@ -310,13 +312,21 @@ async def set_rule(
     action = (
         Action.SET_AGENT_TOOL_RULE if channel_id is None else Action.SET_CHANNEL_AGENT_TOOL_RULE
     )
-    if not authorize(
-        TenantAccessPolicy(),
+    if not authorize(TenantAccessPolicy(), subject=actor, action=action):
+        raise PermissionError("only an admin may edit its tool rules")
+    decision = authorize(
+        await load_access_policy(session, tenant_id=tenant_id),
         subject=actor,
         action=action,
+        agent=AgentRef.of(agent_name),
         place=Place(channel_id=channel_id),
-    ):
-        raise PermissionError("only an admin may edit its tool rules")
+    )
+    if not decision:
+        raise PermissionError(
+            SEALED_REFUSAL
+            if decision.reason == "sealed_channel"
+            else "only an admin may edit its tool rules"
+        )
     if channel_id is not None and not channel_id:
         raise ValueError("channel_id must name a parent channel")
     server, separator, tool = tool_key.partition("/")

@@ -28,6 +28,12 @@ class UsageRevisions(Protocol):
         self, session: ResourceRef, observation_id: str, meter: Mapping[str, JsonValue]
     ) -> int: ...
 
+    async def latest(
+        self, session: ResourceRef, observation_id: str
+    ) -> Mapping[str, JsonValue] | None:
+        """The meter of the observation's newest revision, if any."""
+        ...
+
 
 class MemoryUsageRevisions:
     """Offline implementation. Sharing this object simulates host persistence."""
@@ -43,6 +49,12 @@ class MemoryUsageRevisions:
         rev = 1 if prior is None else prior[1] + (prior[0] != meter)
         self._values[identity] = (object_json(dict(meter)), rev)
         return rev
+
+    async def latest(
+        self, session: ResourceRef, observation_id: str
+    ) -> Mapping[str, JsonValue] | None:
+        prior = self._values.get((session, observation_id))
+        return None if prior is None else prior[0]
 
 
 #: Ended turns: their items no longer change, so their search count is cached.
@@ -62,7 +74,12 @@ def billable_search(item: Mapping[str, JsonValue]) -> bool:
 
 
 def observation(
-    turn: Object, session: ResourceRef, *, revision: int, web_searches: int = 0
+    turn: Object,
+    session: ResourceRef,
+    *,
+    revision: int,
+    web_searches: int = 0,
+    final: bool = False,
 ) -> UsageObservation:
     value = turn.get("usage")
     meter = {} if value is None else object_json(value)
@@ -96,6 +113,7 @@ def observation(
         if inputs is not None and outputs is not None
         else "partial",
         observed_at=datetime.now(UTC),
+        final=final,
         web_searches=web_searches,
     )
 
@@ -104,6 +122,14 @@ class OpenAIUsage:
     def __init__(self, context: Context, revisions: UsageRevisions) -> None:
         self._c, self._revisions = context, revisions
         self._searches_of: OrderedDict[tuple[ResourceRef, str], tuple[str, int]] = OrderedDict()
+        self._terminal: OrderedDict[tuple[ResourceRef, str], Object] = OrderedDict()
+
+    def note_terminal(self, session: ResourceRef, turn_id: str, usage: Object) -> None:
+        """Keep a root terminal event's own usage for a resource read that lacks it."""
+        self._terminal[session, turn_id] = usage
+        self._terminal.move_to_end((session, turn_id))
+        if len(self._terminal) > _SEARCH_CACHE:
+            self._terminal.popitem(last=False)
 
     @owned
     async def list(
@@ -113,7 +139,10 @@ class OpenAIUsage:
         raw = await self._c.call(
             "GET", f"/agents/sessions/{segment(session.id)}/turns", params=query(page)
         )
-        values = [await self._observe(session, turn) for turn in objects(raw["data"])]
+        values = [
+            await self._observe(session, *await self._settled(session, turn))
+            for turn in objects(raw["data"])
+        ]
         more = raw["has_more"]
         if not isinstance(more, bool):
             raise ValueError("invalid has_more")
@@ -125,17 +154,43 @@ class OpenAIUsage:
     async def reconcile_turn(
         self, scope: Scope, session: ResourceRef, turn_id: str
     ) -> tuple[UsageObservation, ...]:
-        """The root turn's own observation, reading no other turn or its items."""
+        """The root turn's own observation, reading no other turn or its items.
+
+        One read: usage the resource still lacks is the host's to re-read later.
+        """
         self._c.check(scope, session, "session")
         turn = await self._c.call(
             "GET", f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}"
         )
         if turn.get("id") != turn_id:
             raise ValueError("usage belongs to another turn")
-        value = await self._observe(session, turn)
+        value = await self._observe(session, *await self._settled(session, turn))
         return () if value.thread_id is not None else (value,)
 
-    async def _observe(self, session: ResourceRef, turn: Object) -> UsageObservation:
+    async def _settled(self, session: ResourceRef, turn: Object) -> tuple[Object, bool]:
+        """The turn with usage filled in, and whether that fill is a fallback.
+
+        A resource lacking usage keeps what is known: its terminal event's, else
+        stored. A fresh driver never saw the event, so a stored meter's usage
+        stands; a null read never replaces counts already revised.
+        """
+        if turn.get("usage") is not None:
+            return turn, False
+        turn_id = text(turn["id"])
+        noted = self._terminal.get((session, turn_id)) if turn.get("status") in _ENDED else None
+        if noted is None:
+            stored = await self._revisions.latest(session, "openai:turn:" + turn_id)
+            noted = stored.get("usage") if stored is not None else None
+        return (turn, False) if noted is None else ({**turn, "usage": noted}, True)
+
+    async def _observe(
+        self, session: ResourceRef, turn: Object, fallback: bool = False
+    ) -> UsageObservation:
+        """`final` only for an ended turn whose resource itself reported usage.
+
+        A fallback (stream or stored) value may be a mid-turn snapshot, so the host
+        keeps re-reading until the resource answers.
+        """
         if turn.get("session_id") != session.id:
             raise ValueError("usage belongs to another session")
         observation(turn, session, revision=1)
@@ -147,7 +202,8 @@ class OpenAIUsage:
         if searches:
             meter["web_searches"] = searches
         rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
-        return observation(turn, session, revision=rev, web_searches=searches)
+        final = not fallback and turn.get("usage") is not None and turn.get("status") in _ENDED
+        return observation(turn, session, revision=rev, web_searches=searches, final=final)
 
     async def _searches(self, session: ResourceRef, turn: Object) -> int:
         """Billable searches of an ended turn, read from its items.

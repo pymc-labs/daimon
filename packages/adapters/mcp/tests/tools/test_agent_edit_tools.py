@@ -37,6 +37,11 @@ def runtime(monkeypatch):
     for module in (edits, library):
         monkeypatch.setattr(module, "require_card", confirmed)
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
+
+    async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
+        return links
+
+    monkeypatch.setattr(web_url, "_where_aware", aware)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]
     rt.settings = SimpleNamespace(  # type: ignore[misc]

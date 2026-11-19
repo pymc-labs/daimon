@@ -46,7 +46,7 @@ from mux.drivers.openai.deployment import configured_transport
 from mux.drivers.openai.skills import bundle_digest
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_full_source import CUSTOM, F2_PARAMS, ROOT, archive
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_openai_host import Wire
@@ -179,11 +179,11 @@ class FullWire(Wire):
 
 
 @pytest.fixture
-async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, request):
+async def full_openai(switched_request, source_mcp, monkeypatch, tmp_path, request):
     gated = getattr(request, "param", False)
     host_tools = gated == "host-tools"
     native_defaults = gated in ("native-defaults", "host-tools")
-    request, _, source, actor, accepted, router, source_reads, *_ = consent_request
+    request, _, source, actor, accepted, router, source_reads, *_ = switched_request
     sessions = request.deps.sessionmaker
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
@@ -404,29 +404,11 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
             d for d in expected_drops if d not in ("builtin_tool:web_fetch", "memory")
         )
     assert quote.allowed and quote.declared_drops == expected_drops
-    if native_defaults and not host_tools:
-        from daimon.core.channel_backend import AgentBackendRefused
-
-        with pytest.raises(AgentBackendRefused) as missing_consent:
-            await service.set_backend(
-                source,
-                "openai",
-                accepted.local,
-                actor,
-                accepted_drops=tuple(
-                    drop for drop in quote.declared_drops if drop != "builtin_tool:web_fetch"
-                ),
-                expected_preview_digest=quote.digest,
-            )
-        assert missing_consent.value.reason == "drops_mismatch"
-        assert wire.posts == []
     accepted = await service.set_backend(
         source,
         "openai",
         accepted.local,
         actor,
-        accepted_drops=quote.declared_drops,
-        expected_preview_digest=quote.digest,
     )
     revision = ConfigRevision.create(
         request.admission.backend_revision.channel, 2, request.admission.backend_revision
@@ -511,7 +493,7 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     assert all(client.is_closed() for client in clients)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_full_default_public_switch_real_factory_and_authenticated_session(
     full_openai, source_mcp
 ):
@@ -595,7 +577,7 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     assert "Bearer" not in json.dumps(wire.agent)
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_shared_agent_copy_on_a_pinned_file_deployment_is_refused_at_admission(
     full_openai,
 ):
@@ -609,7 +591,7 @@ async def test_a_shared_agent_copy_on_a_pinned_file_deployment_is_refused_at_adm
     assert denied.value.reason == "backend_unsupported", "refused before any native write"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "defect",
     [
@@ -680,7 +662,7 @@ ASK_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("edited", [False, True])
 async def test_an_operator_row_pinned_before_the_gating_change_still_serves(full_openai, edited):
     """A row pinned by the older formula (which also covered Daimon's gating, so it
@@ -722,7 +704,7 @@ async def test_an_operator_row_pinned_before_the_gating_change_still_serves(full
         assert (await bind).session_ref.provider == "openai"
 
 
-@pytest.mark.parametrize("consent_request", [ASK_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [ASK_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", [True], indirect=True)
 async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(full_openai):
     request, _, canonical, wire, *_ = full_openai
@@ -758,7 +740,7 @@ async def test_confirmation_gated_mcp_tool_is_declared_without_losing_siblings(f
     assert wire.posts[0]["agent"]["tools"][0]["allowed_tools"] == ["search_tools", "call_tool"]
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("policy", ["disabled", "ask"])
 async def test_no_executable_mcp_tools_never_publishes_empty_allowlist(
     full_openai, monkeypatch, policy
@@ -818,7 +800,7 @@ NATIVE_DEFAULT_PARAMS = {
 }
 
 
-@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
 async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_openai):
     """A pinned row with the full live catalogue still admits and runs: its skills,
@@ -854,7 +836,7 @@ async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_
     assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected
 
 
-@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", ["host-tools"], indirect=True)
 async def test_host_web_fetch_when_listed_then_never_a_declared_drop(full_openai):
     """A catalogue listing Daimon's own `web_fetch` and memory tools loses neither."""
@@ -867,7 +849,7 @@ async def test_host_web_fetch_when_listed_then_never_a_declared_drop(full_openai
     assert set(PINNED_HOST_TOOLS) <= set(allowed), "the host tools are listed by name"
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_openai):
     """Capture the real creation bearer, then use it through registered MCP in the driver."""
     from typing import cast
@@ -1106,7 +1088,7 @@ async def test_native_creation_grant_human_reuse_and_unattended_handoffs(full_op
     )
 
 
-@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
 @pytest.mark.parametrize("full_openai", ["native-defaults"], indirect=True)
 async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_siblings(full_openai):
     request, _, canonical, wire, *_ = full_openai

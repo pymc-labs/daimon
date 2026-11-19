@@ -206,12 +206,9 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     # Listing names no skill and changes nothing; adding one reaches the whole library.
     "add_server_skill": "skill",
     "lead_intake_resolve": "resolution",
-    "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",
     "request_channel_pin": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
-    # A pick on another provider asks; a same-provider pick has no digest and runs.
-    "set_thread_model": "digest",
     # The card itself is the point: every call asks.
     "approve_reach": "threads",
     # Every call names its action, so every call asks.
@@ -253,30 +250,11 @@ def confirmation_gated_tools() -> frozenset[str]:
     )
 
 
-def self_carded_tools() -> frozenset[str]:
-    """Gated tools Daimon confirms with a card it posts itself (`daimon.core.switch_cards`).
-
-    A provider turn with no confirmation card of its own may call them: the
-    tool posts the card instead of acting, and the press applies.
-    """
-    return frozenset({"request_agent_backend_switch"})
-
-
-def host_call_previews(name: str, args: Mapping[str, object]) -> bool:
-    """A provider turn's call that only previews its gated write, so runs uncarded."""
-    return name == "set_thread_model" and args.get(CONFIRMED_DAIMON_TOOLS[name]) is None
-
-
-#: Gated tools that run uncarded while the host call gate is off; each refuses what needs a card.
-GATE_OFF_TOOLS: Final[frozenset[str]] = frozenset({"set_thread_model"})
-
-
-def host_call_carded_tools() -> frozenset[str]:
-    """Gated tools the host call gate cards on a turn with no card of its own.
-
-    A reach approval is tallied under the asking turn, which is gone by the press.
-    """
-    return confirmation_gated_tools() - self_carded_tools() - REACH_APPROVAL_TOOLS
+#: Asked before a provider switch applied like a model change. An old agent's
+#: stored ask on one is read as none: the call runs.
+RETIRED_GATES: Final[frozenset[str]] = frozenset(
+    {"request_agent_backend_switch", "set_thread_model"}
+)
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
@@ -284,11 +262,9 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     return (
         frozenset(
             {
-                "request_agent_backend_switch",
                 "request_provider_allowlist",
                 "request_channel_pin",
                 "request_channel_pin_clear",
-                "set_thread_model",
             }
         )
         if enabled
@@ -906,7 +882,10 @@ def decide_tool_call(
     )
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
-    if call.permission == "ask" and verdict.outcome == "allow":
+    inner = unwrap_daimon_call(call, trusted_servers)
+    retired = inner.server_name in trusted_servers and inner.tool_name in RETIRED_GATES
+    if call.permission == "ask" and verdict.outcome == "allow" and not retired:
+        # A retired gate's ask, stored on a session started before it was lifted, runs.
         return ToolVerdict(
             outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
         )

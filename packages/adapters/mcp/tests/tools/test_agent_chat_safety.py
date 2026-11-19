@@ -939,29 +939,26 @@ async def test_another_runtime_reads_a_pause_it_does_not_answer(
 
 
 @pytest.mark.parametrize("policy", [_ENABLED, _DISABLED], ids=["enabled", "disabled"])
-@pytest.mark.parametrize(
-    "call",
-    [
-        ("daimon-mcp", "request_agent_backend_switch", {"preview_digest": "d1", "revision": 3}),
-        ("daimon-mcp", "microsoft_send", {"action": "send_mail"}),
-    ],
-    ids=["backend_switch", "microsoft_send"],
-)
 async def test_a_protected_first_party_action_is_refused_unattended(
-    policy: ToolSafetyPolicy, call: Call, factory: async_sessionmaker[AsyncSession]
+    policy: ToolSafetyPolicy, factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Review A, finding 1: nobody is here to press its card, policy on or off."""
+    """Review A, finding 1: nobody is here to press its card, policy on or off.
+
+    A provider switch is not protected: it applies like a model change.
+    """
+    call: Call = ("daimon-mcp", "microsoft_send", {"action": "send_mail"})
     fake = FakeSession(script=[[call]]).with_daimon()
     await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, policy, public_url=_PUBLIC)
     _restart()
     await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await _settle(runtime)
-    assert [c["result"] for c in fake.confirmations] == ["deny"]
+    assert [c["result"] for c in fake.confirmations] == ["deny"], "nobody is here to confirm"
     [(_, agent)] = [c for c in fake.calls if c[0] == "update"]
     daimon = next(t for t in agent["tools"] if t["mcp_server_name"] == "daimon-mcp")
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
-    assert {"request_agent_backend_switch", "microsoft_send"} <= asked
+    assert "microsoft_send" in asked, asked
+    assert "request_agent_backend_switch" not in asked, "a switch asks nobody"
 
 
 async def test_a_foreign_reserved_server_is_healed_with_safety_off(

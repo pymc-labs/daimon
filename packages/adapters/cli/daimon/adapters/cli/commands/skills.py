@@ -562,7 +562,7 @@ async def _skill_add_refusal(
         )
 
     async def admin() -> Subject:
-        return Subject(is_admin=True)
+        return Subject(is_admin=True, operator=True)
 
     async def this_agent() -> BetaManagedAgentsAgent:
         return agent

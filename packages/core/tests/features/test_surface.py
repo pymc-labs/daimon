@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from daimon.core.features.registry import DEFAULT, FEATURES, TIERS
 from daimon.core.features.resolver import ResolvedFeature
-from daimon.core.features.service import TierSetting, tier_word, where
+from daimon.core.features.service import FeatureView, TierSetting, tier_word, where
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import (
     CATEGORIES,
     Choice,
+    agent_listed,
     choice,
     feature_schema,
     parse_choice,
     source_text,
     tier_options,
 )
+
+TENANT = uuid.UUID(int=1)
 
 
 def test_every_registered_key_is_in_the_schema() -> None:
@@ -104,3 +110,19 @@ def test_source_text_says_where_the_value_comes_from() -> None:
     assert source_text(spec, locked, "discord").endswith("locked by the server")
     gone = ResolvedFeature(spec.key, on, "default", False, "platform")
     assert source_text(spec, gone, "discord") == "Not available here"
+
+
+@pytest.mark.parametrize("web", ["on", "off"])
+def test_an_agent_listing_leaves_out_the_web_rows_while_web_awareness_is_off(web: str) -> None:
+    """Off at the place: the agent's settings list names neither the feature nor the web app."""
+    keys = ("web_awareness", "web.chat", "approvals")
+    views = [
+        FeatureView(
+            FEATURES[key],
+            (),
+            ResolvedFeature(key, web if key == "web_awareness" else "on", "agent"),
+        )
+        for key in keys
+    ]
+    shown = [view.spec.key for view in agent_listed(views, None, FeaturePlace(TENANT, "slack"))]
+    assert shown == (list(keys) if web == "on" else ["approvals"]), "only the web rows go"

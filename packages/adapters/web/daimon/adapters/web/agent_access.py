@@ -37,8 +37,8 @@ def edit_refusal(exc: AgentEditError) -> HTTPException:
 
 
 def change_deps(runtime: WebRuntime, caller: WebCaller | None = None) -> AgentChangeDeps:
-    """The change deps. Only a `caller` can switch an agent's provider: its loss consent is
-    read from the agent's source as that person. Without one, a switch is refused."""
+    """The change deps. Only a `caller` can switch an agent's provider: its source is read
+    as that person, so a switch back restores it. Without one, a switch is refused."""
     if runtime.anthropic is None:
         raise HTTPException(status_code=503, detail="Agents are not available here.")
     public_url = runtime.settings.mcp.public_url

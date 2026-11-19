@@ -6,11 +6,13 @@ import uuid
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_ISOLATED,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
     build_metadata,
     find_conflicting_skill_body,
     find_mount_collision,
+    is_renamed_seeded_record,
     skill_owner_candidates,
     strip_tenant_prefix,
     tenant_scoped_display_title,
@@ -300,3 +302,14 @@ def test_find_mount_collision_unique_names_return_none() -> None:
     assert result is None, (
         "unique mounts must not collide; ids missing from the map (built-ins) are skipped"
     )
+
+
+def test_renamed_seeded_record_is_a_managed_record_named_default() -> None:
+    """The record rename rewrites the record's name, not its stored `daimon_name`."""
+    stale = {MA_METADATA_KEY_NAME: "daimon", MA_METADATA_KEY_MANAGED: "true"}
+    assert is_renamed_seeded_record("default", stale), "a managed `default` record is the seed"
+    assert is_renamed_seeded_record("Default", stale), "names compare as agent names do"
+    assert not is_renamed_seeded_record("default", {}), "an unmanaged `default` is a user's own"
+    assert not is_renamed_seeded_record("default", None), "no metadata is unmanaged"
+    assert not is_renamed_seeded_record("daimon", stale), "only the new name is the renamed seed"
+    assert not is_renamed_seeded_record("helper", stale), "another name is never the seed"

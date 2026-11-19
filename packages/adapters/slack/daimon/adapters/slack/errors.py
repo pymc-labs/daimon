@@ -18,6 +18,7 @@ from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.cron import InvalidScheduleError
@@ -195,6 +196,7 @@ def _rendered(exc: Exception, request_id: str, *, mrkdwn: bool = True) -> tuple[
         ref=ref,
         error_type=type(exc).__name__,
         exc_info=exc,
+        causes=backend_refusal_causes(exc),
     )
     return message, f"Ref {ref}"
 

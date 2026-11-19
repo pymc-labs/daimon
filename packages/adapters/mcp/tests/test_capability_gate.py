@@ -16,7 +16,16 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware, caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.config import (
+    ComputeSettings,
+    NotebookSettings,
+    ReportHostSettings,
+    Settings,
+    WebSettings,
+)
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
@@ -30,6 +39,7 @@ from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_tool_schema_snapshot import (
@@ -37,11 +47,28 @@ from .test_tool_schema_snapshot import (
 )
 
 OFF = "is turned off here"
+UNSET = "isn't set up here yet"
 
 
-async def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> FastMCP:
+def _set_up() -> Settings:
+    """Every capability's setup present, so only a feature Off refuses."""
+    return _fully_configured_settings().model_copy(
+        update={
+            "report_host": ReportHostSettings(
+                host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("r" * 32)
+            ),
+            "compute": ComputeSettings(
+                enabled=True, deployment_id="d", api_token=SecretStr("c" * 32), org_slug="o"
+            ),
+        }
+    )
+
+
+async def _app(
+    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings | None = None
+) -> FastMCP:
     app = create_mcp_app(
-        settings=_fully_configured_settings(),
+        settings=settings or _set_up(),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
     )
@@ -156,13 +183,45 @@ async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
     tenant_id = await _tenant(sessionmaker)
     await _set(sessionmaker, tenant_id, "github", "off", FeatureTarget("channel", channel_id="c1"))
     agent_id = str(uuid.uuid4())
-    _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c1")
+    # Self-hosted: the key's agent is looked up in the records, where it has none.
+    key = {"platform": "discord", "agent_id": agent_id, "anthropic_disabled": True}
+    _as(monkeypatch, tenant_id, **key, bound_channel_id="c1")
     async with Client(mcp) as client:
         bound = await _error(client, "github_connect", {})
-        _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c2")
+        _as(monkeypatch, tenant_id, **key, bound_channel_id="c2")
         elsewhere = await _error(client, "github_connect", {})
     assert OFF in bound, f"the key bound to the Off channel reached github_connect: {bound!r}"
     assert OFF not in elsewhere, f"a key in another channel was refused: {elsewhere!r}"
+
+
+async def test_an_agent_key_whose_agent_has_the_web_app_off_is_kept_from_the_web_app(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The key's derived uuid maps to its agent, whose agent-tier Off then applies."""
+    tenant_id = await _tenant(sessionmaker)
+    web = WebSettings(public_url="https://app.example.com/")  # type: ignore[arg-type]
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        settings=_set_up().model_copy(update={"web": web}),
+        deployment_default=DeploymentDefault(),
+    )
+    derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agent_k")
+    runtime.resolver_cache.derived_agent_ids[(tenant_id, derived)] = "agent_k"
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        role=Role.ADMIN,
+        platform="discord",
+        agent_id=derived,
+    )
+    assert await tenant_links(runtime, auth) is not None, "On: the caller gets links"
+    await _set(sessionmaker, tenant_id, "web_awareness", "off", FeatureTarget("agent", "agent_k"))
+    assert await tenant_links(runtime, auth) is None, "Off at the key's agent: no web_url"
+    web_tool = await _gate(sessionmaker, auth, "list_web_invites", runtime)
+    lookup = await _gate(sessionmaker, auth, "list_web_people", runtime)
+    assert OFF in web_tool, f"the key's agent has the web app Off but reached it: {web_tool!r}"
+    assert OFF not in lookup, f"allowances and owners need the people lookup: {lookup!r}"
 
 
 async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_external_client(
@@ -193,6 +252,25 @@ async def test_the_tool_list_for_a_chat_credential_is_left_whole(
         await _set(sessionmaker, tenant_id, "routines", "off")
         after = {t.name for t in await client.list_tools()}
     assert before == after, f"a chat credential's list changed: {before ^ after}"
+
+
+async def test_notebook_tools_when_the_server_lacks_a_host_leave_a_chat_credentials_list(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker can't judge the notebook host, so the server drops the tools from a chat
+    credential's whole list too, and refuses a call as not set up rather than turned off."""
+    unset = _set_up().model_copy(update={"notebook": NotebookSettings()})
+    mcp = await _app(sessionmaker, unset)
+    tenant_id = await _tenant(sessionmaker)
+    notebooks = CAPABILITY_TOOLS["notebooks"]
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        listed = {t.name for t in await client.list_tools()}
+        message = await _error(client, "list_notebooks", {})
+    assert not listed & notebooks, f"notebook tools listed without a host: {listed & notebooks}"
+    assert "publish_report" in listed, "a tool that is set up stays listed"
+    assert f"{FEATURES['notebooks'].name} {UNSET}" in message, f"wrong refusal: {message!r}"
+    assert OFF not in message, f"a missing host is not a feature turned off: {message!r}"
 
 
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:
@@ -255,13 +333,17 @@ class _Context:
 
 
 async def _gate(
-    sessionmaker: async_sessionmaker[AsyncSession], auth: AuthIdentity, tool: str
+    sessionmaker: async_sessionmaker[AsyncSession],
+    auth: AuthIdentity,
+    tool: str,
+    runtime: McpRuntime | None = None,
 ) -> str:
     gate = CapabilityGateMiddleware(
-        McpRuntime(
+        runtime
+        or McpRuntime(
             session_factory=sessionmaker,
             client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
-            settings=_fully_configured_settings(),
+            settings=_set_up(),
             deployment_default=DeploymentDefault(),
         )
     )
@@ -296,7 +378,7 @@ async def test_a_session_with_two_turns_in_one_place_reads_that_place(
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
-        settings=_fully_configured_settings(),
+        settings=_set_up(),
         deployment_default=DeploymentDefault(),
     )
     places = await caller_places(runtime, auth, None)

@@ -37,7 +37,7 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
-from daimon.core.turn.session_skills import turn_session_skills
+from daimon.core.turn.session_skills import SessionSkillFiles, tell_left_out, turn_session_skills
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
@@ -197,7 +197,13 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     if prior is not None and (prior.id != binding_id or "session" not in prior.native_refs):
         raise ScopeViolation(binding_id, "Gemini binding differs from admitted revision")
-    backend = gemini_backend(config, scope, runtime, deployment.account_scope_id)
+    # A template's session uploads its skills past the inline limits as it starts.
+    files = (
+        SessionSkillFiles(request.deps.sessionmaker, request.deps.anthropic)
+        if installs_skills
+        else None
+    )
+    backend = gemini_backend(config, scope, runtime, deployment.account_scope_id, files)
 
     def ref_of(bound: ProviderBinding) -> ResourceRef:
         return ResourceRef(
@@ -246,8 +252,9 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 scope=scope,
                 # Copies belong to one account here, not to the whole project.
                 account_scope_id=f"{deployment.account_scope_id}:{scope.account_id}",
+                files=files,
             )
-            if installs_skills
+            if files is not None
             else ()
         )
         session = await backend.sessions.create(
@@ -268,6 +275,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             ),
             key=f"{binding_id}{era}:session",
         )
+        if files is not None:
+            await tell_left_out(request, files, session.native)
         return session.binding.model_copy(
             update={
                 "legacy_account_id": None if shared is not None else scope.account_id,

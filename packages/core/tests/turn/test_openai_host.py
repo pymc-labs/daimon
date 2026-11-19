@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 from collections.abc import AsyncIterator
@@ -16,6 +17,7 @@ import pytest
 from daimon.core import channel_backend
 from daimon.core.turn import openai_host
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runtime_for
+from daimon.core.turn.openai_late_usage import LateUsage
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -24,13 +26,16 @@ from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
+from mux.contracts.usage import UsageObservation
+from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.transport import SDKTransport
 from mux.errors import ContinuityLost, OperationConflict, ScopeViolation, UnsupportedCapability
-from mux.state.lease import Slot
+from mux.state.lease import Lease, Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.operations import request_digest
 from openai import AsyncOpenAI
+from structlog.testing import capture_logs
 
 from .test_provider_dispatch import (
     ACCOUNT,
@@ -760,6 +765,220 @@ async def test_durable_usage_revision_survives_runtime_restart(composed):
     assert await allocate({"usage": {"input_tokens": 3}, "subagent_id": None}) == 2
     with pytest.raises(ScopeViolation):
         await OpenAIUsageRevisions().revise(prepared.session_ref, "root", {})
+    reading = TurnPersistence(store, binding, SCOPE, operation_key="revision")
+
+    async def newest():
+        return await OpenAIUsageRevisions().latest(prepared.session_ref, "openai:turn:root")
+
+    with reading.activate():
+        meter = await reading.run(newest)
+    assert meter == {"usage": {"input_tokens": 3}, "subagent_id": None}, meter
+
+
+SLOT = Slot(
+    thread=ThreadRef(channel=REVISION.channel, thread_id="thread"), account_id=SCOPE.account_id
+)
+FINAL_USAGE = {"input_tokens": 100, "output_tokens": 20}
+
+
+def _root(usage: dict | None) -> dict:
+    return {
+        "id": "root",
+        "session_id": SESSION_ID,
+        "agent_id": "native-agent",
+        "subagent_id": None,
+        "status": "completed",
+        "created_at": 0,
+        "usage": usage,
+    }
+
+
+class LateTurn:
+    """An ended root turn prepared with a late-usage scheduler, readable like the host reads it."""
+
+    def __init__(self, composed, prepared, recorder) -> None:
+        _, self.wire, self.store, self.observations, _ = composed
+        self.prepared, self._recorder, self._reads = prepared, recorder, 0
+
+    async def read(self) -> UsageObservation:
+        """The root turn's observation as a turn in progress reads it."""
+        self._reads += 1
+        binding = await self.store.get_binding(SLOT)
+        active = TurnPersistence(self.store, binding, SCOPE, operation_key=f"read-{self._reads}")
+
+        async def reading():
+            driver = cast(OpenAIDriver, self.prepared.backend)
+            (value,) = await driver.usage.reconcile_turn(SCOPE, self.prepared.session_ref, "root")
+            return value
+
+        with active.activate():
+            return await active.run(reading)
+
+    async def record(self, value: UsageObservation) -> None:
+        await self._recorder(observation=value)
+
+    async def hold(self) -> Lease:
+        """Another holder of the thread's lease, as a running turn would be."""
+        return await self.store.acquire_lease(
+            SLOT,
+            holder="turn",
+            turn_id="other",
+            now=datetime.now(UTC),
+            ttl=timedelta(minutes=5),
+        )
+
+
+@contextlib.asynccontextmanager
+async def _late_turn(composed, late, *, serve=None, **changes) -> AsyncIterator[LateTurn]:
+    request, wire, _, _, runtime = composed
+    async with AsyncOpenAI(
+        api_key="offline",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(serve or wire.handle)),
+    ) as sdk:
+        runtime = replace(
+            runtime,
+            late_usage=late,
+            transport_factory=lambda revision, scope: SDKTransport(sdk),
+            **changes,
+        )
+        prepared = await prepare_openai(
+            replace(request, deps=replace(request.deps, turn_runtimes={PROFILE: runtime}))
+        )
+        recorder = cast(ObservationRecorder, prepared._record)
+        yield LateTurn(composed, prepared, recorder)
+
+
+async def test_an_unknown_turn_is_reread_after_it_and_recorded_measured(composed):
+    """The recorder never waits on late usage; the deferred re-read records the priced revision."""
+    wire = composed[1]
+    gate = asyncio.Event()
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    late = LateUsage(delays_s=(1.0, 2.0), sleep=held)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        assert unknown.completeness == "unknown", unknown
+        await turn.record(unknown)
+        assert len(turn.observations) == 1, "the recorder returns before any re-read"
+        wire.turns[0]["usage"] = FINAL_USAGE
+        gate.set()
+        await late.wait()
+    later = [x["observation"] for x in turn.observations]
+    assert [x.completeness for x in later] == ["unknown", "measured"], later
+    assert (later[1].revision, later[1].input_tokens) == (unknown.revision + 1, 100), later
+
+
+async def test_a_fallback_usage_when_the_resource_still_lacks_it_then_is_reread_to_the_final(
+    composed,
+):
+    """A mid-turn snapshot kept as the fallback is billed, but never ends the re-reads."""
+    wire, waits = composed[1], list[float]()
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) == 2:
+            wire.turns[0]["usage"] = FINAL_USAGE
+
+    late = LateUsage(delays_s=(1.0, 2.0, 4.0), sleep=sleep)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root({"input_tokens": 50, "output_tokens": 5})]
+        await turn.read()  # the spend guard stores a mid-turn snapshot
+        wire.turns[0]["usage"] = None
+        fallback = await turn.read()
+        assert (fallback.completeness, fallback.input_tokens) == ("measured", 50), fallback
+        assert not fallback.final, "a fallback is never final"
+        await turn.record(fallback)
+        await late.wait()
+    assert waits == [1.0, 2.0], "the first re-read found only the fallback and went on"
+    final = turn.observations[-1]["observation"]
+    assert (final.input_tokens, final.output_tokens, final.final) == (100, 20, True), final
+
+
+async def test_reread_when_the_thread_is_busy_then_retries_after_the_lease_frees(composed):
+    """A running turn holding the lease makes the late read wait for its next attempt."""
+    wire, waits = composed[1], list[float]()
+    held = []
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+        if len(waits) == 2:
+            await turn.store.release_lease(held[0])
+
+    late = LateUsage(delays_s=(1.0, 2.0, 4.0), sleep=sleep)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        wire.turns[0]["usage"] = FINAL_USAGE
+        held.append(await turn.hold())
+        await turn.record(unknown)
+        await late.wait()
+    assert waits == [1.0, 2.0], "the busy read retried once, then the read went through"
+    assert turn.observations[-1]["observation"].final, turn.observations
+
+
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_reread_when_the_read_fails_or_hangs_then_the_lease_is_released(composed, failure):
+    """A failed or timed-out read leaves the thread free for its turns."""
+    wire = composed[1]
+    down = False
+
+    async def serve(req: httpx.Request) -> httpx.Response:
+        if down and "/turns/" in req.url.path:
+            if failure == "hang":
+                await asyncio.Event().wait()
+            raise httpx.ReadError("provider down")
+        return wire.handle(req)
+
+    async def never(delay: float) -> None:
+        return None
+
+    late = LateUsage(delays_s=(1.0,), sleep=never)
+    async with _late_turn(composed, late, serve=serve, late_read_timeout_s=0.05) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        down = True
+        await turn.record(unknown)
+        await late.wait()
+        lease = await turn.hold()  # LeaseBusy here means the failed read kept the lease
+        await turn.store.release_lease(lease)
+    assert len(turn.observations) == 1, "nothing was read, so nothing more was recorded"
+
+
+async def test_reread_when_the_thread_moved_to_another_session_then_logs_and_stops(composed):
+    """A re-read of a turn whose thread is bound elsewhere is dropped, with a warning."""
+    wire, waits = composed[1], list[float]()
+
+    async def sleep(delay: float) -> None:
+        waits.append(delay)
+
+    late = LateUsage(delays_s=(1.0, 2.0), sleep=sleep)
+    async with _late_turn(composed, late) as turn:
+        wire.turns = [_root(None)]
+        unknown = await turn.read()
+        binding = await turn.store.get_binding(SLOT)
+        moved = binding.model_copy(
+            update={
+                "native_refs": {**binding.native_refs, "session": "sess-other"},
+                "generation": binding.generation + 1,
+            }
+        )
+        await turn.store.put_binding(moved, expected_generation=binding.generation)
+        with capture_logs() as logs:
+            await turn.record(unknown)
+            await late.wait()
+    (event,) = [entry for entry in logs if entry["event"] == "late_usage.rebound"]
+    assert (event["log_level"], event["turn_id"], event["session_id"]) == (
+        "warning",
+        "root",
+        SESSION_ID,
+    ), event
+    assert event["bound_session_id"] == "sess-other", event
+    assert waits == [1.0], "the re-reads stopped at the rebind"
+    assert len(turn.observations) == 1, "the other session's turn was never read"
 
 
 @pytest.mark.parametrize("composed", ["postgres"], indirect=True)
