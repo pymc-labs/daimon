@@ -393,7 +393,6 @@ async def _answer_burst(
             client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
         )
         return
-    role = await _live_role(client, user_id=user_id, team_id=team_id)
     seconds = await debounce_seconds(
         runtime.sessionmaker, runtime.settings, conversation.tenant_id, "slack"
     )
@@ -437,6 +436,8 @@ async def _answer_burst(
         if not content:
             return
         try:
+            # Read per group: one queued behind a running turn must not run on a stale role.
+            role = await _live_role(client, user_id=user_id, team_id=team_id)
             said = await reply_to_dm(
                 runtime.turn_deps,
                 platform="slack",
