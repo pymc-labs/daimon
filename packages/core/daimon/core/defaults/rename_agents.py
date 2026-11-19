@@ -6,9 +6,9 @@ variant, its self-hosted record and every live name reference to the new name.
 It runs before the agent pass and sweep, so the old agent is never archived and
 no second one is created.
 
-Order: the database references commit first, then the provider renames. A
-failure leaves the managed agent under its old name, so the next apply finds
-it again and redoes both; every step is idempotent.
+Order: the database references commit first, then the provider renames, then
+the access rules. A failure leaves the managed agent under its old name, so the
+next apply finds it again and redoes them; every step is idempotent.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from daimon.core.stores.agent_rename import (
     SelfHostedState,
     inspect_selfhosted_rename,
     rename_agent_references,
+    rename_policy_keys,
     rename_selfhosted_agent,
 )
 from sqlalchemy import text
@@ -230,14 +231,20 @@ async def write_seeded_rename(
 
 
 async def move_seeded_rename(
-    client: AsyncAnthropic | None, rename: SeededRename, *, tenant_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    session_factory: async_sessionmaker[AsyncSession],
+    rename: SeededRename,
+    *,
+    tenant_id: uuid.UUID,
 ) -> None:
-    """The provider half of `rename`, once its database half committed. Idempotent."""
+    """The provider half of `rename`, then its access rules. Idempotent."""
     if client is not None:
         for agent in rename.moves:
             await _rename_on_provider(
                 client, agent, tenant_id=tenant_id, old=rename.old, new=rename.new
             )
+    async with session_factory() as session, session.begin():
+        await rename_policy_keys(session, tenant_id=tenant_id, old=rename.old, new=rename.new)
     _log.info("defaults.agent_renamed", tenant_id=str(tenant_id), old=rename.old, new=rename.new)
 
 
@@ -274,7 +281,7 @@ async def rename_seeded_agent(
         if rename is None:
             return None
         await write_seeded_rename(session, rename, tenant_id=tenant_id)
-    await move_seeded_rename(client, rename, tenant_id=tenant_id)
+    await move_seeded_rename(client, session_factory, rename, tenant_id=tenant_id)
     return rename.outcome
 
 

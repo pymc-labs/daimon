@@ -1254,23 +1254,23 @@ def test_role_gate_requires_current_membership_and_matching_role(action: Action)
 
 
 @pytest.mark.parametrize(
-    ("name", "metadata", "ruled"),
+    ("name", "metadata", "aliased"),
     [
-        ("daimon", {"daimon_managed": "true", "daimon_name": "daimon"}, True),
         ("default", {"daimon_managed": "true", "daimon_name": "default"}, True),
-        ("daimon-reader", {"daimon_reader_of": "ag_1", "daimon_reader_source": "daimon"}, True),
+        ("daimon", {"daimon_managed": "true", "daimon_name": "daimon"}, False),
+        ("default-reader", {"daimon_reader_of": "h", "daimon_reader_source": "default"}, False),
         ("default", {"daimon_name": "default"}, False),
     ],
-    ids=["seeded-before-provider-rename", "seeded-after", "stale-reader", "own-default"],
+    ids=["seeded-renamed", "seeded-unrenamed", "reader", "own-default"],
 )
-def test_agent_names_when_rules_moved_to_default_then_seeded_names_carry_them(
-    name: str, metadata: dict[str, str], ruled: bool
+def test_agent_names_when_builtin_name_then_only_the_renamed_seed_takes_the_old_rules(
+    name: str, metadata: dict[str, str], aliased: bool
 ) -> None:
-    """The rename moves rules to `default` before the provider name follows."""
+    """A rule on the other built-in name may be a workspace's own agent's."""
     from daimon.core.access_policy import AgentRule, agent_invoker_roles
     from daimon.core.authz import agent_names
 
-    policy = TenantAccessPolicy(agent_rules={"default": AgentRule(invoker_role_ids=("1234",))})
+    other = "daimon" if name.startswith("default") else "default"
+    policy = TenantAccessPolicy(agent_rules={other: AgentRule(invoker_role_ids=("1234",))})
     names = agent_names(name, metadata)
-    assert ({"default", "daimon"} <= set(names)) is ruled, f"{names}: both names, seeded only"
-    assert agent_invoker_roles(policy, names), f"{names} keep the rule moved to default"
+    assert bool(agent_invoker_roles(policy, names)) is aliased, f"{names} under {other}'s rule"

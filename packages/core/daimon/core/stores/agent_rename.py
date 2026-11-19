@@ -122,13 +122,16 @@ async def rename_agent_references(
         )
         .values(agent_name=new)
     )
-    await _rename_policy_keys(session, tenant_id=tenant_id, old=old, new=new)
 
 
-async def _rename_policy_keys(
+async def rename_policy_keys(
     session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
 ) -> None:
-    """Move the access policy's per-agent rules; an existing `new` entry wins."""
+    """Move the access policy's per-agent rules; an existing `new` entry wins.
+
+    Called once the agent holds `new`, so an agent still named `old` keeps its
+    rules and never takes another agent's.
+    """
     policy = await session.scalar(
         select(TenantAccessPolicyRecord.policy)
         .where(TenantAccessPolicyRecord.tenant_id == tenant_id)

@@ -12,6 +12,7 @@ from daimon.core.stores.agent_rename import (
     _KEYED_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
     _LIVE_NAME_COLUMNS,  # pyright: ignore[reportPrivateUsage]
     rename_agent_references,
+    rename_policy_keys,
     rename_selfhosted_agent,
 )
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
@@ -138,7 +139,7 @@ async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_
     )
     await db_session.flush()
 
-    await rename_agent_references(db_session, tenant_id=tenant.id, old="daimon", new="default")
+    await rename_policy_keys(db_session, tenant_id=tenant.id, old="daimon", new="default")
 
     policy = await db_session.scalar(
         select(TenantAccessPolicyRecord.policy)

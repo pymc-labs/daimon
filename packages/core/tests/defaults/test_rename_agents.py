@@ -255,7 +255,7 @@ async def test_apply_when_reader_source_is_not_seeded_then_reader_stays(
         assert {"default", "default-reader"} == set(live), "the seeded agent's reader follows it"
 
 
-async def test_apply_when_only_own_default_exists_then_refuses_it_without_deferring(
+async def test_apply_when_only_own_default_exists_then_defers_adopting_it(
     tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     name = "default"
@@ -265,8 +265,8 @@ async def test_apply_when_only_own_default_exists_then_refuses_it_without_deferr
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    assert _actions(report) == [("default", Action.FAILED)], (
-        f"with nothing to rename the agent pass runs and refuses to adopt it: {report}"
+    assert _actions(report) == [("default", Action.DEFERRED)], (
+        f"the agent pass refuses to adopt it without failing the boot: {report}"
     )
     live = _live(state)
     assert list(live) == [name], f"nothing is created or archived: {live}"
@@ -490,7 +490,10 @@ async def test_rename_when_a_concurrent_apply_moved_the_reader_then_keeps_its_su
     )
 
     await move_seeded_rename(
-        build_fake_anthropic(make_fake_ma_handler(state)), rename, tenant_id=_TENANT
+        build_fake_anthropic(make_fake_ma_handler(state)),
+        db_session_factory,
+        rename,
+        tenant_id=_TENANT,
     )
 
     assert list(_live(state)) == ["default-reader"], "the reader never becomes `default`"

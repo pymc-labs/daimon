@@ -145,6 +145,7 @@ async def rename_selfhosted_defaults(
     *,
     dry_run: bool,
     skip_tenant_ids: Collection[uuid.UUID] = (),
+    only_tenant_ids: Collection[uuid.UUID] | None = None,
 ) -> ApplyReport:
     """Run pending seeded renames for every tenant with a self-hosted record to move.
 
@@ -152,7 +153,8 @@ async def rename_selfhosted_defaults(
     Postgres; a `client` also lets each tenant's managed agents move with it.
     The tree is checked first, so a bad one fails before any write. Run it after
     `apply_defaults` has passed its pre-flight, and pass the tenants that apply
-    renamed itself as `skip_tenant_ids` so none is reported twice.
+    renamed itself as `skip_tenant_ids` so none is reported twice;
+    `only_tenant_ids` limits the pass to those tenants.
     """
     report = ApplyReport()
     agents_root = defaults_root / "agents"
@@ -163,22 +165,25 @@ async def rename_selfhosted_defaults(
         async with session_factory() as session:
             tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
         for tenant_id in tenant_ids:
-            if tenant_id in skip_tenant_ids:
+            if tenant_id in skip_tenant_ids or (
+                only_tenant_ids is not None and tenant_id not in only_tenant_ids
+            ):
                 continue
-            await _run_isolated(
-                report,
-                lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(
-                    client,
-                    session_factory,
-                    tenant_id=tenant_id,
-                    old=old,
-                    new=new,
-                    lock_key=reconcile_lock_key(tenant_id),
-                    dry_run=dry_run,
-                ),
-                kind="agent",
-                name=new,
-            )
+            with structlog.contextvars.bound_contextvars(tenant_id=str(tenant_id)):
+                await _run_isolated(
+                    report,
+                    lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(
+                        client,
+                        session_factory,
+                        tenant_id=tenant_id,
+                        old=old,
+                        new=new,
+                        lock_key=reconcile_lock_key(tenant_id),
+                        dry_run=dry_run,
+                    ),
+                    kind="agent",
+                    name=new,
+                )
     return report
 
 
@@ -519,7 +524,7 @@ async def _reconcile_core(
     # their old names, so the next apply plans the same renames again.
     async def _move() -> None:
         for rename in due:
-            await move_seeded_rename(client, rename, tenant_id=tenant_id)
+            await move_seeded_rename(client, session_factory, rename, tenant_id=tenant_id)
 
     moved = not await _halted(_move)
     if moved:
