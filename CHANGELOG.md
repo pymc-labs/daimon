@@ -7,15 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **The built-in agent is named `default`.**
-  It was `daimon`; its prompt, the bot's name and its picture stay the same, and its reader variant is `default-reader`.
-  On upgrade, `daimon defaults apply` renames the existing agent in place on each workspace, so its sessions, threads, routines, channel and workspace defaults, tool rules and access-policy rules keep working. Audit and history records keep the old name.
-  A self-hosted `daimon` agent record is renamed the same way, with or without Anthropic credentials.
-  If a workspace already has its own agent named `default`, apply leaves the built-in agent untouched, reports that workspace as failed and says what to do: rename or archive that agent, then run apply again.
-  Until then, requests for `default` still reach the built-in agent, never the workspace's own.
-  Agent copies such as `daimon-copy` keep their names. Skills synced to the built-in agent before the rename keep their `daimon/` title prefix.
-  `daimon selfhosted init --name` defaults to `default`.
-  On Discord, a reply from the deployment's default agent is unlabelled under any name, as on Slack and Teams.
+- **The built-in agent is named `default`.** It was `daimon`; its prompt, bot
+  name and picture stay, and its reader variant is `default-reader`. On upgrade,
+  `daimon defaults apply` renames each workspace's seeded agent and its managed
+  self-hosted record in place, keyless or not, so sessions, threads, routines,
+  defaults, tool and access rules keep working; audit history keeps the old name
+  and `daimon` stays taken by the renamed agent. A workspace with its own
+  `default` agent, or its own unmanaged `daimon` record, is left as is: apply
+  reports its rename as deferred, exits zero and tries again next time, while
+  requests for `default` still reach the built-in agent. Copies such as
+  `daimon-copy` keep their names, and the `init` commands default to `default`.
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
