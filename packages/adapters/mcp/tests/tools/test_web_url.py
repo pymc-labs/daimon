@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _web_url as web_url
+from daimon.adapters.mcp.tools import routines as routines_tools
 from daimon.adapters.mcp.tools._web_url import admin_links, tenant_links
 from daimon.adapters.mcp.tools.agents import (  # pyright: ignore[reportPrivateUsage]
     AgentInfo,
@@ -72,6 +73,16 @@ def web_role(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # `web_awareness` itself is checked in core (`links_at`); here it is On.
     monkeypatch.setattr(web_url, "_where_aware", aware)
     return state
+
+
+@pytest.fixture(autouse=True)
+def no_sandbox_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests read no database; a routine's sandbox status has its own tests."""
+
+    async def off(_session: Any, rows: list[RoutineRow], _platform: str) -> dict[Any, None]:
+        return {row.id: None for row in rows}
+
+    monkeypatch.setattr(routines_tools, "opted_in_by_many", off)
 
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]

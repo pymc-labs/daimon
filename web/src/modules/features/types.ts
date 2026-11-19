@@ -1,5 +1,5 @@
 // `/api/features*` shapes: the schema describes every key, a place's features say what is set where.
-export type Tier = "deployment" | "workspace" | "agent" | "channel" | "thread"
+export type Tier = "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine"
 
 export type FeatureSchema = {
   key: string

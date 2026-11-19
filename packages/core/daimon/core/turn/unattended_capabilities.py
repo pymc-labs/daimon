@@ -25,8 +25,8 @@ split: a server named `linear/bridge` would otherwise alias a tool on
 `linear`. A server name holding `/` is refused outright.
 
 `ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
-sandbox tools are off except in isolated long-job workers; the admin opt-in is per routine
-(`Routine.sandbox_tools_enabled`), and `capability_policy` honours it only for
+sandbox tools are off except in isolated long-job workers; the admin opt-in is the
+`routine_sandbox_tools` feature, and `capability_policy` honours it only for
 the `routine` entry point.
 """
 
@@ -128,8 +128,8 @@ def capability_policy(
 ) -> CapabilityPolicy:
     """The entry point's policy; a caller that names none gets nothing extra.
 
-    `routine_sandbox_tools` is the routine's own admin opt-in
-    (`Routine.sandbox_tools_enabled`). It turns built-ins on for the `routine`
+    `routine_sandbox_tools` is the admin opt-in of that feature, for the routine or its
+    agent (`daimon.core.routine_sandbox`). It turns built-ins on for the `routine`
     entry point and is ignored for every other: watches, wakes, agent chat,
     `daimon run` and checkpoints have no opt-in.
     """
