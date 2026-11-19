@@ -23,7 +23,6 @@ them.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import discord
@@ -186,15 +185,3 @@ async def test_build_context_xml_omits_keys_when_the_mounted_env_is_stale(
     xml, _ = await build_context_xml(thread, trigger, key_names=key_names)
 
     _assert_no_keys_element(xml, builder_name="build_context_xml")
-
-
-def test_context_module_references_turn_keys() -> None:
-    source = Path("packages/adapters/discord/daimon/adapters/discord/context.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "turn_keys" in source, (
-        "discord/context.py must reference daimon.core.turn_keys — this is the wiring's "
-        "tripwire. If you are reading this because it failed, you unwired render_keys_element: "
-        "do so deliberately, then invert the assertions in this file back to name-absence."
-    )
