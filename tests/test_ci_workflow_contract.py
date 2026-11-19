@@ -782,11 +782,10 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
     ):
         assert job["env"][flag] == f"${{{{ matrix.{matrix_key} }}}}"
     command = " ".join(_pytest_commands(job))
-    for selected in (
-        "test_turn_runs_on_the_selected_leg",
-        "packages/core/tests/turn/test_staging_configuration_paths.py",
-    ):
-        assert selected in command
+    assert "packages/core/tests/turn/test_staging_configuration_paths.py" in command
+    for path in command.split():
+        if path.endswith(".py") or ".py::" in path:
+            assert (_WORKFLOWS.parents[1] / path.split("::")[0]).is_file(), f"{path} must exist"
 
 
 def test_journeys_run_on_the_default_and_production_backend_pins() -> None:

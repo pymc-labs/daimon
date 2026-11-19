@@ -232,7 +232,6 @@ jobs:
       - name: pytest (${{ matrix.configuration }})
         run: >-
           uv run pytest
-          tests/parity/test_turn_leg.py::test_turn_runs_on_the_selected_leg
           packages/core/tests/turn/test_staging_configuration_paths.py
           -n 2 --timeout=300 --durations=20
           --junitxml=staging-config-${{ matrix.configuration }}.xml
