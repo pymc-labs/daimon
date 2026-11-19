@@ -186,7 +186,7 @@ async def _slack_post_check(
         if body.get("error") == "channel_not_found":
             # A private channel Daimon is not in answers the same way as a missing one.
             return slack_check(label=label, found=False)
-        raise PlatformUnreadable("slack refused")
+        raise PlatformUnreadable("refused")
     channel = as_dict(body.get("channel"))
     return slack_check(
         label=label,
