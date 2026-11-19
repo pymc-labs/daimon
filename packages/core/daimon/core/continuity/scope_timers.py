@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.anthropic_guard import AnthropicDisabled, independent_wake_provider_context
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.messages import render_timer_seed
 from daimon.core.continuity.wakes import (
     WAKE_MAX_ATTEMPTS,
@@ -102,7 +103,10 @@ async def dispatch_scope_timer(
             skip_reason = f"admission_denied:{exc.reason}"
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning(
-                "scope_timer.dispatch_failed", row_id=str(row.id), error_type=type(exc).__name__
+                "scope_timer.dispatch_failed",
+                row_id=str(row.id),
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
             )
             skip_reason = "dispatch_failed"
         await settle_wake(
