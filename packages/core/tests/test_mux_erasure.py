@@ -527,7 +527,8 @@ async def test_the_erased_accounts_private_provider_sessions_go_to_the_provider_
         ("anthropic", "session-private-a"),
         ("openai", "session-openai-a"),
     }, "only A's private sessions, never B's or the shared one"
-    assert next(i for i in sent if i.provider == "openai").account_scope_id == "scope-1"
+    openai = next(i for i in sent if i.provider == "openai")
+    assert (openai.account_scope_id, openai.profile) == ("scope-1", "openai.agents_sdk")
 
 
 async def test_a_provider_outage_never_fails_the_erasure(world: World) -> None:

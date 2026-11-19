@@ -326,6 +326,7 @@ class ProviderSession:
     provider: str
     session_id: str
     account_scope_id: str | None
+    profile: str
 
 
 async def provider_sessions(
@@ -336,17 +337,20 @@ async def provider_sessions(
     Read before `erase` removes the bindings that name them. Shared slots are not listed.
     """
     rows = await session.execute(
-        select(ProviderBinding.tenant_id, ProviderBinding.provider, ProviderBinding.binding).where(
-            ProviderBinding.binding_id.in_(_private_slot_ids(_account_key(account_id)))
-        )
+        select(
+            ProviderBinding.tenant_id,
+            ProviderBinding.provider,
+            ProviderBinding.binding,
+            ProviderBinding.profile,
+        ).where(ProviderBinding.binding_id.in_(_private_slot_ids(_account_key(account_id))))
     )
     found: dict[tuple[uuid.UUID, str, str], ProviderSession] = {}
-    for tenant_id, provider, binding in rows.tuples():
+    for tenant_id, provider, binding, profile in rows.tuples():
         refs = cast("dict[str, str]", binding.get("native_refs") or {})
         session_id = refs.get("session")
         if session_id:
             found[tenant_id, provider, session_id] = ProviderSession(
-                tenant_id, provider, session_id, refs.get("account_scope")
+                tenant_id, provider, session_id, refs.get("account_scope"), profile
             )
     return tuple(found.values())
 
