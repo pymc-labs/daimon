@@ -894,6 +894,10 @@ async def clear_pinned_on(
     cleared one."""
     spec = FEATURES[key]
     assert spec.pinned, f"{key} has no pin"
+    # Most edits touch no opt-in: look before taking the tenant lock, then read again under it.
+    found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
+    if found is None or found.value != "on":
+        return False
     await lock_tenant(session, tenant_id)
     found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
     if found is None or found.value != "on":

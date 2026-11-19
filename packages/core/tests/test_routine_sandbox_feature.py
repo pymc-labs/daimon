@@ -318,6 +318,36 @@ async def test_a_material_edit_clears_the_routine_on_and_a_schedule_edit_keeps_i
     assert (last.after, last.surface) == (None, "system"), "recorded as Daimon's own change"
 
 
+async def test_an_edit_takes_the_tenant_lock_only_to_clear_an_opt_in(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A material edit of a routine with no opt-in must not serialize the whole workspace."""
+    from daimon.core.features import service
+
+    locked: list[object] = []
+    real = service.lock_tenant
+
+    async def spy(session: AsyncSession, tenant_id: object) -> None:
+        locked.append(tenant_id)
+        await real(session, tenant_id)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "lock_tenant", spy)
+    row = await _routine(db_session)
+    async with db_session_factory.begin() as session:
+        await update_routine(
+            session, row.id, tenant_id=row.tenant_id, trigger_message="a", edited_by="owner-1"
+        )
+    assert locked == [], "no opt-in, no lock"
+    await _set(db_session_factory, row, "routine", "on", pin=PIN)
+    locked.clear()
+    async with db_session_factory.begin() as session:
+        await update_routine(
+            session, row.id, tenant_id=row.tenant_id, trigger_message="b", edited_by="owner-1"
+        )
+    assert locked, "clearing an opt-in locks the workspace"
+    assert await own_opt_in(db_session_factory, routine_place(row, "discord")) == (None, None)
+
+
 async def test_a_provider_move_clears_the_opt_ins_naming_the_old_agent(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
