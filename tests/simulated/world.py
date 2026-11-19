@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
@@ -29,6 +30,7 @@ from daimon.core.config import (
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import (
     load_access_policy,
     policy_write_transaction,
@@ -157,6 +159,29 @@ async def set_agent_backend(
     await service.set_backend(agent, backend, current.local if current else 0, actor)
 
 
+async def switch_to(
+    world: World, tenant_id: UUID, provider: Provider, *, platform: Platform, user_id: str
+) -> None:
+    """Turn `provider` on and move the default agent onto it; Anthropic needs neither."""
+    if provider != "anthropic":
+        await enable_backend(world, tenant_id, provider)
+        await set_agent_backend(
+            world, tenant_id, platform=platform, user_id=user_id, backend=provider
+        )
+
+
+async def metering(
+    world: World, tenant_id: UUID, provider: Provider
+) -> tuple[list[tuple[int | None, int | None]], list[tuple[int, int]]]:
+    """The usage rows Daimon wrote, and the calls the providers billed."""
+    async with world.sessions() as session:
+        rows = await usage_events.list_for_tenant(session, tenant_id=tenant_id)
+    fake = {"anthropic": world.api, "openai": world.openai, "gemini": world.gemini}[provider]
+    # Daimon's own small Claude calls (thread titles) are billed whichever provider answers.
+    billed = world.api.reported + ([] if fake is world.api else fake.reported)
+    return sorted((r.input_tokens, r.output_tokens) for r in rows), sorted(billed)
+
+
 async def pick_model(
     world: World,
     tenant_id: UUID,
@@ -204,17 +229,21 @@ def _compressed_waits() -> Iterator[None]:
 
 
 @asynccontextmanager
-async def world(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[World]:
-    settings = OfflineSettings(
-        database=DatabaseSettings(
+async def world(
+    sessions: async_sessionmaker[AsyncSession], **overrides: Any
+) -> AsyncIterator[World]:
+    """`overrides` replace whole top-level settings, e.g. a surface's own block."""
+    base: dict[str, Any] = {
+        "database": DatabaseSettings(
             url=PostgresDsn("postgresql+asyncpg://sim:sim@localhost:5432/daimon_test_nc_sim")
         ),
-        anthropic=AnthropicSettings(api_key=SecretStr("sim")),
-        discord=DiscordSettings(bot_token=SecretStr("sim"), thread_open_notice_after_s=0),
-        mcp=McpSettings(public_url=HttpUrl("https://daimon.example.com/mcp")),
-        turn=turn_settings(),
-        defaults_root=ROOT / "defaults",
-    )
+        "anthropic": AnthropicSettings(api_key=SecretStr("sim")),
+        "discord": DiscordSettings(bot_token=SecretStr("sim"), thread_open_notice_after_s=0),
+        "mcp": McpSettings(public_url=HttpUrl("https://daimon.example.com/mcp")),
+        "turn": turn_settings(),
+        "defaults_root": ROOT / "defaults",
+    }
+    settings = OfflineSettings(**(base | overrides))
     script = Script()
     api, openai, gemini = AnthropicAPI(script), OpenAIAPI(script=script), GeminiAPI(script=script)
     network = ProviderNetwork({fake.host: fake for fake in (api, openai, gemini)})
