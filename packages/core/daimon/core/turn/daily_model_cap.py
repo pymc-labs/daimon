@@ -124,7 +124,7 @@ class CappedFlashAccounting:
     continuations) are never refused halfway through an answer. A model without a
     current tariff never runs on any request, first or later: its spend could be
     neither billed nor capped. The turn's own model is refused plainly; a fallback
-    ends the turn with the primary's 503.
+    answers 503, so the chain skips it, unsent, for the next one.
     """
 
     def __init__(

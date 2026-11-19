@@ -72,7 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partway through a reply, the next request could fall back to the
   `gemini-flash-latest` alias, which has no tariff, so its tokens were neither
   billed nor counted against the daily model cap. A model with no current tariff
-  is now refused on every request of a turn, not only the first.
+  now never runs on any request: a busy Flash skips the alias and falls back to
+  Flash-Lite.
 
 - **GPT spend counts against the right channel budget.** A GPT reply was debited
   to the channel it ran in, not the channel whose budget the turn counts

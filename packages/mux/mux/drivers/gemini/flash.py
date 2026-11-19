@@ -46,7 +46,8 @@ class FlashAttempt:
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
-    A failed accounting operation stops the chain. Actuals arrive via scoped
+    A failed accounting operation stops the chain; a 503 `ProviderError` from
+    `before_attempt` instead skips that model, unsent. Actuals arrive via scoped
     Usage. Free calls are reported `refused`: an HTTP 4xx that rejected the
     request itself, a 503 that refused the work (both with their status, no
     interaction returned), or a create that never reached Google (`sent=False`).
@@ -145,13 +146,14 @@ class FlashTransport:
             models = (self._native_agent.spec.model.id,)
         for index, name in enumerate(models):
             model = ModelRef(provider="gemini", id=name)
-            await self.accounting.before_attempt(model=model, attempt=index + 1)
             bounded = dict(request)
             if capped:
                 bounded["model"] = name
             else:
                 bounded["agent_config"] = {**original, "model": name}
             try:
+                # A 503 here skips this model, unsent, like Google's own.
+                await self.accounting.before_attempt(model=model, attempt=index + 1)
                 return await self._dispatch(bounded, model, index + 1)
             except ProviderError as error:
                 # Only a 503 moves down the chain; a rejected request is the answer.
