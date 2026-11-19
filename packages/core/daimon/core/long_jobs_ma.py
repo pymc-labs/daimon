@@ -34,7 +34,7 @@ from daimon.core.session_ports_compat import (
 )
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn, unattended_sends
-from daimon.core.turn.io import LegacyTurnIO
+from daimon.core.turn.io import turn_io
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.posture import Billed, UsageRecorder
 from daimon.core.turn.state import TurnState
@@ -229,7 +229,7 @@ class ManagedLongJobPort:
         session = await self.snapshot(job)
         if session.archived_at is not None or session.status in ("terminated", "errored"):
             raise WorkerVanished()
-        events = await LegacyTurnIO(self.client, session.id, scope=self.scope(job)).replay()
+        events = await turn_io(self.client, session.id, scope=self.scope(job)).replay()
         return any(e.type == "user.message" for e in events)
 
     async def recorder(self, job: LongJob) -> UsageRecorder:
@@ -335,7 +335,7 @@ class ManagedLongJobPort:
     async def interrupt(self, job: LongJob) -> None:
         assert job.worker_session_id is not None
         await self.snapshot(job)
-        await LegacyTurnIO(self.client, job.worker_session_id, scope=self.scope(job)).interrupt(
+        await turn_io(self.client, job.worker_session_id, scope=self.scope(job)).interrupt(
             timeout_s=30
         )
 

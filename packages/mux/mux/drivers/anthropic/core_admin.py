@@ -14,7 +14,7 @@ from mux.drivers.anthropic.resources._authorization import (
 )
 from mux.drivers.anthropic.resources._errors import provider_call, provider_iter
 from mux.drivers.anthropic.resources._native import native_snapshot
-from mux.drivers.anthropic.transport import LegacyTurnTransport, mutation_client
+from mux.drivers.anthropic.transport import mutation_client
 from mux.errors import ScopeViolation
 
 
@@ -130,5 +130,7 @@ class AnthropicCoreAdmin:
     async def interrupt_orphan(self, scope: Scope, session: ResourceRef) -> None:
         self._check(scope, session, "session")
         await provider_call(
-            LegacyTurnTransport(self._client, session.id).send([{"type": "user.interrupt"}])
+            mutation_client(self._client, single_attempt=True).beta.sessions.events.send(
+                session.id, events=[{"type": "user.interrupt"}]
+            )
         )

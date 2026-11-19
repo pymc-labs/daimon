@@ -1201,9 +1201,9 @@ async def _cancel_turn_impl(
     status anyway, including an already-idle or already-terminated session
     (harmless no-op). This call returns immediately; it does not wait for the
     interrupt to take effect — poll ``get_my_session`` to see the session
-    reach ``idle`` or ``terminated`` (contrast ``daimon.core.ma.
-    send_interrupt_and_wait``, which sends the same event and then blocks on
-    the SSE stream for a terminal ``session.status_idle``; this tool is
+    reach ``idle`` or ``terminated`` (contrast the turn codec's
+    ``interrupt``, which sends the same event and then blocks on the SSE
+    stream for a terminal ``session.status_idle``; this tool is
     fire-and-return, not fire-and-wait).
 
     An interrupted turn is still billed for what it already consumed before

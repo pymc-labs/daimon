@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 from uuid import uuid4
 
 import anthropic
@@ -22,9 +22,8 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsStreamSessionEvents,
 )
-from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
-from daimon.core.ma import REPLAY_TIMEOUT_S, replay_events, send_interrupt_and_wait
+from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.provider_actions import BoundProviderActions, ProviderActionApproval
@@ -38,9 +37,8 @@ from mux.contracts.receipts import CancelReceipt, Operation, SendReceipt, StopOb
 from mux.contracts.usage import UsageObservation
 from mux.drivers.anthropic import (
     EventHistoryWalk,
-    EventNormalizer,
-    LegacyTurnTransport,
-    object_json,
+    EventQuery,
+    SessionTools,
     observation_from_event,
 )
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -117,194 +115,6 @@ async def _native_error_edge[T](call: Awaitable[T]) -> T:
         if error.category == "transient_network":
             raise TurnConnectionLost(str(error)) from error
         raise
-
-
-class _LegacyStream(AsyncIterator[TurnEvent]):
-    def __init__(self, source: anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents]) -> None:
-        self._source = source
-        self._iterator = source.__aiter__()
-
-    def __aiter__(self) -> _LegacyStream:
-        return self
-
-    async def __anext__(self) -> TurnEvent:
-        return TurnEvent(await self._iterator.__anext__())
-
-    async def close(self) -> None:
-        await self._source.close()
-
-
-class LegacyTurnIO:
-    def __init__(
-        self, client: anthropic.AsyncAnthropic, session_id: str, *, scope: Scope | None = None
-    ) -> None:
-        self._transport = LegacyTurnTransport(client, session_id, scope=scope)
-        self._client = client
-        self._session_id = session_id
-        self._scope = scope
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        await self._transport.send(events)
-
-    async def status(self) -> str:
-        return await self._transport.status()
-
-    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-        return _LegacyStream(await self._transport.open_stream(read_timeout_s=read_timeout_s))
-
-    async def replay(
-        self, *, timeout_s: float = REPLAY_TIMEOUT_S
-    ) -> list[BetaManagedAgentsSessionEvent]:
-        return await replay_events(
-            self._client, session_id=self._session_id, timeout_s=timeout_s, scope=self._scope
-        )
-
-    async def interrupt(self, *, timeout_s: float) -> StopObservation | None:
-        await send_interrupt_and_wait(
-            self._client, session_id=self._session_id, timeout_s=timeout_s, scope=self._scope
-        )
-        return None
-
-    async def archive(self) -> None:
-        await self._transport.archive()
-
-
-class _TrackedLegacyStream(_LegacyStream):
-    def __init__(
-        self,
-        source: anthropic.AsyncStream[BetaManagedAgentsStreamSessionEvents],
-        persistence: TurnPersistence,
-        session: ResourceRef,
-    ) -> None:
-        super().__init__(source)
-        self._persistence = persistence
-        self._session = session
-        self._normalizer = EventNormalizer(session)
-
-    async def __anext__(self) -> TurnEvent:
-        try:
-            event = await super().__anext__()
-        except (StopAsyncIteration, httpx.HTTPError, anthropic.APIConnectionError):
-            await self._persistence.gap(self._session)
-            raise
-        if event.native is None:
-            raise TurnConnectionLost("native recovery stream has no SDK event")
-        normalized = self._normalizer.normalize(
-            object_json(event.native.model_dump(mode="json")), observed_at=datetime.now(UTC)
-        )
-        await self._persistence.record(self._session, normalized)
-        return event
-
-
-class TrackedLegacyTurnIO(LegacyTurnIO):
-    """Keep main's native recovery HTTP while retaining the mux turn's fence."""
-
-    def __init__(
-        self,
-        client: anthropic.AsyncAnthropic,
-        session_id: str,
-        *,
-        scope: Scope,
-        persistence: TurnPersistence,
-    ) -> None:
-        super().__init__(client, session_id, scope=scope)
-        self._persistence = persistence
-        self._session = ResourceRef(
-            id=session_id,
-            kind="session",
-            provider="anthropic",
-            account_scope_id="native-confirmation-recovery",
-            tenant_id=scope.tenant_id,
-            account_id=scope.account_id,
-        )
-        persistence.check_session(scope, self._session)
-
-    async def _execute(
-        self,
-        kind: str,
-        request: JsonValue,
-        call: Callable[[], Awaitable[None]],
-        *,
-        processed: bool = False,
-    ) -> None:
-        async def deliver(key: str) -> SendReceipt:
-            await call()
-            return SendReceipt(
-                operation_id=key, status="processed" if processed else "queued", input_ids=()
-            )
-
-        try:
-            await self._persistence.mutate(
-                self._session,
-                kind,
-                request,
-                deliver,
-                SendReceipt,
-                lambda receipt: "processed" if receipt.status == "processed" else "accepted",
-            )
-        except UncertainSend as error:
-            raise TurnConnectionLost(str(error)) from error
-
-    async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        request: JsonValue
-        if any(event["type"] == "user.interrupt" for event in events):
-            kind = "recovery-interrupt"
-            request = [event for event in _JSON_INPUTS.validate_python(events)]
-        else:
-            inputs = neutral_inputs(events)
-            kind = _send_kind(inputs)
-            request = [event.model_dump(mode="json") for event in inputs]
-        await self._execute(kind, request, lambda: self._transport.send(events))
-
-    async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
-        return _TrackedLegacyStream(
-            await self._transport.open_stream(read_timeout_s=read_timeout_s),
-            self._persistence,
-            self._session,
-        )
-
-    async def replay(
-        self, *, timeout_s: float = REPLAY_TIMEOUT_S
-    ) -> list[BetaManagedAgentsSessionEvent]:
-        events = await super().replay(timeout_s=timeout_s)
-        normalizer = EventNormalizer(self._session)
-        for event in events:
-            normalized = normalizer.normalize(
-                object_json(event.model_dump(mode="json")), observed_at=datetime.now(UTC)
-            )
-            await self._persistence.record(self._session, normalized)
-        return events
-
-    async def interrupt(self, *, timeout_s: float) -> None:
-        await self._execute(
-            "recovery-stop",
-            {},
-            lambda: send_interrupt_and_wait(
-                self._client, session_id=self._session_id, timeout_s=timeout_s, scope=self._scope
-            ),
-            processed=True,
-        )
-
-    async def archive(self) -> None:
-        async def deliver(key: str) -> Operation:
-            await self._transport.archive()
-            observed_at = datetime.now(UTC)
-            return Operation(
-                id=key,
-                key=key,
-                request_digest=request_digest({}),
-                status="processed",
-                resource=self._session,
-                created_at=observed_at,
-                updated_at=observed_at,
-            )
-
-        try:
-            await self._persistence.mutate(
-                self._session, "archive", {}, deliver, Operation, lambda receipt: receipt.status
-            )
-        except UncertainSend as error:
-            raise TurnConnectionLost(str(error)) from error
 
 
 class _MuxStream(AsyncIterator[TurnEvent]):
@@ -588,7 +398,7 @@ class MuxTurnIO:
                 kind="upstream", message=f"MA event replay did not complete within {timeout_s}s"
             ) from error
 
-    async def interrupt(self, *, timeout_s: float) -> StopObservation:
+    def _cancel(self) -> tuple[str, Callable[[str], Awaitable[CancelReceipt]]]:
         turn_id = self._turn_id or (
             self._persistence.operation_key if self._persistence is not None else self._operation_id
         )
@@ -597,6 +407,59 @@ class MuxTurnIO:
             return await self._backend.events.cancel(
                 self._scope, self._session, turn_id=turn_id, key=key
             )
+
+        return turn_id, deliver
+
+    async def request_interrupt(self) -> None:
+        """Ask the session to stop without waiting for it.
+
+        Confirmation recovery has no stream open, so it polls for the settle
+        (`latest_idle_is_settled`) instead. The journal kind and request are
+        the ones the earlier native recovery recorded, so a turn in flight
+        across an upgrade finds its own operation.
+        """
+        _, deliver = self._cancel()
+        try:
+            await _native_error_edge(
+                deliver(str(uuid4()))
+                if self._persistence is None
+                else self._persistence.mutate(
+                    self._session,
+                    "recovery-interrupt",
+                    [{"type": "user.interrupt"}],
+                    deliver,
+                    CancelReceipt,
+                    lambda receipt: (
+                        "outcome_unknown" if receipt.status == "outcome_unknown" else "accepted"
+                    ),
+                )
+            )
+        except UncertainSend as error:
+            raise TurnConnectionLost(str(error)) from error
+
+    async def latest_idle_is_settled(self) -> bool:
+        """Whether the latest idle exists and is not a `requires_action` pause.
+
+        A session stuck on confirmations already reads idle, so its status
+        cannot prove the interrupt was taken; no idle at all proves nothing.
+        """
+        tools = self._backend.extension(
+            SessionTools, namespace="anthropic.session_tools", version=1
+        )
+        page = await _native_error_edge(
+            tools.list_events(
+                self._scope,
+                self._session,
+                EventQuery(types=["session.status_idle"], order="desc", limit=1),
+            )
+        )
+        if not page.data:
+            return False
+        stop_reason = page.data[0].native.get("stop_reason")
+        return not (isinstance(stop_reason, dict) and stop_reason.get("type") == "requires_action")
+
+    async def interrupt(self, *, timeout_s: float) -> StopObservation:
+        turn_id, deliver = self._cancel()
 
         async def request_cancel() -> CancelReceipt:
             receipt = await _native_error_edge(
@@ -702,7 +565,6 @@ def turn_io(
     client: anthropic.AsyncAnthropic,
     session_id: str,
     *,
-    path: Literal["legacy", "mux"] | None = None,
     backend: ManagedAgents | None = None,
     scope: Scope | None = None,
     session_ref: ResourceRef | None = None,
@@ -715,11 +577,6 @@ def turn_io(
     """Bind every turn helper to the same authorized session as its driver."""
     if profile is None and backend_request is not None:
         profile = backend_request.profile
-    selected = path if path is not None else load_turn_settings().path
-    if selected == "legacy":
-        if profile not in (None, "anthropic.managed_agents"):
-            raise UnsupportedCapability(("mux_turn_path",), profile)
-        return LegacyTurnIO(client, session_id, scope=scope)
     if scope is None:
         raise ScopeViolation(session_id, "mux turns require the caller's authorized scope")
     selected_profile = profile or (

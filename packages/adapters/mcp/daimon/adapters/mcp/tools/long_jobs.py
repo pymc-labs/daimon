@@ -27,7 +27,7 @@ from daimon.core.stores import long_jobs as store
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
-from daimon.core.turn.io import LegacyTurnIO
+from daimon.core.turn.io import turn_io
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -113,7 +113,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             raise ToolError("The original conversation is unavailable")
         parent = await retrieve_session(runtime.client, live.ma_session_id, scope=mcp_scope(auth))
         # Bind idempotency to provider evidence, never a caller-invented key.
-        events = await LegacyTurnIO(runtime.client, parent.id, scope=mcp_scope(auth)).replay()
+        events = await turn_io(runtime.client, parent.id, scope=mcp_scope(auth)).replay()
         approvals = {
             e.tool_use_id
             for e in events

@@ -1,18 +1,16 @@
 """Managed Agents host policy over scoped resource ports and the turn edge.
 
 Per refinements §6, this module holds ONLY operations whose logic extends
-beyond one provider call: replay, interrupt acknowledgement and best-effort
-cleanup. Resource I/O uses ports; the remaining replay and acknowledgement
-SDK calls belong to the separately owned turn migration.
+beyond one provider call, such as best-effort cleanup. Resource I/O uses
+ports; turn replay and interrupts go through the turn codec
+(`daimon.core.turn.io`).
 
 Design rules:
 - Free async functions; no class (no cross-call state to own).
 - `AsyncAnthropic` is injected by the caller. No module-level client.
 - Errors from the SDK (`anthropic.APIError` and subclasses) propagate
-  unchanged. Two exceptions: `send_interrupt_and_wait` converts its own
-  timeout — a purely local condition — into `TurnError(kind="interrupt_timeout")`,
-  and `interrupt_orphaned_session` is best-effort by contract: it logs an
-  SDK error or its own timeout instead of raising.
+  unchanged. One exception: `interrupt_orphaned_session` is best-effort by
+  contract: it logs an SDK error or its own timeout instead of raising.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionStatusIdleEvent,
 )
-from daimon.core.errors import DaimonError, TurnError
+from daimon.core.errors import DaimonError
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import (
     delete_skill,
@@ -41,7 +39,7 @@ from daimon.core.mux_compat import (
     retrieve_agent,
 )
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic import CoreAdmin, LegacyTurnTransport
+from mux.drivers.anthropic import CoreAdmin
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -73,122 +71,15 @@ SessionEvent = BetaManagedAgentsSessionEvent
 REPLAY_TIMEOUT_S: float = 60.0
 
 
-async def replay_events(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    timeout_s: float = REPLAY_TIMEOUT_S,
-    scope: Scope | None = None,
-) -> list[SessionEvent]:
-    """Return the full ordered event history for `session_id`.
-
-    Walks `client.beta.sessions.events.list(session_id=...)` to completion via
-    the SDK's async paginator. Used by the turn driver on SSE reconnect to
-    rebuild `TurnState` by re-folding the full log (main design §Session Turn
-    Pipeline: "Rebuild state from GET /v1/sessions/{id}/events on reconnect").
-
-    Fail-fast on `anthropic.APIError`: callers at the turn-driver edge convert
-    this to `TurnError(kind="upstream")` per refinements §7.
-
-    Bounded by `timeout_s` (default `REPLAY_TIMEOUT_S`, 60s): a stalled
-    upstream paginator raises `TurnError(kind="upstream")` instead of hanging
-    the reconnecting turn forever, with the `TimeoutError` preserved as
-    `__cause__`.
-    """
-
-    try:
-        return await LegacyTurnTransport(anthropic, session_id, scope=scope).replay(
-            timeout_s=timeout_s
-        )
-    except TimeoutError as err:
-        raise TurnError(
-            kind="upstream",
-            message=f"MA event replay did not complete within {timeout_s}s",
-        ) from err
-
-
-# `session.status_idle` stop_reason variants that represent a real terminal
-# stop (session is done) rather than `requires_action` (paused on a tool call).
-# Per the SDK: BetaManagedAgentsSessionEndTurn / ...RetriesExhausted vs
-# ...RequiresAction. See docs/references/managed-agents.md.
-_TERMINAL_STOP_REASONS: frozenset[str] = frozenset({"end_turn", "retries_exhausted"})
-
-# For interrupt acks, `requires_action` is ALSO terminal: when the session is
-# paused on a tool approval and the user cancels, the interrupt ack arrives as
-# `requires_action` idle (session is idle/paused, not running). Treating it as
-# terminal here is correct. Do NOT merge this into `_TERMINAL_STOP_REASONS` —
-# that constant lists only the variants `send_interrupt_and_wait` treats as
-# terminal. `terminal_stop_reason()` (below) is a separate, broader helper:
-# the interactive turn driver treats ANY `session.status_idle` (including
-# `requires_action`) as stream-terminal. No approval/resume loop is wired for
-# interactive surfaces — the driver finalizes a `requires_action` idle as an
-# actionable `TurnError(kind="requires_action")`, not blank success.
-# `headless_runner` is the one caller that auto-allows tool confirmations
-# instead of stopping.
-_INTERRUPT_TERMINAL: frozenset[str] = _TERMINAL_STOP_REASONS | frozenset({"requires_action"})
-
-
 def terminal_stop_reason(event: SessionEvent) -> str | None:
     """Return the ``stop_reason.type`` string for any ``session.status_idle`` event, else None.
 
-    Callers decide which variants count as terminal. The turn driver treats any
-    non-None return as terminal; ``send_interrupt_and_wait`` only treats the
-    variants listed in ``_TERMINAL_STOP_REASONS`` as terminal.
+    The turn driver treats any non-None return, `requires_action` included, as
+    stream-terminal; callers decide which variants end the turn.
     """
     if isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
         return event.stop_reason.type
     return None
-
-
-async def send_interrupt_and_wait(
-    anthropic: AsyncAnthropic,
-    *,
-    session_id: str,
-    timeout_s: float = 120.0,
-    scope: Scope | None = None,
-) -> None:
-    """Fire `user.interrupt` against `session_id` and block until MA reaches a
-    terminal idle or `timeout_s` elapses.
-
-    Per refinements §5 (interrupt UX):
-    - Open the SSE stream before posting `user.interrupt`, so an immediate
-      idle acknowledgement cannot arrive before the subscription.
-    - Wait up to `timeout_s` (default 120s) for a `session.status_idle` whose
-      `stop_reason.type` is in `_INTERRUPT_TERMINAL` (`end_turn`,
-      `retries_exhausted`, or `requires_action`). `requires_action` IS treated
-      as terminal here — it means the session is idle/paused on a tool approval,
-      so the interrupt ack is valid and the cancel is complete.
-    - On timeout, raise `TurnError(kind="interrupt_timeout")`. The caller (turn
-      driver) converts the in-flight turn to a surfaced failure and tears down.
-
-    The caller owns rendering (`lifecycle.on_render("… interrupting")`). This
-    helper is pure I/O-and-wait.
-    """
-    transport = LegacyTurnTransport(anthropic, session_id, scope=scope)
-
-    async def _wait_for_terminal_idle() -> None:
-        stream = await transport.open_interrupt_stream()
-        try:
-            await transport.send([{"type": "user.interrupt"}])
-            async for event in stream:
-                if not isinstance(event, BetaManagedAgentsSessionStatusIdleEvent):
-                    continue
-                if event.stop_reason.type in _INTERRUPT_TERMINAL:
-                    return
-        finally:
-            await stream.close()
-        raise TurnError(
-            kind="interrupt_timeout",
-            message=f"MA SSE stream closed without terminal idle (timeout {timeout_s}s)",
-        )
-
-    try:
-        await asyncio.wait_for(_wait_for_terminal_idle(), timeout=timeout_s)
-    except TimeoutError as err:
-        raise TurnError(
-            kind="interrupt_timeout",
-            message=f"MA did not acknowledge interrupt within {timeout_s}s",
-        ) from err
 
 
 # HTTP status codes that indicate a stale-version conflict on agents.update.
