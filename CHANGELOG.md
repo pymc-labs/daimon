@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
   in the servers JSON only after every service runs this release; older images
   reject unknown keys.
+- **Other chat apps' names are no longer replaced.** Replies, status lines, routine
+  posts, tool sends and edits, and Discord thread names keep whatever the model
+  wrote. The instruction not to name another chat app, and the quote clause that
+  went with it, are gone from the prompt, and a prompt line that names another chat
+  app is no longer dropped, so a line a tenant wrote such as "post the summary in
+  Slack" stays; each platform's prompt still says where Daimon works there.
+  Because the system prompt changed, existing Discord, Slack and Teams sessions
+  are replaced once.
+- **The operator can set Approvals from the command line.** `daimon features set
+  approvals <on|off> --reason "..."` works for a workspace, channel or thread,
+  without a chat admin. The reason is required, and the audit log records the
+  operator, the old and new value and the reason. Other features refuse
+  `--reason`. Chat users who are not admins and agent keys are refused as before.
 - **GPT threads start with skills whose description spans lines.** A SKILL.md
   block scalar (`description: >`) made OpenAI refuse the session. `name` and
   `description` now upload as one line, an invalid name such as

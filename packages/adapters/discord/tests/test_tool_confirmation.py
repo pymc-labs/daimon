@@ -947,10 +947,8 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
     assert load.await_count == 2
 
 
-def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app() -> None:
-    """The one text left unscrubbed: the card must show what will run, not a reworded copy.
-
-    A scrubbed card over an unscrubbed call would misstate what the person approves."""
+def test_an_approval_card_shows_the_call_exactly() -> None:
+    """The card must show what will run, not a reworded copy of the call."""
     call = ToolCall(
         tool_use_id="tu_1",
         server_name="linear",
