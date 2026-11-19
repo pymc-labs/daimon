@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GPT or Gemini turn in Discord, Slack and Teams shows the same debit the
   balance takes, markup included, as Claude turns do. When OpenAI reports a
   turn's usage after the turn ended, the summary line is edited to show that
-  debit and the money left. Daimon reads that usage again from 2 seconds after
-  the turn, doubling up to an hour, and the scheduler keeps its slower pace.
-  The line shows no cost while Daimon cannot know it, such as an unpriced model
-  or usage the provider never reported.
+  debit and the money left, unless a later turn has started in the thread.
+  Daimon reads that usage again from 2 seconds after the turn, doubling up to
+  an hour, and the scheduler keeps its slower pace. The line shows no cost
+  while Daimon cannot know it, such as an unpriced model or usage the provider
+  never reported.
 
 - **Admins can monitor an agent, and people are told.** Two features, Monitor
   direct messages and Monitor coding tools, are off by default and set per

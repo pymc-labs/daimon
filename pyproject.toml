@@ -343,6 +343,7 @@ source_modules = [
     "daimon.core.provider_key_gate",
     "daimon.core.provider_keys",
     "daimon.core.provider_purge",
+    "daimon.core.provider_turn_cost",
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.release",

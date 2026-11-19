@@ -538,16 +538,7 @@ class TeamsTurnLifecycle(OutputGate):
         `named_above`: agent identity's bold name leads the answer just above it.
         None when an admin hid the footer.
         """
-        if (
-            self._sessionmaker is not None
-            and self._tenant_id is not None
-            and not await cost_footer_shown(
-                self._sessionmaker,
-                tenant_id=self._tenant_id,
-                platform="teams",
-                channel_id=self._budget_channel_id,
-            )
-        ):
+        if not await self._footer_shown():
             return None
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
@@ -573,10 +564,22 @@ class TeamsTurnLifecycle(OutputGate):
             left=await self._balance(),
         )
 
-    async def _show_late_debit(self, debit: float) -> None:
+    async def _footer_shown(self) -> bool:
+        return (
+            self._sessionmaker is None
+            or self._tenant_id is None
+            or await cost_footer_shown(
+                self._sessionmaker,
+                tenant_id=self._tenant_id,
+                platform="teams",
+                channel_id=self._budget_channel_id,
+            )
+        )
+
+    async def _show_late_debit(self, debit: float) -> bool:
         """Edit a debit priced after the turn ended into each summary line the turn posted."""
-        if self._summary_at is None:
-            return
+        if self._summary_at is None or not await self._footer_shown():
+            return False
         named_above, elapsed = self._summary_at
         summary = format_summary(
             agent_name=None if named_above else self._agent_name,
@@ -584,17 +587,22 @@ class TeamsTurnLifecycle(OutputGate):
             cost=format_cost(debit),
             left=await self._balance(),
         )
+        applied = False
         for message_id, (actions, shown, error) in list(self._notices.items()):
             if shown is not None:
                 self._notices[message_id] = (actions, summary, error)
                 await self._amend(message_id, lambda text: text, _SUFFIX_EVENTS)
+                applied = True
         draw, controls_id = self._controls
         if (controls := draw(summary)) is None:
-            return
+            return applied
         if self._held_controls is not None:
             self._held_controls = controls
         elif controls_id is not None:
             await self._edit(controls, controls_id)
+        else:
+            return applied
+        return True
 
     async def _balance(self) -> str | None:
         if self._sessionmaker is None or self._tenant_id is None:

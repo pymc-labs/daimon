@@ -517,6 +517,10 @@ class SlackTurnLifecycle(OutputGate):
             self._register(self._status_ts, self._cancel, self._author_id)
             await self.record_post(self._status_ts)
         else:
+            # A rewritten status card no longer carries the summary a late debit edits.
+            self._summary_posts = [
+                post for post in self._summary_posts if post[0] != self._status_ts
+            ]
             await self.check_output()
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel,
@@ -686,12 +690,12 @@ class SlackTurnLifecycle(OutputGate):
         if not self._state.footer_hidden and self._status_ts is not None:
             self._summary_posts.append((self._status_ts, text, blocks, summary, now))
 
-    async def _show_late_debit(self, debit: float) -> None:
+    async def _show_late_debit(self, debit: float) -> bool:
         """Edit a debit priced after the turn ended into each summary line the turn posted."""
         self._state = dataclasses.replace(self._state, cost_str=format_cost(debit))
         await self._apply_balance()
-        if self._state.footer_hidden:
-            return
+        if self._state.footer_hidden or not self._summary_posts:
+            return False
         for ts, text, posted, index, now in self._summary_posts:
             blocks = list(posted)
             blocks[index] = to_blocks(self._state, now=now)[-1]
@@ -699,6 +703,7 @@ class SlackTurnLifecycle(OutputGate):
             await self._client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=self._channel, ts=ts, blocks=blocks, text=text
             )
+        return True
 
     def _feedback_block(self) -> dict[str, Any] | None:
         """👍/👎 while `message_feedback` is on, plus Ask a human when offered; None for neither."""

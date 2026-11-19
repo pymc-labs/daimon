@@ -1441,19 +1441,24 @@ class DiscordTurnLifecycle(OutputGate):
 
         log.info("turn.terminal_success")
 
-    async def _show_late_debit(self, debit: float) -> None:
+    async def _show_late_debit(self, debit: float) -> bool:
         """Edit a debit priced after the turn ended into the summary the turn posted."""
         message, embed = self._summary_ref or self._summary_card, self._terminal_embed
         if message is None or embed is None or embed.footer.text is None or self._thread_stopped():
-            return
+            return False
         self._state = dataclasses.replace(self._state, cost_str=format_cost(debit))
         await self._apply_balance()
         footer = to_embed_data(self._state, now=self._terminal_at).footer
         if footer is None:
-            return
+            return False
         self._terminal_embed = embed = embed.copy().set_footer(text=footer)
-        await self._edit_message(
-            message, terminal_override=True, recover_missing=False, embeds=[embed]
+        # A card keeps the rest of its terminal render (content, view), which a repair re-sends.
+        render: dict[str, Any] = {
+            **self._card_writes.terminal.get(self._card_writes.key(message), {}),
+            "embeds": [embed],
+        }
+        return await self._edit_message(
+            message, terminal_override=True, recover_missing=False, **render
         )
 
     async def _restore_card_summary(self) -> None:

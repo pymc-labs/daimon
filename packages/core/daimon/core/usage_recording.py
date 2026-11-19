@@ -304,6 +304,7 @@ async def record_provider_usage(
     Callers retain attribution, binding and the dated price context.
     """
     from daimon.core.accounting_outbox import record_observation_usage
+    from daimon.core.provider_turn_cost import LATE_TURN_COSTS
     from daimon.core.turn.outcomes import current_outcome
 
     if tenant_id is None:
@@ -341,6 +342,10 @@ async def record_provider_usage(
             channel_id=channel_id,
             agent_id=agent_id,
         )
+    # Whichever reader recorded the revision first, an ended turn's footer shows its debit.
+    LATE_TURN_COSTS.settle(
+        observation, price=provider_price, infrastructure_usd=infrastructure_usd, markup=markup
+    )
     if (outcome := current_outcome.get()) is not None:
         outcome.note_usage(
             observation,

@@ -1295,11 +1295,15 @@ async def run_prepared_turn(
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
 
+    # Imported here: it reads this package's turn state.
+    from daimon.core.provider_turn_cost import LATE_TURN_COSTS
+
     observation = (
         prepared.admission.observation
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    LATE_TURN_COSTS.release(observation)  # this turn may edit the thread's earlier footers
     prepared, carry_over_pending = await _with_pending_carry_over(
         deps, prepared, tenant_id=tenant_id
     )

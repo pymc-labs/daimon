@@ -3,14 +3,15 @@
 Discord, Slack and Teams read one core rule (`LATE_TURN_COSTS.turn_debit`), the pricing
 the usage outbox settles with, markup included. An unpriced model, a partial reading or
 usage not reported yet shows no cost. A GPT turn's usage reported after the turn ended
-is edited into the footer it posted. Deliberate gaps: web chat renders no per-turn cost,
-and the scheduler's durable re-reads run in another process, with no footer to edit.
+is edited into the footer it posted, until a later turn starts in its thread (that turn
+may edit the message). Deliberate gaps are recorded in `DELIBERATE_GAPS`.
 """
 
 from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import itertools
 import textwrap
@@ -25,9 +26,11 @@ import pytest
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
+from daimon.core import usage_recording
 from daimon.core.pricing import provider_prices
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
-from daimon.core.turn import openai_host, openai_late_usage
+from daimon.core.turn import run
+from daimon.core.turn.outcomes import TurnObservation
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.usage_totals import ProviderUsageTotals
 from microsoft_teams.api import MessageActivityInput, SentActivity
@@ -45,7 +48,9 @@ _ids = itertools.count()
 #: Paths that never edit a late GPT debit into a footer, and why.
 DELIBERATE_GAPS = {
     "web chat": "renders no per-turn cost",
-    "scheduler durable re-reads": "another process, which holds no footer to edit",
+    "scheduler durable re-reads": "settle in another process, which holds no footer to edit",
+    "MCP edit and tidy tools": "edit in the MCP server's process; a later turn in the thread"
+    " stops the late edit, but an edit from another thread's turn is not seen",
 }
 
 
@@ -168,8 +173,15 @@ class _Teams:
         self.writes: list[str] = []
 
 
-async def _finish_turn(platform: str, totals: ProviderUsageTotals) -> Callable[[], list[str]]:
+async def _finish_turn(
+    platform: str, totals: ProviderUsageTotals, outcome: TurnObservation | None = None
+) -> Callable[[], list[str]]:
     """Run a finished GPT turn through the platform; reads every write it made, as text."""
+    with outcome.activate() if outcome else contextlib.nullcontext():
+        return await _finish(platform, totals)
+
+
+async def _finish(platform: str, totals: ProviderUsageTotals) -> Callable[[], list[str]]:
     state = TurnState(content=[TextBlock(kind="text", text="The answer.")], usage_totals=totals)
     if platform == "discord":
         writes: list[Any] = []
@@ -244,14 +256,67 @@ def _calls(source: str, name: str) -> bool:
     )
 
 
-def test_every_chat_footer_takes_the_late_debit_and_only_in_process_rereads_settle_it() -> None:
+@pytest.mark.parametrize("platform", _PLATFORMS)
+async def test_a_later_turn_in_the_thread_stops_the_late_edit(platform: str) -> None:
+    """The later turn may have edited the message: a late debit must not overwrite it."""
+    session, outcome = f"later-{platform}", TurnObservation(None, None, platform, thread_id="t")
+    unknown = _observation("openai", "gpt-6-luna", completeness="unknown", session=session)
+    writes = await _finish_turn(platform, ProviderUsageTotals().add_observation(unknown), outcome)
+    ended = writes()
+    LATE_TURN_COSTS.release(TurnObservation(None, None, platform, thread_id="t"))
+    _settle(_observation("openai", "gpt-6-luna", revision=2, final=True, session=session))
+    await LATE_TURN_COSTS.wait()
+    assert writes() == ended, f"{platform} edited a released footer"
+
+
+async def test_a_rewritten_slack_status_card_takes_no_late_debit() -> None:
+    session = "rewritten-slack"
+    unknown = _observation("openai", "gpt-6-luna", completeness="unknown", session=session)
+    client = _Slack()
+    slack = SlackTurnLifecycle(
+        client=client, channel="C", thread_ts="1.0", cancel=asyncio.Event(), author_id="U",
+        register=lambda *a: None, deregister=lambda *a: None, **_common(),
+    )  # fmt: skip
+    state = TurnState(usage_totals=ProviderUsageTotals().add_observation(unknown))
+    await slack.on_terminal_success(state)
+    await slack._repair_terminal_flush("It failed.")
+    ended = len(client.writes)
+    _settle(_observation("openai", "gpt-6-luna", revision=2, final=True, session=session))
+    await LATE_TURN_COSTS.wait()
+    assert len(client.writes) == ended, "the late debit overwrote the error card"
+
+
+async def test_a_late_discord_edit_keeps_the_rest_of_the_card_render() -> None:
+    session, edits = "render-discord", list[dict[str, Any]]()
+
+    async def send(**kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(id=next(_ids))
+
+    async def edit(message: object, **kwargs: Any) -> None:
+        edits.append(kwargs)
+
+    discord = DiscordTurnLifecycle(send=send, edit=edit, in_dm=False, **_common())
+    unknown = _observation("openai", "gpt-6-luna", completeness="unknown", session=session)
+    await discord.on_terminal_success(
+        TurnState(usage_totals=ProviderUsageTotals().add_observation(unknown))
+    )
+    ended = len(edits)
+    _settle(_observation("openai", "gpt-6-luna", revision=2, final=True, session=session))
+    await LATE_TURN_COSTS.wait()
+    assert ended and edits[ended:], "the late debit was never edited in"
+    assert set(edits[-1]) == set(edits[ended - 1]), (edits[ended - 1], edits[-1])
+
+
+def test_every_chat_footer_takes_the_late_debit_and_every_recording_settles_it() -> None:
     """Found from the code: each lifecycle pricing a turn reads the one core rule."""
+    packages = _ROOT / "packages"
     readers = {
-        path.parts[path.parts.index("adapters") + 1]
-        for path in (_ROOT / "packages").rglob("*.py")
-        if "tests" not in path.parts and _calls(path.read_text(), "turn_debit")
+        parts[1] if parts[0] == "adapters" else parts[0]
+        for path in packages.rglob("*.py")
+        if "tests" not in (parts := path.relative_to(packages).parts)
+        and _calls(path.read_text(), "turn_debit")
     }
     assert readers == set(_PLATFORMS), f"footers reading the late debit: {readers}"
-    assert _calls(inspect.getsource(openai_host), "settle"), "the GPT recorder must settle it"
-    durable = inspect.getsource(openai_late_usage._reread)
-    assert not _calls(durable, "settle"), DELIBERATE_GAPS["scheduler durable re-reads"]
+    recorder = inspect.getsource(usage_recording.record_provider_usage)
+    assert _calls(recorder, "settle"), "every recorded revision must reach the waiting footer"
+    assert _calls(inspect.getsource(run.run_prepared_turn), "release"), "a later turn stops it"

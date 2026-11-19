@@ -24,7 +24,6 @@ from daimon.core.mux_backend import (
     TurnRuntime,
 )
 from daimon.core.pricing import ProviderPrice
-from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -685,10 +684,6 @@ async def _prepare_with_runtime(
             channel_id=channel_id,
             agent_id=agent_id,
         )
-        if settled:  # an ended turn's footer shows the debit its late usage just took
-            LATE_TURN_COSTS.settle(
-                observation, price=runtime.price, infrastructure_usd=infrastructure, markup=markup
-            )
         turn_id = observation.turn_id
         # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
         if not observation.final and late is not None and turn_id is not None:

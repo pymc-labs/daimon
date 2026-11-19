@@ -7,17 +7,19 @@ model, a profile whose infrastructure cannot settle, or searches whose free
 allowance is only claimed at settlement.
 
 A GPT turn's usage can arrive after the turn ended (`openai_late_usage`). The
-recorder hands each settled debit, priced with the turn's own tariff and
-infrastructure, to `LATE_TURN_COSTS`: the footer takes it when it renders, or waits
-for it and edits it in.
+recorder hands each recorded revision, priced with the turn's own tariff and
+infrastructure, to `LATE_TURN_COSTS`: the footer takes its debit when it renders,
+or waits for it and edits it in.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from decimal import Decimal, localcontext
 
 import structlog
@@ -28,6 +30,8 @@ from daimon.core.pricing import (
     provider_prices,
     provider_usage_tokens,
 )
+from daimon.core.turn.openai_late_usage import DELAYS_S
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.state import UsageTotals
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.usage import UsageObservation
@@ -35,8 +39,8 @@ from mux.profiles import get_profile
 
 log = structlog.get_logger(__name__)
 
-#: Edits a debit priced after the turn ended into the footer the turn posted.
-type ShowDebit = Callable[[float], Awaitable[None]]
+#: Edits a debit priced after the turn ended into the footer the turn posted; True once it did.
+type ShowDebit = Callable[[float], Awaitable[bool]]
 
 
 def observation_debit(
@@ -76,7 +80,9 @@ def _guessed_debit(observation: UsageObservation, markup: Decimal) -> Decimal | 
         return None
     return observation_debit(
         observation,
-        provider_prices(profile).get((provider, observation.model.id)),
+        provider_prices(profile, on=observation.observed_at.date()).get(
+            (provider, observation.model.id)
+        ),
         infrastructure_usd=known_infrastructure_usd(profile),
         markup=markup,
     )
@@ -95,26 +101,52 @@ def provider_turn_debit(totals: UsageTotals, *, markup: Decimal) -> float | None
     return float(debit)
 
 
+@dataclass(eq=False)
+class _Footer:
+    show: ShowDebit
+    context: contextvars.Context
+    place: tuple[str, str, str | None] | None
+    expires: float
+    shown: Decimal | None
+    latest: Decimal | None = None
+
+
+def _place(outcome: TurnObservation | None) -> tuple[str, str, str | None] | None:
+    return (
+        None if outcome is None else (str(outcome.tenant_id), outcome.platform, outcome.thread_id)
+    )
+
+
 class LateTurnCosts:
     """Debits settled for a turn's usage, and footers waiting for them, in this process.
 
-    Best effort: a footer whose usage another process re-reads (the scheduler's
-    `DurableRereads`), or that `max_waiting` newer turns pushed out, keeps no
-    cost. Nothing here raises into, or waits inside, the settlement that calls it.
+    Best effort: a footer keeps the cost it posted with once a later turn starts in
+    its thread (`release`: that turn may edit the message), once its re-reads are
+    over (`max_age_s`), or once `max_waiting` newer footers pushed it out. A debit
+    another process settles never reaches this one. A refused or failed edit is
+    retried after each of `retry_s`. Nothing here raises into, or waits inside, the
+    settlement that calls it.
     """
 
-    def __init__(self, *, max_waiting: int = 256) -> None:
-        self._max_waiting = max_waiting
+    def __init__(
+        self,
+        *,
+        max_waiting: int = 256,
+        max_age_s: float = sum(DELAYS_S) + 60.0,
+        retry_s: Sequence[float] = (1.0, 4.0, 16.0),
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_waiting, self._max_age_s, self._retry_s = max_waiting, max_age_s, retry_s
+        self._clock = clock
         self._settled: OrderedDict[tuple[str, str], tuple[Decimal, bool]] = OrderedDict()
-        self._waiting: OrderedDict[
-            tuple[str, str], tuple[ShowDebit, contextvars.Context, Decimal | None]
-        ] = OrderedDict()
+        self._waiting: OrderedDict[tuple[str, str], _Footer] = OrderedDict()
         self._shows: set[asyncio.Task[None]] = set()
 
     def turn_debit(self, totals: UsageTotals, *, markup: Decimal, show: ShowDebit) -> float | None:
         """The debit a finished turn's footer shows; `show` gets one settled after this.
 
         Only a turn of one observation can take a later debit: a GPT turn's own usage.
+        `show` returns whether it edited the footer in.
         """
         guessed = provider_turn_debit(totals, markup=markup)
         if not isinstance(totals, ProviderUsageTotals) or len(totals.selected) != 1:
@@ -123,10 +155,25 @@ class LateTurnCosts:
         key = (observation.session.id, observation.id)
         debit, final = self._settled.get(key, (None, observation.final))
         if not final:
+            now = self._clock()
+            while self._waiting and next(iter(self._waiting.values())).expires <= now:
+                self._waiting.popitem(last=False)
             # The footer renders in the turn's context (its backend line), not the re-read's.
-            self._waiting[key] = (show, contextvars.copy_context(), debit)
+            self._waiting[key] = _Footer(
+                show,
+                contextvars.copy_context(),
+                _place(current_outcome.get()),
+                now + self._max_age_s,
+                debit,
+            )
             self._bound(self._waiting, key)
         return guessed if debit is None else float(debit)
+
+    def release(self, outcome: TurnObservation) -> None:
+        """A turn starts in `outcome`'s thread: earlier footers there take no later debit."""
+        place = _place(outcome)
+        for key in [key for key, footer in self._waiting.items() if footer.place == place]:
+            del self._waiting[key]
 
     def _bound[V](self, entries: OrderedDict[tuple[str, str], V], key: tuple[str, str]) -> None:
         entries.move_to_end(key)
@@ -141,7 +188,7 @@ class LateTurnCosts:
         infrastructure_usd: Decimal | None,
         markup: Decimal,
     ) -> None:
-        """Hand a settled revision's debit to the footer waiting on it; never raises or waits."""
+        """Hand a recorded revision's debit to the footer waiting on it; never raises or waits."""
         key = (observation.session.id, observation.id)
         try:
             debit = observation_debit(
@@ -150,19 +197,23 @@ class LateTurnCosts:
         except Exception:  # the footer is cosmetic: the settlement that called this goes on
             log.warning("late_turn_cost.price_failed", key=":".join(key), exc_info=True)
             return
-        if (waiting := self._waiting.get(key)) is None:
+        footer = self._waiting.get(key)
+        if footer is not None and footer.expires <= self._clock():
+            del self._waiting[key]
+            return
+        if footer is None:
             if debit is not None:  # settled before the footer rendered: it takes this one
                 self._settled[key] = (debit, observation.final)
                 self._bound(self._settled, key)
             return
-        show, context, shown = waiting
-        if observation.final:
-            del self._waiting[key]
-        elif debit is not None:
-            self._waiting[key] = (show, context, debit)
-        if debit is None or debit == shown:
+        if debit is None or debit == footer.shown:
+            if observation.final:
+                del self._waiting[key]
             return
-        task = asyncio.get_running_loop().create_task(self._show(key, show, debit), context=context)
+        footer.latest = debit
+        task = asyncio.get_running_loop().create_task(
+            self._show(key, footer, debit, final=observation.final), context=footer.context
+        )
         self._shows.add(task)
         task.add_done_callback(self._shows.discard)
 
@@ -171,11 +222,23 @@ class LateTurnCosts:
         while self._shows:
             await asyncio.gather(*self._shows, return_exceptions=True)
 
-    async def _show(self, key: tuple[str, str], show: ShowDebit, debit: Decimal) -> None:
-        try:
-            await show(float(debit))
-        except Exception:  # a footer edit is cosmetic: a refused or failed one is only logged
-            log.warning("late_turn_cost.show_failed", key=":".join(key), exc_info=True)
+    async def _show(
+        self, key: tuple[str, str], footer: _Footer, debit: Decimal, *, final: bool
+    ) -> None:
+        for delay in (0.0, *self._retry_s):
+            await asyncio.sleep(delay)
+            if self._waiting.get(key) is not footer or footer.latest != debit:
+                return  # released, expired, or a newer revision took over
+            try:
+                applied = await footer.show(float(debit))
+            except Exception:  # a footer edit is cosmetic: a failed one is retried, then dropped
+                log.warning("late_turn_cost.show_failed", key=":".join(key), exc_info=True)
+                applied = False
+            if applied:
+                footer.shown = debit
+                if final and self._waiting.get(key) is footer:
+                    del self._waiting[key]
+                return
 
 
 #: The process's waiting footers, shared by every chat platform's lifecycle.
