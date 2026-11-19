@@ -407,13 +407,21 @@ async def get_support_channel(
     return None if orm is None else SupportChannelRow.model_validate(orm)
 
 
-async def get_support_setup(session: AsyncSession, *, tenant_id: uuid.UUID) -> SupportSetup:
-    """The workspace's own channel platform and whether any limit exists, in one read."""
+async def get_support_setup(
+    session: AsyncSession, *, tenant_id: uuid.UUID, place: SupportPlace
+) -> SupportSetup:
+    """The workspace's own channel platform, whether `place`'s menu names a channel, and
+    whether any limit exists."""
     own = select(SupportChannel.platform).where(SupportChannel.tenant_id == tenant_id)
     # A person's limit gives that person credits (`_balance`), so it counts as one existing.
     limits = exists().where(SupportLimit.tenant_id == tenant_id)
     row = (await session.execute(select(own.scalar_subquery(), limits))).one()
-    return SupportSetup(own_platform=row[0], limits=bool(row[1]))
+    menu = await menu_for_place(session, tenant_id=tenant_id, place=place)
+    return SupportSetup(
+        own_platform=row[0],
+        limits=bool(row[1]),
+        menu_channel=menu is not None and menu.channel is not None,
+    )
 
 
 async def set_support_channel(

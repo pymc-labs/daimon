@@ -16,7 +16,13 @@ from daimon.core.config import (
 from daimon.core.features.service import import_env, set_workspace_feature
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.feature_values import list_feature_values
-from daimon.core.stores.support import set_limit, set_menu, set_menu_use, set_support_channel
+from daimon.core.stores.support import (
+    clear_support_channel,
+    set_limit,
+    set_menu,
+    set_menu_use,
+    set_support_channel,
+)
 from daimon.core.support import MenuChannel, SupportPlace, parse_menu
 from daimon.core.support_routing import (
     feedback_destination,
@@ -116,6 +122,18 @@ async def test_request_destination_when_the_menu_names_a_channel_then_it_wins(
 
     menu_place, other = SupportPlace("C1", None), SupportPlace("C2", None)
     assert await to(menu_place, _settings()) == "C5", "the menu's channel"
+    await clear_support_channel(db_session, tenant_id=tenant.id)
+    offered = await feature_in(
+        db_session, _settings(), FeaturePlace(tenant.id, "slack", "C1"), "support_escalation"
+    )
+    assert offered.on, "the menu's channel alone is somewhere to send requests"
+    elsewhere = await feature_in(
+        db_session, _settings(), FeaturePlace(tenant.id, "slack", "C2"), "support_escalation"
+    )
+    assert elsewhere.unavailable == "requires", "a place without that menu has nowhere"
+    await set_support_channel(
+        db_session, tenant_id=tenant.id, platform="slack", channel_id="C9", set_by_account_id=None
+    )
     assert await to(other, _settings()) == "C9", "elsewhere, the workspace's channel"
     locked = _settings({"support_own_channel": "off"}, slack_escalation_channel_id="C0")
     assert await to(menu_place, locked) == "C0", "a locked deployment keeps its own"
