@@ -824,6 +824,7 @@ SettleStatus = Literal[
     "limit_gone",
     "not_found",
     "not_here",
+    "own_request",
 ]
 
 

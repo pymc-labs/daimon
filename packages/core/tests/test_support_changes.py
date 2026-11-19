@@ -12,7 +12,9 @@ from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expected
 from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support_escalation as ledger
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.domain import Role
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import (
@@ -641,6 +643,38 @@ async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     surfaces = [c.surface for c in changes if c.setting == SETTLE_SETTING]
     assert surfaces == ["panel"], "one record, from the support post"
+
+
+async def test_settle_from_post_when_the_requester_clicks_then_only_an_admin_settles(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
+    request_id = await _pending(db_session_factory, tenant_id)
+    for accept, charge in ((True, None), (False, None), (False, D(1))):
+        own = await settle_from_post(
+            db_session_factory,
+            escalation_id=request_id,
+            charge=charge,
+            settled_by="U1",
+            settled_by_account_id=None,
+            default_allowance=20,
+            channel_id="S1",
+            parent_id=None,
+            default_channel_id="SDEFAULT",
+            accept=accept,
+        )
+        assert own.status == "own_request", "the requester never settles their own request"
+    tenant = await get_tenant(db_session, tenant_id)
+    requester = await make_platform_principal(
+        db_session, platform="slack", external_id="U1", tenant=tenant
+    )
+    await set_role(db_session, requester.account_id, Role.ADMIN)
+    await db_session.commit()
+    settled = await _from_post(db_session_factory, request_id, None, by="U1")
+    assert settled.status == "declined", "an admin may settle their own request"
 
 
 async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_no_account(

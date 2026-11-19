@@ -86,6 +86,18 @@ def test_settle_when_clicked_then_the_post_checks_the_stamped_channel(platform: 
             assert _keyword(call, kw) is not None, f"settle_from_post gets {kw}"
 
 
+@pytest.mark.parametrize("platform", CHAT)
+def test_settle_when_the_requester_clicks_then_the_post_says_why_not(platform: str) -> None:
+    """`settle_from_post` refuses a requester who is not an admin; each path shows OWN_REQUEST."""
+    shown = {
+        module
+        for module, tree in _trees(platform).items()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "OWN_REQUEST"
+    }
+    assert shown, f"{platform} never shows the own-request refusal"
+
+
 ROUTED = [
     pytest.param(helper, platform, what, id=f"{helper}-{platform}")
     for helper, what in (

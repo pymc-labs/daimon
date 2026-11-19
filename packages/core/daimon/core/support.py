@@ -958,6 +958,7 @@ CHARGE_FIELD: Final = "Credits"
 REQUEST_GONE: Final = "This request no longer exists."
 LIMIT_GONE: Final = "This request's limit was removed. Decline it instead."
 SETTLE_ELSEWHERE: Final = "Set the charge in the support channel."
+OWN_REQUEST: Final = "You can't settle your own request. Ask an admin or an owner."
 
 
 def received_text(row: SupportEscalationRow, view: LimitView) -> str:

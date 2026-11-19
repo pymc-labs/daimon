@@ -28,7 +28,9 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.access_policy import lock_access_policy
+from daimon.core.stores.accounts import list_roles
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
+from daimon.core.stores.domain import PlatformPrincipalRow, Role
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_rows import (
     SupportChannelRow,
@@ -658,6 +660,13 @@ async def settle(
     return outcome
 
 
+async def _is_admin(session: AsyncSession, principal: PlatformPrincipalRow | None) -> bool:
+    if principal is None:
+        return False
+    roles = await list_roles(session, [principal.account_id])
+    return roles.get(principal.account_id) == Role.ADMIN
+
+
 async def settle_from_post(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -671,13 +680,14 @@ async def settle_from_post(
     default_channel_id: str | None,
     accept: bool = False,
 ) -> ledger.SettleOutcome:
-    """Anyone in the request's support channel settles from its post, with audit.
+    """Anyone in the request's support channel but its requester settles from its post, with audit.
 
     `accept` is the post's Accept: the row's fixed price in place of `charge`.
 
     The click must come from the channel the request was posted to (or a thread
     in it); a row from before that was stamped falls back to the workspace's
-    channel now (`default_channel_id` is the deployment's). Else "not_here".
+    channel now (`default_channel_id` is the deployment's). Else "not_here". The requester
+    settles only as an admin of the request's tenant, else "own_request".
     The post may sit in another tenant, so the request is found by id alone. The
     settler's id and account stay on the request (`clear_settler` wipes them on
     a purge). The audit row names an account only of the request's own tenant,
@@ -701,6 +711,8 @@ async def settle_from_post(
             platform=before.platform,
             external_id=settled_by,
         )
+        if settled_by == before.platform_user_id and not await _is_admin(session, principal):
+            return ledger.SettleOutcome(status="own_request", row=before)
         outcome = await ledger.settle_request(
             session,
             escalation_id=escalation_id,
