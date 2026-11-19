@@ -177,6 +177,13 @@ describe("limits", () => {
     expect(api.put).toHaveBeenCalledWith("/api/support/menus/support", expect.objectContaining({ menu: expect.objectContaining({ channel: { id: "c2" } }) }))
   })
 
+  it("drops a menu's channel when the deployment sets where requests go", async () => {
+    const own = { ...menu, channel: { id: "c2", name: "help" }, body: { ...menu.body, channel: { id: "c2" } } }
+    const d = await drawer("/?menu=support", { ...data, menus: [own], channel: { ...data.channel, own_allowed: false } })
+    await userEvent.click(d.getByRole("button", { name: "Save" }))
+    expect(api.put).toHaveBeenCalledWith("/api/support/menus/support", expect.objectContaining({ menu: expect.not.objectContaining({ channel: expect.anything() }) }))
+  })
+
   it("shows a server refusal next to the input it names", async () => {
     const d = await drawer("/?limit=channel%7Cc1%7C")
     vi.mocked(api.put).mockRejectedValueOnce(new ApiError(422, "invalid", [{ loc: ["limit", "each_person"], msg: "must be more than 0" }]))

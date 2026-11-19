@@ -133,7 +133,7 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
         <Actions>
           {menu && <Button variant="ghost" className="mr-auto text-destructive max-sm:mr-0" disabled={save.pending} onClick={() => void remove()}>Remove</Button>}
           <Button variant="outline" onClick={() => setOpen(null)}>Cancel</Button>
-          <Button disabled={save.pending || !draft.name.trim()} onClick={() => void put(toCatalog(draft))}>Save</Button>
+          <Button disabled={save.pending || !draft.name.trim()} onClick={() => void put(toCatalog(c.own_allowed ? draft : { ...draft, channel: null }))}>Save</Button>
         </Actions>
         <Failure>{errors.rest ?? inUse}</Failure>
       </div>
