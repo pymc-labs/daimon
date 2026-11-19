@@ -20,6 +20,7 @@ from anthropic.types.message_create_params import MessageCreateParamsNonStreamin
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.sim.network import StrictFake
 from daimon.testing.sim.script import Script, Turn
+from daimon.testing.sim.vaults import Vaults
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     FakeMemoryStoreState,
@@ -53,6 +54,8 @@ class AnthropicAPI(StrictFake):
         self.environments: dict[str, dict[str, Any]] = {}
         self.skills: dict[str, dict[str, Any]] = {}
         self.stores = FakeMemoryStoreState()
+        self.vaults = Vaults()
+        self.vaults.install(self)
         self._stores = make_fake_memory_store_handler(self.stores)
         self._paused: dict[str, list[dict[str, Any]]] = {}
         self.reported: list[tuple[int, int]] = []
@@ -69,6 +72,7 @@ class AnthropicAPI(StrictFake):
         self.shape("POST", "/v1/messages", MessageCreateParamsNonStreaming)
         self.route("GET", f"/v1/sessions/{_ID}/events/stream", self._stream)
         self.route("POST", f"/v1/sessions/{_ID}/events", self._send)
+        self.route("GET", f"/v1/sessions/{_ID}", self._poll)
         self.route("POST", "/v1/messages", self._message)
         self.route("GET", "/v1/models", self._models)
         self.route("GET", "/v1/environments", self._list_environments)
@@ -111,6 +115,11 @@ class AnthropicAPI(StrictFake):
             if self._listening.get(sid):
                 self._answer(sid)
         return response
+
+    def _poll(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """A client that polls the session, as MCP `ask` does, is a listener too."""
+        self._answer(match[1])
+        return self._session_api(request, match)
 
     def _answer(self, sid: str) -> None:
         """The model's events land a moment later; deterministic, it waits for a listener."""
