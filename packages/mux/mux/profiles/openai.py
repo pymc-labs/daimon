@@ -13,8 +13,10 @@ from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
 
 LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
+ASTRA_6_2_MODEL = "gpt-6.2-astra"
+SOL_MODEL = "gpt-6.2-sol"
 # Every model the native OpenAI host runs; the admitted revision selects one.
-NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
+NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL, ASTRA_6_2_MODEL, SOL_MODEL)
 # GPT-5.6 and later bill cache writes at 1.25x uncached input (OpenAI prompt-caching
 # guide), but Agents API turn usage "do[es] not expose a separate cache-write count,
 # so they cannot determine the exact model charge when that pricing applies" (Agents
@@ -42,6 +44,8 @@ PERSISTENT_WORKSPACE = Profile(
     mcp_policy_keys=("allowed_tools", "required"),
     tool_readback="compiled",
     skill_digest="content",
+    # SKILL.md uploads with plain frontmatter (`drivers/openai/skills.py` `plain_manifest`).
+    skill_copy_format="plain-frontmatter",
     # The readback bounds in `drivers/openai/skills.py`: what is installed can be read back.
     skill_limits=SkillLimits(total_bytes=28 * MIB, file_bytes=25 * MIB, files=500),
     support={

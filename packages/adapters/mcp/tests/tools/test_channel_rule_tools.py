@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
 from daimon.adapters.mcp.tools.channel_rules import (
     _set_agent_rule_impl,
     _set_channel_rule_impl,
@@ -31,6 +34,17 @@ OWN = ChannelRule(readers="own", writers="own")
 POLICY = TenantAccessPolicy(
     channel_rules={ISOLATED: OWN}, agent_rules={"own": AgentRule(runs_in=(ISOLATED,))}
 )
+
+
+@pytest.fixture(autouse=True)
+def _inside_the_channels() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """These calls come from inside the channels they change (a private channel is inside-only)."""
+    ids = frozenset(
+        v for v in globals().values() if isinstance(v, str) and re.fullmatch(r"\d{18}", v)
+    )
+    token = CALL_ORIGIN.set(ids)
+    yield
+    CALL_ORIGIN.reset(token)
 
 
 async def _world(

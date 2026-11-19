@@ -32,6 +32,11 @@ def runtime(monkeypatch):
     monkeypatch.setattr(shared.web_roles, "get_workspace_role", no_grant)
     monkeypatch.setattr(shared.web_people, "get_person_for_account", no_grant)
     monkeypatch.setattr(web_url, "role_of_account", role)
+
+    async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
+        return links
+
+    monkeypatch.setattr(web_url, "_where_aware", aware)
     monkeypatch.setattr(tool, "agent_names", agents)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]

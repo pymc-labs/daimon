@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.context_prompt import TurnContext
 from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import (
@@ -291,6 +292,7 @@ class TurnObservation:
                 platform=self.platform,
                 reason=resolved.value,
                 error_class=type(terminal_error).__name__ if terminal_error else None,
+                causes=backend_refusal_causes(terminal_error),
                 origin=self.origin,
                 backend=self.backend or "unknown",
                 release=current_release(),

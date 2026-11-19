@@ -128,7 +128,7 @@ async def _list_impl(
     async with runtime.session_factory() as db:
         found = await web_invites.list_invites(db, tenant_id=actor.tenant_id, limit=_LIMIT)
     at = now()
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return WebInvites(
         [_shown(i, at, details) for i in found], details, links.invites() if links else None
     )
@@ -179,7 +179,7 @@ async def _create_impl(
             raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The invite was revoked.") from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     url = links.invites(str(invite.id)) if links else None
     return WebInviteSent(_shown(invite, at, details), "direct_message", details, url)
 
@@ -201,7 +201,7 @@ async def _files_impl(
             )
     except WebAdminError as err:
         raise refused(err) from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     url = links.invites(str(invite.id)) if links else None
     return WebInviteChanged(_shown(invite, at, details), details, url)
 
@@ -225,7 +225,7 @@ async def _issue_link_impl(
             raise
         why = str(err) if isinstance(err, ToolError) else "The link could not be sent."
         raise ToolError(f"{why} The link was revoked.") from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return VisitorLinkSent(person_id, "direct_message", links.person(person_id) if links else None)
 
 

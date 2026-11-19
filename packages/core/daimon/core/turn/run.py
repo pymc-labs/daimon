@@ -27,6 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
@@ -97,7 +98,6 @@ from daimon.core.turn.agent_notices import (
     LOST_WORKSPACE_NOTICE,
     mcp_failure_notices,
     render_agent_notices,
-    stale_switch_notice,
 )
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -390,8 +390,12 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
         log.info("billing.settle_skipped", managed_session_id=session_id)
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session_id)
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session_id,
+            causes=backend_refusal_causes(error),
+        )
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -634,6 +638,7 @@ async def _replay_previous_session(
             "turn.recovery_transcript_unavailable",
             session_id=session_id,
             error=str(err)[:200],
+            causes=backend_refusal_causes(err),
         )
         return None
     turns = select_recent_turns(events)
@@ -1038,6 +1043,10 @@ async def _with_handoff_summary(
         )
     if taken is None:
         return user_message, None
+    if getattr(prepared.admission, "relay_scoped", False):
+        # A relay turn is handed no summary: it is taken (so it is not kept) and dropped.
+        log.info("turn.handoff_summary_dropped_for_relay", thread_id=thread_id)
+        return user_message, None
     from_name, summary = taken
     log.info("turn.handoff_summary_seeded", thread_id=thread_id, chars=len(summary))
     seeded = f"{render_handoff_summary(summary, from_agent_name=from_name)}\n\n{user_message}"
@@ -1172,12 +1181,9 @@ async def _with_agent_notices(
     """The message and its recovery reseed after what Daimon has to tell the agent.
 
     Queued notices are failures of this agent's earlier turns in the thread; a
-    GitHub key restart and a stale switch are this turn's own. Also returns the
-    queued and restart notices, so a turn that never sent its message can queue
-    them again.
+    GitHub key restart is this turn's own. Also returns the queued and restart
+    notices, so a turn that never sent its message can queue them again.
     """
-    stale = prepared.admission.backend_switch_stale
-    own = [stale_switch_notice(stale)] if stale is not None else []
     try:
         async with deps.sessionmaker.begin() as db:
             taken = await take_agent_notices(
@@ -1197,10 +1203,10 @@ async def _with_agent_notices(
         log.warning("turn.agent_notices_take_failed", error=type(error).__name__)
         taken, restarted = [], False
     notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else list(taken)
-    if not notices and not own:
+    if not notices:
         return user_message, reseed_user_message, []
-    log.info("turn.agent_notices_sent", count=len(notices) + len(own))
-    block = render_agent_notices([*notices, *own])
+    log.info("turn.agent_notices_sent", count=len(notices))
+    block = render_agent_notices(notices)
 
     async def reseed() -> str:  # a recovered session is told too
         return f"{block}\n\n{await reseed_user_message()}"

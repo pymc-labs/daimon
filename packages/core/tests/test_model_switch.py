@@ -1,4 +1,4 @@
-"""The panels' shared model select and switch preview words."""
+"""The panels' shared model select, switch lines and effort pick."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from daimon.core.model_switch import (
     SwitchRefusal,
     refusal_of,
     set_effort,
-    switch_card_text,
 )
 from daimon.core.models_catalog import ModelChoice
 from mux.contracts.ids import ModelRef
@@ -34,6 +33,7 @@ def _choice(index: int) -> ModelChoice:
 
 
 def test_the_select_keeps_the_current_model_within_the_limit() -> None:
+    """A long catalog is cut to the select's limit with the current model kept."""
     choices = tuple(_choice(i) for i in range(40))
     picker = ModelPicker(choices=choices, current=choices[39].model)
     shown = picker.limited()
@@ -42,29 +42,29 @@ def test_the_select_keeps_the_current_model_within_the_limit() -> None:
 
 
 def test_a_short_list_is_shown_whole() -> None:
+    """A catalog within the limit is shown as it is."""
     choices = tuple(_choice(i) for i in range(3))
-    assert ModelPicker(choices=choices, current=choices[0].model).limited() == choices
+    assert ModelPicker(choices=choices, current=choices[0].model).limited() == choices, "whole"
 
 
-def test_a_pick_without_a_preview_shows_only_its_name() -> None:
+def test_a_pick_without_a_preview_applies_with_no_lines() -> None:
+    """A Claude-to-Claude pick has nothing to say and is allowed."""
     switch = ModelSwitchPreview(
         model=ModelRef(provider="anthropic", id="claude-sonnet-4-6"),
         label="Sonnet",
         before="anthropic",
         preview=None,
     )
-    assert switch_card_text(switch, agent_name="Ada") == ("Switch Ada to Sonnet?",), (
-        "a Claude-to-Claude pick has only a title"
-    )
-    assert not switch.asks_first, "a Claude-to-Claude pick applies at once"
-    assert switch.allowed and switch.digest == "" and switch.revision == 0
+    assert switch.lines() == (), "nothing is off"
+    assert switch.allowed, "a Claude-to-Claude pick is allowed"
 
 
 def test_a_refusal_uses_the_shared_line() -> None:
+    """Every panel words a refusal from the one table."""
     error = AgentBackendRefused("stale_preview")
     refusal = refusal_of(error, admin=False)
-    assert (refusal.line, refusal.action) == refusal_card(error, admin=False)
-    assert refusal.reason == "stale_preview"
+    assert (refusal.line, refusal.action) == refusal_card(error, admin=False), "the shared line"
+    assert refusal.reason == "stale_preview", "the reason is kept"
 
 
 def _effort_service(
@@ -101,29 +101,28 @@ async def _set(service: Any, effort: str) -> object:
     )
 
 
-async def test_an_effort_pick_keeps_the_model_and_accepts_the_shown_losses(
+async def test_an_effort_pick_keeps_the_model_and_applies_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An effort pick writes at the preview's revision, with no digest or drops to accept."""
     service = _effort_service(monkeypatch, backend="openai")
-    assert await _set(service, "high") == "high"
+    assert await _set(service, "high") == "high", "the level is kept"
     _agent, settings, revision, _actor = service.set_settings.await_args.args
-    assert (settings.effort, revision) == ("high", 4)
-    assert service.set_settings.await_args.kwargs == {
-        "expected_preview_digest": "d",
-        "accepted_drops": ("x",),
-    }
+    assert (settings.effort, revision) == ("high", 4), "at the previewed revision"
+    assert service.set_settings.await_args.kwargs == {}, "nothing to consent to"
 
 
 async def test_an_effort_pick_is_refused_on_claude_for_a_non_editor_and_for_unknown_levels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Claude has its own setting; a viewer and an unknown level write nothing."""
     claude = _effort_service(monkeypatch, backend=None)
     refused = await _set(claude, "high")
-    assert isinstance(refused, SwitchRefusal)
+    assert isinstance(refused, SwitchRefusal), "Claude refuses"
     claude.set_settings.assert_not_awaited()
     viewer = _effort_service(monkeypatch, backend="openai", editor=False)
-    assert isinstance(await _set(viewer, "high"), SwitchRefusal)
+    assert isinstance(await _set(viewer, "high"), SwitchRefusal), "a viewer is refused"
     viewer.set_settings.assert_not_awaited()
     assert isinstance(
         await _set(_effort_service(monkeypatch, backend="openai"), "max"), SwitchRefusal
-    )
+    ), "an unknown level is refused"

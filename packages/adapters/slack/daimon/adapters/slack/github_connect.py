@@ -13,6 +13,7 @@ from daimon.adapters.slack.admin import resolve_is_platform_admin
 from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import connect_attachment, resolve_connect_card
@@ -197,8 +198,8 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         )
     except PinnedAgentConnectionError as exc:
         await reply(str(exc))
-    except (anthropic.APIError, SlackApiError, SQLAlchemyError, ValueError):
-        log.exception("slack.github_connect.failed")
+    except (anthropic.APIError, SlackApiError, SQLAlchemyError, ValueError) as error:
+        log.exception("slack.github_connect.failed", causes=backend_refusal_causes(error))
         await reply("GitHub setup is unavailable. Try again.")
 
 

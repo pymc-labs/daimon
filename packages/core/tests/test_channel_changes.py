@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, origin_ids
 from daimon.core.channel_budget import parse_budget_spec
 from daimon.core.channel_changes import (
     BudgetValue,
@@ -145,16 +145,21 @@ async def test_a_default_the_rules_would_refuse_is_invalid(
     )
     await _bind(db_session, tenant.id, "c2", "homebody")
     await db_session.commit()
-    actor = _actor(tenant.id)
+    actor = _actor(tenant.id, Subject(is_admin=True, origin_channel_ids=origin_ids("c1", None)))
 
     with pytest.raises(ChannelChangeRefused) as elsewhere:
         await set_default_agent(
             db_session_factory, actor, platform="discord", channel_id="c1", agent_name="homebody"
         )
     assert (elsewhere.value.kind, elsewhere.value.reason) == ("invalid", "agent_has_home")
+    actor = _actor(tenant.id, Subject(is_admin=True, origin_channel_ids=origin_ids("c2", None)))
     with pytest.raises(ChannelChangeRefused) as keeps_own:
         await clear_default_agent(db_session_factory, actor, platform="discord", channel_id="c2")
     assert keeps_own.value.reason == "keeps_own", "an own-agents channel keeps its agent"
+    outside = _actor(tenant.id)
+    with pytest.raises(ChannelChangeRefused) as sealed:
+        await clear_default_agent(db_session_factory, outside, platform="discord", channel_id="c2")
+    assert sealed.value.reason == "sealed_channel", "an admin outside a private channel is refused"
 
 
 async def test_budget_set_raise_and_clear_are_recorded_and_compared(

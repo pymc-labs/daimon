@@ -1,7 +1,7 @@
 """One chat's model: the choices, what a pick changes, and keeping it.
 
 The chat-view control of the same `daimon.core.thread_model_switch` Discord `/model`
-uses: a pick that loses nothing is kept at once, any other shows the switch card once. The
+uses: a pick is kept at once, and what the new provider can't carry is off there. The
 person must own the agent or be an admin to move it off its provider, unless its
 `thread_providers` feature is on.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.agent_access import actor_of, change_deps
 from daimon.adapters.web.caller import WebCaller
-from daimon.adapters.web.model_preview import ModelPreview, preview_doc, refused_doc
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_backend import BackendActor, load_backend_agent
 from daimon.core.model_switch import SwitchRefusal
@@ -19,10 +18,8 @@ from daimon.core.stores.domain import WebThreadRow
 from daimon.core.stores.thread_models import get_thread_choice
 from daimon.core.thread_model_switch import (
     ThreadPick,
-    confirm_thread_or_refusal,
+    pick_thread,
     pick_value,
-    preview_thread_or_refusal,
-    thread_asks_first,
     thread_model_picker,
 )
 from daimon.core.thread_models import choose_thread_model
@@ -96,27 +93,14 @@ async def thread_models(
     )
 
 
-async def preview_thread(
-    runtime: WebRuntime, caller: WebCaller, thread: WebThreadRow, value: str
-) -> ModelPreview:
-    """What picking `value` changes for this chat, or why it can't be picked."""
-    pick = await thread_pick(runtime, caller, thread)
-    found = await preview_thread_or_refusal(pick, pick_value(value), admin=is_admin(caller.role))
-    if isinstance(found, SwitchRefusal):
-        return refused_doc(found)
-    return preview_doc(found, agent_name=None, card=await thread_asks_first(pick, found))
-
-
 async def keep_thread_model(
     runtime: WebRuntime,
     caller: WebCaller,
     thread: WebThreadRow,
     *,
     value: str,
-    digest: str,
-    revision: int,
 ) -> Picked:
-    """Keep the pick the person confirmed; `default` goes back to the agent's own model."""
+    """Keep the pick; `default` goes back to the agent's own model."""
     if value.strip().lower() == "default":
         change = await choose_thread_model(
             runtime.sessionmaker,
@@ -127,13 +111,8 @@ async def keep_thread_model(
         )
         return Picked(model=change.model_id, note=change.note)
     pick = await thread_pick(runtime, caller, thread)
-    done = await confirm_thread_or_refusal(
-        pick,
-        pick_value(value),
-        thread_id=thread_key(thread.id),
-        digest=digest,
-        revision=revision,
-        admin=is_admin(caller.role),
+    done = await pick_thread(
+        pick, pick_value(value), thread_id=thread_key(thread.id), admin=is_admin(caller.role)
     )
     if isinstance(done, SwitchRefusal):
         raise HTTPException(status_code=_STATUS.get(done.reason, 409), detail=done.line)

@@ -833,7 +833,7 @@ async def test_session_busy_for_a_seal_says_to_send_again(
 @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
 @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
 @patch("daimon.adapters.discord.bot.build_context_xml", new_callable=AsyncMock)
-async def test_mention_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_mention_turn_admin_settings_card_reads_no_agent_source(
     mock_build_context_xml: AsyncMock,
     mock_resolve_config: AsyncMock,
     mock_resolve_env: AsyncMock,
@@ -842,12 +842,8 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ordinary mention turn's Confirm card reads the switched agent's source as
-    that turn's own admitted caller, exactly like a wizard-submitted turn's card
-    (test_a_wizard_turns_backend_switch_card_captures_through_its_own_admission in
-    tests/integration/test_wizard_submit_turn.py). Built without the admission,
-    every backend-switch card on this call site refuses `source_unavailable`.
-    """
+    """A mention turn's admin settings cards (allowed providers, channel pin) read no
+    agent source: a model switch has no card of its own, so nothing captures one."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -883,8 +879,7 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
+    capture_backend_source = AsyncMock()
     monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
@@ -902,15 +897,7 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         await bot.on_message(message)
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "discord",
-        "789",
-        "5555",
+    assert service._capture_source is None, (  # pyright: ignore[reportPrivateUsage]
+        "the admin cards read no agent source"
     )
+    capture_backend_source.assert_not_awaited()

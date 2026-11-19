@@ -602,6 +602,8 @@ async def test_failed_fetch_diagnostic_is_closed_and_keeps_original_cause(
     with capture_logs() as logs:
         result = await run(native_host, lifecycle=lifecycle)
     diagnostic = [row for row in logs if row["event"] == "turn.usage_reconciliation_failed"]
+    causes = diagnostic[0].pop("causes") if diagnostic else []
+    assert causes[0]["native_error_code"] == "http_429", f"the provider cause is logged: {causes}"
     assert diagnostic == [
         {
             "event": "turn.usage_reconciliation_failed",

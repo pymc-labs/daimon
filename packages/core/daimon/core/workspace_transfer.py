@@ -59,6 +59,7 @@ from anthropic.types.beta.beta_managed_agents_file_resource_params import (
     BetaManagedAgentsFileResourceParams,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.checkpoint_prompt import (
     CHECKPOINT_BUNDLE_MOUNT_PATH,
     CHECKPOINT_OUTPUTS_DIR,
@@ -390,7 +391,12 @@ async def _rehost_bundle(
     try:
         content = await read_output_record(client, bundle.id, scope=scope)
     except anthropic.APIStatusError as err:
-        log.warning("workspace_transfer.download_failed", file_id=bundle.id, error=str(err)[:300])
+        log.warning(
+            "workspace_transfer.download_failed",
+            file_id=bundle.id,
+            error=str(err)[:300],
+            causes=backend_refusal_causes(err),
+        )
         return "archive_missing"
 
     # Already gone (a concurrent sweep, a retried transfer) is not an error.
@@ -414,7 +420,11 @@ async def _rehost_bundle(
             )
         )
     except anthropic.APIStatusError as err:
-        log.warning("workspace_transfer.upload_failed", error=str(err)[:300])
+        log.warning(
+            "workspace_transfer.upload_failed",
+            error=str(err)[:300],
+            causes=backend_refusal_causes(err),
+        )
         return "upload_failed"
 
     async with sessionmaker() as session, session.begin():
@@ -504,7 +514,11 @@ async def transfer_workspace(
     except anthropic.APIStatusError as err:
         if not _is_not_found(err):
             raise
-        log.info("workspace_transfer.events_unavailable", session_id=old_session_id)
+        log.info(
+            "workspace_transfer.events_unavailable",
+            session_id=old_session_id,
+            causes=backend_refusal_causes(err),
+        )
         return HistoryOnly(gap_reason="events_unavailable")
 
     turns = select_recent_turns(events)
@@ -529,6 +543,7 @@ async def transfer_workspace(
                 "workspace_transfer.checkpoint_failed",
                 session_id=old_session_id,
                 status=err.status_code,
+                causes=backend_refusal_causes(err),
             )
             return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
         ref = build_agent_ref(predecessor.name, predecessor.metadata, old_snapshot.agent_name)
@@ -570,7 +585,11 @@ async def transfer_workspace(
     except anthropic.APIStatusError as err:
         if not _is_not_found(err):
             raise
-        log.warning("workspace_transfer.checkpoint_failed", session_id=old_session_id)
+        log.warning(
+            "workspace_transfer.checkpoint_failed",
+            session_id=old_session_id,
+            causes=backend_refusal_causes(err),
+        )
         return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
     try:
         # A session the unattended gate cannot constrain (a coordinator roster,

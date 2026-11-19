@@ -90,11 +90,19 @@ def held_connectors(keys: Collection[str]) -> frozenset[str]:
 
 
 _CLAIM_KEYS: Final = frozenset({"platform", "channel_id", "client"})
+_RELAY_CLAIM_KEYS: Final = _CLAIM_KEYS | {"relay"}
 
 
 def hold_claim(hold: TurnHold) -> dict[str, str | bool]:
     """The value signed under `HOLD_CLAIM`."""
-    return {"platform": hold.platform, "channel_id": hold.channel_id, "client": hold.client}
+    claim: dict[str, str | bool] = {
+        "platform": hold.platform,
+        "channel_id": hold.channel_id,
+        "client": hold.client,
+    }
+    if hold.relay:
+        claim["relay"] = True
+    return claim
 
 
 def parse_hold_claim(raw: object) -> TurnHold:
@@ -103,8 +111,10 @@ def parse_hold_claim(raw: object) -> TurnHold:
         raise ValueError("hold claim is not an object")
     claim = cast("Mapping[str, object]", raw)
     platform, channel_id, client = (claim.get(key) for key in ("platform", "channel_id", "client"))
+    relay = "relay" in claim
     if (
-        frozenset(claim) != _CLAIM_KEYS
+        frozenset(claim) not in (_CLAIM_KEYS, _RELAY_CLAIM_KEYS)
+        or ("relay" in claim and claim["relay"] is not True)
         or not isinstance(platform, str)
         or not isinstance(channel_id, str)
         or not isinstance(client, bool)
@@ -112,7 +122,7 @@ def parse_hold_claim(raw: object) -> TurnHold:
         or not channel_id
     ):
         raise ValueError("hold claim has the wrong shape")
-    return TurnHold(platform=platform, channel_id=channel_id, client=client)
+    return TurnHold(platform=platform, channel_id=channel_id, client=client, relay=relay)
 
 
 def hold_metadata_value(hold: TurnHold) -> str:
@@ -135,7 +145,10 @@ def hold_key(hold: TurnHold | None) -> str | None:
     """A stable name for one hold, recorded in credential metadata and the session snapshot."""
     if hold is None:
         return None
-    return f"{hold.platform}:{hold.channel_id}:{'client' if hold.client else 'member'}"
+    return (
+        f"{hold.platform}:{hold.channel_id}:{'client' if hold.client else 'member'}"
+        f"{':relay' if hold.relay else ''}"
+    )
 
 
 def hold_vault_suffix(hold: TurnHold) -> str:
@@ -146,4 +159,7 @@ def hold_vault_suffix(hold: TurnHold) -> str:
     metadata keeps the exact hold.
     """
     digest = hashlib.sha256(hold.channel_id.encode()).hexdigest()[:20]
-    return f":hold:{hold.platform}:{digest}:{'client' if hold.client else 'member'}"
+    return (
+        f":hold:{hold.platform}:{digest}:{'client' if hold.client else 'member'}"
+        f"{':relay' if hold.relay else ''}"
+    )

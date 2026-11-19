@@ -1,9 +1,8 @@
-"""Slack's model choice for one thread: a message shortcut, a select, at most one card.
+"""Slack's model choice for one thread: a message shortcut and a select.
 
 Slash commands carry no thread, so the thread level is a shortcut on a message in the
-thread. The select lists the agent's catalog with prices; a pick that loses something
-names it and asks once. The same card is posted in the thread when an agent edit leaves
-the thread's consent stale (`daimon.core.thread_model_reask`). The shared flow is
+thread. The select lists the agent's catalog with prices; a pick applies at once and the
+reply names anything off on the new provider. The shared flow is
 `daimon.core.thread_model_flow`; the person, channel and thread come from Slack's signed
 envelope, and every click is checked again.
 """
@@ -11,7 +10,6 @@ envelope, and every click is checked again.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import Any, Final, cast
 
 import structlog
@@ -22,19 +20,15 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.thread_model_flow import (
     NOTHING_CHANGED,
-    ThreadConfirm,
     ThreadOption,
     build_thread_pick,
     confirm_thread_pick,
     pick_thread_model,
     thread_options,
 )
-from daimon.core.thread_model_reask import ThreadReask, ThreadReaskNotifier
 from daimon.core.thread_models import may_choose_thread_model
-from daimon.core.turn.deps import TurnDeps
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -44,6 +38,7 @@ log = structlog.get_logger()
 
 SHORTCUT_CALLBACK_ID: Final = "thread_model"
 PICK_ACTION_ID: Final = "thread_model_pick"
+# Switch and Cancel on cards from before picks applied at once.
 CONFIRM_ACTION_ID: Final = "thread_model_confirm"
 CANCEL_ACTION_ID: Final = "thread_model_cancel"
 THREAD_MODEL_ACTION_IDS: Final = frozenset({PICK_ACTION_ID, CONFIRM_ACTION_ID, CANCEL_ACTION_ID})
@@ -81,49 +76,13 @@ def _select_blocks(options: tuple[ThreadOption, ...], conversation_id: str) -> l
     ]
 
 
-def _confirm_value(confirm: ThreadConfirm, conversation_id: str) -> str:
-    return json.dumps(
-        {"v": confirm.value, "d": confirm.digest, "r": confirm.revision, "c": conversation_id},
-        separators=(",", ":"),
-    )
-
-
-def _read_confirm(raw: str) -> tuple[ThreadConfirm, str] | None:
+def _read_confirm(raw: str) -> tuple[str, str] | None:
+    """The pick and conversation on a Switch from before picks applied at once."""
     try:
         data = cast("dict[str, Any]", json.loads(raw))
-        return ThreadConfirm(str(data["v"]), str(data["d"]), int(data["r"])), str(data["c"])
+        return str(data["v"]), str(data["c"])
     except (ValueError, KeyError, TypeError):
         return None
-
-
-def _card_text(lines: tuple[str, ...]) -> dict[str, Any]:
-    """The card's title in bold, its facts under it."""
-    return _text("\n".join((f"*{lines[0]}*", *lines[1:])) if lines else "")
-
-
-def confirm_blocks(
-    lines: tuple[str, ...], confirm: ThreadConfirm, conversation_id: str
-) -> list[dict[str, Any]]:
-    """The card for a pick that loses something, with Cancel and Switch."""
-    buttons: list[dict[str, Any]] = [
-        {
-            "type": "button",
-            "action_id": CANCEL_ACTION_ID,
-            "text": {"type": "plain_text", "text": CANCEL_LABEL},
-            "value": "cancel",
-        },
-        {
-            "type": "button",
-            "action_id": CONFIRM_ACTION_ID,
-            "style": "primary",
-            "text": {"type": "plain_text", "text": SWITCH_LABEL},
-            "value": _confirm_value(confirm, conversation_id),
-        },
-    ]
-    return [
-        _card_text(lines),
-        {"type": "actions", "block_id": f"{_BLOCK_PREFIX}confirm", "elements": buttons},
-    ]
 
 
 def _ids(payload: dict[str, Any]) -> tuple[str, str, str]:
@@ -165,15 +124,10 @@ async def _agent_admin(client: AsyncWebClient, *, team_id: str, user_id: str) ->
     )
 
 
-async def _answer(
-    response_url: str, text: str, *, blocks: list[dict[str, Any]] | None = None
-) -> None:
-    """Replace the card with one line, or with new blocks."""
-    fields: dict[str, Any] = {"replace_original": True, "parse": "none"}
-    if blocks is not None:
-        fields |= {"text": _TITLE, "blocks": blocks}
-    else:
-        fields |= {"text": "", "blocks": [], "attachments": notice_attachments(text, neutral=True)}
+async def _answer(response_url: str, text: str) -> None:
+    """Replace the card with a neutral notice."""
+    fields: dict[str, Any] = {"replace_original": True, "parse": "none", "text": "", "blocks": []}
+    fields["attachments"] = notice_attachments(text, neutral=True)
     await AsyncWebhookClient(response_url).send_dict(fields)
 
 
@@ -219,7 +173,7 @@ async def handle_thread_model_shortcut(runtime: SlackRuntime, payload: dict[str,
 
 
 async def handle_thread_model_pick(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """A pick from the select: kept when it loses nothing, else the card that asks once."""
+    """A pick from the select: kept at once, with anything off on the new provider named."""
     team_id, user_id, channel_id = _ids(payload)
     element = cast("list[dict[str, Any]]", payload.get("actions") or [{}])[0]
     choice = str(cast("dict[str, Any]", element.get("selected_option") or {}).get("value") or "")
@@ -259,7 +213,7 @@ async def handle_thread_model_pick(runtime: SlackRuntime, payload: dict[str, Any
             channel_id=channel_id,
             conversation_id=conversation_id,
         )
-        result = await pick_thread_model(
+        text = await pick_thread_model(
             sessionmaker=runtime.sessionmaker,
             settings=runtime.settings,
             pick=pick,
@@ -269,29 +223,21 @@ async def handle_thread_model_pick(runtime: SlackRuntime, payload: dict[str, Any
             choice=choice,
             admin=admin,
         )
-        if result.confirm is None:
-            shown = (*result.lines, NOTHING_CHANGED) if result.lines else (result.text,)
-            await _answer(response_url, "\n".join(shown))
-            return
-        await _answer(
-            response_url,
-            "",
-            blocks=confirm_blocks(result.lines, result.confirm, conversation_id),
-        )
+        await _answer(response_url, text)
     except (SlackApiError, DaimonError, SQLAlchemyError) as exc:
         log.warning("slack.thread_model.pick_failed", team_id=team_id, exc_info=exc)
         await _answer(response_url, _FAILED)
 
 
 async def handle_thread_model_confirm(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Switch: the pick is kept only if it still matches what was shown."""
+    """Switch on an old card: its pick is kept as a new pick would be."""
     team_id, user_id, channel_id = _ids(payload)
     element = cast("list[dict[str, Any]]", payload.get("actions") or [{}])[0]
     read = _read_confirm(str(element.get("value") or ""))
     response_url = str(payload.get("response_url") or "")
     if read is None or not (team_id and user_id and channel_id and response_url):
         return
-    confirm, conversation_id = read
+    value, conversation_id = read
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
@@ -323,9 +269,7 @@ async def handle_thread_model_confirm(runtime: SlackRuntime, payload: dict[str, 
         if pick is None:
             await _answer(response_url, f"No agent answers here yet. {NOTHING_CHANGED}")
             return
-        text = await confirm_thread_pick(
-            pick, confirm, conversation_id=conversation_id, admin=admin
-        )
+        text = await confirm_thread_pick(pick, value, conversation_id=conversation_id, admin=admin)
         await _answer(response_url, text)
     except (SlackApiError, DaimonError, SQLAlchemyError) as exc:
         log.warning("slack.thread_model.confirm_failed", team_id=team_id, exc_info=exc)
@@ -333,40 +277,7 @@ async def handle_thread_model_confirm(runtime: SlackRuntime, payload: dict[str, 
 
 
 async def handle_thread_model_cancel(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Cancel: the card becomes one line."""
+    """Cancel on an old card: it becomes one line."""
     response_url = str(payload.get("response_url") or "")
     if response_url:
         await _answer(response_url, NOTHING_CHANGED)
-
-
-def slack_thread_reask_notifier(runtime: SlackRuntime) -> ThreadReaskNotifier:
-    """Post the preview card in the thread; a failed post raises so the next message asks again."""
-
-    async def send(ask: ThreadReask) -> None:
-        client = await resolve_web_client(runtime, team_id=ask.workspace_id)
-        if client is None:
-            raise RuntimeError("no slack client for the workspace")
-        if ask.confirm is None:
-            blocks = [_card_text(ask.lines)]
-        else:
-            blocks = confirm_blocks(ask.lines, ask.confirm, ask.conversation_id)
-        fields: dict[str, Any] = notice_fields(_TITLE, neutral=True, blocks=blocks)
-        if ask.thread_id:
-            fields["thread_ts"] = ask.thread_id
-        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-            channel=ask.channel_id, text=_TITLE, parse="none", **fields
-        )
-
-    return send
-
-
-def with_thread_reask_notifier(runtime: SlackRuntime) -> SlackRuntime:
-    """`runtime` whose turns post the card; a stand-in test runtime comes back unchanged."""
-    real = cast(object, runtime)
-    deps = cast(object, runtime.turn_deps)
-    if not isinstance(real, SlackRuntime) or not isinstance(deps, TurnDeps):
-        return runtime
-    return replace(
-        real,
-        turn_deps=replace(deps, thread_reask_notifier=slack_thread_reask_notifier(real)),
-    )

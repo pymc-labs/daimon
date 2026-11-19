@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from typing import TYPE_CHECKING
 
@@ -21,6 +21,7 @@ from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import (
     button,
+    conversation_origin,
     submitted_fields,
     toast,
 )
@@ -261,7 +262,11 @@ class TeamsConfirmationCards:
         """
 
         if runtime is not None:
-            from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+            from daimon.core.channel_backend import (
+                NO_CAPTURE,
+                backend_selection_enabled,
+                make_backend_service,
+            )
 
             if backend_selection_enabled(runtime.settings.turn):
                 from daimon.core.confirmation import backend_switch_callbacks
@@ -273,39 +278,15 @@ class TeamsConfirmationCards:
                 async def current_platform_admin(clicker: str) -> bool:
                     return await _is_admin_now(runtime, clicker, action=None)
 
-                async def current_admin(clicker: str) -> bool:
-                    return await _is_admin_now(
-                        runtime, clicker, action=DelegatedAction.AGENT_SETTINGS
-                    )
-
-                from functools import partial
-
-                from daimon.core.turn.admission import capture_admitted_backend_source
-
-                capture = partial(
-                    capture_admitted_backend_source,
-                    runtime.turn_deps,
-                    admission=admission,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform="teams",
-                )
-
+                # The admin cards set the allowed providers or clear a pin: no agent source.
                 prepare_admin, check_admin = backend_switch_callbacks(
                     make_backend_service(
-                        runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                        runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
                     ),
                     sessionmaker=runtime.sessionmaker,
-                    anthropic=runtime.anthropic,
                     tenant_id=tenant_id,
                     account_id=account_id,
-                    current_admin=current_admin,
                     current_platform_admin=current_platform_admin,
-                    answering_agent_name=(
-                        getattr(getattr(admission, "config", None), "agent_name", None)
-                    ),
-                    default_agent_name=runtime.deployment_default.agent_name,
-                    place_word="team",
                     # A channel-pin card clears only the channel this turn runs in.
                     pin_channel=ChannelRef(
                         tenant_id=str(tenant_id),
@@ -499,7 +480,11 @@ class TeamsConfirmationCards:
         if clicker is None:
             return
         try:
-            subject = await posted.rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            subject = replace(
+                await posted.rule_subject(clicker),
+                origin_channel_ids=conversation_origin(ctx.activity.conversation.id),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             subject = Subject()

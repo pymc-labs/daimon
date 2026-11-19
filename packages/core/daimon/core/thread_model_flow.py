@@ -1,9 +1,7 @@
-"""One conversation's model pick as a chat card shows it: the choices, then kept or one card.
+"""One conversation's model pick as a chat card shows it: the choices, then the outcome.
 
-Slack and Teams share these; Discord `/model` runs the same core call
-(`pick_thread_or_card`). A pick that loses something returns the short card and the digest
-it was shown at, which the platform keeps in its Switch button; Switch reads the preview
-again and keeps the pick only if it still matches.
+Slack and Teams share these; Discord `/model` runs the same core call (`pick_thread`).
+A pick is kept at once; the note says what is off on the new provider, if anything.
 """
 
 from __future__ import annotations
@@ -15,12 +13,11 @@ from daimon.core import backend_capture, channel_backend
 from daimon.core.authz import build_subject
 from daimon.core.config import load_turn_settings
 from daimon.core.errors import DaimonError
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal, switch_card_text
+from daimon.core.model_switch import SwitchRefusal
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.thread_model_switch import (
     ThreadPick,
-    confirm_thread_or_refusal,
-    pick_thread_or_card,
+    pick_thread,
     pick_value,
     thread_model_picker,
     thread_pick_for,
@@ -56,28 +53,6 @@ LEGACY_OPTIONS: Final = (
     ThreadOption("Opus", "opus"),
     ThreadOption("Agent default", "default"),
 )
-
-
-@dataclass(frozen=True)
-class ThreadConfirm:
-    """A pick waiting for its one Switch: the value and what it was previewed at."""
-
-    value: str
-    digest: str
-    revision: int
-
-
-@dataclass(frozen=True)
-class ThreadPickResult:
-    """What a pick came to: the words to show, and the Switch when one is needed.
-
-    `lines` are the card's when the pick asks first; `text` is the one-line answer (kept,
-    or refused) otherwise.
-    """
-
-    text: str
-    confirm: ThreadConfirm | None = None
-    lines: tuple[str, ...] = ()
 
 
 async def thread_actor(
@@ -173,8 +148,8 @@ async def pick_thread_model(
     conversation_id: str,
     choice: str,
     admin: bool,
-) -> ThreadPickResult:
-    """Keep a pick that loses nothing; otherwise the card that asks first."""
+) -> str:
+    """Keep a pick at once; the note to show, or why it was refused."""
     word = choice.strip().lower()
     if word == "default" or not channel_backend.backend_selection_enabled(settings.turn):
         change = await choose_thread_model(
@@ -184,38 +159,23 @@ async def pick_thread_model(
             thread_id=conversation_id,
             choice=choice,
         )
-        return ThreadPickResult(change.note)
+        return change.note
     if pick is None:
-        return ThreadPickResult(NO_AGENT)
-    value = pick_value(choice)
-    done = await pick_thread_or_card(pick, value, thread_id=conversation_id, admin=admin)
-    return thread_pick_result(value, done)
+        return NO_AGENT
+    done = await pick_thread(pick, pick_value(choice), thread_id=conversation_id, admin=admin)
+    return thread_pick_result(done)
 
 
-def thread_pick_result(
-    value: str, done: ThreadModelChange | ModelSwitchPreview | SwitchRefusal
-) -> ThreadPickResult:
-    """A pick's outcome as a chat shows it: kept, refused, or the card. Pure."""
-    if isinstance(done, SwitchRefusal):
-        return ThreadPickResult(f"{done.line} {NOTHING_CHANGED}")
-    if isinstance(done, ThreadModelChange):
-        return ThreadPickResult(done.note)
-    confirm = ThreadConfirm(value, done.digest, done.revision) if done.allowed else None
-    return ThreadPickResult("", confirm, switch_card_text(done, agent_name=None))
-
-
-async def confirm_thread_pick(
-    pick: ThreadPick, confirm: ThreadConfirm, *, conversation_id: str, admin: bool
-) -> str:
-    """Keep the confirmed pick; a refusal (or a preview that moved on) changes nothing."""
-    done = await confirm_thread_or_refusal(
-        pick,
-        confirm.value,
-        thread_id=conversation_id,
-        digest=confirm.digest,
-        revision=confirm.revision,
-        admin=admin,
-    )
+def thread_pick_result(done: ThreadModelChange | SwitchRefusal) -> str:
+    """A pick's outcome as a chat shows it: the note, or the refusal. Pure."""
     if isinstance(done, SwitchRefusal):
         return f"{done.line} {NOTHING_CHANGED}"
     return done.note
+
+
+async def confirm_thread_pick(
+    pick: ThreadPick, value: str, *, conversation_id: str, admin: bool
+) -> str:
+    """Switch on a card posted before picks applied at once: keeps its pick as a new pick would."""
+    done = await pick_thread(pick, value, thread_id=conversation_id, admin=admin)
+    return thread_pick_result(done)

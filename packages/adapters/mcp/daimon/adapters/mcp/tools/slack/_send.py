@@ -56,6 +56,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.output_delivery import MAX_BYTES_PER_FILE
 from daimon.core.slack_customize_scope import (
@@ -264,7 +265,11 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
                 wait_for_face=True,
             )
     except (anthropic.APIError, SQLAlchemyError) as exc:
-        log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.agent_identity_lookup_failed",
+            error_type=type(exc).__name__,
+            causes=backend_refusal_causes(exc),
+        )
         return None
     if identity.builtin:
         return None

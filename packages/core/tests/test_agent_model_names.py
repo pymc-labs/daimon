@@ -28,6 +28,9 @@ from mux.profiles.gemini import OPT_IN_MODELS
         ("gemini 4 carbon", "gemini-4-carbon"),
         ("Gemini 4 Hydrogen", "gemini-4-hydrogen"),
         ("lunaa", "gpt-6-luna"),
+        ("astra", "gpt-6.2-astra"),
+        ("gpt 6 astra", "gpt-6-astra"),
+        ("sol", "gpt-6.2-sol"),
     ],
 )
 def test_natural_names_use_the_priced_runtime_catalog(name, model):
@@ -117,6 +120,8 @@ def test_family_shorthand_never_means_the_pricier_fast_preset():
         ("anthropic", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"),
         ("anthropic", "claude-opus-9-1", "Claude Opus 9.1"),
         ("openai", "gpt-6-astra", "GPT-6 Astra"),
+        ("openai", "gpt-6.2-astra", "GPT-6.2 Astra"),
+        ("openai", "gpt-6.2-sol", "GPT-6.2 Sol"),
         ("openai", "gpt-6-luna", "GPT-6 Luna"),
         ("gemini", "gemini-4-argon", "Gemini 4 Argon"),
         ("gemini", "gemini-4-carbon", "Gemini 4 Carbon"),

@@ -23,6 +23,7 @@ from daimon.core.agent_ownership import agent_name_lock
 from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import require_anthropic
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.ma_index import download_skill_version, find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
@@ -302,7 +303,12 @@ async def _copy_skills_to_record(
     try:
         await _pin_record_skills(sessionmaker, person, record_id, tuple(copied.values()))
     except _SKILL_ERRORS as error:
-        _log.warning("agent.convert_skills_unpinned", name=name, error=type(error).__name__)
+        _log.warning(
+            "agent.convert_skills_unpinned",
+            causes=backend_refusal_causes(error),
+            name=name,
+            error=type(error).__name__,
+        )
         return (), tuple(kept), (*dropped, *(f"{skill} (couldn't be added)" for skill in copied))
     return tuple(copied), tuple(kept), tuple(dropped)
 
@@ -318,7 +324,10 @@ async def _held_copy(
             stored = await catalog.get_agent_skill(person, record, pin)
         except _SKILL_ERRORS as error:
             _log.warning(
-                "agent.convert_skill_unread", skill_id=skill_id, error=type(error).__name__
+                "agent.convert_skill_unread",
+                causes=backend_refusal_causes(error),
+                skill_id=skill_id,
+                error=type(error).__name__,
             )
             continue
         if stored is not None:
@@ -344,7 +353,12 @@ async def _copy_one_to_catalog(
             anthropic, skill_id=skill_id, version=version, scope=service
         )
     except _SKILL_ERRORS as error:
-        _log.warning("agent.convert_skill_skipped", skill_id=skill_id, error=type(error).__name__)
+        _log.warning(
+            "agent.convert_skill_skipped",
+            causes=backend_refusal_causes(error),
+            skill_id=skill_id,
+            error=type(error).__name__,
+        )
         return "couldn't be downloaded"
     try:
         bundle = bundle_from_files(retained_archive_files(data))
@@ -363,7 +377,12 @@ async def _copy_one_to_catalog(
             bundle=bundle,
         )
     except _SKILL_ERRORS as error:
-        _log.warning("agent.convert_skill_skipped", skill_id=skill_id, error=type(error).__name__)
+        _log.warning(
+            "agent.convert_skill_skipped",
+            causes=backend_refusal_causes(error),
+            skill_id=skill_id,
+            error=type(error).__name__,
+        )
         return "couldn't be copied"
     return bundle.preview.name, SkillRef(id=skill_id, version=version, source="custom")
 
@@ -438,7 +457,12 @@ async def _copy_skills_to_claude(
         try:
             stored = await catalog.get_agent_skill(person, record, ref)
         except _SKILL_ERRORS as error:
-            _log.warning("agent.convert_skill_skipped", skill_id=ref.id, error=type(error).__name__)
+            _log.warning(
+                "agent.convert_skill_skipped",
+                causes=backend_refusal_causes(error),
+                skill_id=ref.id,
+                error=type(error).__name__,
+            )
             stored = None
         if stored is None:
             dropped.append(f"{ref.id} (couldn't be found)")
@@ -456,7 +480,12 @@ async def _copy_skills_to_claude(
                 recheck=_no_recheck,
             )
         except _SKILL_ERRORS as error:
-            _log.warning("agent.convert_skill_skipped", skill_id=ref.id, error=type(error).__name__)
+            _log.warning(
+                "agent.convert_skill_skipped",
+                causes=backend_refusal_causes(error),
+                skill_id=ref.id,
+                error=type(error).__name__,
+            )
             dropped.append(f"{stored.bundle.preview.name} (couldn't be added)")
             continue
         copied.append(added.name)

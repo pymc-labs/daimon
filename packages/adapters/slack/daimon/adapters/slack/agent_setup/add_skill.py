@@ -31,6 +31,7 @@ from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -189,8 +190,12 @@ async def run_add_skill_submission(
     except SkillIngestError as exc:
         await tell(f"{exc} Nothing was added.")
         return
-    except (DaimonError, anthropic.APIError, ScopeViolation):
-        log.exception("slack.agent_setup.add_skill.failed", agent_name=agent_name)
+    except (DaimonError, anthropic.APIError, ScopeViolation) as error:
+        log.exception(
+            "slack.agent_setup.add_skill.failed",
+            agent_name=agent_name,
+            causes=backend_refusal_causes(error),
+        )
         await tell(
             f"Adding {escape_mrkdwn(name)} to {escape_mrkdwn(agent_name)} failed. Try again."
         )

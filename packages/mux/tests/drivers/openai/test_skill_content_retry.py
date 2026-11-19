@@ -137,3 +137,34 @@ async def test_persistent_404_on_version_metadata_still_raises(monkeypatch):
 
 async def _no_sleep(_delay: float) -> None:
     return None
+
+
+async def test_create_when_the_new_version_404s_then_returns_once_it_is_readable(monkeypatch):
+    """A session attaching a just-uploaded version fails while its read still 404s."""
+    from mux.drivers.openai.skills import OpenAISkills
+
+    monkeypatch.setattr("mux.drivers.openai.skills.asyncio.sleep", _no_sleep)
+    reads = 0
+
+    def handle(request):
+        nonlocal reads
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"id": "sk", "name": "s", "latest_version": "1", "created_at": 1},
+            )
+        assert request.url.path.endswith("/skills/sk/versions/1"), "reads the new version"
+        reads += 1
+        if reads <= 2:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json={"skill_id": "sk", "version": "1"})
+
+    async with build_async_openai(transport=httpx.MockTransport(handle)) as sdk:
+        context = Context(
+            SDKTransport(sdk),
+            "project",
+            "openai.persistent_workspace",
+            lambda actual, *_: actual == SCOPE,
+        )
+        skill = await OpenAISkills(context).create(SCOPE, BUNDLE, key="k")
+    assert (skill.id, reads) == ("sk", 3), "create returns only after the version reads 200"

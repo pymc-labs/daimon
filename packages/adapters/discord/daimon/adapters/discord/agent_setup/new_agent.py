@@ -24,6 +24,7 @@ from daimon.adapters.discord.agent_setup.write import create_blank_agent, valida
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.models_catalog import claude_model_choices
@@ -228,6 +229,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                 model=model_value,
                 err_type=type(err).__name__,
                 request_id=rid,
+                causes=backend_refusal_causes(err),
             )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(err, request_id=rid)), ephemeral=True

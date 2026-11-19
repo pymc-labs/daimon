@@ -19,9 +19,13 @@ The official [environment documentation](https://ai.google.dev/gemini-api/docs/a
 (`source-G-env.txt:447-490,1449-1450`) defines raw-text inline sources at 1 MiB
 per file and 2 MiB total, and GCS directory sources up to 2 GB. The driver retains
 a 64 MiB bundle bound for host storage. Combined inline mounts respect native
-limits. With no publisher, binary/oversize skill bundles refuse explicitly with
-`UnsupportedCapability("skill_bundle_gcs_deployment")`; ordinary text bundles
-retain their existing inline representation. External bundles still require a
+limits. With no publisher but a host `skill_files` reader, bundles up to 28 MiB
+(binaries allowed) keep a path/size/SHA-256 manifest. Session start creates the
+environment with each such SKILL.md inline, uploads the other files as one
+tar.gz and checks their sizes. A skill whose upload fails is left out and named
+in `Session.native["skills_left_out"]`. With neither, binary/oversize bundles
+refuse with `UnsupportedCapability("skill_bundle_gcs_deployment")`; ordinary
+text bundles retain their existing inline representation. External bundles still require a
 UTF-8 root SKILL.md, safe canonical paths and no file/directory collisions.
 
 The host must supply an authorized, idempotent publisher, immutable retention

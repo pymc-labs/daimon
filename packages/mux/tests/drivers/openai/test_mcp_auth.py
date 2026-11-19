@@ -11,13 +11,15 @@ from typing import cast
 
 import httpx
 import pytest
+from mux.contracts.actions import UserMessage
+from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import Context, objects
 from mux.drivers.openai.agents import agent_body, agent_spec
-from mux.drivers.openai.mcp_auth import KEY, MCPSecretResolver
+from mux.drivers.openai.mcp_auth import KEY, METADATA_LIMIT, MCPSecretResolver
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import decode
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
@@ -28,7 +30,7 @@ from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 
-from .conftest import SCOPE, native_session
+from .conftest import SCOPE, native_session, turn
 
 URL = "https://qa.example.com/mcp"
 
@@ -1137,6 +1139,32 @@ def test_shared_credential_decode_refuses_a_changed_destination(edit: str) -> No
         agent_spec(raw, context)
 
 
+@pytest.mark.parametrize("required", [None, True])
+def test_one_server_with_a_long_tool_list_round_trips_by_digest(required: bool | None) -> None:
+    """Daimon's own server lists ~40 tools: over 512 characters whole, so it binds by digest."""
+    names: list[JsonValue] = [f"tool_number_{n}" for n in range(40)]
+    policy: dict[str, JsonValue] = {"allowed_tools": names}
+    if required is not None:
+        policy["required"] = required
+    connection = MCPConnection(
+        name="daimon-mcp", url=URL, credential_ref="host:owned-token", tool_policy=policy
+    )
+    requested = spec(connection)
+    context = _offline_context()
+    body = agent_body(requested, context)
+    assert len(str(object_json(body["metadata"])[KEY])) <= METADATA_LIMIT
+    tools = objects(body["tools"])
+    tools[0].update(mode="live", context_size="medium", allowed_domains=None, location=None)
+    # The API echoes an unset `required` as false.
+    tools[-1].setdefault("required", False)
+    body["tools"] = list(tools)
+    raw: Object = {"id": "a", "created_at": 0, **body}
+    assert agent_spec(raw, context).mcp_servers == requested.mcp_servers, "read back as written"
+    tools[-1]["allowed_tools"] = [*names, "delete_everything"]
+    with pytest.raises(ValueError, match="changed"):
+        agent_spec({**raw, "tools": list(tools)}, context)
+
+
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
@@ -1262,20 +1290,25 @@ async def test_raw_session_vault_ids_cannot_authorize_foreign_vault_cleanup() ->
 
 
 @pytest.mark.parametrize("secret", ["opaque-user-token", "eyJpartial.jwt-fragment"])
-@pytest.mark.parametrize("phase", ["credential", "session"])
+@pytest.mark.parametrize("phase", ["credential", "session", "turn"])
 async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase: str) -> None:
+    """Create masks the bearers it knows; a turn on a vault-bound session wipes every field."""
+
     class EchoWire(Wire):
         def handle(self, request: httpx.Request) -> httpx.Response:
             failure = (
                 request.url.path.endswith("/credentials")
                 if phase == "credential"
-                else request.url.path == "/v1/agents/sessions"
+                else request.url.path
+                == ("/v1/agents/sessions/s/events" if phase == "turn" else "/v1/agents/sessions")
             )
             if failure and request.method == "POST":
                 self.requests.append(request)
                 return httpx.Response(
                     403, json={"error": {"message": secret, "code": secret, "param": secret}}
                 )
+            if request.url.path == "/v1/agents/sessions/s/turns":
+                return httpx.Response(200, json={"data": [turn("in_progress")], "has_more": False})
             return super().handle(request)
 
     wire = EchoWire()
@@ -1288,14 +1321,21 @@ async def test_mcp_errors_suppress_cross_request_credentials(secret: str, phase:
         driver = wire.driver(sdk)
         agent = await driver.agents.create(SCOPE, spec(), key="agent")
         with pytest.raises(ProviderError) as refused:
-            await driver.sessions.create(
+            session = await driver.sessions.create(
                 SCOPE,
                 SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
                 key="session",
             )
+            wire.sessions["s"]["status"] = "in_progress"
+            steer = UserMessage(content=(TextPart(text="more"),), mode="steer")
+            await driver.events.send(SCOPE, session.ref, [steer], key="turn")
     error = refused.value
     assert error.category == "permission" and error.native_code == "403"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    fields = (error.native_message, error.native_error_code, error.native_param)
+    if phase == "turn":
+        assert fields == (None,) * 3, "the vault may echo an earlier turn's bearer: wiped"
+        return
+    assert fields == ("[redacted]",) * 3, "a known MCP secret is masked, never kept"
     assert not wire.vaults
     assert not any(r.method == "GET" and r.url.path == "/v1/vaults" for r in wire.requests)
     for request in wire.requests:
@@ -1334,7 +1374,7 @@ async def test_mcp_cleanup_failure_preserves_original_error(phase: str) -> None:
             )
     error = refused.value
     assert error.category == "invalid_request" and error.native_code == "400"
-    assert error.native_message is error.native_error_code is error.native_param is None
+    assert error.native_message == "[redacted]", "the echoed MCP secret is masked"
     assert any(
         "cleanup failed (ProviderError)" in note and "vault-1" in note for note in error.__notes__
     )

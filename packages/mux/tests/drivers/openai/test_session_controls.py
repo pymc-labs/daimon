@@ -16,6 +16,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, UnsupportedCapability
+from mux.profiles.openai import NATIVE_MODELS
 from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 
@@ -185,8 +186,10 @@ async def test_explicit_session_model_override_is_verified(actual_model: str | N
 
 
 def test_only_native_host_models_are_allowed_session_model_controls():
-    for model in ("gpt-6-luna", "gpt-6-astra"):
-        assert SessionControls.model_validate({"model": model}).model == model
+    for model in NATIVE_MODELS:
+        assert SessionControls.model_validate({"model": model}).model == model, (
+            f"the native host's {model} is a valid session model"
+        )
     for model in ("gpt-5-nano", "gpt-6-sol", ""):
         with pytest.raises(ValidationError):
             SessionControls.model_validate({"model": model})

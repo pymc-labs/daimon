@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -57,6 +58,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.handoff_context import redact_handoff_summary
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
+from daimon.core.relay_scope import agent_has_identity_relay
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
@@ -145,8 +147,8 @@ async def copy_awaiting_its_switch(
     """A copy fork_agent made of this conversation's responder, in this conversation,
     still on the responder's provider and not answering here yet (J1).
 
-    Its switch card's approval hands it this conversation and switches it in one
-    step; any other copy (an older one, a channel rule's) is an ordinary agent.
+    Its switch hands it this conversation and switches it in one step; any other
+    copy (an older one, a channel rule's) is an ordinary agent.
     """
     from daimon.core.stores import thread_agent_bindings
 
@@ -185,6 +187,21 @@ class _HandOffChecked(Exception):
     """Rolls back a hand-off that was only checked (`switch="check"`)."""
 
 
+_RELAY_HANDOFF_REFUSAL = (
+    "This agent stays in its channel and keeps no conversation past it, so it can't hand "
+    "this task to another agent. Nothing was changed. Do not retry."
+)
+
+
+def _is_relay_agent(runtime: McpRuntime, agent: BetaManagedAgentsAgent | None) -> bool:
+    """Whether `agent` has a signed-identity MCP server attached (`daimon.core.relay_scope`)."""
+    public_url = runtime.settings.mcp.public_url
+    return agent is not None and agent_has_identity_relay(
+        (server.url for server in agent.mcp_servers),
+        public_url=None if public_url is None else str(public_url),
+    )
+
+
 async def _hand_off_task_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -216,6 +233,10 @@ async def _hand_off_task_impl(
     agents = await list_agents_by_tenant(
         runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
     )
+    # A relay agent (channel turn or DM) hands nothing to anyone: one coarse rule.
+    caller_agent = next((a for a in agents if a.id == origin.responder_ma_agent_id), None)
+    if (auth.hold is not None and auth.hold.relay) or _is_relay_agent(runtime, caller_agent):
+        raise ToolError(_RELAY_HANDOFF_REFUSAL)
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
     caller = await load_isolation_view(
@@ -240,22 +261,20 @@ async def _hand_off_task_impl(
             runtime, auth, origin, ma_agent_id=destination.id, metadata=destination.metadata
         )
     ):
-        # J1: the model chose the order before. Sometimes it handed the thread to the
-        # copy and stopped, and the copy's next turn posted the switch card instead
-        # of answering.
+        # J1: the switch hands the thread over itself. A hand-off first left the copy
+        # answering on the old provider.
         raise ToolError(
             f"{destination_name} is a new copy of you, still on your model provider. If "
-            "the person asked for it on another provider, post its switch card now "
-            f"instead (request_agent_backend_switch for {destination_name}, with the "
-            "preview's digest): approving the card hands this thread to it and switches "
-            "it, in one step. If the copy should stay on this provider, call "
+            "the person asked for it on another provider, switch it now instead "
+            f"(request_agent_backend_switch for {destination_name}): the switch hands "
+            "this thread to it, in one step. If the copy should stay on this provider, call "
             "hand_off_task again with keep_provider=true. Nothing was changed."
         )
     named_work = sanitize_requested_work(continuation, echoes=(destination_name,))
     summary = _clean_summary(summary)
     # The destination answers at once only when the person's own new message asked
     # for this hand-off: never for a resumed or queued turn (a hand-off's own first
-    # turn among them), a wake, a routine, an agent key or a switch card.
+    # turn among them), a wake, a routine, an agent key or a provider switch.
     starts_turn = (
         switch is None
         and origin.human_invocation is True
@@ -370,7 +389,8 @@ async def _hand_off_task_impl(
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
             )
-            readable = may_carry_work(
+            # A relay destination is handed no summary, queued work or session.
+            readable = not _is_relay_agent(runtime, destination) and may_carry_work(
                 await load_access_policy(session, tenant_id=auth.tenant_id),
                 destination=handoff_destination,
                 parent_channel_id=origin.parent_channel_id,
@@ -720,7 +740,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 description=(
                     "True only for a new copy of you that should stay on your model "
                     "provider. A copy being switched to another provider is handed the "
-                    "thread after its switch card is approved, never before."
+                    "thread by its switch, never before."
                 )
             ),
         ] = False,
@@ -749,7 +769,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         That agent answers here from now on, with its own keys, connections and
         memory; conversation, decisions and files move with the requester. When
         the person's own message asked for the hand-off, it answers right away (one
-        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        billed turn); otherwise (a routine, a wake, an agent key, a provider switch)
         from their next message.
 
         `origin_context_id` must name this execution's origin and match the

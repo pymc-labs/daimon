@@ -112,6 +112,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.platform_words import words_for
@@ -880,7 +881,12 @@ async def run_wizard_submit_turn_observed(
                     )
                     await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-        _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
+        _log.warning(
+            "wizard_submit.turn_failed",
+            error=str(exc),
+            short_id=row.id,
+            causes=backend_refusal_causes(exc),
+        )
         finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state

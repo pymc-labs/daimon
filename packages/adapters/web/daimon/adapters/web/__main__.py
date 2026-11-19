@@ -24,6 +24,7 @@ from daimon.core.config import Settings, WebSettings, load_settings
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import log_runtime_started
+from daimon.core.turn.runtimes import preload_channel_runtimes
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 
 log = structlog.get_logger()
@@ -105,6 +106,7 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
             runtime.turns,
         )
         log_runtime_started("web")
+        await preload_channel_runtimes()
         log.info("starting_web_adapter", port=web.port)
         sweepers = [
             asyncio.create_task(sweep_expired_web_sessions_forever(runtime.sessionmaker)),

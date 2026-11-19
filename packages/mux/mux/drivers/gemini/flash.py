@@ -14,12 +14,13 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.mcp_auth import model_request
 from mux.drivers.gemini.transport import (
+    EnvironmentTransport,
     Object,
     Transport,
     object_value,
     string,
 )
-from mux.errors import ProviderError
+from mux.errors import ProviderError, UnsupportedCapability
 from mux.profiles.gemini import OPT_IN_MODELS
 
 log = logging.getLogger(__name__)
@@ -261,6 +262,27 @@ class FlashTransport:
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await self.source.download_snapshot(environment_id)
+
+    def _environments(self) -> EnvironmentTransport:
+        if not isinstance(self.source, EnvironmentTransport):
+            raise UnsupportedCapability(("environment_upload",), "gemini.inline_reuse")
+        return self.source
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        return await self._environments().create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        await self._environments().upload_archive(
+            environment_id, path, archive, overwrite=overwrite
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        return await self._environments().list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await self._environments().delete_environment(environment_id)
 
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None

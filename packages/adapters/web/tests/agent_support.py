@@ -220,15 +220,3 @@ async def provider_choice(
         ),
     )
     return settings
-
-
-async def consent_body(
-    client: httpx.AsyncClient, value: str = "openai:gpt-6-astra"
-) -> dict[str, Any]:
-    """The apply body that accepts what the model preview says the switch drops."""
-    preview = (await client.get(f"/api/agents/ag_w/model-preview?value={value}")).json()
-    return {
-        "accepted_drops": preview["drops"],
-        "preview_digest": preview["digest"],
-        "preview_revision": preview["revision"],
-    }

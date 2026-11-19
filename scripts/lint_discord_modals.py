@@ -167,6 +167,21 @@ def _literal_int(node: ast.expr) -> int | None:
     return None
 
 
+def _upper_bound(node: ast.expr, int_constants: dict[str, int]) -> int | None:
+    """The most ``node`` can be: an int literal, a same-file constant, or a
+    ``min(...)`` with one of those among its arguments (a cap on a value set
+    elsewhere, e.g. ``min(field.max_chars, 4000)``)."""
+    value = _literal_int(node)
+    if value is None and isinstance(node, ast.Name):
+        value = int_constants.get(node.id)
+    if value is not None or not isinstance(node, ast.Call) or node.keywords:
+        return value
+    if not isinstance(node.func, ast.Name) or node.func.id != "min":
+        return None
+    bounds = [b for arg in node.args if (b := _upper_bound(arg, int_constants)) is not None]
+    return min(bounds) if bounds else None
+
+
 def _module_int_constants(tree: ast.Module) -> dict[str, int]:
     """Module-level ``NAME = <int literal>`` bindings, for resolving a
     ``max_length=_SOME_CAP`` that is defined in the same file. An *imported*
@@ -351,9 +366,7 @@ def _walk_modal_class(
         max_length_node = _max_length_kwarg(call)
         if max_length_node is None:
             continue
-        max_length = _literal_int(max_length_node)
-        if max_length is None and isinstance(max_length_node, ast.Name):
-            max_length = int_constants.get(max_length_node.id)
+        max_length = _upper_bound(max_length_node, int_constants)
         if max_length is None:
             yield Finding(
                 file=source_path,

@@ -32,7 +32,7 @@ export function skillBadge(follow: SkillFollow, pinned: string): Badge {
   if (follow.status === "managed") return { label: "Managed by settings", tone: "muted" }
   if (follow.status === "unavailable") return { label: "Unavailable", tone: "bad" }
   if (follow.status === "pending") return { label: "Needs approval", tone: "warn" }
-  if (follow.status === "needs_reconfirm") return { label: "Needs re-confirm", tone: "warn", apply: true }
+  if (follow.status === "needs_reconfirm") return { label: "Update held", tone: "warn", apply: true }
   if (follow.follow) return { label: "Following", tone: "muted" }
   if (follow.version && follow.version !== pinned) return { label: "Update available", tone: "warn", update: follow.version }
   return { label: `Pinned v${pinned}`, tone: "muted" }

@@ -22,6 +22,9 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.anthropic_guard import AnthropicDisabled
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_environments import sealed_pick_refusal
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.owned import AgentNameTaken
@@ -43,6 +46,7 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
+from daimon.core.stores.scoped_config_read import list_channels_picking_agent
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -223,13 +227,49 @@ async def archive_memory_store_best_effort(
             tenant_id=tenant_id,
             agent_id=agent_id,
         )
-    except (anthropic_errors.APIError, AnthropicDisabled):
+    except (anthropic_errors.APIError, AnthropicDisabled) as error:
         # Best-effort degrade: the caller's own delete flow has already
         # committed (e.g. the MA agent is archived and the retry path is
         # dead), so a transient memory-store archive failure must not
         # strand it in a failed state — mirrors the mount-side policy in
         # memory_resource.py.
-        _log.warning("agent_lifecycle.memory_store_archive_failed", **log_context)
+        _log.warning(
+            "agent_lifecycle.memory_store_archive_failed",
+            **log_context,
+            causes=backend_refusal_causes(error),
+        )
+
+
+def _own_names(name: str, agent: BetaManagedAgentsAgent) -> tuple[str, ...]:
+    own = (name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
+    return tuple(dict.fromkeys(n for n in own if n))
+
+
+async def archive_sealed_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    agent: BetaManagedAgentsAgent,
+    subject: Subject,
+) -> str | None:
+    """Why `subject` may not archive `agent`, or None when it may.
+
+    Archiving clears every channel pick of the agent's own names
+    (`forget_archived_agent`). A private channel that picks it changes only from
+    inside, so the archive is refused before any write. Call it in every archive path.
+    """
+    channels = await list_channels_picking_agent(
+        session, tenant_id=tenant_id, agent_names=_own_names(name, agent)
+    )
+    return await sealed_pick_refusal(
+        session,
+        tenant_id=tenant_id,
+        channels=channels,
+        subject=subject,
+        picks=f"{name} as its agent",
+        change="its agent",
+    )
 
 
 async def forget_archived_agent(
@@ -252,8 +292,7 @@ async def forget_archived_agent(
     `daimon agents rule set <name> --anywhere`; any other failure raises.
     Returns the names whose rule was dropped.
     """
-    own = (name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
-    names = tuple(dict.fromkeys(n for n in own if n))
+    names = _own_names(name, agent)
     log_fields = {"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id}
     try:
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:

@@ -104,6 +104,15 @@ def is_renamed_seeded_agent(metadata: Mapping[str, str]) -> bool:
     return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == SEEDED_AGENT_RENAME[1]
 
 
+def is_renamed_seeded_record(name: str, metadata: Mapping[str, str] | None) -> bool:
+    """`is_renamed_seeded_agent` for a Daimon record, whose name is its own field.
+
+    A record's stored `daimon_name` is not rewritten by the rename; the record's
+    `name` is, so that is the name judged here.
+    """
+    return is_renamed_seeded_agent({**(metadata or {}), MA_METADATA_KEY_NAME: name})
+
+
 def forked_in(platform: str | None, channel_id: str | None, thread_id: str | None) -> str:
     """A conversation as `MA_METADATA_KEY_FORKED_IN` records it."""
     return json.dumps([platform, channel_id, thread_id], separators=(",", ":"))

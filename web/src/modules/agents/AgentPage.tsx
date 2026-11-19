@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query"
 import { ReactFlowProvider } from "@xyflow/react"
 import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, SlidersHorizontal, Sparkles, Users } from "lucide-react"
 import { useMemo } from "react"
@@ -7,6 +8,7 @@ import { useParam } from "@/lib/filters"
 import { ErrorState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError } from "@/lib/api"
@@ -17,9 +19,27 @@ import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
 import { nodeId, nodeUi } from "./nodes/registry"
 import { LifecycleMenu } from "./setup/LifecycleMenu"
+import type { AgentSummary } from "./types"
 
 /** The header actions keep their icon and drop the word on a phone, so the crumb stays readable. */
 const ICON_ON_PHONE = "max-sm:w-7 max-sm:px-0"
+
+/** The agent card's shape while a slow agent loads, so the page never looks empty. */
+function Loading() {
+  return (
+    <div role="status" aria-label="Loading" className="flex h-full items-center justify-center bg-[radial-gradient(var(--border-strong)_1px,transparent_1px)] bg-size-[20px_20px] p-4 max-md:items-start">
+      <div className="w-[272px] rounded-2xl border border-border-strong bg-card shadow-[0_6px_24px_rgb(12_31_64/0.08)]">
+        <div className="flex items-center gap-3 p-4">
+          <Skeleton className="size-11 rounded-lg bg-border" />
+          <div className="flex-1 space-y-2"><Skeleton className="h-4 w-24 bg-border" /><Skeleton className="h-3 w-40 bg-border" /></div>
+        </div>
+        <div className="space-y-3 border-t px-4 py-3.5">
+          {[28, 36, 20, 24].map((w) => <Skeleton key={w} className="h-3 bg-border" style={{ width: `${w * 4}px` }} />)}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export function AgentPage() {
   const { id = "" } = useParams()
@@ -30,6 +50,8 @@ export function AgentPage() {
   const { config, update } = useDraftEditor(agent, draft)
   const connect = useConnectNode(id)
   const [node, setNode] = useParam("node")
+  // Opened from the list: name the agent at once, while the rest loads.
+  const listed = useQueryClient().getQueryData<AgentSummary[]>(["agents"])?.find((a) => a.id === id)
   const changes = useMemo(() => draft?.changes ?? [], [draft])
   const changed = useMemo(() => new Set(changes.map((c) => c.key)), [changes])
   const changedNodes = useMemo(() => new Set(changes.map((c) => c.node)), [changes])
@@ -38,7 +60,7 @@ export function AgentPage() {
   if (!agent && query.isError) return <Page crumbs={[{ label: "Agents", to: "/agents" }]}><ErrorState error={error} onRetry={() => void query.refetch()} /></Page>
   return (
     <Page
-      crumbs={[{ label: "Agents", to: "/agents" }, { label: config?.name ?? "" }]}
+      crumbs={[{ label: "Agents", to: "/agents" }, { label: config?.name ?? listed?.name ?? "" }]}
       flush
       className="relative overflow-hidden bg-muted/40"
       actions={agent && (
@@ -82,6 +104,7 @@ export function AgentPage() {
         </>
       )}
     >
+      {!agent && <Loading />}
       {agent && config && (
         <ReactFlowProvider>
           <Canvas

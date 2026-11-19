@@ -11,9 +11,9 @@ from daimon.adapters.mcp.tools import _own_card
 from daimon.adapters.mcp.tools.discord import _switch_card
 from daimon.adapters.mcp.tools.slack import _credential_button
 from daimon.adapters.mcp.tools.teams import _send
-from daimon.core.posted_controls import PostedCard
+from daimon.core.host_calls import card_custom_id
+from daimon.core.posted_controls import CardButton, PostedCard
 from daimon.core.stores.domain import Role, TurnOriginRow
-from daimon.core.switch_cards import requested_switch_card
 from fastmcp.exceptions import ToolError
 
 
@@ -37,12 +37,17 @@ def _origin(platform: str, thread_id: str = "thread-1") -> TurnOriginRow:
 
 
 def _card() -> PostedCard:
-    return requested_switch_card(
-        uuid.uuid4(),
-        title="Change the model?",
-        facts=(),
+    return PostedCard(
+        kind="call",
+        state="requested",
+        headline="Researcher wants to run search",
+        buttons=(
+            CardButton(
+                label="Approve", style="primary", custom_id=card_custom_id(uuid.uuid4(), "approve")
+            ),
+        ),
         requester_platform_user_id="user-1",
-        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+        expires_at_unix=int((dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)).timestamp()),
     )
 
 
@@ -128,4 +133,4 @@ async def test_a_web_card_is_a_notice_to_the_chat(monkeypatch: pytest.MonkeyPatc
     (notice,) = sent
     assert isinstance(notice, web_notices.WebControlNotice), "a control notice is sent"
     assert (notice.thread_id, notice.title) == ("web:t", card.headline), "it names the chat"
-    assert got == notice.card_id and got.startswith("bsw:"), "the card id is the message id"
+    assert got == notice.card_id and got.startswith("hcc:"), "the card id is the message id"

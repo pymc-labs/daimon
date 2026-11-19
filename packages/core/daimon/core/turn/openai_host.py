@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -39,12 +39,13 @@ from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
     invocation_baseline,
 )
-from daimon.core.turn.persistence import UncertainSend, current_persistence
+from daimon.core.turn.persistence import TurnPersistence, UncertainSend, current_persistence
 from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
@@ -56,6 +57,7 @@ from daimon.core.turn.replace_binding import (
     OldSession,
     binding_decision,
     end_session,
+    hold_slot,
     recorded_facts,
     replace_binding,
 )
@@ -77,6 +79,8 @@ from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
+
+log = structlog.get_logger(__name__)
 
 #: HTTP answers that reject a session create outright: no session exists afterwards.
 #: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
@@ -110,6 +114,10 @@ class OpenAIHostRuntime(TurnRuntime):
     infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]] = unknown_infrastructure
     #: Enforces the row's spend limit host-side; set when the profile has no native cap.
     spend_guard: SpendGuard | None = field(default=None, kw_only=True)
+    #: Re-reads an ended root turn whose usage was unknown; None never re-reads.
+    late_usage: LateUsage | None = field(default=None, kw_only=True)
+    #: Bounds one late read, so a hung provider cannot hold the thread's lease.
+    late_read_timeout_s: float = field(default=READ_TIMEOUT_S, kw_only=True)
 
 
 def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) -> OpenAIHostRuntime:
@@ -426,8 +434,8 @@ async def _prepare_with_runtime(
     _check_spec(spec, runtime, request.scope, revision)
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
     if current.backend_revision_origin == "agent":
-        # Admission retained this exact source consent; a generic StateStore
-        # write has no agent-origin association and cannot recreate that proof.
+        # Admission retained this exact agent revision; a generic StateStore
+        # write has no agent-origin association and cannot recreate it.
         async with request.deps.sessionmaker.begin() as session:
             retained = await mux_state.get_config_agent_revision(
                 session,
@@ -437,7 +445,7 @@ async def _prepare_with_runtime(
                 ),
             )
             if retained is None:
-                raise ScopeViolation(request.thread_id, "missing original backend consent")
+                raise ScopeViolation(request.thread_id, "missing original backend revision")
             await mux_state.put_config_revision(
                 session, revision, origin="agent", agent_revision=retained
             )
@@ -641,27 +649,69 @@ async def _prepare_with_runtime(
     # runtime_for admitted exactly one native model; usage is priced at its rate.
     model_id = revision.model or ""
 
+    scope, tenant_id, binding_id = request.scope, request.tenant_id, binding.id
+    sessionmaker, markup = request.deps.sessionmaker, request.deps.markup
+    user_id, channel_id, agent_id = (
+        request.external_user_id,
+        revision.channel.channel_id,
+        current.agent.id,
+    )
+    late, read_timeout_s = runtime.late_usage, runtime.late_read_timeout_s
+
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
             raise ScopeViolation(ref.id, "OpenAI host usage differs from bound root session")
         infrastructure = await runtime.infrastructure(observation)
         settled = await record_provider_usage(
-            sessionmaker=request.deps.sessionmaker,
-            binding_id=binding.id,
+            sessionmaker=sessionmaker,
+            binding_id=binding_id,
             observation=observation,
-            tenant_id=request.tenant_id,
-            platform_user_id=request.external_user_id,
+            tenant_id=tenant_id,
+            platform_user_id=user_id,
             provider_price=runtime.price,
             infrastructure_usd=infrastructure,
             billing_grain="turn",
             managed_session_id=ref.id,
             model_id=model_id,
-            markup=request.deps.markup,
-            channel_id=revision.channel.channel_id,
-            agent_id=current.agent.id,
+            markup=markup,
+            channel_id=channel_id,
+            agent_id=agent_id,
         )
-
+        turn_id = observation.turn_id
+        # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
+        if not observation.final and late is not None and turn_id is not None:
+            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id))
         return settled
+
+    async def reread(now: datetime, turn_id: str) -> bool:
+        """One late read of an ended root turn, under the thread's lease.
+
+        True once the turn resource itself gave final usage, or the thread has no
+        such turn to read; a fallback value never ends the re-reads.
+        """
+        bound = await store.get_binding(slot)
+        if bound is None or bound.native_refs.get("session") != ref.id:
+            log.warning(
+                "late_usage.rebound",
+                turn_id=turn_id,
+                session_id=ref.id,
+                bound_session_id=None if bound is None else bound.native_refs.get("session"),
+                binding_id=binding_id,
+            )
+            return True  # the thread moved to another session
+        async with hold_slot(store, slot, now) as lease:
+            reading = TurnPersistence(
+                store, bound, scope, operation_key="late-usage:" + turn_id, session_ref=ref
+            )
+            async with asyncio.timeout(read_timeout_s):
+                with reading.holding(lease):
+                    values = await driver(runtime, revision, scope, bound).usage.reconcile_turn(
+                        scope, ref, turn_id
+                    )
+        known = [value for value in values if value.completeness != "unknown"]
+        for value in known:
+            await record(observation=value)
+        return any(value.final for value in values) or not values
 
     return PreparedTurn(
         admission=request.admission,
