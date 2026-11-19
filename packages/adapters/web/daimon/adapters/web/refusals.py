@@ -92,6 +92,16 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
                 "Switch back to Claude, or turn the tools back on." if admin else ask,
                 way_back,
             )
+        case "provider_busy":
+            return _refusal(
+                f"{named} is busy with other chats.", _NO_ANSWER, "Try again in a minute."
+            )
+        case "provider_cooling":
+            return _refusal(
+                f"{named} asked to slow down.",
+                _NO_ANSWER,
+                "Try again in a few minutes, or switch back to Claude.",
+            )
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
         case None:

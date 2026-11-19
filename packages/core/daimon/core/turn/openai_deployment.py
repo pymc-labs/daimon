@@ -24,6 +24,7 @@ from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
@@ -58,7 +59,7 @@ from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import OpenAIClients, SessionControls, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
-from mux.profiles.openai import NATIVE_MODELS
+from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -456,6 +457,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             *(("skill", skill) for skill in deployment.skill_ids),
         }
 
+    provider_key = ProviderKey.from_env(PERSISTENT_WORKSPACE.provider, deployment.api_key_env)
+
     def transport(config: ConfigRevision, authorized: Scope) -> Transport:
         check(config, authorized)
         secret = os.environ.get(deployment.api_key_env)
@@ -465,11 +468,17 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # request/stream lifetimes and disables retry of uncertain mutations.
         from mux.drivers.openai import configured_transport
 
-        return configured_transport(
+        inner = configured_transport(
             api_key=secret,
             project=deployment.project if deployment.project_header else None,
             clients=request.deps.provider_clients.openai,
         )
+        gate = request.deps.provider_gate
+        if gate is None or provider_key is None or config.model is None:
+            return inner
+        from daimon.core.turn.provider_gate import CooldownTransport
+
+        return CooldownTransport(inner, gate, provider_key, config.model)
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified
@@ -608,6 +617,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     )
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if deployment.root_materialization else None,
         journal=OpenAIRecoveryJournal(),

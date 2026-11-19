@@ -382,8 +382,12 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     runtime = runtime_for(
         request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
     )
+    from daimon.core.turn.provider_gate import gated_turn
+
     try:
-        return await _prepare_with_runtime(request, runtime)
+        return await gated_turn(
+            request, runtime.provider_key, lambda: _prepare_with_runtime(request, runtime)
+        )
     except BaseException:
         # A per-turn MCP credential minted before the turn existed (a template's
         # session create) is revoked now, not left to its TTL.

@@ -283,6 +283,14 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "This channel is pinned to {provider}, which isn't set up for it yet.",
         'Ask whoever runs Daimon to set it up, or ask {who} to say "clear this channel\'s pin".',
     ),
+    "provider_busy": _Copy(
+        "{Provider} is busy with other conversations right now.",
+        "Try again in a minute.",
+    ),
+    "provider_cooling": _Copy(
+        "{Provider} asked Daimon to slow down.",
+        "Try again in a few minutes, or ask {who} to switch {agent_mid} to {default}.",
+    ),
     "anthropic_unconfigured": _Copy(
         "{agent} runs on Anthropic, which isn't set up on this Daimon install.",
         "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"

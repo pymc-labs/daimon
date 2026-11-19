@@ -57,8 +57,20 @@ SETUP_REF = "environment_setup"
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
+    from daimon.core.turn.provider_gate import gated_turn
+
+    revision = request.admission.backend_revision
+    runtime = (
+        request.deps.turn_runtimes.get(PROFILE)
+        if revision is not None and revision.profile == PROFILE
+        else None
+    )
     try:
-        return await _prepare_gemini_turn(request)
+        return await gated_turn(
+            request,
+            runtime.provider_key if runtime is not None else None,
+            lambda: _prepare_gemini_turn(request),
+        )
     except UnsupportedCapability as err:
         raise AdmissionDenied(reason="backend_unsupported") from err
 

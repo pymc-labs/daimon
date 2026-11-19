@@ -4926,6 +4926,39 @@ class DiscordGatewayLease(Base):
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ProviderKeyCooldown(Base):
+    """When a provider key may be used again for one model, after a rate limit.
+
+    Keyed by a digest of the key, never the key itself. Private to
+    `daimon.core.stores.provider_key_gate`.
+    """
+
+    __tablename__ = "provider_key_cooldowns"
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    key_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderKeyLease(Base):
+    """One running turn on a provider key; it expires if the turn never releases it."""
+
+    __tablename__ = "provider_key_leases"
+    __table_args__ = (Index("ix_provider_key_leases_key", "provider", "key_digest", "tenant_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_provider_key_leases_tenants"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    key_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class SessionSettleState(Base):
     """Whether a headless send left one MA session to be settled.
 

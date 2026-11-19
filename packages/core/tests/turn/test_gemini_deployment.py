@@ -16,6 +16,7 @@ import httpx
 import pytest
 from daimon.core import pricing
 from daimon.core.channel_backend import check_backend
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
@@ -30,6 +31,7 @@ from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import Artifact
+from mux.drivers.clients import key_digest
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord
@@ -531,6 +533,9 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             reuse_existing=True,
         )
         assert prepared.runtime is not None and isinstance(prepared.runtime.journal, GeminiJournal)
+        assert prepared.runtime.provider_key == ProviderKey(
+            "gemini", key_digest("offline-selected-key")
+        ), "the turn runs on a keyed, gated provider key"
         deployment = prepared.runtime.journal.deployment
         assert deployment is not None and deployment.agent.model.id == model
         if session_id is not None:
@@ -761,6 +766,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     wire.expected_spend_limit = None
     clients = clients_for(monkeypatch, wire.handle)
     runtime = build_channel_runtime(application)
+    assert runtime.provider_key == ProviderKey("openai", key_digest("offline"))
     config = application.admission.backend_revision
     assert config is not None
     assert runtime.price is pricing.provider_prices(config.profile)[("openai", config.model)]

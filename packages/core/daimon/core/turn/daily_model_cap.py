@@ -21,6 +21,7 @@ from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.errors import AdmissionDenied
 
 if TYPE_CHECKING:
+    from daimon.core.provider_key_gate import ProviderKey
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from mux.contracts.ids import ModelRef
     from mux.drivers.gemini import FlashAccounting, FlashAttempt
@@ -133,8 +134,11 @@ class CappedFlashAccounting:
         request: ProviderPreparationRequest,
         prices: Mapping[str, ProviderPrice],
         cap: Decimal | None,
+        *,
+        key: ProviderKey | None = None,
     ) -> None:
         self._inner, self._request, self._prices, self._cap = inner, request, prices, cap
+        self._key = key
         self._started = False
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
@@ -150,11 +154,28 @@ class CappedFlashAccounting:
             await check_daily_model_cap(
                 self._request, provider=model.provider, model=model.id, price=price, cap=self._cap
             )
+        gate = self._request.deps.provider_gate
+        # The primary was cooling or busy; a fallback that is cooling never runs.
+        if (
+            attempt > 1
+            and gate is not None
+            and self._key is not None
+            and await gate.cooling_until(self._key, model.id) is not None
+        ):
+            from mux.contracts.errors import ProviderError
+
+            raise ProviderError("overloaded", retryable=True, native_code="503")
         await self._inner.before_attempt(model=model, attempt=attempt)
 
     async def after_attempt(self, *, receipt: FlashAttempt) -> None:
         if receipt.outcome == "accepted":
             self._started = True
+        gate = self._request.deps.provider_gate
+        if receipt.retry_after_s is not None and gate is not None and self._key is not None:
+            try:
+                await gate.record_cooldown(self._key, receipt.model.id, receipt.retry_after_s)
+            except Exception:
+                log.warning("provider_key_gate.cooldown_failed", exc_info=True)
         await self._inner.after_attempt(receipt=receipt)
 
     # Explicit, never forwarded: `HoldSettlement` is a runtime-checkable Protocol,

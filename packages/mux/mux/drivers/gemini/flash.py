@@ -41,6 +41,8 @@ class FlashAttempt:
     # False only when the create provably never reached Google (its connection
     # failed): nothing was sent, so its hold is freed at once.
     sent: bool = True
+    # The wait Google named for a rate limit, in seconds.
+    retry_after_s: float | None = None
 
 
 class FlashAccounting(Protocol):
@@ -194,6 +196,7 @@ class FlashTransport:
                 outcome="refused" if refused or rejected is not None or unsent else "unknown",
                 http_status=503 if refused else rejected,
                 sent=not unsent,
+                retry_after_s=error.retry_after_s if error.category == "rate_limited" else None,
             )
             raise
         finally:

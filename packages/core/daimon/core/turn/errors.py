@@ -75,6 +75,10 @@ BackendRefusalCause = Literal[
     # A channel's or thread's tool switches can't be applied by the provider the agent
     # runs on (it compiles one revision per agent): refused, never run with the tool.
     "tool_limits",
+    # The provider key is serving as many turns as Daimon allows: "busy, try again".
+    "provider_busy",
+    # The provider asked for a pause on this key and model: "try again shortly".
+    "provider_cooling",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

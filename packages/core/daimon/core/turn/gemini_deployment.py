@@ -21,6 +21,7 @@ from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
@@ -681,11 +682,17 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
 
     # Every attempt (the Flash chain may fall back to other models) checks the cap.
+    provider_key = ProviderKey.from_env(INLINE_REUSE.provider, plan.api_key_env)
     accounting = CappedFlashAccounting(
-        accounting, request, prices, request.deps.gemini_daily_model_cap_usd
+        accounting,
+        request,
+        prices,
+        request.deps.gemini_daily_model_cap_usd,
+        key=provider_key,
     )
     runtime = TurnRuntime(
         transport_factory=transport,
+        provider_key=provider_key,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
         # Revokes whatever the turn minted; nothing when it ran on the pinned file.

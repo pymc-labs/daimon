@@ -53,6 +53,7 @@ typo is silent — check the spelling here.
 - [Provider Daily Ceiling Usd](#provider-daily-ceiling-usd)
 - [Support](#support)
 - [Turn](#turn)
+- [Provider Limits](#provider-limits)
 - [Thread Naming](#thread-naming)
 - [Outbound](#outbound)
 - [Turn Queue](#turn-queue)
@@ -1740,6 +1741,32 @@ Capture complete scoped source and resource intent for an agent-selected native 
 Unproved obligations are refused; counterpart identity readback alone never authorizes
 execution. Requires mux and channel_backends; on by default. Emergency stop only: false
 refuses agent-selected native backends.
+
+## Provider Limits
+
+Read from `daimon.core.config.ProviderLimitsSettings`. Prefix
+`DAIMON_PROVIDER_LIMITS__`.
+
+How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`).
+
+### `DAIMON_PROVIDER_LIMITS__KEY_TURNS`
+
+`int` · optional · default `16`
+
+Most turns running at once on one provider API key, across every replica. A turn past
+the cap waits, then is refused as busy.
+
+### `DAIMON_PROVIDER_LIMITS__TENANT_TURNS`
+
+`int` · optional · default `4`
+
+Most of those turns one workspace may hold on one provider API key.
+
+### `DAIMON_PROVIDER_LIMITS__WAIT_S`
+
+`float` · optional · default `20.0`
+
+Seconds a turn waits for a free slot before it is refused as busy.
 
 ## Thread Naming
 

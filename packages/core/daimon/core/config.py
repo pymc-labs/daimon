@@ -2784,6 +2784,30 @@ class LongJobsSettings(BaseModel):
     )
 
 
+class ProviderLimitsSettings(BaseModel):
+    """How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`)."""
+
+    key_turns: int = Field(
+        default=16,
+        gt=0,
+        description=(
+            "Most turns running at once on one provider API key, across every replica. "
+            "A turn past the cap waits, then is refused as busy."
+        ),
+    )
+    tenant_turns: int = Field(
+        default=4,
+        gt=0,
+        description="Most of those turns one workspace may hold on one provider API key.",
+    )
+    wait_s: float = Field(
+        default=20.0,
+        ge=0,
+        allow_inf_nan=False,
+        description="Seconds a turn waits for a free slot before it is refused as busy.",
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -2938,6 +2962,7 @@ class Settings(BaseSettings):
     )
     support: SupportSettings = Field(default_factory=SupportSettings)
     turn: TurnSettings = Field(default_factory=TurnSettings)
+    provider_limits: ProviderLimitsSettings = Field(default_factory=ProviderLimitsSettings)
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     outbound: OutboundSettings = Field(default_factory=OutboundSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
