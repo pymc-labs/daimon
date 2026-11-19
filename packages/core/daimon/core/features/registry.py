@@ -573,9 +573,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "People may talk to the agent in a direct message. Turned on for the team, every "
-            "agent takes part; an agent can opt out. Who may message each agent, and which agent "
-            "a message reaches, is set apart from this."
+            "People may message the agent directly; on for the team, every agent takes part "
+            "unless it opts out. Who may message which agent is set apart from this."
         ),
         # Teams personal chats always reached an agent, so they stay on unless turned off.
         platforms=_DM_PLATFORMS | {"teams"},

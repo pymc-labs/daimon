@@ -991,9 +991,9 @@
     }),
     'change_workspace_settings': dict({
       'description': '''
-        Change the web modules, web chat agent, who may start turns (everyone or exactly
-        ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the agent
-        a DM starts with ("" clears it); ``dm_rules`` replaces the ordered rule list, first
+        Change the workspace's modules and default agent, who may start turns (everyone or
+        exactly ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the
+        agent a DM starts with ("" clears it); ``dm_rules`` replaces the ordered rule list, first
         match wins.
       ''',
       'parameters': dict({

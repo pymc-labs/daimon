@@ -268,7 +268,7 @@ def dm_router(runtime: WebRuntime) -> APIRouter:
             if platform is None or not q.strip():
                 return []
             found = await search_user_names(
-                db, tenant_id=tenant_id, platform=platform, text=q.strip(), limit=8
+                db, tenant_id=tenant_id, platform=platform, query=q.strip(), limit=8
             )
         return [_named(user_id, found) for user_id in found]
 
