@@ -182,7 +182,10 @@ async def reconcile_owned_agent(
     """
     scope = owned_scope(tenant_id, account_id)
     try:
-        existing = await resolve_owned_agent(sessions, scope, spec.name, seeded_rename=managed)
+        # A create counts the built-in under either name as taken.
+        existing = await resolve_owned_agent(
+            sessions, scope, spec.name, seeded_rename=managed or create_only
+        )
     except ProviderError as error:
         if error.category != "not_found":
             raise

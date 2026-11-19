@@ -133,10 +133,12 @@ async def reconcile_agent(
         skills_view=skills_view if dry_run else None,
     )
     renamed = None
-    if managed and spec.name == SEEDED_AGENT_RENAME[0]:
+    if (managed or create_only) and spec.name == SEEDED_AGENT_RENAME[0]:
         matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id)
     else:
         matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)
+    if create_only and (matches or renamed is not None):
+        raise AgentNameTaken(spec.name)  # the renamed seeded agent still answers `daimon`
     # Leave the seeded agent renamed in place alone: creating `daimon` would
     # fork it, updating it would rename it back, and adopting a workspace's
     # own `daimon` would overwrite that agent (see `SEEDED_AGENT_RENAME`).
@@ -148,8 +150,6 @@ async def reconcile_agent(
             kind="agent", name=spec.name, action=Action.SKIPPED, anthropic_id=renamed.id
         )
     ma_match = matches[0] if matches else None
-    if create_only and ma_match is not None:
-        raise AgentNameTaken(spec.name)
     if managed and ma_match is not None and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
         # Never adopt (and re-stamp as managed) a workspace's own agent that
         # holds the built-in's name: prefer the seeded one, else refuse.

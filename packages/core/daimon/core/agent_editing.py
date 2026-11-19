@@ -35,7 +35,7 @@ from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -905,7 +905,8 @@ async def reject_name_taken(deps: AgentEditDeps, *, tenant_id: uuid.UUID, name: 
     """
     if not anthropic_configured(deps.client):
         return  # Daimon records: the create-only reconcile refuses a taken name.
-    if await find_agents_by_daimon_tag(
+    # The singular lookup: `daimon` stays taken by the seeded agent renamed from it.
+    if await find_agent_by_daimon_tag(
         deps.client, tenant_id=tenant_id, name=name, records=deps.session_factory
     ):
         raise AgentNameTakenError(name)
