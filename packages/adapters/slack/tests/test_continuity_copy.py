@@ -1011,17 +1011,13 @@ async def test_the_dispatcher_is_told_a_turn_is_running_when_the_row_still_says_
     )
 
 
-async def test_mention_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_mention_turn_admin_cards_read_no_agent_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ordinary mention turn's Confirm card reads the switched agent's source as
-    that turn's own admitted caller. Built without the admission, every
-    backend-switch card on this call site refuses `source_unavailable`
-    (packages/core/daimon/core/turn/admission.py:capture_admitted_backend_source).
-    """
+    """A mention turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -1054,9 +1050,6 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patch(
@@ -1084,18 +1077,9 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "slack",
-        channel,
-        thread_ts,
-    )
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
 def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep(

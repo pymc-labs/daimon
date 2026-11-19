@@ -66,6 +66,9 @@ def native_definition(
             pin.digest is not None and pin.digest != pin.version
         ):
             refuse("concrete_catalog_skill_pin")
+        if pin.version in record.uploads:
+            # Its files upload into a session's own environment; a definition has none.
+            refuse("catalog_uploaded_skill")
         bundle = record.bundles.get(pin.version)
         if (
             bundle is None

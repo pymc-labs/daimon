@@ -8,6 +8,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic._models import construct_type_unchecked
 from anthropic.types.beta import BetaManagedAgentsSession
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma import replay_events
 from daimon.core.mux_backend import managed_agents, resource_ref
@@ -78,6 +79,9 @@ async def completed_orphan_text(
             return extract_final_response(state.content) or None
     except (anthropic.APIError, TimeoutError, DaimonError) as err:
         log.warning(
-            "turn.orphan_result_read_failed", thread_id=row.thread_id, error_type=type(err).__name__
+            "turn.orphan_result_read_failed",
+            thread_id=row.thread_id,
+            error_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
         )
         return None

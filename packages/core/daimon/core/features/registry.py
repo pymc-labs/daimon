@@ -38,9 +38,11 @@ Requirement = Literal[
     "repo_memory_setup",
     "teams_public_url",
     "support_channel",
+    "support_credits",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
-``support_channel``: the platform has an escalation channel and people have credits to ask.
+``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
+``support_credits``: people have credits to ask (Everyone above 0, or any limit).
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
@@ -124,8 +126,9 @@ class FeatureSpec:
     platform_defaults: Mapping[str, str] = field(default_factory=dict[str, str])
     """A platform whose default differs from `default`, kept as it was before the registry."""
     env_map: str | None = None
-    """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
-    stands for the workspace tier; a stored workspace row always beats it."""
+    """The `Settings` field (dotted for a nested block) of a deprecated per-workspace map
+    (workspace id to on/off) that stands for the workspace tier; a stored workspace row always
+    beats it."""
     minimum: float = 0
     """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
     above 0 where 0 would be an unusable limit, not an off switch."""
@@ -245,14 +248,18 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
     FeatureSpec(
         key="web_awareness",
-        name="Web app links",
+        name="Web app",
         category="model_input",
         effect="model",
         values=_ON_OFF,
         default="on",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
-        doc="Each message tells the agent the web app's address and the pages it may link to.",
+        doc=(
+            "The agent knows about the web app: messages, routine runs and tool results carry "
+            "its address and the pages it may link to, its invite and access tools are offered, "
+            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+        ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -862,16 +869,51 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent"),
+        tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask the Daimon team for help, which posts the request in the "
-            "support channel. Off removes the button and the form. An agent can turn it off for "
-            "itself, never on where it is off for everyone. Whoever runs Daimon sets the channel "
-            "and each person's credits."
+            "Answers offer a way to ask a person for help, which posts the request in the "
+            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
+            "default channel and credits; an admin can set limits, a menu and their own channel."
+        ),
+        requires=("support_channel", "support_credits"),
+        authority=_SETTINGS,
+    ),
+    FeatureSpec(
+        key="support_feedback",
+        name="Feedback to support",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="turn",
+        doc=(
+            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "link to the answer) is also posted where Ask a person requests go, and the form "
+            "says so first. It spends no credits. Off keeps the form in the database only."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
+        legacy_env=("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT",),
+        env_map="support.feedback_to_support",
+    ),
+    FeatureSpec(
+        key="support_own_channel",
+        name="Own support channel",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An admin may send Ask a person requests to a channel of their own instead of the "
+            "default one; whoever runs Daimon then no longer sees them. Off sends every request "
+            "to the default channel."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     _capability(
         "github",

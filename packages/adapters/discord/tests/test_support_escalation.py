@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -12,30 +11,24 @@ import pytest
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
-    discord_channel,
     post_to_support_channel,
 )
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-from daimon.core.config import (
-    AnthropicSettings,
-    DatabaseSettings,
-    DiscordSettings,
-    Settings,
-    SupportSettings,
+from daimon.adapters.discord.support_post import (
+    CANNOT_SEE,
+    NEEDS_PERMISSIONS,
+    NOT_TEXT,
+    post_blocker,
 )
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.config import SupportSettings
 from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import FeatureTarget, Role
-from daimon.core.stores.feature_values import set_feature_value
-from daimon.testing.factories import (
-    make_account,
-    make_platform_principal,
-    make_tenant,
-    make_thread_session,
-)
-from pydantic import PostgresDsn, SecretStr
+from daimon.core.stores.domain import Role
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _GUILD = "111"
 _CHANNEL = "222"
@@ -43,10 +36,7 @@ _THREAD = "333"
 _ESCALATION = "999"
 
 
-async def _seed(
-    session: AsyncSession, *, sealed: bool = False, agent: str | None = None
-) -> uuid.UUID:
-    """A guild, an admin and, with `agent`, a live session of that agent in `_THREAD`."""
+async def _seed(session: AsyncSession, *, sealed: bool = False) -> None:
     tenant = await make_tenant(session, platform="discord", workspace_id=_GUILD)
     if sealed:
         await set_access_policy(
@@ -59,12 +49,7 @@ async def _seed(
         session, platform="discord", external_id="50", tenant=tenant, account=account
     )
     await accounts.set_role(session, account.id, Role.ADMIN)
-    if agent is not None:
-        await make_thread_session(
-            session, tenant=tenant, account=account, thread_id=_THREAD, ma_agent_id=agent
-        )
     await session.commit()
-    return tenant.id
 
 
 async def test_long_support_note_reaches_channel_in_order() -> None:
@@ -90,30 +75,39 @@ async def test_long_support_note_reaches_channel_in_order() -> None:
     assert "".join(sent).endswith(note)
 
 
-async def test_partial_support_channel_post_is_undelivered() -> None:
+async def test_a_later_chunk_failing_still_returns_the_first_and_logs_it() -> None:
+    first = MagicMock(spec=discord.Message)
+    first.id = 77
     channel = MagicMock(spec=discord.TextChannel)
     channel.send = AsyncMock(
         side_effect=[
-            None,
+            first,
             discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "lost access"),
         ]
     )
     bot = MagicMock()
     bot.get_channel.return_value = channel
 
-    assert not await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+    with capture_logs() as logs:
+        post = await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+
+    assert post is not None and post.message_id == "77", "the part with the buttons landed"
     assert channel.send.await_count == 2
+    assert [e["event"] for e in logs if e["event"] == "support.post_partial"] == [
+        "support.post_partial"
+    ], "the lost part is logged"
 
 
-def _settings(escalation_channel: str) -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-            "support": SupportSettings(escalation_channel_id=escalation_channel),
-        }
+async def test_the_first_chunk_failing_is_undelivered() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(
+        side_effect=discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "no")
     )
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    assert await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000) is None
+    assert channel.send.await_count == 1, "no later part is tried"
 
 
 async def _submit(
@@ -140,7 +134,9 @@ async def _submit(
     interaction.followup.send = AsyncMock()
     runtime = MagicMock()
     runtime.sessionmaker = sessionmaker
-    runtime.settings = _settings(escalation_channel)
+    runtime.settings = mock_settings()
+    runtime.settings.support = SupportSettings(escalation_channel_id=escalation_channel)
+    runtime.settings.direct_message_policies = {}
     modal = SupportModal(runtime=runtime, guild_id=_GUILD, channel_id=_THREAD, message_id="444")
     modal.note_input = SimpleNamespace(value=note)  # type: ignore[assignment]
     await modal.on_submit(interaction)
@@ -162,32 +158,6 @@ async def test_support_note_uses_the_escalation_channel(
     bot.open_member_dm.assert_not_awaited()
     escalation.send.assert_awaited_once()
     assert await _delivered(db_session_factory) == [True]
-
-
-@pytest.mark.parametrize(
-    ("answering", "delivered"),
-    [("agent_off", []), ("agent_client", [True])],
-    ids=["its own agent is off", "another agent is off"],
-)
-async def test_the_form_follows_the_answering_agents_own_value(
-    db_session_factory: async_sessionmaker[AsyncSession], answering: str, delivered: list[bool]
-) -> None:
-    async with db_session_factory() as session:
-        tenant_id = await _seed(session, agent=answering)
-        await set_feature_value(
-            session,
-            tenant_id=tenant_id,
-            target=FeatureTarget(tier="agent", agent_id="agent_off"),
-            key="support_escalation",
-            value="off",
-            set_by=None,
-            surface="web",
-        )
-        await session.commit()
-    _bot, escalation, dm = await _submit(db_session_factory)
-    assert escalation.send.await_count == len(delivered), "posted only where it is offered"
-    dm.send.assert_not_awaited()
-    assert await _delivered(db_session_factory) == delivered, "recorded only where it is offered"
 
 
 async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(
@@ -224,6 +194,8 @@ async def test_the_form_warns_only_for_a_sealed_channel(
     thread.parent_id = int(_CHANNEL)
     runtime = MagicMock()
     runtime.sessionmaker = db_session_factory
+    runtime.settings = mock_settings()
+    runtime.settings.support = SupportSettings(escalation_channel_id=_ESCALATION)
     bot = MagicMock()
     bot.runtime = runtime
     bot.get_channel = MagicMock(side_effect=lambda cid: {333: thread}.get(cid))
@@ -257,10 +229,40 @@ def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
     assert len(modal.note_input.label) <= 45, "Discord rejects a longer text-input label"
 
 
-def test_a_teams_escalation_channel_is_not_a_discord_one() -> None:
-    """A Teams id left from when Teams shared the setting is not Discord's."""
-    teams = SupportSettings(escalation_channel_id="19:support@thread.tacv2")
-    assert discord_channel(teams) is None, "the Discord bot cannot post in a Teams channel"
-    assert discord_channel(SupportSettings(escalation_channel_id=_ESCALATION)) == _ESCALATION, (
-        "a Discord channel id stays the destination"
-    )
+def _channel_bot(channel: Any) -> Any:
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    return bot
+
+
+def _text_channel(**allowed: bool) -> Any:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.permissions_for = MagicMock(return_value=discord.Permissions(**allowed))
+    return channel
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [
+        ({"view_channel": True, "send_messages": True, "embed_links": True}, None),
+        ({"view_channel": True, "send_messages": True}, NEEDS_PERMISSIONS),
+        ({"view_channel": True, "embed_links": True}, NEEDS_PERMISSIONS),
+    ],
+)
+async def test_post_blocker_when_permissions_vary_then_names_what_is_missing(
+    allowed: dict[str, bool], expected: str | None
+) -> None:
+    """View Channel, Send Messages and Embed Links are each required."""
+    got = await post_blocker(_channel_bot(_text_channel(**allowed)), "1")
+    assert got == expected, f"{allowed} reads as {expected}"
+
+
+async def test_post_blocker_when_not_a_text_channel_or_unreachable_then_says_so() -> None:
+    """A voice channel is not a text channel; a fetch Discord refuses is out of reach."""
+    voice = MagicMock(spec=discord.VoiceChannel)
+    assert await post_blocker(_channel_bot(voice), "1") == NOT_TEXT, "only text channels"
+    bot = _channel_bot(None)
+    forbidden = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no")
+    bot.fetch_channel = AsyncMock(side_effect=forbidden)
+    assert await post_blocker(bot, "1") == CANNOT_SEE, "a refused fetch"
+    assert await post_blocker(bot, "not-a-number") == CANNOT_SEE, "a malformed id"

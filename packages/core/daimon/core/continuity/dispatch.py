@@ -22,6 +22,7 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
@@ -296,7 +297,12 @@ async def dispatch_pending_continuations(
                 retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
                 await release_wake(sessionmaker, claim, retry_at=retry_at)
             except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
-                log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
+                log.warning(
+                    "continuation.dispatch_failed",
+                    row_id=str(row.id),
+                    error=str(exc),
+                    causes=backend_refusal_causes(exc),
+                )
                 await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
                 await _settle(sessionmaker, claim, None, now)

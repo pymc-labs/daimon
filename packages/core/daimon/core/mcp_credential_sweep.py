@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.mcp_vault import GITHUB_COPILOT_MCP_URL, chat_mcp_credential, same_server_url
 from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import (
@@ -206,7 +207,10 @@ async def sweep_stale_admin_credentials(
             # Never include credential payloads, JWTs or arbitrary provider error text.
             failures.append((vault_id, type(exc).__name__))
             _log.warning(
-                "mcp_credential_sweep.failed", vault_id=vault_id, error_type=type(exc).__name__
+                "mcp_credential_sweep.failed",
+                vault_id=vault_id,
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
             )
 
     return SweepReport(

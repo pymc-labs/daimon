@@ -67,11 +67,11 @@ describe("SkillEditor", () => {
     expect(api.put).toHaveBeenCalledWith("/api/agents/ag_1/skill-follows", { skill_id: "sk_plots", follow: true })
   })
 
-  it("offers a held update to the owner, who then re-confirms the backend", async () => {
+  it("offers a held update to the owner, which moves the agent", async () => {
     follows = { sk_plots: { follow: true, status: "needs_reconfirm", version: "2" } }
     vi.mocked(api.post).mockResolvedValueOnce(undefined as never)
     show((p) => <SkillEditor {...p} skill={plots} />)
-    expect(await screen.findByText("Needs re-confirm")).toBeInTheDocument()
+    expect(await screen.findByText("Update held")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Update to v2" }))
     expect(api.post).toHaveBeenCalledWith("/api/agents/ag_1/skill-follows/sk_plots/apply")
   })

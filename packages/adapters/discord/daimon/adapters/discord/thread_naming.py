@@ -18,6 +18,7 @@ from decimal import Decimal
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core.auxiliary_calls import AuxiliaryUnavailable
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.thread_naming import (
     is_generic_thread_name,
     suggest_thread_name,
@@ -73,7 +74,12 @@ async def generate_thread_name(
         )
         return fallback
     except (APIError, ProviderError, AuxiliaryUnavailable) as exc:
-        log.warning("thread.naming_failed", message_id=message_id, error=str(exc))
+        log.warning(
+            "thread.naming_failed",
+            message_id=message_id,
+            error=str(exc),
+            causes=backend_refusal_causes(exc),
+        )
         return fallback
 
     await record_auxiliary_usage(

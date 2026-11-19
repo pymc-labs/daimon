@@ -20,6 +20,7 @@ from daimon.core.authz import (
     Surface,
     authorize,
     build_agent_ref,
+    origin_ids,
 )
 from daimon.core.credential_requests import DEFAULT_TTL
 from daimon.core.env_file import env_name_problem
@@ -219,7 +220,10 @@ class NativeCredentialAdapter:
         ):
             raise CatalogConflict("native credential target changed")
         subject = Subject(
-            is_admin=actor.role is Role.ADMIN, platform_user_id=actor.platform_user_id
+            is_admin=actor.role is Role.ADMIN,
+            platform_user_id=actor.platform_user_id,
+            # The offer is posted in the verified channel the request came from.
+            origin_channel_ids=origin_ids(place.parent_channel_id, place.thread_id),
         )
         agent = build_agent_ref(target.agent.spec.name, target.agent.spec.metadata or {})
         location = Place.from_origin(

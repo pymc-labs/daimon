@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { toast } from "sonner"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/lib/api"
@@ -16,60 +17,45 @@ const models = {
     { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
   ],
 }
-const stays = { moves: false, card: false, allowed: true, skills: [], servers: [], capabilities: [], title: "", lines: [], drops: [], digest: "", revision: 0, refusal: null }
-const lossless = { ...stays, moves: true, title: "Switch this conversation to GPT-6 Luna?", digest: "d0", revision: 3 }
-const moves = { ...lossless, card: true, lines: ["Stops working: memory"], drops: ["memory"], digest: "d1", revision: 4 }
-
 const open = async (onChanged = vi.fn()) => {
   render(<QueryClientProvider client={new QueryClient()}><ThreadModel sid="s1" model="Sonnet 5.5" onChanged={onChanged} /></QueryClientProvider>)
   await userEvent.click(screen.getByRole("button", { name: "Chat model" }))
   return onChanged
 }
-const previews = (preview: unknown) =>
-  vi.mocked(api.get).mockImplementation(async (path: string) => (path.endsWith("/models") ? models : preview) as never)
 
-beforeEach(() => { vi.clearAllMocks(); vi.mocked(api.put).mockResolvedValue({ note: "Done." } as never) })
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(api.get).mockResolvedValue(models as never)
+  vi.mocked(api.put).mockResolvedValue({ note: "This conversation runs on GPT-6 Luna from the next reply. Memory is off there." } as never)
+})
 
 describe("ThreadModel", () => {
   it("lists the catalog with prices", async () => {
-    previews(stays)
     await open()
     expect(await screen.findByText("GPT-6 Luna")).toBeInTheDocument()
     expect(screen.getByText("$2 / $10")).toBeInTheDocument()
   })
 
   it("keeps a pick on the agent's own provider at once", async () => {
-    previews(stays)
     const changed = await open()
     await userEvent.click(await screen.findByText("Haiku 5.5"))
-    await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "anthropic:claude-haiku-5-5", preview_digest: "", preview_revision: 0 }))
-    expect(changed).toHaveBeenCalled()
+    await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "anthropic:claude-haiku-5-5" }))
+    expect(changed, "the chat refreshes").toHaveBeenCalled()
   })
 
-  it("keeps a cross-provider pick that loses nothing at once, with its preview", async () => {
-    previews(lossless)
+  it("keeps a cross-provider pick at once and says what is off as information", async () => {
     await open()
     await userEvent.click(await screen.findByText("GPT-6 Luna"))
-    await vi.waitFor(() => expect(api.put, "no card, the preview's consent sent").toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "openai:gpt-6-luna", preview_digest: "d0", preview_revision: 3 }))
-    expect(screen.queryByRole("button", { name: "Switch" }), "no card").not.toBeInTheDocument()
+    await vi.waitFor(() => expect(api.put, "no card first").toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "openai:gpt-6-luna" }))
+    expect(api.get, "no preview fetched").toHaveBeenCalledTimes(1)
+    expect(toast.success, "the note names what is off").toHaveBeenCalledWith(expect.stringContaining("Memory is off there."))
+    expect(screen.queryByRole("button", { name: "Switch" }), "no switch card").not.toBeInTheDocument()
   })
 
-  it("shows the switch card for a pick that loses something and keeps it only on Switch", async () => {
-    previews(moves)
+  it("says why a refused pick was not kept", async () => {
+    vi.mocked(api.put).mockRejectedValue(new Error("Ask an admin."))
     await open()
     await userEvent.click(await screen.findByText("GPT-6 Luna"))
-    expect(await screen.findByText("Switch this conversation to GPT-6 Luna?"), "the card's title").toBeInTheDocument()
-    expect(screen.getByText("Stops working: memory"), "what stops working").toBeInTheDocument()
-    expect(api.put).not.toHaveBeenCalled()
-    await userEvent.click(screen.getByRole("button", { name: "Switch" }))
-    await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "openai:gpt-6-luna", preview_digest: "d1", preview_revision: 4 }))
-  })
-
-  it("offers no Switch for a refused pick", async () => {
-    previews({ ...moves, allowed: false, refusal: { line: "Ask an admin.", action: null } })
-    await open()
-    await userEvent.click(await screen.findByText("GPT-6 Luna"))
-    expect(await screen.findByText("Ask an admin.")).toBeInTheDocument()
-    expect(screen.getByRole("button", { name: "Switch" })).toBeDisabled()
+    await vi.waitFor(() => expect(toast.error, "the refusal line").toHaveBeenCalledWith("Ask an admin."))
   })
 })

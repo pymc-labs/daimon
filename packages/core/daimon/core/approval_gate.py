@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import DaimonError, StaleChannelValue
+from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
@@ -96,6 +97,8 @@ async def set_approval_gate(
     async with policy_write_transaction(factory, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        if sealed_outside(policy, subject.inside, channel_ids=(target,), operator=subject.operator):
+            raise DaimonError(SEALED_REFUSAL)
         if target is None:
             before = policy.approvals
             changed = policy.model_copy(

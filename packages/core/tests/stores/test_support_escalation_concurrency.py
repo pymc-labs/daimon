@@ -1,6 +1,6 @@
 """Concurrent submissions against the support ledger — real Postgres, two connections.
 
-`record_escalation` counts then inserts. Without the per-person ledger lock two
+`submit_request` counts then inserts. Without the per-person ledger lock two
 transactions under READ COMMITTED both count the same rows and both insert, so
 two fast submissions overspend the allowance, and two submissions on one
 message record two requests. These tests run the writes on separate
@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from daimon.core.stores import support_escalation as store
+from daimon.core.support import RequestChoice, SupportPlace
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -28,9 +29,9 @@ async def _submit(
     *,
     message_id: str,
     allowance: int,
-) -> store.EscalationOutcome:
+) -> store.SubmitOutcome:
     async with factory() as session, session.begin():
-        outcome = await store.record_escalation_once(
+        outcome = await store.submit_request(
             session,
             tenant_id=tenant_id,  # type: ignore[arg-type]
             account_id=None,
@@ -39,8 +40,9 @@ async def _submit(
             channel_id="C1",
             message_id=message_id,
             ma_session_id=None,
-            note="help",
-            allowance=allowance,
+            place=SupportPlace(channel_id="C1", agent_id=None),
+            choice=RequestChoice.default("help"),
+            default_allowance=allowance,
         )
         # Keep the transaction open so the other submitters are genuinely
         # concurrent with an uncommitted row.

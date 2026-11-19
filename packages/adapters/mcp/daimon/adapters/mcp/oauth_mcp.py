@@ -41,7 +41,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
-from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.channel_backend import backend_refusal_causes, backend_selection_enabled
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
@@ -206,6 +206,7 @@ def build_oauth_mcp_routes(
                 mcp_server_url=flow.mcp_server_url,
                 err_type=type(err).__name__,
                 error=str(err)[:300],
+                causes=backend_refusal_causes(err),
             )
             if isinstance(err, McpOAuthClientConfigError):
                 return _error_page("client_misconfigured")
@@ -292,6 +293,7 @@ def build_oauth_mcp_routes(
                 err_type=type(err).__name__,
                 error=str(err)[:300],
                 configured_client=configured,
+                causes=backend_refusal_causes(err),
             )
             if request_row is not None:
                 await _settle(request_row, outcome="write_failed", state="partial")

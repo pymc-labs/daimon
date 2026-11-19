@@ -8,7 +8,6 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,14 +23,12 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import FeatureTarget
-from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.tenants import get_tenant
-from daimon.core.support_escalation import UNAVAILABLE
-from daimon.testing.factories import make_thread_session
+from daimon.core.support_escalation import RECORDED_UNDELIVERED
+from daimon.testing.settings_mock import mock_settings
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -117,9 +114,16 @@ async def _delivered(service: TeamsHttpService) -> None:
 
 
 async def _send(
-    service: TeamsHttpService, token: str, note: str, *, user: str = AAD_OBJECT_ID
+    service: TeamsHttpService,
+    token: str,
+    note: str,
+    *,
+    user: str = AAD_OBJECT_ID,
+    card: str | None = None,
 ) -> str:
     click = make_card_action("support", "send", user=user, ask=token, note=note)
+    if card is not None:
+        click["replyToId"] = card
     reply = json.dumps(await post_activity(service, click), ensure_ascii=False)
     await _delivered(service)
     return reply
@@ -201,7 +205,7 @@ async def test_requests_stop_when_the_credits_run_out(
     async with _running(db_session_factory, teams_api_fake, credits=1) as service:
         card = await _form(service, teams_api_fake, make_message_activity(text="support"))
         await _send(service, _token(card), "one")
-        stale = await _send(service, _token(card), "two")
+        stale = await _send(service, _token(card), "two", card="m-8")
         again = await _form(
             service, teams_api_fake, make_message_activity(text="support", activity_id="a-2")
         )
@@ -224,18 +228,25 @@ async def test_a_failed_post_keeps_the_request_undelivered(
 ) -> None:
     fake = _OpsFake(fail=True)
     fake.release.set()
-    async with _running(db_session_factory, fake) as svc:
-        card = await _form(svc, fake, make_message_activity(text="support"))
-        reply = await _send(svc, _token(card), "help")
+    with capture_logs() as logs:
+        async with _running(db_session_factory, fake) as svc:
+            card = await _form(svc, fake, make_message_activity(text="support"))
+            reply = await _send(svc, _token(card), "help")
     assert fake.posting.is_set(), "the post was tried, and failed"
-    assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
+    assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
+        "error"
+    ], "the failure is an error an operator sees"
+    assert RECORDED_UNDELIVERED in reply, "the one shared undelivered reply"
+    assert "Used" not in reply and "left" not in reply, "no used or left line"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"
 
 
-async def test_the_request_is_answered_before_its_delivery_lands(
-    db_session_factory: async_sessionmaker[AsyncSession],
+async def test_a_slow_delivery_does_not_hold_the_invoke(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The invoke waits only briefly for the post, then answers as received."""
+    monkeypatch.setattr(support, "_DELIVERY_WAIT", 0.05)
     fake = _OpsFake()
     async with _running(db_session_factory, fake) as svc:
         card = await _form(svc, fake, make_message_activity(text="support"))
@@ -254,41 +265,24 @@ async def test_the_request_is_answered_before_its_delivery_lands(
 
 
 @pytest.mark.parametrize(
-    ("teams_channel", "discord_channel", "credits", "on"),
+    ("teams_channel", "discord_channel", "own", "on"),
     [
-        (None, None, 3, False),
-        (OPS, None, 0, False),
-        (None, "123", 3, False),
-        (OPS, "123", 3, True),
-        (OPS, None, 3, True),
+        (None, None, "off", False),
+        (None, "123", "off", False),
+        (OPS, None, "off", True),
+        (None, None, "on", True),
     ],
+    ids=["nothing", "discord-only", "deployment", "own-allowed"],
 )
-def test_the_command_exists_only_with_a_teams_channel_and_credits(
-    teams_channel: str | None, discord_channel: str | None, credits: int, on: bool
+def test_the_command_exists_only_when_a_teams_channel_could_take_requests(
+    teams_channel: str | None, discord_channel: str | None, own: str, on: bool
 ) -> None:
     """Discord's channel is Discord's: Teams never posts there, as Slack never does."""
-    settings: Any = SimpleNamespace(
-        support=SupportSettings(
-            teams_escalation_channel_id=teams_channel,
-            escalation_channel_id=discord_channel,
-            credits_per_user=credits,
-        )
+    settings = mock_settings(support_own_channel=own)
+    settings.support = SupportSettings(
+        teams_escalation_channel_id=teams_channel, escalation_channel_id=discord_channel
     )
-    assert support.enabled(settings) is on
-
-
-def test_routed_feedback_needs_the_teams_channel() -> None:
-    """A tenant's 👎 forms never go to Discord's channel, which Teams once posted to."""
-    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    routed = {tenant: True}
-    discord_only: Any = SimpleNamespace(
-        support=SupportSettings(escalation_channel_id="123", feedback_to_support=routed)
-    )
-    teams: Any = SimpleNamespace(
-        support=SupportSettings(teams_escalation_channel_id=OPS, feedback_to_support=routed)
-    )
-    assert not support.routes_feedback(discord_only, tenant)
-    assert support.routes_feedback(teams, tenant)
+    assert support.enabled(settings) is on, f"{teams_channel=} {discord_channel=} {own=}"
 
 
 def _ask(op: str, **data: object) -> dict[str, object]:
@@ -317,43 +311,6 @@ async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
     assert "wrong totals" in posted and IN_DIRECT_CHAT in posted, "the note, and where it was"
     [row] = await _rows(db_session_factory)
     assert (row.message_id, row.channel_id) == ("m-7", CONVERSATION_ID)
-
-
-async def _agent_off(db_factory: async_sessionmaker[AsyncSession], conversation: str) -> None:
-    """The conversation's agent has "ask a person" switched off for itself."""
-    async with db_factory.begin() as session:
-        await make_thread_session(
-            session,
-            tenant=await get_tenant(session, TENANT),
-            platform="teams",
-            thread_id=conversation,
-            ma_agent_id="off",
-        )
-        await set_feature_value(
-            session,
-            tenant_id=TENANT,
-            target=FeatureTarget(tier="agent", agent_id="off"),
-            key="support_escalation",
-            value="off",
-            set_by=None,
-            surface="web",
-        )
-
-
-async def test_ask_a_human_is_unavailable_when_the_conversations_agent_turned_it_off(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
-) -> None:
-    await _agent_off(db_session_factory, CONVERSATION_ID)
-    async with _running(db_session_factory, teams_api_fake) as service:
-        opened = await post_activity(service, _ask("open"))
-        sent = await post_activity(service, _ask("send", message="m-7", note="wrong totals"))
-        await _delivered(service)
-
-    assert UNAVAILABLE in json.dumps(opened), "the form is not shown"
-    assert sent["task"]["value"] == UNAVAILABLE, "a late send is refused again"
-    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == [], (
-        "nothing is recorded or posted for an agent set to off"
-    )
 
 
 async def test_ask_a_human_twice_on_one_answer_spends_one_credit(

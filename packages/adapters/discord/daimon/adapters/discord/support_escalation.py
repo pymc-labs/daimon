@@ -27,9 +27,8 @@ survives one person's DMs being closed, leaves a shared record anyone on the
 rota can pick up, and does not silently make whoever is first in a config list
 the only person who ever hears anything.
 
-A channel with its own admins is the exception: its requests go to those
-admins by DM first, then to the server admins, and to the channel only when
-no DM landed (`daimon.core.support_routing`).
+There is no exception: `daimon.core.support_routing` has no DM tier, so every
+request goes to the channel and no one is messaged directly.
 
 Delivery ordering is the load-bearing part of this module. The row is
 committed BEFORE the post is attempted, and `delivered_at` is stamped only
@@ -43,37 +42,71 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any, Self, cast
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Final, Self, cast
 
 import structlog
-from daimon.adapters.discord.bot import DaimonBot
+from daimon.adapters.discord.bot import DaimonBot, requester_role
+from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.split import split_for_discord_safe
-from daimon.core.config import SupportSettings
+from daimon.adapters.discord.support_post import post_to_support_channel, request_facts
+from daimon.adapters.discord.support_settle import settle_view
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.platform_names import get_channel_row
 from daimon.core.stores.support_escalation import (
+    SubmitOutcome,
+    asked_options,
     mark_delivered,
-    record_escalation,
+    resolve_limit,
+    submit_request,
 )
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support import (
+    CHOOSE_OPTION,
+    EXEMPT_OFFER,
+    MAX_PARAGRAPH_CHARS,
+    OPTIONS_CHANGED,
+    ChoiceField,
+    RequestChoice,
+    StepsPrice,
+    SupportError,
+    SupportOption,
+    SupportPlace,
+    TextField,
+    balance_text,
+    credits_text,
+    ended_text,
+    offer_refusal,
+    option_value,
+    pick_refusal,
+    picked_option,
+    price_text,
+    received_text,
+    refusal_text,
+)
 from daimon.core.support_escalation import (
+    ALREADY_REQUESTED,
     ASK_THE_TEAM,
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
     ESCALATE,
-    OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
     UNAVAILABLE,
     build_custom_id,
-    received_text,
 )
-from daimon.core.support_offer import support_offered
+from daimon.core.support_routing import log_undelivered, support_destination
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 from discord.ext import commands
@@ -82,53 +115,146 @@ _log = structlog.get_logger()
 
 _CALLBACK_FAILED = "That didn't work. Try again."
 _SUBMIT_FAILED = "That didn't work. Try again."
-# The person-facing copy is shared with Slack (`daimon.core.support_escalation`).
-_EMPTY_NOTE = EMPTY_NOTE
-_MALFORMED = UNAVAILABLE
-_OUT_OF_CREDITS = OUT_OF_CREDITS
-_RECORDED_UNDELIVERED = RECORDED_UNDELIVERED
+MENU_TEMPLATE: Final = (
+    r"spm:(?P<guild_id>[0-9]{1,20}):(?P<channel_id>[0-9]{1,20})"
+    r":(?P<message_id>[0-9]{1,20})"
+)
 
 
-def discord_channel(support: SupportSettings) -> str | None:
-    """Ask a human's escalation channel when the Discord bot can post in it, else None.
+@dataclass(frozen=True)
+class AnswerOrigin:
+    """The answer a request is about, and the place its limit and feature are read at."""
 
-    Teams once shared `escalation_channel_id`; its channel now has its own
-    setting. A Teams id (`19:…`) left here from then is not Discord's, so
-    Discord offers no Ask a human rather than spending credits on requests it
-    could never deliver.
+    guild_id: str
+    channel_id: str
+    message_id: str
+    tenant_id: uuid.UUID
+    parent_id: str
+    thread_id: str | None
+    agent_id: str | None
+    ma_session_id: str | None
+    budget_channel_id: str | None
+
+    @property
+    def link(self) -> str:
+        return f"https://discord.com/channels/{self.guild_id}/{self.channel_id}/{self.message_id}"
+
+    @property
+    def support_place(self) -> SupportPlace:
+        return SupportPlace.of_thread(
+            channel_id=self.parent_id,
+            budget_channel_id=self.budget_channel_id,
+            agent_id=self.agent_id,
+        )
+
+    @property
+    def feature_place(self) -> FeaturePlace:
+        return FeaturePlace.of(
+            self.tenant_id, "discord", self.parent_id, self.thread_id, agent_id=self.agent_id
+        )
+
+
+async def answer_place(
+    bot: commands.Bot,
+    runtime: DiscordRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    fetch: bool,
+) -> tuple[str, str | None]:
+    """`(channel, thread)` for the answer's channel id: a thread names its parent.
+
+    `fetch=False` is for the click that must open a modal within three seconds:
+    the cache, then the channel as last recorded, and never a Discord request.
     """
-    channel = support.escalation_channel_id
-    return None if channel is None or channel.startswith("19:") else channel
-
-
-async def _answer_place(bot: commands.Bot, channel_id: str) -> tuple[str, str | None]:
-    """`(channel, thread)` for the answer's channel id: a thread names its parent."""
     try:
-        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        channel = bot.get_channel(int(channel_id))
+        if channel is None and fetch:
+            channel = await bot.fetch_channel(int(channel_id))
     except (discord.HTTPException, ValueError):
+        return channel_id, None
+    if channel is None:
+        async with runtime.sessionmaker() as session:
+            known = await get_channel_row(
+                session, tenant_id=tenant_id, platform="discord", channel_id=channel_id
+            )
+        if known is not None and known.kind == "thread" and known.parent_id:
+            return known.parent_id, channel_id
         return channel_id, None
     if isinstance(channel, discord.Thread) and channel.parent_id:
         return str(channel.parent_id), channel_id
     return channel_id, None
 
 
-async def answer_is_sealed(
-    runtime: DiscordRuntime, bot: commands.Bot, *, guild_id: str, channel_id: str
-) -> bool:
+async def answer_origin(
+    runtime: DiscordRuntime,
+    bot: commands.Bot,
+    *,
+    guild_id: str,
+    channel_id: str,
+    message_id: str,
+    fetch: bool = True,
+) -> AnswerOrigin:
+    """Read where the answer sits now: its channel, thread, agent and session."""
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+    parent, thread = await answer_place(
+        bot, runtime, tenant_id=tenant_id, channel_id=channel_id, fetch=fetch
+    )
+    async with runtime.sessionmaker() as session:
+        row = await get_latest_thread_session(
+            session, tenant_id=tenant_id, platform="discord", thread_id=channel_id
+        )
+    return AnswerOrigin(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        message_id=message_id,
+        tenant_id=tenant_id,
+        parent_id=parent,
+        thread_id=thread,
+        agent_id=None if row is None else row.ma_agent_id,
+        ma_session_id=None if row is None else row.ma_session_id,
+        budget_channel_id=None if row is None else row.budget_channel_id,
+    )
+
+
+async def answer_is_sealed(runtime: DiscordRuntime, origin: AnswerOrigin) -> bool:
     """Whether only turns inside the answer's channel (or its thread) read it.
 
     The same core check Slack and Teams make (`readers_limited_at`). A policy
     that cannot be read counts as sealed: the hint and the marker only ask for
     care, so erring toward them costs nothing.
     """
-    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-    channel, thread = await _answer_place(bot, channel_id)
     try:
         async with runtime.sessionmaker() as session:
-            policy = await load_access_policy(session, tenant_id=tenant_id)
+            policy = await load_access_policy(session, tenant_id=origin.tenant_id)
     except AccessPolicyUnreadable:
         return True
-    return readers_limited_at(policy, channel_id=channel, thread_id=thread)
+    return readers_limited_at(policy, channel_id=origin.parent_id, thread_id=origin.thread_id)
+
+
+async def requester_is_admin(bot: commands.Bot, *, guild_id: str, user_id: str) -> bool:
+    """Decision 5: a server admin's requests are charged nowhere. Anything unknown charges."""
+    guild = bot.get_guild(int(guild_id))
+    if not isinstance(guild, discord.Guild):
+        return False
+    role, _roles = await requester_role(guild, user_id)
+    return role == Role.ADMIN
+
+
+def requester_is_admin_cached(
+    interaction: discord.Interaction[Any], bot: commands.Bot, *, guild_id: str
+) -> bool:
+    """As `requester_is_admin`, from the interaction and the cache: no Discord request.
+
+    For the click that must open a modal within three seconds. A member neither
+    on the interaction nor cached charges; the submit decides for good.
+    """
+    guild = bot.get_guild(int(guild_id))
+    if not isinstance(guild, discord.Guild):
+        return False
+    user = interaction.user
+    member = user if isinstance(user, discord.Member) else guild.get_member(user.id)
+    return member is not None and is_member_guild_admin(member, guild_owner_id=guild.owner_id)
 
 
 def _sealed_hint() -> str:
@@ -136,56 +262,168 @@ def _sealed_hint() -> str:
     return "\n\n".join(f"-# {line}" for line in SEALED_NOTE_HINT.split("\n\n"))
 
 
-async def post_to_support_channel(
-    bot: commands.Bot,
-    *,
-    channel_id: str,
-    body: str,
-    allowed_mentions: discord.AllowedMentions | None = None,
-) -> bool:
-    """Post ``body`` into the support channel. True if it landed.
+async def _notice(
+    interaction: discord.Interaction[Any], text: str, *, neutral: bool = False
+) -> None:
+    await interaction.followup.send(embed=build_notice_embed(text, neutral=neutral), ephemeral=True)
 
-    Shared by Ask a human and the routed 👎 form (`feedback_modal`). Resolves
-    through the cache first and falls back to one fetch, because the
-    escalation channel lives in the operators' own guild and may not be in a
-    freshly-started bot's cache. Returns False on anything that means the
-    message did not arrive -- a channel that cannot be resolved, one the bot
-    cannot post in, or an id that is not a channel it can message.
-    """
-    try:
-        channel = bot.get_channel(int(channel_id))
-        if channel is None:
-            channel = await bot.fetch_channel(int(channel_id))
-        if not isinstance(channel, discord.abc.Messageable):
-            _log.warning("support.channel_not_messageable", channel_id=channel_id)
-            return False
-        for chunk in split_for_discord_safe(body):
-            if allowed_mentions is None:
-                await channel.send(chunk)
-            else:
-                await channel.send(chunk, allowed_mentions=allowed_mentions)
-        return True
-    except (discord.HTTPException, ValueError) as exc:
-        # A misconfigured id, a channel the bot was removed from, or lost
-        # send permission. All operator-side, none of them the requester's
-        # problem -- and none of them may lose the row.
-        _log.warning(
-            "support.channel_undeliverable",
-            channel_id=channel_id,
-            err_type=type(exc).__name__,
+
+async def _report_failure(
+    interaction: discord.Interaction[Any], text: str, *, neutral: bool = False
+) -> None:
+    embed = build_notice_embed(text, neutral=neutral)
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def _refuse(interaction: discord.Interaction[Any], outcome: SubmitOutcome) -> None:
+    if outcome.status == "out_of_credits" and outcome.view is not None:
+        _log.info("support.out_of_credits", charged_to=outcome.view.charged_to)
+    text = refusal_text(outcome, now=datetime.now(UTC))
+    await _notice(interaction, text, neutral=outcome.status == "duplicate")
+
+
+async def _offer_state(
+    runtime: DiscordRuntime, origin: AnswerOrigin, user_id: str, *, exempt: bool
+) -> tuple[LimitView, frozenset[str]]:
+    """The limit `user_id` asks under at `origin`, and the options they already asked with."""
+    async with runtime.sessionmaker() as session:
+        view = await resolve_limit(
+            session,
+            tenant_id=origin.tenant_id,
+            place=origin.support_place,
+            platform_user_id=user_id,
+            default_allowance=runtime.settings.support.credits_per_user,
+            exempt=exempt,
         )
-        return False
+        return view, await _asked(session, origin, user_id)
+
+
+async def _asked(session: AsyncSession, origin: AnswerOrigin, user_id: str) -> frozenset[str]:
+    """The options `user_id` already asked with on this answer."""
+    return await asked_options(
+        session,
+        tenant_id=origin.tenant_id,
+        platform="discord",
+        platform_user_id=user_id,
+        channel_id=origin.channel_id,
+        message_id=origin.message_id,
+    )
+
+
+def _post_body(
+    interaction: discord.Interaction[Any],
+    origin: AnswerOrigin,
+    row: SupportEscalationRow,
+    view: LimitView,
+    *,
+    sealed: bool,
+) -> str:
+    """Today's post for a plain default request; any other adds its option, status and balance.
+
+    A default-charged pick on a menu, or one still to be priced, reads like a
+    limit's: staff need its option and price range to settle it.
+    """
+    head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
+    marker = [f"*{SEALED_POST_MARKER}*"] if sealed else []
+    facts: list[str] = []
+    if row.charged_to != "default" or view.menu is not None or row.status == "pending":
+        balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
+        facts.append(request_facts(row, menu=view.menu is not None, balance=balance))
+    return "\n\n".join(part for part in (head, *facts, origin.link, *marker, row.note) if part)
+
+
+async def submit_answer_request(
+    interaction: discord.Interaction[Any],
+    *,
+    runtime: DiscordRuntime,
+    origin: AnswerOrigin,
+    choice: RequestChoice,
+) -> None:
+    """Record one request and post it, after the interaction was deferred.
+
+    The row is committed BEFORE the post is attempted, and `delivered_at` is
+    stamped only once it lands: a failure downgrades the confirmation, never
+    the request.
+    """
+    settings = runtime.settings
+    offered = await place_feature(
+        runtime.sessionmaker, settings, origin.feature_place, "support_escalation"
+    )
+    destination = None
+    if offered.on:
+        async with runtime.sessionmaker() as session:
+            destination = await support_destination(
+                session, tenant_id=origin.tenant_id, platform="discord", settings=settings
+            )
+    if destination is None:
+        # Disabled between the offer and the submit. Nothing is spent.
+        await _notice(interaction, UNAVAILABLE)
+        return
+    bot = cast(commands.Bot, interaction.client)
+    user_id = str(interaction.user.id)
+    exempt = await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
+    try:
+        async with runtime.sessionmaker() as session, session.begin():
+            principal = await find_platform_principal(
+                session, tenant_id=origin.tenant_id, platform="discord", external_id=user_id
+            )
+            outcome = await submit_request(
+                session,
+                tenant_id=origin.tenant_id,
+                account_id=None if principal is None else principal.account_id,
+                platform="discord",
+                platform_user_id=user_id,
+                channel_id=origin.channel_id,
+                message_id=origin.message_id,
+                ma_session_id=origin.ma_session_id,
+                place=origin.support_place,
+                choice=choice,
+                default_allowance=settings.support.credits_per_user,
+                exempt=exempt,
+            )
+    except SupportError as err:
+        await _notice(interaction, str(err))
+        return
+    row, view = outcome.row, outcome.view
+    if outcome.status != "recorded" or row is None or view is None:
+        await _refuse(interaction, outcome)
+        return
+    # Decided again at submit, as Slack does: the rule may have changed since
+    # the form opened, and the post's marker must match it now.
+    sealed = await answer_is_sealed(runtime, origin)
+    post = await post_to_support_channel(
+        bot,
+        channel_id=destination.channel_id,
+        body=_post_body(interaction, origin, row, view, sealed=sealed),
+        view=settle_view(row.id) if row.status == "pending" else None,
+    )
+    if post is not None:
+        async with runtime.sessionmaker() as session, session.begin():
+            await mark_delivered(
+                session,
+                escalation_id=row.id,
+                support_channel_id=post.channel_id,
+                support_post_id=post.message_id,
+            )
+    else:
+        log_undelivered(row)
+    _log.info(
+        "support.escalation_recorded",
+        escalation_id=str(row.id),
+        tenant_id=str(origin.tenant_id),
+        delivered=post is not None,
+    )
+    # A failed post tells the person the same as on Slack and Teams: sent, with no
+    # used/left line, since staff have not seen it yet.
+    text = received_text(row, view) if post is not None else RECORDED_UNDELIVERED
+    await _notice(interaction, text, neutral=True)
 
 
 class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
-    """Free-text form; writing it is what spends the credit.
-
-    `on_submit` commits the row, closes the transaction, and only then tries
-    to reach an operator. Holding the transaction open across the DM round
-    trips would pin a connection for the duration of an unbounded number of
-    HTTP calls, and a failure part-way would roll back a request the person
-    has already been told about.
-    """
+    """The default menu's free-text form; writing it is what spends the credit."""
 
     def __init__(
         self,
@@ -201,7 +439,6 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         self._guild_id = guild_id
         self._channel_id = channel_id
         self._message_id = message_id
-        self._sealed = sealed
         if sealed:
             self.add_item(discord.ui.TextDisplay(_sealed_hint()))
         self.note_input: discord.ui.TextInput[SupportModal] = discord.ui.TextInput(
@@ -210,7 +447,8 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
             placeholder="Write a few words.",
             style=discord.TextStyle.paragraph,
             required=True,
-            max_length=4000,
+            # The core note limit, under Discord's 4000 so the lint can check it.
+            max_length=min(MAX_PARAGRAPH_CHARS, 4000),
         )
         self.add_item(self.note_input)
 
@@ -218,152 +456,249 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         await interaction.response.defer(ephemeral=True, thinking=True)
         note = str(self.note_input.value or "")
         if not note.strip():
-            await interaction.followup.send(embed=build_notice_embed(_EMPTY_NOTE), ephemeral=True)
+            await _notice(interaction, EMPTY_NOTE)
             return
-
-        settings = self._runtime.settings
-        channel_id = discord_channel(settings.support)
         # The button arrives by direct message, so `interaction.guild_id` is
         # None and the originating guild comes from the custom_id instead.
-        guild_id = self._guild_id
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-        offered = await support_offered(
-            self._runtime.sessionmaker,
-            settings,
-            tenant_id=tenant_id,
-            platform="discord",
-            thread_id=self._channel_id,
-            post=(self._channel_id, self._message_id),
-        )
-        if channel_id is None or not offered:
-            # Disabled between the reaction and the submit. Nothing is spent.
-            await interaction.followup.send(embed=build_notice_embed(_MALFORMED), ephemeral=True)
-            return
-        user_id = str(interaction.user.id)
-
-        async with self._runtime.sessionmaker() as session, session.begin():
-            thread_row = await get_latest_thread_session(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                thread_id=self._channel_id,
-            )
-            principal = await find_platform_principal(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                external_id=user_id,
-            )
-            row = await record_escalation(
-                session,
-                tenant_id=tenant_id,
-                account_id=principal.account_id if principal is not None else None,
-                platform="discord",
-                platform_user_id=user_id,
-                channel_id=self._channel_id,
-                message_id=self._message_id,
-                ma_session_id=thread_row.ma_session_id if thread_row is not None else None,
-                note=note,
-                allowance=settings.support.credits_per_user,
-            )
-
-        if row is None:
-            _log.info("support.out_of_credits", tenant_id=str(tenant_id))
-            await interaction.followup.send(
-                embed=build_notice_embed(_OUT_OF_CREDITS), ephemeral=True
-            )
-            return
-
-        # Decided again at submit, as Slack does: the rule may have changed
-        # since the form opened, and the post's marker must match it now.
-        self._sealed = await answer_is_sealed(
+        origin = await answer_origin(
             self._runtime,
             cast(commands.Bot, interaction.client),
-            guild_id=guild_id,
+            guild_id=self._guild_id,
             channel_id=self._channel_id,
+            message_id=self._message_id,
         )
-        # The row is committed. Everything below is best-effort delivery, and
-        # a total failure downgrades the confirmation wording rather than the
-        # outcome -- the request is already durable.
-        delivered = await self._post_to_channel(
-            interaction=interaction,
-            note=note,
-            guild_id=guild_id,
-            channel_id=channel_id,
-        )
-        if delivered:
-            async with self._runtime.sessionmaker() as session, session.begin():
-                await mark_delivered(session, escalation_id=row.id)
-
-        _log.info(
-            "support.escalation_recorded",
-            escalation_id=str(row.id),
-            tenant_id=str(tenant_id),
-            delivered=delivered,
-        )
-        if not delivered:
-            await interaction.followup.send(
-                embed=build_notice_embed(_RECORDED_UNDELIVERED), ephemeral=True
-            )
-            return
-        remaining = max(
-            settings.support.credits_per_user - (await self._used(tenant_id, user_id)), 0
-        )
-        await interaction.followup.send(
-            embed=build_notice_embed(received_text(remaining=remaining), neutral=True),
-            ephemeral=True,
-        )
-
-    async def _used(self, tenant_id: uuid.UUID, user_id: str) -> int:
-        from daimon.core.stores.support_escalation import count_escalations_for_user
-
-        async with self._runtime.sessionmaker() as session:
-            return await count_escalations_for_user(
-                session, tenant_id=tenant_id, platform_user_id=user_id
-            )
-
-    def _body(self, interaction: discord.Interaction, note: str) -> str:
-        link = (
-            f"https://discord.com/channels/{self._guild_id}/{self._channel_id}/{self._message_id}"
-        )
-        marker = [f"*{SEALED_POST_MARKER}*"] if self._sealed else []
-        head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
-        return "\n\n".join([head, link, *marker, note])
-
-    async def _post_to_channel(
-        self,
-        *,
-        interaction: discord.Interaction,
-        note: str,
-        guild_id: str,
-        channel_id: str,
-    ) -> bool:
-        """Post the request into the escalation channel. True if it landed; on
-        False the caller leaves `delivered_at` NULL and tells the requester the
-        honest thing."""
-        return await post_to_support_channel(
-            cast(commands.Bot, interaction.client),
-            channel_id=channel_id,
-            body=self._body(interaction, note),
+        choice = RequestChoice.default(note)
+        await submit_answer_request(
+            interaction, runtime=self._runtime, origin=origin, choice=choice
         )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""
         _log.exception("support_modal.on_error", err_type=type(error).__name__)
-        if interaction.response.is_done():
-            await interaction.followup.send(
-                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
+        await _report_failure(interaction, _SUBMIT_FAILED)
+
+
+type _FieldInput = discord.ui.TextInput[SupportOptionModal] | discord.ui.Select[SupportOptionModal]
+
+
+def _answer(item: _FieldInput) -> str:
+    if isinstance(item, discord.ui.TextInput):
+        return str(item.value or "")
+    return str(item.values[0]) if item.values else ""
+
+
+class SupportOptionModal(discord.ui.Modal, title=ASK_THE_TEAM):
+    """One configured option's form: its terms, then a step and its fields (or just Submit)."""
+
+    def __init__(
+        self,
+        *,
+        runtime: DiscordRuntime,
+        origin: AnswerOrigin,
+        option: SupportOption,
+        sealed: bool = False,
+    ) -> None:
+        super().__init__()
+        self._runtime = runtime
+        self._origin = origin
+        self._option = option
+        terms = [f"**{option.label}**: {price_text(option.price)}"]
+        if option.description:
+            terms.append(option.description)
+        head = "\n".join(terms)
+        self.add_item(discord.ui.TextDisplay(f"{head}\n\n{_sealed_hint()}" if sealed else head))
+        self.step_input: discord.ui.Select[SupportOptionModal] | None = None
+        price = option.price
+        if isinstance(price, StepsPrice):
+            steps: discord.ui.Label[SupportOptionModal] = discord.ui.Label(
+                text=price.label,
+                component=discord.ui.Select(
+                    options=[
+                        discord.SelectOption(
+                            label=step.label,
+                            value=str(index),
+                            description=credits_text(step.amount),
+                        )
+                        for index, step in enumerate(price.steps)
+                    ],
+                ),
             )
-        else:
-            await interaction.response.send_message(
-                embed=build_notice_embed(_SUBMIT_FAILED), ephemeral=True
-            )
+            # `Label.component` is typed `Item`; it is the Select built just above.
+            self.step_input = cast(discord.ui.Select[SupportOptionModal], steps.component)
+            self.add_item(steps)
+        self.field_inputs: dict[str, _FieldInput] = {}
+        for spec in option.fields:
+            if isinstance(spec, ChoiceField):
+                label: discord.ui.Label[SupportOptionModal] = discord.ui.Label(
+                    text=spec.label,
+                    component=discord.ui.Select(
+                        placeholder=spec.placeholder,
+                        min_values=1 if spec.required else 0,
+                        required=spec.required,
+                        options=[discord.SelectOption(label=choice) for choice in spec.choices],
+                    ),
+                )
+            else:
+                label = discord.ui.Label(
+                    text=spec.label,
+                    component=discord.ui.TextInput(
+                        style=discord.TextStyle.short
+                        if isinstance(spec, TextField)
+                        else discord.TextStyle.paragraph,
+                        placeholder=spec.placeholder,
+                        required=spec.required,
+                        max_length=min(spec.max_chars, 4000),
+                    ),
+                )
+            # As above: the component is the input built inside this `Label`.
+            self.field_inputs[spec.key] = cast(_FieldInput, label.component)
+            self.add_item(label)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        picked = self.step_input.values if self.step_input is not None else []
+        choice = RequestChoice.of(
+            self._option,
+            step=int(picked[0]) if picked else None,
+            answers={key: _answer(item) for key, item in self.field_inputs.items()},
+        )
+        await submit_answer_request(
+            interaction, runtime=self._runtime, origin=self._origin, choice=choice
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        """Adapter boundary: discord.py routes on_submit failures here, not to a dispatcher."""
+        _log.exception("support_option_modal.on_error", err_type=type(error).__name__)
+        await _report_failure(interaction, _SUBMIT_FAILED)
+
+
+def _menu_lines(option: SupportOption) -> str:
+    line = f"**{option.label}**: {price_text(option.price)}"
+    return f"{line}\n{option.description}" if option.description else line
+
+
+def menu_message(origin: AnswerOrigin, view: LimitView) -> tuple[discord.Embed, discord.ui.View]:
+    """A configured menu: each option and its price, the balance, and a picker."""
+    options = view.spec.options
+    embed = discord.Embed(
+        title=ASK_THE_TEAM,
+        description="\n\n".join(
+            [f"Need help with [this answer]({origin.link})?", *map(_menu_lines, options)]
+        ),
+        colour=discord.Colour.blurple(),
+    )
+    footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
+    if footer:
+        embed.set_footer(text=footer)
+    menu = discord.ui.View(timeout=None)
+    menu.add_item(
+        SupportMenuSelect(
+            guild_id=origin.guild_id,
+            channel_id=origin.channel_id,
+            message_id=origin.message_id,
+            options=[
+                discord.SelectOption(
+                    label=option.label,
+                    value=option_value(option),
+                    description=price_text(option.price),
+                )
+                for option in options
+            ],
+        )
+    )
+    return embed, menu
+
+
+class SupportMenuSelect(
+    discord.ui.DynamicItem[discord.ui.Select[discord.ui.View]], template=MENU_TEMPLATE
+):
+    """The configured menu's picker; each option's value carries the terms it showed.
+
+    Picking re-reads the limit (decision 9): a changed menu answers "Options
+    changed", an unaffordable option "Not enough credits", before any form.
+    """
+
+    def __init__(
+        self,
+        *,
+        guild_id: str,
+        channel_id: str,
+        message_id: str,
+        options: Sequence[discord.SelectOption] = (),
+    ) -> None:
+        select: discord.ui.Select[discord.ui.View] = discord.ui.Select(
+            custom_id=f"spm:{guild_id}:{channel_id}:{message_id}",
+            placeholder=CHOOSE_OPTION,
+            # Rebuilt from a click, the options are not needed: the pick is in the payload.
+            options=list(options) or [discord.SelectOption(label=CHOOSE_OPTION)],
+        )
+        super().__init__(select)
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.message_id = message_id
+
+    @classmethod
+    async def from_custom_id(  # type: ignore[override]  # discord.py's ClientT is a free TypeVar; this adapter only ever runs DaimonBot
+        cls,
+        interaction: discord.Interaction[commands.Bot],
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+        /,
+    ) -> Self:
+        return cls(
+            guild_id=match["guild_id"],
+            channel_id=match["channel_id"],
+            message_id=match["message_id"],
+        )
+
+    async def callback(  # type: ignore[override]  # see from_custom_id
+        self, interaction: discord.Interaction[commands.Bot]
+    ) -> None:
+        try:
+            await self._pick(interaction)
+        except Exception as err:
+            # dynamic-item dispatch is an adapter boundary; discord.py's dispatcher swallows
+            # anything raised here
+            _log.exception("support_menu.callback_failed", err_type=type(err).__name__)
+            await _report_failure(interaction, _CALLBACK_FAILED)
+
+    async def _pick(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        bot = cast(DaimonBot, interaction.client)
+        runtime = bot.runtime
+        origin = await answer_origin(
+            runtime,
+            bot,
+            guild_id=self.guild_id,
+            channel_id=self.channel_id,
+            message_id=self.message_id,
+            fetch=False,
+        )
+        user_id = str(interaction.user.id)
+        # No Discord request before the form: it must open inside the
+        # interaction's three seconds. The submit decides who is an admin.
+        exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
+        view, asked = await _offer_state(runtime, origin, user_id, exempt=exempt)
+        values = self.item.values
+        option = picked_option(view.spec, str(values[0])) if values else None
+        if option is None:
+            await _report_failure(interaction, OPTIONS_CHANGED)
+            return
+        if not view.active:
+            await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
+            return
+        if (refused := pick_refusal(view, option, asked=asked)) is not None:
+            await _report_failure(interaction, refused, neutral=refused == ALREADY_REQUESTED)
+            return
+        sealed = await answer_is_sealed(runtime, origin)
+        await interaction.response.send_modal(
+            SupportOptionModal(runtime=runtime, origin=origin, option=option, sealed=sealed)
+        )
 
 
 class SupportEscalateButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=CUSTOM_ID_TEMPLATE
 ):
-    """Persistent button delivered by DM; its only job is to open the modal.
+    """Persistent button delivered by DM: the note form, or a configured menu.
 
     Defines no `interaction_check`, for the reason `feedback_button.py`
     documents: the button arrives in a one-to-one direct message, so Discord's
@@ -406,28 +741,81 @@ class SupportEscalateButton(
         self, interaction: discord.Interaction[commands.Bot]
     ) -> None:
         try:
-            bot = cast(DaimonBot, interaction.client)
-            sealed = await answer_is_sealed(
-                bot.runtime, bot, guild_id=self.guild_id, channel_id=self.channel_id
-            )
-            await interaction.response.send_modal(
-                SupportModal(
-                    runtime=bot.runtime,
-                    guild_id=self.guild_id,
-                    channel_id=self.channel_id,
-                    message_id=self.message_id,
-                    sealed=sealed,
-                )
-            )
+            await self._open(interaction)
         except Exception as err:
             # dynamic-item dispatch is an adapter boundary; discord.py's dispatcher swallows
             # anything raised here
             _log.exception("support_button.callback_failed", err_type=type(err).__name__)
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
-                )
-            else:
-                await interaction.response.send_message(
-                    embed=build_notice_embed(_CALLBACK_FAILED), ephemeral=True
-                )
+            await _report_failure(interaction, _CALLBACK_FAILED)
+
+    async def _open(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        bot = cast(DaimonBot, interaction.client)
+        runtime = bot.runtime
+        origin = await answer_origin(
+            runtime,
+            bot,
+            guild_id=self.guild_id,
+            channel_id=self.channel_id,
+            message_id=self.message_id,
+            fetch=False,
+        )
+        # Slack and Teams refuse at the click too: an old button must not open a
+        # form that can only fail at Send.
+        offered = await place_feature(
+            runtime.sessionmaker, runtime.settings, origin.feature_place, "support_escalation"
+        )
+        if not offered.on:
+            await _report_failure(interaction, UNAVAILABLE)
+            return
+        user_id = str(interaction.user.id)
+        # A modal must open within the interaction's three seconds, so only a
+        # refusal asks Discord whether an uncached admin clicked.
+        exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
+        view, asked = await _offer_state(runtime, origin, user_id, exempt=exempt)
+        if not view.active:
+            await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
+            return
+        # One check for every path, the default form included (`offer_refusal`).
+        refused = offer_refusal(view, asked=asked)
+        if (
+            refused is not None
+            and not exempt
+            and await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
+        ):
+            view, asked = await _offer_state(runtime, origin, user_id, exempt=True)
+            refused = offer_refusal(view, asked=asked)
+        if refused is not None:
+            await _report_failure(
+                interaction, refused, neutral=refused.startswith(ALREADY_REQUESTED)
+            )
+            return
+        if view.menu is not None:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            embed, menu = menu_message(origin, view)
+            await interaction.followup.send(embed=embed, view=menu, ephemeral=True)
+            return
+        sealed = await answer_is_sealed(runtime, origin)
+        await interaction.response.send_modal(
+            SupportModal(
+                runtime=runtime,
+                guild_id=self.guild_id,
+                channel_id=self.channel_id,
+                message_id=self.message_id,
+                sealed=sealed,
+            )
+        )
+
+
+__all__ = [
+    "AnswerOrigin",
+    "SupportEscalateButton",
+    "SupportMenuSelect",
+    "SupportModal",
+    "SupportOptionModal",
+    "answer_origin",
+    "answer_place",
+    "menu_message",
+    "post_to_support_channel",
+    "requester_is_admin",
+    "submit_answer_request",
+]

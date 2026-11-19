@@ -282,3 +282,48 @@ async def test_forget_archived_agent_drops_rows_keyed_by_its_id(
     async with db_session_factory() as s:
         left = await s.scalar(select(func.count()).select_from(ThreadModelConsent))
         assert left == 0
+
+
+async def test_archiving_a_shared_agent_a_private_channel_picks_is_refused_outside_it(
+    db_session: AsyncSession,
+) -> None:
+    """Archive clears every channel's pick of the agent. A private channel that picks
+    a shared agent (one with no home) changes only from inside, so the archive waits."""
+    from daimon.core.access_policy import ChannelRule
+    from daimon.core.agent_lifecycle import archive_sealed_refusal
+    from daimon.core.authz import Subject
+    from daimon.core.permissions import SEALED_REFUSAL
+
+    tenant = await make_tenant(db_session)
+    for channel_id, picked in (("c_seal", "shared-ma"), ("c_open", "shared")):
+        await set_fields(
+            db_session,
+            scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=channel_id),
+            tenant_id=tenant.id,
+            agent_name=picked,
+        )
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(
+            channel_rules={"c_seal": ChannelRule(readers="own", writers="own")}
+        ),
+    )
+    agent = ma_agent(
+        id="ag_shared",
+        name="shared-ma",
+        tenant_id=tenant.id,
+        metadata={MA_METADATA_KEY_NAME: "shared"},
+    )
+
+    async def refusal(subject: Subject) -> str | None:
+        return await archive_sealed_refusal(
+            db_session, tenant_id=tenant.id, name="shared", agent=agent, subject=subject
+        )
+
+    outside = await refusal(Subject(is_admin=True, origin_channel_ids=frozenset({"c_open"})))
+    assert outside is not None and outside.startswith(SEALED_REFUSAL), "its MA name counts too"
+    assert await refusal(Subject(is_admin=True, origin_channel_ids=frozenset({"c_seal"}))) is None
+    assert await refusal(Subject(is_admin=True, operator=True)) is None, "the operator CLI recovers"
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=TenantAccessPolicy())
+    assert await refusal(Subject(is_admin=True)) is None, "open channels archive as before"

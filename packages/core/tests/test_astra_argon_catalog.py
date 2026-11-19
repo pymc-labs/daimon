@@ -1,7 +1,7 @@
-"""gpt-6-astra and the Gemini opt-in models: priced models an agent's own config may pick."""
+"""gpt-6-astra, the GPT-6.2 models and the Gemini opt-in models: priced agent model picks."""
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -10,7 +10,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
 from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
-from mux.profiles.openai import PERSISTENT_WORKSPACE
+from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 
 ASTRA = "gpt-6-astra"
 CHANNEL = ChannelRef(tenant_id="t", platform="discord", channel_id="c")
@@ -32,6 +32,35 @@ def test_astra_has_a_dated_verified_price_row() -> None:
     )
     assert price.max_priced_input_tokens == 272_000
     assert "https://developers.openai.com/api/docs/models/gpt-6-astra" in PROVIDER_PRICING_SOURCES
+
+
+@pytest.mark.parametrize(
+    ("model", "rates"),
+    [
+        ("gpt-6.2-astra", ("8.00", "40.00", "0.40", "10.00")),
+        ("gpt-6.2-sol", ("2.00", "10.00", "0.10", "2.50")),
+    ],
+)
+def test_gpt_6_2_models_have_dated_sourced_rows_with_astras_long_context_rule(
+    model: str, rates: tuple[str, ...]
+) -> None:
+    """Each row is its model page's rates from 2026-11-17, with Astra's rule above 272k
+    input tokens and web search price, and the native host runs the model."""
+    rows = provider_prices(PERSISTENT_WORKSPACE.profile_id)
+    price, astra_row = rows[("openai", model)], rows[("openai", ASTRA)]
+    assert (price.input, price.output, price.cache_read, price.cache_write) == tuple(
+        map(Decimal, rates)
+    ), f"{model}: input, output, cached input, cache write"
+    assert price.checked_on == date(2026, 11, 17), "dated from the day it was checked"
+    assert (price.max_priced_input_tokens, price.long_context_multipliers) == (
+        astra_row.max_priced_input_tokens,
+        astra_row.long_context_multipliers,
+    ), "priced wholly at 2x input and cache, 1.5x output above 272k, as Astra"
+    assert price.web_search == astra_row.web_search, "web search at OpenAI's per-call rate"
+    assert f"https://developers.openai.com/api/docs/models/{model}" in PROVIDER_PRICING_SOURCES, (
+        "the model page is a cited source"
+    )
+    assert model in NATIVE_MODELS, "the native OpenAI host runs it"
 
 
 @pytest.mark.parametrize("model", OPT_IN_MODELS)

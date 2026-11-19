@@ -575,7 +575,7 @@ async def test_reconcile_turn_when_other_turns_ended_then_reads_only_that_turn(
 ) -> None:
     """A replay bills one root turn, so no other turn or its items is read."""
     transport.responses["GET", "/agents/sessions/s/turns"] = page(turn(id_="old"), turn())
-    transport.responses["GET", "/agents/sessions/s/turns/root"] = turn()
+    transport.responses["GET", "/agents/sessions/s/turns/root"] = {**turn(), "usage": _usage()}
     transport.responses["GET", "/agents/sessions/s/turns/root/items"] = page(_search("a"))
     (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
     assert root.turn_id == "root" and root.web_searches == 1, root
@@ -586,3 +586,110 @@ async def test_reconcile_turn_when_other_turns_ended_then_reads_only_that_turn(
     transport.responses["GET", "/agents/sessions/s/turns/other"] = turn()
     with pytest.raises(ProviderError, match="malformed_response"):
         await driver.usage.reconcile_turn(SCOPE, REF, "other")
+
+
+_ROOT = "/agents/sessions/s/turns/root"
+
+
+def _usage() -> Object:
+    return {
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 10},
+        "output_tokens": 20,
+        "output_tokens_details": {"reasoning_tokens": 5},
+    }
+
+
+def _root_reads(transport: FakeTransport) -> int:
+    return sum(path == _ROOT for _, path, *_ in transport.calls)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_resource_lacks_usage_then_takes_the_terminal_events(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """A completed turn's resource can lack the usage its own terminal event carried."""
+    transport.stream_values = [event("turn.completed", "done", turn=turn(), usage=_usage())]
+    seen = [e.type async for e in driver.events.stream(SCOPE, REF)]
+    assert seen == ["session.turn_ended"], seen
+    (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert root.completeness == "measured", root
+    assert (root.input_tokens, root.output_tokens) == (100, 20), root
+    assert not root.final, "a usage the resource never reported can be a mid-turn snapshot"
+    assert _root_reads(transport) == 1, "the event's usage needs no re-read"
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        pytest.param(
+            [event("turn.completed", "done", turn={**turn(), "usage": _usage()}, usage=None)],
+            id="terminal-turn-usage",
+        ),
+        pytest.param(
+            [
+                event("turn.in_progress", "run", turn={**turn("in_progress"), "usage": _usage()}),
+                event(
+                    "turn.in_progress",
+                    "sub",
+                    turn={**turn("in_progress", id_="child", child="sub"), "usage": {}},
+                ),
+                event("turn.completed", "done", turn=turn(), usage=None),
+            ],
+            id="last-root-turn-usage",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_the_terminal_has_no_top_level_usage_then_takes_the_turns(
+    driver: OpenAIDriver, transport: FakeTransport, stream: list[Object]
+) -> None:
+    """The terminal's own `turn.usage`, else the last non-null one a root event carried."""
+    transport.stream_values = stream
+    seen = [e.type async for e in driver.events.stream(SCOPE, REF)]
+    assert "session.turn_ended" in seen, seen
+    (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert (root.completeness, root.input_tokens) == ("measured", 100), root
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_an_ended_turn_lacks_usage_then_reads_it_once(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """No turn waits on late usage: one read, unknown now, a new revision once it arrives."""
+    (ended,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert ended.completeness == "unknown" and ended.input_tokens is None, ended
+    assert _root_reads(transport) == 1, "an ended turn lacking usage is not re-read"
+    transport.responses["GET", _ROOT] = {**turn(), "usage": _usage()}
+    (late,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert late.completeness == "measured" and late.revision == ended.revision + 1, late
+    assert late.final and not ended.final, "only the resource's own usage is final"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_a_fresh_driver_replays_then_the_priced_revision_stands(
+    transport: FakeTransport,
+) -> None:
+    """A replay that never saw the terminal event keeps the stored counts, not a null revision."""
+    revisions = MemoryUsageRevisions()
+
+    def fresh() -> OpenAIDriver:
+        return OpenAIDriver(
+            transport,
+            account_scope_id="project",
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=revisions,
+            authorization=lambda s, k, i: s == SCOPE,
+        )
+
+    first = fresh()
+    transport.stream_values = [event("turn.completed", "done", turn=turn(), usage=_usage())]
+    assert [e.type async for e in first.events.stream(SCOPE, REF)] == ["session.turn_ended"]
+    (priced,) = await first.usage.reconcile_turn(SCOPE, REF, "root")
+    (replayed,) = await fresh().usage.reconcile_turn(SCOPE, REF, "root")
+    assert (replayed.revision, replayed.input_tokens) == (priced.revision, 100), replayed
+    assert not replayed.final, "stored counts are a fallback, not the resource's answer"
+    transport.responses["GET", _ROOT] = {**turn(), "usage": {**_usage(), "output_tokens": 30}}
+    (filled,) = await fresh().usage.reconcile_turn(SCOPE, REF, "root")
+    assert (filled.revision, filled.output_tokens) == (priced.revision + 1, 30), filled
+    assert filled.final, filled

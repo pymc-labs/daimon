@@ -46,7 +46,7 @@ async def _yes(_: DelegatedAction | None) -> bool:
 
 
 def _operator(tenant_id: uuid.UUID, reason: str = "unattended integration") -> OperatorActor:
-    return OperatorActor(tenant_id, None, "cli", None, _yes, operator="ops", reason=reason)
+    return OperatorActor(tenant_id, None, "cli", None, _yes, operator_name="ops", reason=reason)
 
 
 async def _audit_rows(session: AsyncSession, tenant_id: uuid.UUID) -> list[SecurityAuditRow]:
@@ -122,7 +122,7 @@ def test_an_operator_actor_needs_a_name_a_reason_and_the_cli(
             None,
             _yes,
             via_agent_key=via_agent_key,
-            operator=operator,
+            operator_name=operator,
             reason=reason,
         )
 

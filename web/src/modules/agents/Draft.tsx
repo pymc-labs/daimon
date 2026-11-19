@@ -74,9 +74,8 @@ function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenCha
   const apply = useApply(agent.id)
   const pick = usePendingPreview(agent, draft.config.model)
   const preview = pick.data
-  // A move needs the preview it confirms; a refused one cannot be applied.
-  const blocked = pick.isLoading || pick.isError || !!preview?.refusal
-  const consent = preview?.moves ? { accepted_drops: preview.drops, preview_digest: preview.digest, preview_revision: preview.revision } : undefined
+  // A pick that is refused, still loading or failed to load cannot be applied.
+  const blocked = !!preview?.refusal || pick.isFetching || pick.isError
   const groups = ORDER.map((e) => ({ e, items: draft.changes.filter((c) => c.effect === e) })).filter((g) => g.items.length)
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -108,7 +107,7 @@ function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenCha
           <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note" className="h-8 sm:max-w-64" />
           <div className="flex gap-2">
             <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button disabled={apply.isPending || draft.stale || blocked} onClick={() => apply.mutate({ note, consent }, { onSuccess: () => { setNote(""); onOpenChange(false) } })}>
+            <Button disabled={apply.isPending || draft.stale || blocked} onClick={() => apply.mutate({ note }, { onSuccess: () => { setNote(""); onOpenChange(false) } })}>
               Apply as v{agent.version + 1}
             </Button>
           </div>

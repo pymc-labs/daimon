@@ -5282,3 +5282,80 @@ async def test_attended_accepted_post_with_lost_ack_is_replayed_without_resend(
     assert client.max_retries == 8, "turn mutation policy must not change the shared client"
     assert not outcome.recovered and outcome.state.error is None
     assert outcome.state.content == [TextBlock(kind="text", text="Accepted exactly once")]
+
+
+@pytest.mark.parametrize("relay", [False, True])
+async def test_a_handoff_summary_is_seeded_into_a_non_relay_turn_and_dropped_for_a_relay_one(
+    relay: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The stored summary reaches the destination's first turn; a relay turn gets none."""
+    from types import SimpleNamespace
+
+    from daimon.core.stores.thread_agent_bindings import (
+        create_binding,
+        set_handoff_summary,
+        take_handoff_summary,
+    )
+    from daimon.testing.factories import make_account, make_tenant
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    async with db_session_factory.begin() as db:
+        await create_binding(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="c1",
+            thread_id="t1",
+            responder_ma_agent_id="ag_dest",
+            responder_name="dest",
+            kind="handoff",
+        )
+        await set_handoff_summary(
+            db,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="c1",
+            thread_id="t1",
+            responder_ma_agent_id="ag_dest",
+            account_id=account.id,
+            from_name="old",
+            summary="the secret plan",
+        )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            origin_channel_id="c1",
+            agent=SimpleNamespace(id="ag_dest"),
+            account_id=account.id,
+            relay_scoped=relay,
+        )
+    )
+    deps = SimpleNamespace(sessionmaker=db_session_factory)
+
+    message, seeded = await run_module._with_handoff_summary(  # pyright: ignore[reportPrivateUsage]
+        deps,  # pyright: ignore[reportArgumentType]
+        prepared,  # pyright: ignore[reportArgumentType]
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="t1",
+        user_message="hello",
+    )
+
+    if relay:
+        assert message == "hello" and seeded is None
+        async with db_session_factory() as db:
+            kept = await take_handoff_summary(
+                db,
+                tenant_id=tenant.id,
+                platform="discord",
+                parent_channel_id="c1",
+                thread_id="t1",
+                responder_ma_agent_id="ag_dest",
+                account_id=account.id,
+            )
+        assert kept is None, "dropped, not kept"
+    else:
+        assert seeded is not None and "the secret plan" in message

@@ -19,6 +19,7 @@ from daimon.adapters.discord.agent_setup.navigation import PanelViewBase
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import refuse_if_not_admin
 from daimon.adapters.discord.layout import hairline, header
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.outsiders import channel_outsiders
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
@@ -209,7 +210,11 @@ class PermissionsView(PanelViewBase):
                 readers=readers,
                 writers=writers,
                 # `refuse_if_not_admin` above checked the live role.
-                subject=build_subject(is_admin=True, platform_user_id=str(interaction.user.id)),
+                subject=build_subject(
+                    is_admin=True,
+                    platform_user_id=str(interaction.user.id),
+                    origin_channel_ids=interaction_origin(interaction),
+                ),
                 surface="panel",
                 default=self.runtime.deployment_default,
                 actor_account_id=state.account_id,

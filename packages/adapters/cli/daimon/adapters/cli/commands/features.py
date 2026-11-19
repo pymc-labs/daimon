@@ -102,7 +102,7 @@ def _agent_actor(target: _Target) -> AgentActor:
     return AgentActor(
         tenant_id=target.tenant_id,
         account_id=target.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         surface=Surface.CONFIG,
     )
 
@@ -220,10 +220,11 @@ async def features_set(
     actor: FeatureActor
     who = (target.tenant_id, target.account_id, "cli", None, is_admin)
     if spec.authority.native:
-        actor = OperatorActor(*who, operator=rt.settings.cli.local_user, reason=reason)
+        actor = OperatorActor(*who, operator_name=rt.settings.cli.local_user, reason=reason)
     else:
         actor = FeatureActor(
             *who,
+            operator=True,
             write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
             if builtin and agent_id
             else None,

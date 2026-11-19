@@ -8,7 +8,7 @@ from daimon.core.models_catalog import list_model_choices
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .agent_support import OWN as _OWN
-from .agent_support import Agents, consent_body, provider_choice
+from .agent_support import Agents, provider_choice
 from .agent_support import agent_client as _client
 from .agent_support import agent_people as _people
 from .agent_support import make_admin as _admin
@@ -49,10 +49,10 @@ async def test_the_web_catalog_is_the_core_catalog(
     )
 
 
-async def test_a_provider_apply_needs_the_consent_its_preview_asks_for(
+async def test_a_provider_apply_lands_with_no_consent(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """No consent and a stale digest both leave the agent as it was; the shown one lands."""
+    """The apply switches with nothing accepted; an older client's consent fields are ignored."""
     agents, owner, _other = await _people(db_session)
     await _admin(db_session_factory, owner)
     settings = await provider_choice(db_session_factory, owner, ("anthropic", "openai"))
@@ -62,25 +62,15 @@ async def test_a_provider_apply_needs_the_consent_its_preview_asks_for(
     ) as client:
         preview = (await client.get(f"/api/agents/ag_w/model-preview?value={_OPENAI}")).json()
         await _moved_draft(client, agents)
-        bare = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
-        stale = await client.post(
-            "/api/agents/ag_w/apply",
-            json={**await consent_body(client), "preview_digest": "0" * 64},
-            headers=_OWN,
-        )
-        shown = await client.post(
-            "/api/agents/ag_w/apply", json=await consent_body(client), headers=_OWN
-        )
+        old = {"accepted_drops": [], "preview_digest": "0" * 64, "preview_revision": 9}
+        applied = await client.post("/api/agents/ag_w/apply", json=old, headers=_OWN)
         after = (await client.get("/api/agents/ag_w")).json()["model"]
     assert preview["moves"] and preview["allowed"], "the preview says the move is allowed"
     assert preview["drops"], "the preview lists what the other provider drops"
-    assert preview["card"], "a switch that loses something shows the card"
-    assert preview["title"].startswith("Switch "), preview["title"]
-    assert preview["lines"][0].startswith("Stops working: "), preview["lines"]
-    assert bare.status_code == 422, "drops not accepted refuse the apply"
-    assert stale.status_code == 409, "a preview that moved since refuses the apply"
-    assert shown.status_code == 200, shown.text
-    assert (after["backend"], after["id"]) == ("openai", "gpt-6-astra"), "the shown one landed"
+    assert "card" not in preview and "digest" not in preview, f"nothing to confirm: {preview}"
+    assert preview["lines"][0].startswith("Off on OpenAI: "), preview["lines"]
+    assert applied.status_code == 200, applied.text
+    assert (after["backend"], after["id"]) == ("openai", "gpt-6-astra"), "the pick landed"
 
 
 async def test_a_preview_of_a_model_not_offered_is_refused(

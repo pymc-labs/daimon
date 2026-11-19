@@ -194,7 +194,7 @@ def tool_rules_set_command(
                     rule=rule,
                     scope=scope,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: "
@@ -245,7 +245,7 @@ def tool_rules_clear_command(
                     channel_id=channel,
                     server_url=url,
                     set_by=actor,
-                    actor=Subject(is_admin=True),
+                    actor=Subject(is_admin=True, operator=True),
                 )
             console.print(
                 f"{agent_name} {tool_key} channel={channel or 'all'}: cleared, "
@@ -587,6 +587,8 @@ async def agents_bind_google(
 MODEL_OPTION = typer.Option(
     "--model", help="provider:id, or a Claude id; overrides the file's model."
 )
+#: Older scripts pass it; a switch applies at once, so it is ignored.
+IGNORED_ACCEPT_DROPS = typer.Option("--accept-drops", hidden=True)
 
 
 def parse_model_flag(value: str) -> ModelRef:
@@ -610,7 +612,6 @@ async def _apply_model_flag(
     name: str,
     model: ModelRef | None,
     yes: bool,
-    accept_drops: str | None,
     selector: TenantSelector | None,
 ) -> None:
     """Another provider's `--model` is its backend setting, after the record is written."""
@@ -624,7 +625,6 @@ async def _apply_model_flag(
         yes=yes,
         as_json=False,
         selector=selector,
-        accept_drops=accept_drops,
         model=model.id,
     )
 
@@ -635,7 +635,7 @@ def agents_create_command(
     path: Path,
     model: Annotated[str | None, MODEL_OPTION] = None,
     yes: Annotated[bool, YES_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
@@ -651,7 +651,6 @@ def agents_create_command(
                 selector=selector,
                 model=picked,
                 yes=yes,
-                accept_drops=accept_drops,
             )
 
     run_cli(_with_defaults(), console=console)
@@ -665,7 +664,6 @@ async def agents_create(
     selector: TenantSelector | None = None,
     model: ModelRef | None = None,
     yes: bool = False,
-    accept_drops: str | None = None,
 ) -> None:
     spec = load_agent_spec(path)
     if model is not None and model.provider == DEFAULT_BACKEND:
@@ -719,7 +717,6 @@ async def agents_create(
         name=spec.name,
         model=model,
         yes=yes,
-        accept_drops=accept_drops,
         selector=selector,
     )
 
@@ -731,7 +728,7 @@ def agents_update_command(
     path: Path,
     model: Annotated[str | None, MODEL_OPTION] = None,
     yes: Annotated[bool, YES_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
 ) -> None:
     settings = load_settings()
     console = Console(highlight=False)
@@ -748,7 +745,6 @@ def agents_update_command(
                 selector=selector,
                 model=picked,
                 yes=yes,
-                accept_drops=accept_drops,
             )
 
     run_cli(_with_defaults(), console=console)
@@ -763,7 +759,6 @@ async def agents_update(
     selector: TenantSelector | None = None,
     model: ModelRef | None = None,
     yes: bool = False,
-    accept_drops: str | None = None,
 ) -> None:
     spec = load_agent_spec(path)
     if spec.name != name:
@@ -817,7 +812,6 @@ async def agents_update(
         name=name,
         model=model,
         yes=yes,
-        accept_drops=accept_drops,
         selector=selector,
     )
 
@@ -829,7 +823,7 @@ def agents_backend_set_command(
     backend: str,
     yes: Annotated[bool, YES_OPTION] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     model: Annotated[
         str | None,
@@ -850,7 +844,6 @@ def agents_backend_set_command(
                 yes=yes,
                 as_json=as_json,
                 selector=ctx.obj,
-                accept_drops=accept_drops,
                 dry_run=dry_run,
                 model=model,
             )
@@ -877,7 +870,7 @@ def agents_backend_settings_command(
     ] = None,
     yes: Annotated[bool, YES_OPTION] = False,
     as_json: Annotated[bool, JSON_OPTION] = False,
-    accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
+    _accept_drops: Annotated[str | None, IGNORED_ACCEPT_DROPS] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Preview and state the agent's thread mode, profile and required capabilities.
@@ -916,7 +909,6 @@ def agents_backend_settings_command(
                 yes=yes,
                 as_json=as_json,
                 selector=ctx.obj,
-                accept_drops=accept_drops,
                 dry_run=dry_run,
                 settings=agent_settings,
             )
@@ -990,7 +982,6 @@ async def agents_backend_change(
     yes: bool,
     as_json: bool,
     selector: TenantSelector | None = None,
-    accept_drops: str | None = None,
     dry_run: bool = False,
     revert: bool = False,
     model: str | None = None,
@@ -1024,7 +1015,7 @@ async def agents_backend_change(
     actor = channel_backend.BackendActor(
         tenant_id=tenant_id,
         account_id=principal.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     from functools import partial
 
@@ -1122,29 +1113,6 @@ async def agents_backend_change(
         if as_json:
             console.print(preview_json, markup=False, highlight=False, soft_wrap=True)
         return
-    accepted: tuple[str, ...] | None = None
-    if not revert and target is not None and preview.drop_consent is not None:
-        # A settings change on such a provider names its drops again, as a switch does.
-        try:
-            consent = type(preview.drop_consent).model_validate(
-                {
-                    **preview.drop_consent.model_dump(),
-                    "declared_drops": tuple(part.strip() for part in accept_drops.split(","))
-                    if accept_drops and accept_drops.strip()
-                    else (),
-                }
-            )
-        except ValidationError as exc:
-            raise typer.BadParameter(
-                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
-            ) from exc
-        if consent != preview.drop_consent:
-            raise typer.BadParameter(
-                "--accept-drops must exactly match: " + ",".join(preview.declared_drops)
-            )
-        accepted = consent.declared_drops
-    elif accept_drops is not None:
-        raise typer.BadParameter("This preview does not declare drops.")
     confirm_or_abort(
         console,
         f"Change {name}'s {'settings' if settings is not None else 'model backend'}?",
@@ -1159,8 +1127,6 @@ async def agents_backend_change(
             settings,
             preview.setting_revision,
             actor,
-            expected_preview_digest=preview.digest,
-            accepted_drops=accepted,
         )
     elif revert:
         assert current_revision is not None
@@ -1168,24 +1134,16 @@ async def agents_backend_change(
             current,
             actor,
             expected_revision=current_revision.local,
-            expected_preview_digest=preview.digest,
         )
     elif target is None:
-        revision = await service.clear_backend(
-            current,
-            preview.setting_revision,
-            actor,
-            expected_preview_digest=preview.digest,
-        )
+        revision = await service.clear_backend(current, preview.setting_revision, actor)
     else:
         revision = await service.set_backend(
             current,
             target,
             preview.setting_revision,
             actor,
-            expected_preview_digest=preview.digest,
             model=preview.target_model,
-            accepted_drops=accepted,
         )
     if as_json:
         console.print(
@@ -1328,7 +1286,7 @@ async def agents_convert(
             rt.sessionmaker,
             tenant_id=tenant_id,
             name=name,
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             public_url=public_url,
         )
     else:
@@ -1337,7 +1295,7 @@ async def agents_convert(
             rt.sessionmaker,
             tenant_id=tenant_id,
             name=name,
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             provider=to,
         )
     console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
@@ -1411,7 +1369,7 @@ async def agents_fork(
         new_name=dst,
         public_url=public_url,
         # The CLI is the deployment operator.
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         default_agent_name=rt.deployment_default.agent_name,
     )
     await ensure_agent_face(

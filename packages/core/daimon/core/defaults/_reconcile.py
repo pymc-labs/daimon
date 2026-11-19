@@ -82,7 +82,11 @@ async def _run_sweep(
         ):
             report.add(outcome)
     except (APIError, DaimonError) as err:
-        _log.warning("defaults.sweep_failed", kind=kind, error=str(err))
+        from daimon.core.channel_backend import backend_refusal_causes
+
+        _log.warning(
+            "defaults.sweep_failed", kind=kind, error=str(err), causes=backend_refusal_causes(err)
+        )
         report.add(ResourceOutcome(kind=kind, name="<sweep>", action=Action.FAILED, error=str(err)))
 
 
@@ -117,11 +121,14 @@ async def _run_per_resource(
     try:
         outcome = await fn()
     except (APIError, DaimonError) as err:
+        from daimon.core.channel_backend import backend_refusal_causes
+
         _log.warning(
             "defaults.reconcile_failed",
             kind=kind,
             name=name,
             error=str(err),
+            causes=backend_refusal_causes(err),
         )
         outcome = ResourceOutcome(
             kind=kind,
@@ -213,7 +220,13 @@ async def _reconcile_core(
             try:
                 skills_view = await list_skills_strict(client)
             except (APIError, DaimonError) as err:
-                _log.warning("defaults.skills_list_failed", error=str(err))
+                from daimon.core.channel_backend import backend_refusal_causes
+
+                _log.warning(
+                    "defaults.skills_list_failed",
+                    error=str(err),
+                    causes=backend_refusal_causes(err),
+                )
                 for skill_dir in skill_dirs:
                     report.add(
                         ResourceOutcome(

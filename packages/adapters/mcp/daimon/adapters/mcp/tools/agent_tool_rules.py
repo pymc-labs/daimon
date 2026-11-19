@@ -113,20 +113,23 @@ async def _set(
     _require_rule_access(auth, channel)
     agent = await _agent(runtime, auth, agent_name)
     url = _server_url(agent, tool_key)
-    async with runtime.session_factory.begin() as session:
-        row = await store.set_rule(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_id=agent.id,
-            agent_name=agent.name,
-            tool_key=tool_key,
-            channel_id=channel,
-            server_url=url,
-            rule=rule,
-            scope=scope,
-            set_by=str(auth.account_id),
-            actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
-        )
+    try:
+        async with runtime.session_factory.begin() as session:
+            row = await store.set_rule(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent.id,
+                agent_name=agent.name,
+                tool_key=tool_key,
+                channel_id=channel,
+                server_url=url,
+                rule=rule,
+                scope=scope,
+                set_by=str(auth.account_id),
+                actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
+            )
+    except PermissionError as exc:  # the store's own answer, e.g. a private channel
+        raise ToolError(f"{exc} Nothing was changed. Do not retry.") from exc
     return {"rule": row, "active": _active(runtime)}
 
 
@@ -142,26 +145,29 @@ async def _clear(
     channel = await _channel(runtime, auth, channel_id, lenient=True)
     _require_rule_access(auth, channel)
     agent = await _agent(runtime, auth, agent_name)
-    async with runtime.session_factory.begin() as session:
-        existing = await store.get_rule(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_id=agent.id,
-            tool_key=tool_key,
-            channel_id=channel,
-        )
-        url = existing.server_url if existing is not None else _server_url(agent, tool_key)
-        row = await store.clear_rule(
-            session,
-            tenant_id=auth.tenant_id,
-            agent_id=agent.id,
-            agent_name=agent.name,
-            tool_key=tool_key,
-            channel_id=channel,
-            server_url=url,
-            set_by=str(auth.account_id),
-            actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
-        )
+    try:
+        async with runtime.session_factory.begin() as session:
+            existing = await store.get_rule(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent.id,
+                tool_key=tool_key,
+                channel_id=channel,
+            )
+            url = existing.server_url if existing is not None else _server_url(agent, tool_key)
+            row = await store.clear_rule(
+                session,
+                tenant_id=auth.tenant_id,
+                agent_id=agent.id,
+                agent_name=agent.name,
+                tool_key=tool_key,
+                channel_id=channel,
+                server_url=url,
+                set_by=str(auth.account_id),
+                actor=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.TOOL_RULES)),
+            )
+    except PermissionError as exc:  # the store's own answer, e.g. a private channel
+        raise ToolError(f"{exc} Nothing was changed. Do not retry.") from exc
     return {"rule": row, "active": _active(runtime)}
 
 

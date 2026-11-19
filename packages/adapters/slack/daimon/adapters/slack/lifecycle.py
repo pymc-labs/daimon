@@ -212,7 +212,7 @@ class SlackTurnLifecycle(OutputGate):
         self._reply_people_cap = reply_people_cap
         self._trigger_ts = trigger_ts
         # Whether the final answer offers Ask a human beside the vote buttons
-        # (`support_escalation.slack_support_enabled`).
+        # (the `support_escalation` feature at this place).
         self._ask_human = ask_human
         # `message_feedback` at this place: the 👍/👎 buttons under a final answer.
         self._vote_buttons = vote_buttons

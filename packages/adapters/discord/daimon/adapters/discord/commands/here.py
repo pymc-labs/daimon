@@ -145,6 +145,7 @@ class HereCog(commands.Cog):
                     else None,
                     is_admin=routing_admin,
                     web=panel_links(runtime.settings.web, tenant_id, admin=routing_admin),
+                    settings=runtime.settings,
                     caller_account_id=principal.account_id if principal else None,
                     visible_channel_ids=visible_ids,
                     bot_can_view=bot_view,

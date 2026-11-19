@@ -160,7 +160,7 @@ class ResourceAdminBindings:
             channel_id=channel,
             readers=as_readers(readers),
             writers=as_writers(writers),
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default=binding.default,
             actor_account_id=uuid.UUID(binding.scope.account_id),
             copy="--copy-from" in command.options,
@@ -229,7 +229,7 @@ class ResourceAdminBindings:
             )
         if not authorize(
             policy,
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             action=Action.CONFIGURE,
             surface=Surface.CONFIG,
             place=Place(),
@@ -314,7 +314,7 @@ class ResourceAdminBindings:
                 tenant_id=tenant,
                 name=agent.metadata.get("daimon_name", agent.name),
                 closing_channel_id=channel,
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default=binding.default,
                 expected_ma_agent_id=agent.id,
             )
@@ -325,9 +325,10 @@ class ResourceAdminBindings:
         binding = self.binding
         tenant = uuid.UUID(binding.scope.tenant_id)
         channel, skill = command.channel_id or "", command.args[0]
-        if not may_set_channel_skills(Subject(is_admin=True), channel):
-            raise ScopeViolation(channel, "operator cannot change channel skills")
         async with binding.sessions() as session, session.begin():
+            policy = await load_access_policy(session, tenant_id=tenant)
+            if not may_set_channel_skills(policy, Subject(is_admin=True, operator=True), channel):
+                raise ScopeViolation(channel, "operator cannot change channel skills")
             if command.operation == "channel_skills_add":
                 row = await add_skill_to_channel(
                     session,

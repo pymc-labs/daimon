@@ -24,6 +24,7 @@ import structlog
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.memory_view import (
@@ -241,7 +242,12 @@ async def handle_memory_command(runtime: SlackRuntime, payload: dict[str, Any]) 
 
         await _post(client, channel_id=channel_id, user_id=user_id, text=text, kind=kind)
     except (DaimonError, anthropic.APIError, SlackApiError) as exc:
-        log.warning("slack.memory_command.failed", team_id=team_id, exc_info=exc)
+        log.warning(
+            "slack.memory_command.failed",
+            team_id=team_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         error_text = (
             str(exc)
             if isinstance(exc, DaimonError)

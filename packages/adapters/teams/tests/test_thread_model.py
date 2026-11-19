@@ -1,4 +1,4 @@
-"""Teams' `model` command: the choices, one Confirm, and the ask-again card."""
+"""Teams' `model` command: the choices, then a pick that applies at once."""
 
 from __future__ import annotations
 
@@ -12,14 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.teams import thread_model as module
 from daimon.adapters.teams.card_actions import Actor
-from daimon.core.thread_model_flow import ThreadConfirm, ThreadOption, ThreadPickResult
-from daimon.core.thread_model_reask import ThreadReask
+from daimon.core.thread_model_flow import ThreadOption
 
 CHANNEL = "19:abc@thread.tacv2"
 THREAD = f"{CHANNEL};messageid=1700"
 TENANT = uuid.uuid4()
-CONFIRM = ThreadConfirm("openai:gpt-6", "digest-1", 3)
-LINES = ("Switch this conversation to GPT-6?", "Stops working: memory")
+KEPT = "This conversation runs on GPT-6. Off there: memory."
 OPTIONS = (ThreadOption("GPT-6 ($2)", "openai:gpt-6"), ThreadOption("Agent default", "default"))
 
 
@@ -41,8 +39,8 @@ def flow(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """The membership check and the shared flow, each replaced."""
     seams = SimpleNamespace(
         may=AsyncMock(return_value=True),
-        pick=AsyncMock(return_value=ThreadPickResult("", CONFIRM, LINES)),
-        confirm=AsyncMock(return_value="Switched to GPT-6."),
+        pick=AsyncMock(return_value=KEPT),
+        confirm=AsyncMock(return_value=KEPT),
     )
     monkeypatch.setattr(module, "may_choose_thread_model", seams.may)
     monkeypatch.setattr(module, "build_thread_pick", AsyncMock(return_value=MagicMock()))
@@ -64,30 +62,34 @@ def _context(*, asked_in: str | None = None) -> tuple[Any, list[Any]]:
 
 
 async def test_the_command_offers_each_choice_as_a_button(flow: SimpleNamespace) -> None:
+    """Every choice is one button; the right to choose is checked for this conversation."""
     context, sent = _context()
     await module.show_model(context)
     assert [(b["verb"], b["data"]["op"]) for b in _buttons(sent[0])] == [
         ("thread_model", "pick:openai:gpt-6"),
         ("thread_model", "pick:default"),
-    ]
-    assert flow.may.await_args.kwargs["thread_id"] == THREAD
+    ], "one button per choice"
+    assert flow.may.await_args.kwargs["thread_id"] == THREAD, "checked for this conversation"
 
 
 async def test_a_sender_without_the_right_gets_one_line_naming_who_can_help(
     flow: SimpleNamespace,
 ) -> None:
+    """No buttons for someone who may not choose."""
     flow.may.return_value = False
     context, sent = _context()
     await module.show_model(context)
-    assert module.NOT_ALLOWED in _text(sent[0]) and not _buttons(sent[0])
+    assert module.NOT_ALLOWED in _text(sent[0]), "names who can help"
+    assert not _buttons(sent[0]), "no buttons"
 
 
 async def test_a_command_moved_to_the_chat_points_back_to_the_conversation(
     flow: SimpleNamespace,
 ) -> None:
+    """A command answered in the person's chat points them back to the conversation."""
     context, sent = _context(asked_in=THREAD)
     await module.show_model(context)
-    assert module.IN_THE_CONVERSATION in _text(sent[0])
+    assert module.IN_THE_CONVERSATION in _text(sent[0]), "points back"
     flow.may.assert_not_awaited()
 
 
@@ -108,54 +110,43 @@ def _member(**kw: Any) -> Actor:
     return Actor("u1", TENANT, False, THREAD, **kw)
 
 
-async def test_a_cross_provider_pick_shows_the_preview_and_one_confirm(
+async def test_a_cross_provider_pick_is_kept_at_once_with_no_buttons(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A pick on another provider is kept in one press: the note, never a Confirm."""
     answer = await _on(_press("pick:openai:gpt-6"), monkeypatch, actor=_member())
-    assert [b["data"]["op"] for b in _buttons(answer.value)] == ["cancel", "confirm"], (
-        "Switch is rightmost"
-    )
-    data = _buttons(answer.value)[1]["data"]
-    assert (data["v"], data["d"], data["r"]) == ("openai:gpt-6", "digest-1", 3)
-    assert all(line in _text(answer.value) for line in LINES)
-    assert flow.pick.await_args.kwargs["conversation_id"] == THREAD
-    assert flow.pick.await_args.kwargs["choice"] == "openai:gpt-6"
+    assert not _buttons(answer.value), "nothing to confirm"
+    assert KEPT in _text(answer.value), "the core note, unchanged"
+    kept = flow.pick.await_args.kwargs
+    assert (kept["conversation_id"], kept["choice"]) == (THREAD, "openai:gpt-6"), "for this thread"
 
 
-async def test_a_refused_pick_is_one_line_with_the_core_text(
+async def test_switch_on_an_old_card_keeps_its_pick_and_ignores_its_digest(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    flow.pick.return_value = ThreadPickResult("Ask an admin to allow GPT-6. Nothing changed.")
-    answer = await _on(_press("pick:openai:gpt-6"), monkeypatch, actor=_member())
-    assert "Ask an admin to allow GPT-6. Nothing changed." in _text(answer.value)
-    assert not _buttons(answer.value)
-
-
-async def test_confirm_keeps_the_pick_the_card_was_shown_at(
-    flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ctx = _press("confirm", v=CONFIRM.value, d=CONFIRM.digest, r=CONFIRM.revision)
+    """A Switch posted before picks applied at once keeps its pick as a new pick would."""
+    ctx = _press("confirm", v="openai:gpt-6", d="digest-1", r=3)
     answer = await _on(ctx, monkeypatch, actor=_member())
-    assert "Switched to GPT-6." in _text(answer.value)
-    assert flow.confirm.await_args.args[1] == CONFIRM
-    assert flow.confirm.await_args.kwargs["conversation_id"] == THREAD
+    assert KEPT in _text(answer.value), "the note replaces the card"
+    assert flow.confirm.await_args.args[1] == "openai:gpt-6", "only the pick is read"
+    assert flow.confirm.await_args.kwargs["conversation_id"] == THREAD, "for its thread"
 
 
-async def test_a_forged_confirm_changes_nothing(
+async def test_a_switch_without_a_pick_changes_nothing(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    answer = await _on(
-        _press("confirm", v="x", d="y", r="not a number"), monkeypatch, actor=_member()
-    )
-    assert module.CANNOT_VERIFY in str(answer.value)
+    """A Switch whose pick isn't text is refused without a write."""
+    answer = await _on(_press("confirm", v=3), monkeypatch, actor=_member())
+    assert module.CANNOT_VERIFY in str(answer.value), "can't verify it"
     flow.confirm.assert_not_awaited()
 
 
-async def test_cancel_changes_nothing(
+async def test_cancel_on_an_old_card_changes_nothing(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Cancel on an old card closes it in one line."""
     answer = await _on(_press("cancel"), monkeypatch, actor=_member())
-    assert "Nothing changed." in _text(answer.value)
+    assert "Nothing changed." in _text(answer.value), "one line"
     flow.pick.assert_not_awaited()
     flow.confirm.assert_not_awaited()
 
@@ -164,17 +155,19 @@ async def test_cancel_changes_nothing(
 async def test_an_unverified_or_foreign_clicker_is_refused(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, actor: Actor | None
 ) -> None:
+    """A press with no verified member of this tenant behind it changes nothing."""
     answer = await _on(_press("pick:default"), monkeypatch, actor=actor)
-    assert module.CANNOT_VERIFY in str(answer.value)
+    assert module.CANNOT_VERIFY in str(answer.value), "can't verify them"
     flow.pick.assert_not_awaited()
 
 
 async def test_a_press_rechecks_the_right_to_choose(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Every press checks the right to choose again."""
     flow.may.return_value = False
     answer = await _on(_press("pick:openai:gpt-6"), monkeypatch, actor=_member())
-    assert module.NOT_ALLOWED in _text(answer.value)
+    assert module.NOT_ALLOWED in _text(answer.value), "names who can help"
     flow.pick.assert_not_awaited()
 
 
@@ -190,38 +183,5 @@ async def test_a_press_rechecks_the_right_to_choose(
 def test_the_conversation_comes_from_where_the_card_was_pressed(
     conversation: str, kind: str, found: tuple[str, str] | None
 ) -> None:
-    assert module.where(conversation, kind) == found
-
-
-def _ask(confirm: ThreadConfirm | None = CONFIRM) -> ThreadReask:
-    return ThreadReask(
-        tenant_id=TENANT, workspace_id="w", platform="teams", channel_id=CHANNEL,
-        thread_id=THREAD, conversation_id=THREAD, agent_name="Helper", lines=LINES,
-        confirm=confirm,
-    )  # fmt: skip
-
-
-async def test_the_ask_again_card_is_posted_in_the_conversation() -> None:
-    direct = MagicMock(post_card=AsyncMock(return_value="m1"))
-    await module.teams_thread_reask_notifier(direct)(_ask())
-    conversation, activity = direct.post_card.await_args.args
-    assert conversation == THREAD
-    card = activity.attachments[0].content
-    assert [b["data"]["op"] for b in _buttons(card)] == ["cancel", "confirm"], "Switch is rightmost"
-
-
-async def test_the_ask_again_card_without_a_confirm_has_no_buttons() -> None:
-    direct = MagicMock(post_card=AsyncMock(return_value="m1"))
-    await module.teams_thread_reask_notifier(direct)(_ask(None))
-    assert not _buttons(direct.post_card.await_args.args[1].attachments[0].content)
-
-
-async def test_a_failed_post_raises_so_a_later_message_asks_again() -> None:
-    direct = MagicMock(post_card=AsyncMock(side_effect=module.TEAMS_SEND_ERRORS[0]("down")))
-    with pytest.raises(module.TEAMS_SEND_ERRORS):
-        await module.teams_thread_reask_notifier(direct)(_ask())
-
-
-def test_without_a_way_to_post_the_runtime_is_unchanged() -> None:
-    runtime = MagicMock()
-    assert module.with_thread_reask_notifier(runtime, None) is runtime
+    """The thread and its channel come from the pressed card's own conversation."""
+    assert module.where(conversation, kind) == found, "read from the conversation"

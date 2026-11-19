@@ -32,7 +32,7 @@ from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, owns_agent, record_agent_creator
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_configured
-from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize
+from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
@@ -66,11 +66,17 @@ from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.mux_compat import update_agent as ma_update_agent
-from daimon.core.permissions import WEB_PLACE_ID, agent_permissions, with_agent_rule
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    WEB_PLACE_ID,
+    agent_permissions,
+    sealed_outside,
+    with_agent_rule,
+)
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.specs import AgentSpec, merge_default_agent_toolset
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, lock_access_policy
 from daimon.core.stores.channel_changes import write_channel_default
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.tenants import get_tenant
@@ -682,11 +688,14 @@ async def check_may_edit(
         owned = await owns_agent(
             session, tenant_id=actor.tenant_id, ma_agent_id=agent.id, account_id=actor.account_id
         )
+    async with deps.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     decision = authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=actor.subject,
         action=Action.CHANGE_SHARED_AGENT,
         surface=actor.surface,
+        agent=build_agent_ref(agent.name, agent.metadata),
         operation_family="spec",
         reach=AgentReach(managed=rejection is not None, owned=owned),
     )
@@ -694,6 +703,8 @@ async def check_may_edit(
         message = (
             rejection
             if rejection is not None
+            else SEALED_REFUSAL
+            if decision.reason == "sealed_channel"
             else f"Changing '{agent.name}' needs its owner or an admin."
         )
         raise AgentEditError(message, kind="forbidden")
@@ -762,6 +773,12 @@ async def check_places(
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
                 cleared.append(channel_id)
+    # A private channel's pick is its setting, changed only from inside it, admins too.
+    picks = tuple(c for c in (*turn_on, *cleared) if c != WEB_PLACE_ID)
+    if picks and sealed_outside(
+        policy, actor.subject.inside, channel_ids=picks, operator=actor.subject.operator
+    ):
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     refusal = places_refusal(
         places_policy(
             policy, names=names, agent_name=name, runs_in=_rule_target(policy, names, before, after)
@@ -839,7 +856,22 @@ async def set_places(
         raise AgentEditError(str(exc), kind="invalid") from exc
     turn_on, turn_off = default_changes(before, after)
     async with deps.session_factory.begin() as session:
+        # Re-checked at the write: a pick an inside admin made after `check_places`
+        # read it is still that private channel's setting.
+        await lock_access_policy(session, tenant_id=actor.tenant_id)
+        locked = await load_access_policy(session, tenant_id=actor.tenant_id)
+
+        def refuse_sealed(channel_id: str) -> None:
+            if sealed_outside(
+                locked,
+                actor.subject.inside,
+                channel_ids=(channel_id,),
+                operator=actor.subject.operator,
+            ):
+                raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
+
         for channel_id in turn_on:
+            refuse_sealed(channel_id)
             await write_channel_default(
                 session,
                 tenant_id=actor.tenant_id,
@@ -854,6 +886,7 @@ async def set_places(
             scope = ChannelScopeRef(tenant_id=actor.tenant_id, channel_id=channel_id)
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
+                refuse_sealed(channel_id)
                 await write_channel_default(
                     session,
                     tenant_id=actor.tenant_id,

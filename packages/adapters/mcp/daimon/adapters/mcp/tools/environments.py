@@ -13,6 +13,7 @@ from anthropic.types.beta import BetaEnvironment
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -23,6 +24,7 @@ from daimon.adapters.mcp.tools._words import space_noun
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_environments import (
     archive_needs_confirm,
+    archive_sealed_refusal,
     build_archive_environment_note,
     build_limited_channels_confirm,
     update_needs_confirm,
@@ -227,6 +229,15 @@ async def _archive_environment_impl(
         env,
         refusal="built-in agents run in it, so chat tools cannot archive it. Nothing changed.",
     )
+    async with runtime.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session,
+            tenant_id=auth.tenant_id,
+            environment_name=name,
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.ENVIRONMENTS)),
+        )
+    if refusal is not None:
+        raise ToolError(f"{refusal} Do not retry.")
     if not confirm_open_network:
         async with runtime.session_factory() as session:
             confirm = await archive_needs_confirm(
