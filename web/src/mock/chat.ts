@@ -157,6 +157,8 @@ async function* type(text: string): AsyncGenerator<StreamEvent> {
 }
 
 const stopping = new Set<string>()
+/** Agents whose monitoring notice the signed-in person closed. */
+const dismissed = new Set<string>()
 
 function turn(pid: string, sid: string, build: (m: Msg) => AsyncGenerator<StreamEvent>, cost: number) {
   const list = thread(sid)!
@@ -335,7 +337,7 @@ export const chatHandlers: HttpHandler[] = [
     const q = new URL(request.url).searchParams
     const end = q.has("before") ? Number(q.get("before")) : msgs.length
     const start = Math.max(0, end - (Math.min(Number(q.get("limit")) || 200, 200)))
-    const monitoring = monitoringOn(s.agent.id, "monitor_direct_messages") && { monitoring: { line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." } }
+    const monitoring = monitoringOn(s.agent.id, "monitor_direct_messages") && !dismissed.has(s.agent.id) && { monitoring: { line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." } }
     return HttpResponse.json({ session: s, messages: msgs.slice(start, end), ...(start > 0 && { next: start }), ...monitoring })
   }),
   http.patch("/api/chat/sessions/:id", async ({ params, request }) => {
@@ -405,6 +407,12 @@ export const chatHandlers: HttpHandler[] = [
     s.agent = { ...s.agent, model: chatPick ? (CHAT_MODELS.find((c) => c.value === chatPick)?.label ?? chatPick) : "Claude Sonnet 5.5" }
     await sleep(200)
     return HttpResponse.json({ model: chatPick, note: "This chat runs on that model from the next reply." })
+  }),
+  http.post("/api/chat/sessions/:id/monitoring/dismiss", async ({ params }) => {
+    const p = session.user()
+    const s = p && find(p.id, String(params.id))
+    if (s) dismissed.add(s.agent.id)
+    return HttpResponse.json({ ok: true })
   }),
   http.post("/api/chat/sessions/:id/stop", async ({ params }) => {
     stopping.add(String(params.id))

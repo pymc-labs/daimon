@@ -18,19 +18,20 @@ vi.mock("@/lib/hooks", async (importOriginal) => ({
 vi.mock("../usePendingPreview", () => ({ usePendingPreview: () => ({ data: undefined }) }))
 
 const agent = { id: "ag_w", model: { backend: "managed", id: "m" }, nodes: [] } as unknown as Agent
-const props = { node: "monitoring", agent, config: agent as unknown as AgentConfig, ro: false, changed: new Set<string>(), update: vi.fn(), select: vi.fn() }
-const schema = (key: string) => ({
-  key, name: key, category: "guardrails", categoryName: "Guardrails", values: [{ value: "on", label: "On" }, { value: "off", label: "Off" }],
+const props = { node: "features", agent, config: agent as unknown as AgentConfig, ro: false, changed: new Set<string>(), update: vi.fn(), select: vi.fn() }
+const KEYS = [["monitor_direct_messages", "Monitor direct messages"], ["monitor_mcp", "Monitor coding tools"]]
+const schema = ([key, name]: string[]) => ({
+  key, name, category: "guardrails", categoryName: "Guardrails", values: [{ value: "on", label: "On" }, { value: "off", label: "Off" }],
   default: "off", tiers: ["deployment", "workspace", "agent"], lockable: [], platforms: [], threadAnyone: false, native: false, doc: "",
 })
-const view = (key: string) => ({ key, tiers: [{ tier: "agent", value: "default", locked: false, text: "default" }], value: "off", source: "default", locked: false, unavailable: null, summary: "Off" })
+const view = ([key]: string[]) => ({ key, tiers: [{ tier: "agent", value: "default", locked: false, text: "default" }], value: "off", source: "default", locked: false, unavailable: null, summary: "Off" })
 
 function serve(reads: boolean) {
   vi.mocked(api.get).mockImplementation(async (path: string) => {
-    if (path === "/api/features/schema") return [schema("monitor_direct_messages"), schema("monitor_mcp")]
-    if (path.startsWith("/api/features")) return { platform: "discord", features: [view("monitor_direct_messages"), view("monitor_mcp")] }
+    if (path === "/api/features/schema") return KEYS.map(schema)
+    if (path.startsWith("/api/features")) return { platform: "discord", features: KEYS.map(view) }
     if (!reads) throw new ApiError(403, "Only workspace admins can read monitored conversations.")
-    return { id: "ag_w", name: "W", direct_messages: { on: false, since: null }, coding_tools: { on: false, since: null } }
+    return { id: "ag_w", name: "W", direct_messages: { on: true, since: "2026-05-01T09:00:00Z" }, coding_tools: { on: false, since: null } }
   })
 }
 const show = () => render(
@@ -43,18 +44,20 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = () => {}
 })
 
-describe("Inspector monitoring panel", () => {
-  it("shows the switches to a workspace admin who can read the state", async () => {
+describe("Inspector features panel monitoring rows", () => {
+  it("lists the two switches, with since and the activity link for a workspace admin", async () => {
     serve(true)
     show()
-    expect(await screen.findByRole("combobox", { name: "Direct messages" })).toBeInTheDocument()
+    for (const [, name] of KEYS) expect(await screen.findByRole("combobox", { name })).toBeInTheDocument()
+    expect(await screen.findByText(/^Since /)).toBeInTheDocument()
+    expect(await screen.findByRole("link", { name: "View activity" })).toHaveAttribute("href", "/admin/monitoring?agent=ag_w")
   })
 
-  it("shows nothing to an agent owner who is no workspace admin", async () => {
+  it("shows the switches without the admin extras to an agent owner who is no workspace admin", async () => {
     serve(false)
-    const { container } = show()
+    show()
+    expect(await screen.findByRole("combobox", { name: "Monitor coding tools" })).toBeInTheDocument()
     await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/admin/monitoring/agents/ag_w"))
-    await waitFor(() => expect(container).toBeEmptyDOMElement())
-    expect(screen.queryByRole("combobox", { name: "Direct messages" })).toBeNull()
+    expect(screen.queryByRole("link", { name: "View activity" })).toBeNull()
   })
 })

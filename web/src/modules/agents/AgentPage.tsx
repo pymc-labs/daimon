@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query"
 import { ReactFlowProvider } from "@xyflow/react"
-import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, ScanEye, SlidersHorizontal, Sparkles, Users } from "lucide-react"
+import { Eye, History as HistoryIcon, MessagesSquare, Plug, Plus, Blocks, SlidersHorizontal, Sparkles, Users } from "lucide-react"
 import { useMemo } from "react"
 import { Link, useParams } from "react-router"
 
@@ -12,11 +12,9 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { ApiError } from "@/lib/api"
-import { useCan } from "@/lib/hooks"
 import { NotFound } from "@/pages/Status"
 import { useAgent, useCatalog, useConnectNode, useDraft, useDraftEditor } from "./api"
 import { Canvas } from "./Canvas"
-import { useMonitoringState } from "./setup/useMonitoringState"
 import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
 import { nodeId, nodeUi } from "./nodes/registry"
@@ -45,8 +43,6 @@ function Loading() {
 
 export function AgentPage() {
   const { id = "" } = useParams()
-  const can = useCan()
-  const monitored = useMonitoringState(id, can("workspace.manage")).isSuccess
   const query = useAgent(id)
   const { data: agent, error } = query
   const { data: draft } = useDraft(id, agent?.can_edit === true)
@@ -100,11 +96,6 @@ export function AgentPage() {
           <Button variant={node === "features" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "features" ? null : "features")}>
             <SlidersHorizontal /><span className="max-sm:sr-only">Features</span>
           </Button>
-          {monitored && (
-            <Button variant={node === "monitoring" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "monitoring" ? null : "monitoring")}>
-              <ScanEye /><span className="max-sm:sr-only">Monitoring</span>
-            </Button>
-          )}
           <Button variant={node === "history" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "history" ? null : "history")}>
             <HistoryIcon /><span className="max-sm:sr-only">History</span>
           </Button>

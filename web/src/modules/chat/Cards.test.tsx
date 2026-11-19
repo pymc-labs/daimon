@@ -32,4 +32,11 @@ describe("monitoring notice", () => {
     expect(screen.getByText("Admins can read what you and this agent say here.")).toBeInTheDocument()
     expect(screen.getByText("Ask an admin if you have questions.")).toBeInTheDocument()
   })
+
+  it("can be dismissed", async () => {
+    const onDismiss = vi.fn()
+    render(<MonitoringNotice notice={{ line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." }} onDismiss={onDismiss} />)
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+    expect(onDismiss).toHaveBeenCalledOnce()
+  })
 })

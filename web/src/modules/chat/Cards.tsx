@@ -1,4 +1,4 @@
-import { Check, CircleAlert, Eye, KeyRound, ShieldCheck, ShieldQuestion, ShieldX, UserRound, type LucideIcon } from "lucide-react"
+import { Check, CircleAlert, Eye, KeyRound, ShieldCheck, ShieldQuestion, ShieldX, UserRound, X, type LucideIcon } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -122,8 +122,8 @@ function Refusal({ card, onSwitchBack }: { card: Extract<Card, { kind: "refusal"
   )
 }
 
-/** Admins can read this chat: shown above the composer, apart from any reply. */
-function MonitoringNotice({ notice }: { notice: Notice }) {
+/** Admins can read this chat: shown above the composer, apart from any reply, until the person closes it. */
+function MonitoringNotice({ notice, onDismiss }: { notice: Notice; onDismiss?: () => void }) {
   return (
     <div className={frame}>
       <div className="flex gap-3">
@@ -132,6 +132,7 @@ function MonitoringNotice({ notice }: { notice: Notice }) {
           <div className="text-sm font-medium">{notice.line}</div>
           <p className="mt-2.5 flex items-center gap-1.5 text-sm font-medium"><UserRound className="size-4 text-muted-foreground" />{notice.help}</p>
         </div>
+        {onDismiss && <Button variant="ghost" size="icon-sm" className="-mr-1.5 -mt-1.5 shrink-0" aria-label="Dismiss" onClick={onDismiss}><X /></Button>}
       </div>
     </div>
   )
