@@ -125,7 +125,7 @@ async def resolve_owned_agent(
     """
     agents = SelfHostedAgents(sessions)
     if seeded_rename and builtin_lookup_names(name):
-        name = await _builtin_record_name(agents, scope, name)
+        name = await builtin_record_name(agents, scope, name)
     try:
         return await agents.resolve(scope, name)
     except ProviderError as miss:
@@ -137,7 +137,7 @@ async def resolve_owned_agent(
         return renamed
 
 
-async def _builtin_record_name(agents: SelfHostedAgents, scope: Scope, name: str) -> str:
+async def builtin_record_name(agents: SelfHostedAgents, scope: Scope, name: str) -> str:
     """The record name a request for the built-in `name` resolves under.
 
     A `daimon` record counts whether managed or not: `selfhosted init` used to

@@ -272,7 +272,7 @@ async def test_load_backend_agent_when_catalog_host_keeps_daimon_then_falls_back
 _RESOLVERS = {
     "ma_resolver.py": "_route_builtin",
     "setup_conversations.py": "resolve_setup_agents",
-    "defaults/owned.py": "_builtin_record_name",
+    "defaults/owned.py": "builtin_record_name",
     "channel_backend.py": "load_backend_agent",
 }
 # Direct by-name lookups of the configured default that bypass those resolvers,
