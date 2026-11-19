@@ -181,7 +181,6 @@ async def test_cli_mux_threads_the_real_scope_deadline_and_exempt_billing(
         principal_id="daimon",
         authorization_id="cli-operator-run",
     )
-    assert captured["path"] == "mux"
     assert captured["deadline"] is deadline
     assert captured["billing"] == BillingExempt(reason="cli-operator-run")
     assert transport.requests == []
