@@ -13,7 +13,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
-from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.adapters.mcp.tools._session_gate import CARD_UNVERIFIED, session_card_gap
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.tool_safety import CARDED_TOOLS, ProviderMoveTool
 from fastmcp.exceptions import ToolError
@@ -70,7 +70,7 @@ async def provider_move_applies(
     if not confirming:
         return False
     if await session_card_gap(runtime, auth, origin, tool_name=tool_name) is not None:
-        raise ToolError("This conversation cannot verify the confirmation card. Nothing changed.")
+        raise ToolError(CARD_UNVERIFIED)
     return True
 
 

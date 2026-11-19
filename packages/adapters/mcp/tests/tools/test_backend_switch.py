@@ -402,6 +402,7 @@ async def test_a_session_that_never_gated_the_switch_cannot_confirm_it(active_ch
             expected_revision=0,
         )
     assert "Nothing changed" in str(refused.value)
+    assert "Start a new conversation" in str(refused.value), "the person is told what fixes it"
     agent()
     assert await service.current(await load_backend_agent_for(runtime, auth)) is None, (
         "nothing was written"

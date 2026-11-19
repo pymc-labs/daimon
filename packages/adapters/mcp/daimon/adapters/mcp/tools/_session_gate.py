@@ -50,6 +50,13 @@ from mux.profiles import MANAGED_AGENTS
 
 _log = structlog.get_logger(__name__)
 
+#: What a refusal says when the session can't show the card, such as one that started
+#: before the card existed: only a new session carries it.
+CARD_UNVERIFIED = (
+    "This conversation cannot verify the confirmation card. "
+    "Start a new conversation and ask again. Nothing changed."
+)
+
 CardGap = Literal[
     "no_origin",
     "no_live_session",

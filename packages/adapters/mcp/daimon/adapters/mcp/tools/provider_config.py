@@ -10,7 +10,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.adapters.mcp.tools._session_gate import CARD_UNVERIFIED, session_card_gap
 from daimon.adapters.mcp.tools.setup_target import get_chat_origin
 from daimon.core.agent_configuration import (
     ConfigurationReference,
@@ -58,7 +58,7 @@ async def _require_chat(
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
     if await session_card_gap(runtime, auth, origin, tool_name=tool) is not None:
-        raise ToolError("This conversation cannot verify the confirmation card. Nothing changed.")
+        raise ToolError(CARD_UNVERIFIED)
 
 
 def _actor(auth: AuthIdentity) -> BackendActor:
