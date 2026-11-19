@@ -59,18 +59,8 @@ SETUP_REF = "environment_setup"
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
     from daimon.core.turn.provider_gate import gated_turn
 
-    revision = request.admission.backend_revision
-    runtime = (
-        request.deps.turn_runtimes.get(PROFILE)
-        if revision is not None and revision.profile == PROFILE
-        else None
-    )
     try:
-        return await gated_turn(
-            request,
-            runtime.provider_key if runtime is not None else None,
-            lambda: _prepare_gemini_turn(request),
-        )
+        return await gated_turn(request, _prepare_gemini_turn)
     except UnsupportedCapability as err:
         raise AdmissionDenied(reason="backend_unsupported") from err
 
@@ -127,6 +117,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         price=usage.prices.get(config.model) if config.model is not None else None,
         cap=request.deps.gemini_daily_model_cap_usd,
     )
+    if request.gate is not None:
+        await request.gate.enter(runtime.provider_key)
     deployment = journal.deployment
     # A template's or a channel's own deployment installs channel skills per session.
     installs_skills = admission.backend_revision_origin != "agent"

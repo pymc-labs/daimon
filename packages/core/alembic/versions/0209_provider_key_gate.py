@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0209_provider_key_gate"
-down_revision: str | None = "0207_skill_manifest_bytes"
+down_revision: str | None = "0208_outbox_attribution"
 branch_labels: str | None = None
 depends_on: str | None = None
 

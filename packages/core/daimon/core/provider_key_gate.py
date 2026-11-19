@@ -45,6 +45,10 @@ class ProviderKey:
         return cls(provider, key_digest(value)) if value else None
 
 
+# Read when a turn enters the gate, never earlier: a refused policy never touches the key.
+ProviderKeySource = Callable[[], ProviderKey | None]
+
+
 class ProviderKeyGate:
     def __init__(
         self,

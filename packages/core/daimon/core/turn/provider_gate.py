@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import IO
 
 import structlog
-from daimon.core.provider_key_gate import ProviderKey, ProviderKeyGate
+from daimon.core.provider_key_gate import ProviderKey, ProviderKeyGate, ProviderKeySource
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from mux.contracts.errors import ProviderError
@@ -17,31 +18,53 @@ from mux.drivers.openai import Method, Object, Transport
 log = structlog.get_logger(__name__)
 
 
+class GateHold:
+    """One turn's place in its key's gate, taken once its policy checks have passed.
+
+    Preparation calls `enter` after every refusal that needs no provider key, so a
+    denied turn never reads the key.
+    """
+
+    def __init__(self, request: ProviderPreparationRequest) -> None:
+        self._request = request
+        self._held: tuple[ProviderKeyGate, uuid.UUID] | None = None
+
+    async def enter(self, source: ProviderKeySource | None) -> None:
+        """Refuse a cooling or full key; else take a lease on it.
+
+        A bundle with no gate, a runtime with no key and a revision with no model run ungated.
+        """
+        gate, revision = self._request.deps.provider_gate, self._request.admission.backend_revision
+        key = source() if source is not None else None
+        if gate is None or key is None or revision is None or revision.model is None:
+            return
+        if await gate.cooling_until(key, revision.model) is not None:
+            raise AdmissionDenied(
+                reason="backend_unsupported", cause="provider_cooling", provider=key.provider
+            )
+        lease = await gate.acquire(key, self._request.tenant_id)
+        if lease is None:
+            raise AdmissionDenied(
+                reason="backend_unsupported", cause="provider_busy", provider=key.provider
+            )
+        self._held = gate, lease
+
+    async def release(self) -> None:
+        held, self._held = self._held, None
+        if held is not None:
+            await held[0].release(held[1])
+
+
 async def gated_turn(
     request: ProviderPreparationRequest,
-    key: ProviderKey | None,
-    prepare: Callable[[], Awaitable[PreparedTurn]],
+    prepare: Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]],
 ) -> PreparedTurn:
-    """Refuse a cooling key, hold a lease on it until the turn ends, then prepare.
-
-    A bundle with no gate, a runtime with no key and a revision with no model run ungated.
-    """
-    gate, revision = request.deps.provider_gate, request.admission.backend_revision
-    if gate is None or key is None or revision is None or revision.model is None:
-        return await prepare()
-    if await gate.cooling_until(key, revision.model) is not None:
-        raise AdmissionDenied(
-            reason="backend_unsupported", cause="provider_cooling", provider=key.provider
-        )
-    lease = await gate.acquire(key, request.tenant_id)
-    if lease is None:
-        raise AdmissionDenied(
-            reason="backend_unsupported", cause="provider_busy", provider=key.provider
-        )
+    """Prepare a turn; the lease its `request.gate.enter` takes lasts until the turn ends."""
+    hold = GateHold(request)
     try:
-        prepared = await prepare()
+        prepared = await prepare(replace(request, gate=hold))
     except BaseException:
-        await asyncio.shield(gate.release(lease))
+        await asyncio.shield(hold.release())
         raise
     inner = prepared._finalize  # pyright: ignore[reportPrivateUsage]
 
@@ -50,7 +73,7 @@ async def gated_turn(
             if inner is not None:
                 await inner()
         finally:
-            await gate.release(lease)
+            await hold.release()
 
     return replace(prepared, _finalize=finalize)
 

@@ -7,6 +7,7 @@ recheck. No SDK client or provider configuration is loaded during app startup.
 
 from __future__ import annotations
 
+import functools
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -457,7 +458,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             *(("skill", skill) for skill in deployment.skill_ids),
         }
 
-    provider_key = ProviderKey.from_env(PERSISTENT_WORKSPACE.provider, deployment.api_key_env)
+    provider_key = functools.partial(
+        ProviderKey.from_env, PERSISTENT_WORKSPACE.provider, deployment.api_key_env
+    )
 
     def transport(config: ConfigRevision, authorized: Scope) -> Transport:
         check(config, authorized)
@@ -473,12 +476,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             project=deployment.project if deployment.project_header else None,
             clients=request.deps.provider_clients.openai,
         )
-        gate = request.deps.provider_gate
-        if gate is None or provider_key is None or config.model is None:
+        gate, key = request.deps.provider_gate, provider_key()
+        if gate is None or key is None or config.model is None:
             return inner
         from daimon.core.turn.provider_gate import CooldownTransport
 
-        return CooldownTransport(inner, gate, provider_key, config.model)
+        return CooldownTransport(inner, gate, key, config.model)
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal counterpart_verified

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from datetime import datetime, timedelta
@@ -682,7 +683,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     from daimon.core.turn.daily_model_cap import CappedFlashAccounting
 
     # Every attempt (the Flash chain may fall back to other models) checks the cap.
-    provider_key = ProviderKey.from_env(INLINE_REUSE.provider, plan.api_key_env)
+    provider_key = functools.partial(ProviderKey.from_env, INLINE_REUSE.provider, plan.api_key_env)
     accounting = CappedFlashAccounting(
         accounting,
         request,

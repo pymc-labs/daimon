@@ -111,6 +111,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     from daimon.core.session_preparation_stages import WorkspaceTransfer
     from daimon.core.stores.neutral_catalog import AgentRevision
+    from daimon.core.turn.provider_gate import GateHold
 
 log = structlog.get_logger(__name__)
 
@@ -251,6 +252,8 @@ class ProviderPreparationRequest:
     # The tenant's hosted OpenAI environment, created or reused for this turn by
     # `openai_environment.tenant_environment`; the code-default GPT row uses it.
     openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
+    # Set by `provider_gate.gated_turn`: where preparation enters its provider key's gate.
+    gate: GateHold | None = field(default=None, kw_only=True, compare=False, repr=False)
     # A channel-less preview: every platform the agent answers on. Per-platform
     # features resolve as the strictest across them; empty reads `platform` alone.
     answers_on: tuple[str, ...] = field(default=(), kw_only=True)

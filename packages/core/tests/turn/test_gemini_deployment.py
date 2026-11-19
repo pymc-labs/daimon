@@ -533,7 +533,7 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             reuse_existing=True,
         )
         assert prepared.runtime is not None and isinstance(prepared.runtime.journal, GeminiJournal)
-        assert prepared.runtime.provider_key == ProviderKey(
+        assert prepared.runtime.provider_key() == ProviderKey(
             "gemini", key_digest("offline-selected-key")
         ), "the turn runs on a keyed, gated provider key"
         deployment = prepared.runtime.journal.deployment
@@ -564,7 +564,9 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
 
         assert extract_final_response(outcome.state.content) == "answer"
         assert outcome.state.usage_totals.output_tokens == 11
-    assert len(posts) == 2 and calls and len(clients) == 2 * len(calls)
+    # One sync and one async client serve every turn of the process, closed at shutdown.
+    assert len(posts) == 2 and calls and len(clients) == 2
+    await deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
     assert (tmp_path / "records.sqlite").exists() and (tmp_path / "holds.sqlite").exists()
     # Inline reuse has no infrastructure charge, so its measured usage settles at once:
@@ -766,7 +768,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     wire.expected_spend_limit = None
     clients = clients_for(monkeypatch, wire.handle)
     runtime = build_channel_runtime(application)
-    assert runtime.provider_key == ProviderKey("openai", key_digest("offline"))
+    assert runtime.provider_key() == ProviderKey("openai", key_digest("offline"))
     config = application.admission.backend_revision
     assert config is not None
     assert runtime.price is pricing.provider_prices(config.profile)[("openai", config.model)]
