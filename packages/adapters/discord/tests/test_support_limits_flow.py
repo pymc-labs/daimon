@@ -541,10 +541,10 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
     assert (status, hold) == ("settled", D(0)), "an admin's request holds nothing"
 
 
-async def test_default_note_when_no_limit_then_post_is_unchanged(
+async def test_default_note_when_no_limit_then_post_waits_for_accept(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Without a limit the default note posts as before."""
+    """Without a limit the default note holds its credit until someone accepts it."""
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", workspace_id=_GUILD)
     bot = _bot(db_session_factory)
@@ -554,8 +554,11 @@ async def test_default_note_when_no_limit_then_post_is_unchanged(
     modal.note_input._value = "help please"  # pyright: ignore[reportPrivateUsage]
     await modal.on_submit(_interaction(bot))
     send = bot.support.send.await_args
-    assert send.args[0].split("\n\n")[2:] == ["help please"], "head, link, note: as before"
-    assert send.kwargs == {}, "no buttons and no mention override on the default post"
+    parts = send.args[0].split("\n\n")
+    assert parts[1].startswith("Pending: 1 credit"), "held, not charged"
+    assert parts[3:] == ["help please"], "head, status, link, note"
+    buttons = [b.item.label for b in send.kwargs["view"].children]
+    assert buttons == ["Accept", "Decline"], "staff accept or decline it"
 
 
 async def _pending(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[Any, str]:
