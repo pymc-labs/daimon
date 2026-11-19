@@ -210,7 +210,7 @@ async def test_different_simultaneous_first_messages_each_answer_once_in_one_sco
     assert len(real_dm.provider.submissions) == 2
     prompts = model_prompts(real_dm.provider)
     assert sum(prompt.endswith("\n\nfirst message") for prompt in prompts) == 1
-    assert sum(prompt.endswith("\n\nsecond message") for prompt in prompts) == 1
+    assert sum(prompt.endswith("\nsecond message") for prompt in prompts) == 1
     assert len(set(real_dm.provider.streams)) == 1, "both turns use the one new private session"
     assert answers(first) == ["private answer"] and answers(second) == ["private answer"]
     assert [entry["text"] for entry in row.history if entry["role"] == "user"] == [

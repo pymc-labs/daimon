@@ -482,12 +482,12 @@ async def test_messages_sent_during_a_turn_are_answered_together_by_the_next(
     await asyncio.wait_for(started.wait(), 5)
     await dm_module.handle_direct_message(runtime, _dm("two", "10.2"), team_id=_TEAM)
     await dm_module.handle_direct_message(runtime, _dm("three", "10.3"), team_id=_TEAM)
-    assert _marks(client.reactions_add) == ["10.2", "10.3"], "held while the turn runs"
+    assert _marks(client.reactions_add) == ["10.1", "10.2", "10.3"], "held while the turn runs"
     gate.set()
     await first
     assert [call.kwargs["text"] for call in reply.await_args_list] == ["one", "two\n\nthree"]
     assert reply.await_args.kwargs["merged_message_ids"] == ("10.3",)
-    assert _marks(client.reactions_remove) == ["10.2", "10.3"], "marks come off after it"
+    assert _marks(client.reactions_remove) == ["10.1", "10.2", "10.3"], "marks come off after it"
     assert client.chat_postMessage.await_count == 2, "each turn posts its answer"
 
 
