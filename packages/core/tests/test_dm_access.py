@@ -24,6 +24,7 @@ from daimon.core.dm_access import (
     DmAgent,
     decide_dm,
     groups_by_members,
+    list_routable_dm_agents,
     lookup_dm_groups,
     member_roles,
     permits_dm,
@@ -159,6 +160,94 @@ async def test_decide_dm_when_the_env_policy_leaves_them_out_then_start_and_perm
             )  # fmt: skip
         assert (decision.route == DmStart("a", "only")) is admitted, listed
         assert permitted is admitted, listed
+
+
+@pytest.mark.parametrize(
+    ("platform", "starts"), [("discord", False), ("slack", True), ("teams", True)]
+)
+async def test_decide_dm_when_the_env_policy_excludes_them_then_only_discord_inbound_refuses(
+    db_session_factory, platform, starts
+):
+    """Main applied the env policy to Discord DMs only; Slack and Teams stay as they were."""
+    tenant, _, agents = await seed(db_session_factory, "a", routed=True)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        direct_message_policies={
+            tenant.id: DirectMessagePolicy(mode="allowlist", recipient_ids=["7"])
+        },
+    )
+    async with db_session_factory() as session:
+        decision = await decide_dm(
+            session, settings, POLICY, tenant_id=tenant.id, platform=platform,
+            agents=agents, subject=ADA, account_id=None,
+        )  # fmt: skip
+    assert (decision.route == DmStart("a", "only")) is starts, platform
+
+
+async def test_sender_admits_when_the_workspace_has_dms_off_then_refuses(db_session_factory):
+    """`disabled` (as imported from the env policy) still stops agent-sent DMs."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    none = groups_by_members(None)
+
+    async def admits() -> bool:
+        return await sender_admits(
+            db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999", groups=none
+        )
+
+    assert await admits(), "on and ungranted admits"
+    async with db_session_factory.begin() as session:
+        await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
+    assert not await admits(), "off admits nobody"
+
+
+async def test_list_routable_dm_agents_when_unrouted_without_a_default_then_lists_nothing(
+    db_session_factory, monkeypatch
+):
+    """A failing agent listing must not stop a chat that would be refused or answered anyway."""
+    from daimon.core import dm_access
+
+    async def failing(*_, **__):
+        raise RuntimeError("the agent API is down")
+
+    monkeypatch.setattr(dm_access, "list_dm_agents", failing)
+    tenant, _, _ = await seed(db_session_factory, "a")
+
+    async def listed():
+        async with db_session_factory() as session:
+            return await list_routable_dm_agents(
+                session, tenant_id=tenant.id, anthropic=None, records=db_session_factory
+            )
+
+    assert await listed() == [], "nothing to route, so nothing is listed"
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="a")
+    with pytest.raises(RuntimeError):
+        await listed()
+
+
+async def test_permits_dm_keeps_the_admin_flag_only_when_the_turn_is_running(
+    db_session_factory, monkeypatch
+):
+    """An admin's exemption from an agent's pins holds for the turn recheck, not a cold start."""
+    from daimon.core import dm_access
+
+    seen: list[bool] = []
+
+    def spy(policy, *, subject, **_):
+        seen.append(subject.is_admin)
+        return True
+
+    monkeypatch.setattr(dm_access, "authorize", spy)
+    tenant, _, agents = await seed(db_session_factory, "a")
+    admin = build_subject(is_admin=True, platform_user_id="999", verified_membership=True)
+    for exempt in (False, True):
+        async with db_session_factory() as session:
+            await permits_dm(
+                session, None, POLICY, tenant_id=tenant.id, platform="slack",
+                agent=agents[0], subject=admin, admin_exempt=exempt,
+            )  # fmt: skip
+    assert seen == [False, False, True, True], "one check per action, admin only when exempt"
 
 
 async def test_decide_dm_with_agent_opted_out_drops_it(db_session_factory):

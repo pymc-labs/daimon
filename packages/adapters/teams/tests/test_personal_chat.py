@@ -67,7 +67,7 @@ def _agents(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
     async def listed(*_: object, **__: object) -> list[DmAgent]:
         return [DmAgent(n, f"ag_{n}", AgentRef.of(n)) for n in names]
 
-    monkeypatch.setattr(personal_chat, "list_dm_agents", listed)
+    monkeypatch.setattr(personal_chat, "list_routable_dm_agents", listed)
 
 
 async def _route(
@@ -151,7 +151,7 @@ async def test_route_personal_chat_when_bound_or_setup_then_answers_unrouted(
     async def never(*_: object, **__: object) -> list[DmAgent]:
         raise AssertionError("a pinned chat lists no agents")
 
-    monkeypatch.setattr(personal_chat, "list_dm_agents", never)
+    monkeypatch.setattr(personal_chat, "list_routable_dm_agents", never)
     assert (await _route(db_session_factory))[0], "a pinned chat answers, rechecked on admission"
     setup = make_inbound(setup_thread_id="setup-1")
     assert (await _route(db_session_factory, setup))[0], "a setup chat is not routed"

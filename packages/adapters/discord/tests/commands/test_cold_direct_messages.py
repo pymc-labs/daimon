@@ -150,7 +150,7 @@ async def setup(db_session_factory, monkeypatch, count=1):
     async def list_agents(session, *, tenant_id, **_):
         return offered[tenant_id]
 
-    monkeypatch.setattr(module, "list_dm_agents", list_agents)
+    monkeypatch.setattr(module, "list_routable_dm_agents", list_agents)
 
     async def answer(deps, **kwargs):
         row = await conversation(db_session_factory)

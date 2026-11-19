@@ -43,7 +43,11 @@ from daimon.core.direct_messages import (
     start_cold_dm,
     start_dm,
 )
-from daimon.core.dm_access import decide_dm, list_dm_agents, lookup_dm_groups
+from daimon.core.dm_access import (
+    decide_dm,
+    list_routable_dm_agents,
+    lookup_dm_groups,
+)
 from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.errors import DaimonError, UserFacingError
@@ -591,7 +595,7 @@ async def _decide_cold(
     )
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        agents = await list_dm_agents(
+        agents = await list_routable_dm_agents(
             session,
             tenant_id=tenant_id,
             anthropic=runtime.turn_deps.anthropic,

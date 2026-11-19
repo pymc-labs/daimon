@@ -59,7 +59,7 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
-from daimon.core.dm_access import decide_dm, list_dm_agents
+from daimon.core.dm_access import decide_dm, list_dm_agents, list_routable_dm_agents
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
@@ -305,7 +305,7 @@ class DirectMessageCog(commands.Cog):
             return _Eligibility()
         try:
             async with runtime.sessionmaker() as session:
-                agents = await list_dm_agents(
+                agents = await list_routable_dm_agents(
                     session,
                     tenant_id=tenant.id,
                     anthropic=runtime.turn_deps.anthropic,

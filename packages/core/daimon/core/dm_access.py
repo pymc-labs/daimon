@@ -32,6 +32,7 @@ from daimon.core.dm_routing import (
     Person,
     grant_admits,
     resolve,
+    routed,
 )
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.membership import MembershipResolver
@@ -86,6 +87,24 @@ async def list_dm_agents(
         else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return dm_agents_of(agents)
+
+
+async def list_routable_dm_agents(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    anthropic: AsyncAnthropic | None,
+    records: async_sessionmaker[AsyncSession],
+) -> list[DmAgent]:
+    """`list_dm_agents`, but not asked for a workspace that is unrouted with no default.
+
+    Such a workspace is `DmRefused("unrouted")` whatever its agents are, so a failing
+    listing must not leave a chat unanswered where it was answered before routing.
+    """
+    routing = await load_routing(session, tenant_id=tenant_id)
+    if not routed(routing.grants, routing.rules) and routing.default is None:
+        return []
+    return await list_dm_agents(session, tenant_id=tenant_id, anthropic=anthropic, records=records)
 
 
 def dm_agents_of(agents: Iterable[BetaManagedAgentsAgent]) -> list[DmAgent]:
@@ -214,13 +233,15 @@ async def _candidate(
     platform: str,
     agent: DmAgent,
     subject: Subject,
+    admin_exempt: bool,
 ) -> Candidate:
     place = FeaturePlace(tenant_id, platform, agent_id=agent.ma_agent_id)
     dm_on = (await feature_in(session, settings, place, "direct_messages")).on
     if not dm_on:
         return Candidate(agent.name, False, False)
-    # An agent's pins and isolation apply to a DM without an admin exemption.
-    runner = replace(subject, is_admin=False)
+    # An agent's pins and isolation apply to a DM without an admin exemption, except on a
+    # turn already running, where main kept it.
+    runner = subject if admin_exempt else replace(subject, is_admin=False)
     may_run = all(
         bool(
             authorize(
@@ -249,19 +270,26 @@ async def decide_dm(
     subject: Subject,
     account_id: uuid.UUID | None,
     groups: frozenset[str] | None = None,
+    admin_exempt: bool = False,
 ) -> DmDecision:
     """Which of `agents` a person's DM reaches, from grants, rules, their pick and the default.
 
-    A workspace with DMs off admits nobody, nor does one whose deprecated env policy
-    (`env_admits`, which delivery applies too) leaves the person out. Pass every agent to
-    choose among them, or one to ask whether the person may use it (`DmDecision.may_use`).
-    `groups` are the ones `lookup_dm_groups` found; None takes
-    them from `subject`.
+    A workspace with DMs off admits nobody, nor does a Discord one whose deprecated env
+    policy (`env_admits`, which delivery applies on every platform) leaves the person out.
+    Pass every agent to choose among them, or one to ask whether the person may use it
+    (`DmDecision.may_use`).
+    `groups` are the ones `lookup_dm_groups` found; None takes them from `subject`.
+    `admin_exempt` lets an admin's standing count for an agent's pins, as on a running turn.
     """
     if not await dm_enabled(session, tenant_id=tenant_id):
         return DmDecision(DmRefused("no_agent"))
-    if settings is not None and not env_admits(
-        settings.direct_message_policies, tenant_id, subject.platform_user_id or ""
+    # Main applied the env policy to Discord DMs only, so Slack and Teams do not take it inbound.
+    if (
+        platform == "discord"
+        and settings is not None
+        and not env_admits(
+            settings.direct_message_policies, tenant_id, subject.platform_user_id or ""
+        )
     ):
         return DmDecision(DmRefused("no_agent"))
     routing = await load_routing(session, tenant_id=tenant_id)
@@ -279,6 +307,7 @@ async def decide_dm(
             platform=platform,
             agent=agent,
             subject=subject,
+            admin_exempt=admin_exempt,
         )
         for agent in agents
     ]
@@ -302,6 +331,7 @@ async def permits_dm(
     agent: DmAgent,
     subject: Subject,
     groups: frozenset[str] | None = None,
+    admin_exempt: bool = False,
 ) -> bool:
     """Whether this person may DM this agent: on, runnable, granted, and no lock names another.
 
@@ -316,6 +346,7 @@ async def permits_dm(
         subject=subject,
         account_id=None,
         groups=groups,
+        admin_exempt=admin_exempt,
     )
     return decision.may_use(agent.name)
 
@@ -343,9 +374,12 @@ async def sender_admits(
     Every agent-sent path (the DM tools, routines, watches, notices, support) calls
     this with its platform's lookup. Locks only decide who answers, so they do not
     apply. A message with no sending agent (a notice) uses the workspace default
-    agent's grant, and none when no default is set. Groups unknown: not admitted.
+    agent's grant, and none when no default is set. A workspace with DMs off, or groups
+    unknown: not admitted.
     """
     async with sessionmaker() as session:
+        if not await dm_enabled(session, tenant_id=tenant_id):
+            return False
         grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
     if grant is None:
         return True

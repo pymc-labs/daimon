@@ -265,7 +265,10 @@ async def require_dm_turn_grant(
     user_id: str,
     groups: frozenset[str] | None,
 ) -> None:
-    """The admitted agent must still admit this person; unknown groups fail closed."""
+    """The admitted agent must still admit this person; unknown groups fail closed.
+
+    An admin keeps their exemption from the agent's pins, except in a cold DM, as before.
+    """
     async with deps.sessionmaker() as session:
         permitted = await permits_dm(
             session,
@@ -278,6 +281,7 @@ async def require_dm_turn_grant(
             if admission.grant is not None
             else build_subject(is_admin=False, platform_user_id=user_id),
             groups=groups,
+            admin_exempt=admission.grant is not None and not admission.grant.cold_dm,
         )
     if not permitted:
         raise DirectMessageAccessRevoked("dm_grant", message=DM_AGENT_REFUSED)

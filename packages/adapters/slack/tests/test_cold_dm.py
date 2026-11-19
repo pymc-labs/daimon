@@ -60,7 +60,7 @@ def db_session_factory(
 def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dm_module, "_COLD_DM_NOTICES", ColdDmNotices())
     monkeypatch.setattr(dm_module, "debounce_seconds", AsyncMock(return_value=0.0))
-    monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=[]))
+    monkeypatch.setattr(dm_module, "list_routable_dm_agents", AsyncMock(return_value=[]))
 
 
 def _runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
@@ -128,7 +128,7 @@ async def test_cold_dm_when_unrouted_and_no_default_then_the_guidance(
     """Two agents admit the person, but no rule or narrower grant routes: no picker."""
     await _dms_on(db_session_factory)
     agents = [DmAgent(n, f"ag_{n}", AgentRef.of(n)) for n in ("ada", "bob")]
-    monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=agents))
+    monkeypatch.setattr(dm_module, "list_routable_dm_agents", AsyncMock(return_value=agents))
     client = _client(monkeypatch)
     start, _ = _starts(monkeypatch, uuid.uuid4())
 
@@ -500,7 +500,7 @@ async def test_decide_cold_when_a_grant_lists_a_user_group_then_slack_membership
             group_ids=["S1"], set_by=None, now=datetime.now(UTC),
         )  # fmt: skip
     agents = [DmAgent("ada", "ag_ada", AgentRef.of("ada"))]
-    monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=agents))
+    monkeypatch.setattr(dm_module, "list_routable_dm_agents", AsyncMock(return_value=agents))
     client = _client(monkeypatch)
     client.token = "xoxb-test"
     runtime = _runtime(db_session_factory)

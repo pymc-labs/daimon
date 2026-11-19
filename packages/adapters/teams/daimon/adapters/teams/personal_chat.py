@@ -37,7 +37,7 @@ from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
 from daimon.core.dm_access import (
     DmAgent,
     decide_dm,
-    list_dm_agents,
+    list_routable_dm_agents,
     lookup_dm_groups,
 )
 from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, React
@@ -91,7 +91,7 @@ async def _decide(
     groups = await chat_groups(runtime, tenant_id=tenant_id, user_id=user_id, fresh=True)
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        agents = await list_dm_agents(
+        agents = await list_routable_dm_agents(
             session,
             tenant_id=tenant_id,
             anthropic=runtime.turn_deps.anthropic,
