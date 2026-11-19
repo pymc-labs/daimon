@@ -155,7 +155,6 @@ async def test_admission_names_a_pinned_channels_backend_before_it_refuses(
     deps = replace(
         _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
         channel_backends=True,
-        turn_path="mux",
     )
     observation = TurnObservation(db_session_factory, tenant.id, tenant.platform, "chan-1")
     token = current_outcome.set(observation)
