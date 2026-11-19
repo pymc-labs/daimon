@@ -243,9 +243,9 @@ async def test_stale_revision_applied_after_a_newer_one_claims_nothing(sessions)
     store = mux_state.PostgresStateStore(sessions)
     older = await store.record_usage("gemini-a", observation(searches=7))
     newer = await store.record_usage("gemini-a", observation(searches=2, revision=2))
-    for row in (newer, older):
+    for row, claimed in ((newer, True), (older, False)):
         async with sessions() as session, session.begin():
-            assert await accounting_outbox.apply_usage_outbox(
+            assert claimed == await accounting_outbox.apply_usage_outbox(
                 session,
                 row,
                 tenant_id=TENANT,
@@ -255,7 +255,7 @@ async def test_stale_revision_applied_after_a_newer_one_claims_nothing(sessions)
                 provider_price=price(),
                 infrastructure_usd=Decimal(0),
                 billing_grain="turn",
-            )
+            ), "settling the newer revision closed the older one"
     assert await used(sessions) == 2 and await balance(sessions) == -TOKENS
 
 

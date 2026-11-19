@@ -154,9 +154,11 @@ class DurableRereads:
         for settlement in rows:
             row, observation = settlement.row, settlement.row.observation
             key = (row.binding_id, row.observation_id)
-            if key in seen or observation.final or observation.turn_id is None:
+            if key in seen:
                 continue
-            seen.add(key)  # the newest revision comes first
+            seen.add(key)  # the newest revision comes first: a final one ends the turn
+            if observation.final or observation.turn_id is None:
+                continue
             if now - observation.observed_at > self._give_up_after:
                 if key not in self._given_up:
                     self._given_up.add(key)

@@ -170,6 +170,22 @@ async def test_unknown_openai_usage_is_reread_from_the_scheduler_and_debited(sm,
     assert await _pending(sm) == 0 and await _debited(sm) == debited
 
 
+@pytest.mark.parametrize("priced", [True, False], ids=["settled", "unpriced"])
+async def test_a_turn_whose_usage_is_final_is_not_reread_by_a_later_pass(sm, monkeypatch, priced):
+    """A settled final revision closes the older unknown one; an unpriced final one stays
+    pending, and either way a later pass reads the turn no more."""
+    from daimon.core import pricing
+    from daimon.core.turn.openai_late_usage import DurableRereads
+
+    if not priced:
+        monkeypatch.setattr(pricing, "provider_prices", lambda _profile: {})
+    _, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3))
+    assert read == ["turn"], "the unknown usage is read once"
+    assert await _pending(sm) == (0 if priced else 2), "only an unsettled revision stays"
+    later = await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC))
+    assert later == 0 and read == ["turn"], "a final turn is never read again"
+
+
 async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch):
     reads, read = await _reread(
         sm, monkeypatch, seen_ago=timedelta(hours=3), budget_s=0.05, stall=True

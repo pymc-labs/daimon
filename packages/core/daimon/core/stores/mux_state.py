@@ -1014,6 +1014,23 @@ async def mark_outbox_applied(session: AsyncSession, row: OutboxRow) -> bool:
     return False
 
 
+async def close_superseded_outbox(session: AsyncSession, row: OutboxRow) -> None:
+    """Mark the observation's unapplied revisions older than `row` applied, with no debit.
+
+    Only for exact settlement, where the newest settled revision carries the whole cost.
+    """
+    await session.execute(
+        update(AccountingOutbox)
+        .where(
+            AccountingOutbox.binding_id == row.binding_id,
+            AccountingOutbox.observation_id == row.observation_id,
+            AccountingOutbox.revision < row.revision,
+            AccountingOutbox.applied_at.is_(None),
+        )
+        .values(applied_at=func.now())
+    )
+
+
 # Legacy thread_sessions links
 
 
