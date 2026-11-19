@@ -52,6 +52,7 @@ from daimon.core.monitoring import MonitoringNotice
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
@@ -459,6 +460,9 @@ class DiscordTurnLifecycle(OutputGate):
             else adopt_message_ref
         )
         self._terminal_embed: discord.Embed | None = None
+        # When the terminal card rendered, and the card when it carries the summary.
+        self._terminal_at: float | None = None
+        self._summary_card: discord.Message | None = None
         # The answer message that carries the summary, once there is one. The
         # vote emoji and the turn's files go on it too.
         self._summary_ref: discord.Message | None = None
@@ -1054,8 +1058,9 @@ class DiscordTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Compatibility counters never become an MA meter: no cost shown.
-            self._state = dataclasses.replace(self._state, cost_str=None)
+            # Compatibility counters never become an MA meter: priced from the observations.
+            cost = LATE_TURN_COSTS.turn_debit(t, markup=self._markup, show=self._show_late_debit)
+            self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
             return
         cost = cost_of_totals(
             state.usage_totals,
@@ -1078,6 +1083,27 @@ class DiscordTurnLifecycle(OutputGate):
             thread_id=str(channel.id) if channel is not None else None,
         )
 
+    async def _apply_balance(self) -> None:
+        """Put the money left on the footer, or hide the footer where an admin did."""
+        if self._sessionmaker is None or self._tenant_id is None:
+            return
+        if not await self._footer_shown():
+            self._state = dataclasses.replace(self._state, footer_hidden=True)
+            return
+        try:
+            async with self._sessionmaker() as session:
+                footer = await balance_footer(
+                    session,
+                    tenant_id=self._tenant_id,
+                    platform="discord",
+                    budget_channel_id=self._budget_channel_id,
+                    now=datetime.now(UTC),
+                )
+            if footer is not None:
+                self._state = dataclasses.replace(self._state, balance_str=footer)
+        except Exception:
+            log.warning("turn.balance_footer_failed", exc_info=True)
+
     async def _flush_terminal(self, *, summary_on_card: bool = True) -> None:
         """Unconditionally flush terminal state as a single collapsed embed,
         bypassing debounce.
@@ -1087,25 +1113,9 @@ class DiscordTurnLifecycle(OutputGate):
         The card is deleted only after the answer is up, best effort, so a card
         with the summary would show it twice until then, or for good if the delete fails.
         """
-        if self._sessionmaker is not None and self._tenant_id is not None:
-            if not await self._footer_shown():
-                self._state = dataclasses.replace(self._state, footer_hidden=True)
-            else:
-                try:
-                    async with self._sessionmaker() as session:
-                        footer = await balance_footer(
-                            session,
-                            tenant_id=self._tenant_id,
-                            platform="discord",
-                            budget_channel_id=self._budget_channel_id,
-                            now=datetime.now(UTC),
-                        )
-                    if footer is not None:
-                        self._state = dataclasses.replace(self._state, balance_str=footer)
-                except Exception:
-                    log.warning("turn.balance_footer_failed", exc_info=True)
+        await self._apply_balance()
         self._terminal = True
-        now = self._clock()
+        now = self._terminal_at = self._clock()
         data = to_embed_data(self._state, now=now)
         # A finished turn with its footer hidden has no summary to carry: the
         # answer goes up bare, as an empty embed would be refused.
@@ -1125,6 +1135,8 @@ class DiscordTurnLifecycle(OutputGate):
         else:
             await self._edit_message(self._message_ref, embeds=[embed], view=None)
         self._terminal_shown = True
+        if summary_on_card and data.footer is not None:
+            self._summary_card = self._message_ref
 
     async def _show_card_error(self, title: str, body: str | None = None) -> None:
         """End the turn's card as the red error card; `body` defaults to the usual retry step."""
@@ -1292,11 +1304,10 @@ class DiscordTurnLifecycle(OutputGate):
             if has_tool_activity:
                 self._was_answered = True
                 done_data = dataclasses.replace(
-                    to_embed_data(self._state, now=self._clock()), description="Done."
+                    to_embed_data(self._state, now=self._terminal_at), description="Done."
                 )
-                await self._edit_message(
-                    self._message_ref, embed=build_discord_embed(done_data), view=None
-                )
+                self._terminal_embed = build_discord_embed(done_data)
+                await self._edit_message(self._message_ref, embed=self._terminal_embed, view=None)
                 # The "Done." card carries the summary, so the turn's files go on it.
                 self._summary_ref = self._message_ref
                 log.info("turn.terminal_success", has_text=False, tool_only=True)
@@ -1429,6 +1440,26 @@ class DiscordTurnLifecycle(OutputGate):
             await self._delete_card()
 
         log.info("turn.terminal_success")
+
+    async def _show_late_debit(self, debit: float) -> bool:
+        """Edit a debit priced after the turn ended into the summary the turn posted."""
+        message, embed = self._summary_ref or self._summary_card, self._terminal_embed
+        if message is None or embed is None or embed.footer.text is None or self._thread_stopped():
+            return False
+        self._state = dataclasses.replace(self._state, cost_str=format_cost(debit))
+        await self._apply_balance()
+        footer = to_embed_data(self._state, now=self._terminal_at).footer
+        if footer is None:
+            return False
+        self._terminal_embed = embed = embed.copy().set_footer(text=footer)
+        # A card keeps the rest of its terminal render (content, view), which a repair re-sends.
+        render: dict[str, Any] = {
+            **self._card_writes.terminal.get(self._card_writes.key(message), {}),
+            "embeds": [embed],
+        }
+        return await self._edit_message(
+            message, terminal_override=True, recover_missing=False, **render
+        )
 
     async def _restore_card_summary(self) -> None:
         """Put the summary back on the card when the pinged answer could not carry it.

@@ -823,13 +823,15 @@ def _current_price(rows: Iterable[ProviderPrice], on: date) -> dict[tuple[str, s
     return {(price.provider, price.model): price for price in rows if price.current_on(on)}
 
 
-def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
-    """Cold immutable native tariffs, shared by admission and usage owners.
+def provider_prices(
+    profile: str, *, on: date | None = None
+) -> Mapping[tuple[str, str], ProviderPrice]:
+    """Cold immutable native tariffs in force `on` (today), shared by admission and usage owners.
 
     Unsupported profiles/models are absent. This supplies Standard token
     rates, not a whole-bill proof, native request limit or authority grant.
     """
-    on = datetime.now(UTC).date()
+    on = on or datetime.now(UTC).date()
     if profile == CONVERSATION_ONLY.profile_id:
         profile = PERSISTENT_WORKSPACE.profile_id
     return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
