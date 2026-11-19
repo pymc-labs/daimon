@@ -214,7 +214,9 @@ class OpenAIAPI(StrictFake):
         self.route("POST", "/v1/vaults/([^/]+)/credentials", self._credential)
         self.route("GET", "/v1/vaults/([^/]+)/credentials", self._lister_under)
         self.route("GET", "/v1/vaults/[^/]+/credentials/([^/]+)", self._getter)
+        self.route("POST", "/v1/vaults/[^/]+/credentials/([^/]+)", self._update_credential)
         self.route("DELETE", "/v1/vaults/[^/]+/credentials/([^/]+)", self._deleter)
+        self.route("POST", "/v1/responses", self._response)
         self.route("POST", "/v1/skills", self._create_skill)
         self.route("GET", "/v1/skills", self._lister("/v1/skills"))
         self.route("GET", "/v1/skills/([^/]+)", self._getter)
@@ -307,6 +309,46 @@ class OpenAIAPI(StrictFake):
         body = json.loads(request.content)
         raw = {"id": self._id("cred"), "vault_id": match[1], "created_at": self._now(), **body}
         return self._store(f"/v1/vaults/{match[1]}/credentials", raw)
+
+    def _update_credential(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        raw = self.resources.get(match[1])
+        if raw is None:
+            return self.refuse(404, f"No such object: '{match[1]}'")
+        raw.update(json.loads(request.content))
+        return self._json(self._public(raw))
+
+    def _response(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """Daimon's own small calls (a thread's title): billed like any model call."""
+        self.reported.append((40, 4))
+        text = "Simulated chat"
+        message = {
+            "type": "message",
+            "id": self._id("msg"),
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": list[Json]()}],
+        }
+        usage = {
+            "input_tokens": 40,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 4,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 44,
+        }
+        return self._json(
+            {
+                "id": self._id("resp"),
+                "object": "response",
+                "created_at": self._now(),
+                "status": "completed",
+                "model": json.loads(request.content)["model"],
+                "output": [message],
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+                "usage": usage,
+            }
+        )
 
     def _fields(self, request: httpx.Request) -> dict[str, str]:
         found = re.findall(rb'name="([^"]+)"\r\n\r\n([^\r]*)\r\n', request.content)

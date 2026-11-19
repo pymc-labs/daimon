@@ -36,12 +36,6 @@ class _Daimon(StrictFake):
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a record born on its provider has no Daimon MCP toolset the capture can represent, "
-    "so preparation refuses it before the provider host",
-)
 async def test_the_seeded_agent_replies_on_a_keyless_install(
     provider: Provider, db_preflight: None, db_nullpool_engine: AsyncEngine
 ) -> None:
@@ -66,7 +60,9 @@ async def test_the_seeded_agent_replies_on_a_keyless_install(
             again = await d.say("are you there?", thread=thread)
             assert "Still here." in again[-1], f"the next turn replies too: {again}"
         fake = w.openai if provider == "openai" else w.gemini
-        assert len(fake.reported) == 2, f"both turns ran on {provider}: {fake.reported}"
+        assert len(fake.reported) == 3, (
+            f"the title and both turns ran on {provider}: {fake.reported}"
+        )
         assert not w.api.seen, f"no Anthropic request on a keyless install: {w.api.seen}"
         assert not d.bot.errors, f"the bot raised: {d.bot.errors}"
         w.network.assert_clean()

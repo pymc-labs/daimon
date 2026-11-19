@@ -96,6 +96,7 @@ class GeminiAPI(StrictFake):
         self.route("POST", "/v1beta/interactions", self._create)
         self.route("GET", one, self._read)
         self.route("POST", one + ":cancel", self._cancel)
+        self.route("POST", "/v1beta/models/([^/:]+):generateContent", self._generate)
 
     def refuse(self, status: int, message: str, param: str | None = None) -> httpx.Response:
         if message.endswith("Unknown parameter"):
@@ -103,6 +104,19 @@ class GeminiAPI(StrictFake):
         code = {400: "INVALID_ARGUMENT", 404: "NOT_FOUND"}.get(status, "UNKNOWN")
         return httpx.Response(
             status, json={"error": {"code": status, "message": message, "status": code}}
+        )
+
+    def _generate(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        """Daimon's own small calls (a thread's title): billed like any model call."""
+        self.reported.append((40, 4))
+        candidate = {
+            "content": {"role": "model", "parts": [{"text": "Simulated chat"}]},
+            "finishReason": "STOP",
+            "index": 0,
+        }
+        usage = {"promptTokenCount": 40, "candidatesTokenCount": 4, "totalTokenCount": 44}
+        return httpx.Response(
+            200, json={"candidates": [candidate], "usageMetadata": usage, "modelVersion": match[1]}
         )
 
     def _id(self, kind: str) -> str:
