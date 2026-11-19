@@ -97,6 +97,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenAI's published long-context rates: twice the input and cache rates and 1.5
   times the output rate for the whole request.
 
+- **A busy or rate-limited provider key now says so and recovers.** One GPT or
+  Gemini API key serves at most 16 turns at once across every replica and 4 per
+  workspace (`DAIMON_PROVIDER_LIMITS__KEY_TURNS`, `__TENANT_TURNS`). A turn past
+  a cap waits up to 20 seconds (`__WAIT_S`) for a slot, then is refused as busy
+  instead of piling more requests on the key. When a provider answers 429 with a
+  wait (the `Retry-After` header, or Gemini's retry delay), that key and model
+  rest for that long, defaulting to 30 seconds and at most ten minutes. Turns on
+  it are refused at once with a "try again shortly" message that names the
+  provider, so a rate limit no longer turns into a retry storm. Requires the new
+  `provider_key_cooldowns` and `provider_key_leases` tables.
+- **GPT and Gemini calls share one connection per key, and long GPT histories
+  load.** Each process now builds one provider client per key and reuses its
+  connections, instead of opening and closing a client, with its own TLS
+  context, for every call. Reading a GPT conversation's history from OpenAI
+  happens once per read rather than once per page, in pages of a thousand
+  events, so a conversation past 5,000 events no longer fails to resume.
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's
