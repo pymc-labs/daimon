@@ -44,6 +44,7 @@ from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import provider_turn_debit
 from daimon.core.stores.agent_posts import PostRole
 from daimon.core.teams_markdown import has_math
 from daimon.core.teams_threads import conversation_of
@@ -543,8 +544,9 @@ class TeamsTurnLifecycle(OutputGate):
         ):
             return None
         t = state.usage_totals
-        cost = None
-        if self._provider_draft is None and not isinstance(t, ProviderUsageTotals):
+        if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
+            cost = provider_turn_debit(t, markup=self._markup)
+        else:
             cost = (
                 cost_of_totals(
                     state.usage_totals,
@@ -560,9 +562,7 @@ class TeamsTurnLifecycle(OutputGate):
         return format_summary(
             agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,
-            cost=None
-            if self._provider_draft is not None or isinstance(t, ProviderUsageTotals)
-            else format_cost(cost),
+            cost=format_cost(cost),
             left=await self._balance(),
         )
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **GPT and Gemini turns show their cost.** The summary line under a finished
+  GPT or Gemini turn in Discord, Slack and Teams now shows the same debit the
+  balance takes, markup included, as Claude turns already did. It still shows
+  no cost while Daimon cannot know it yet, such as an unpriced model or usage
+  the provider has not reported.
+
 - **Admins can monitor an agent, and people are told.** Two features, Monitor
   direct messages and Monitor coding tools, are off by default and set per
   workspace or agent. While one is on, Daimon keeps what people ask that agent

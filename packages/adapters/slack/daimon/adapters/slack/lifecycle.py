@@ -84,6 +84,7 @@ from daimon.core.outbound.mentions import mentioned_user_ids, untag
 from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
+from daimon.core.provider_turn_cost import provider_turn_debit
 from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State
@@ -479,8 +480,9 @@ class SlackTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Compatibility counters never become an MA meter: no cost shown.
-            self._state = dataclasses.replace(self._state, cost_str=None)
+            # Compatibility counters never become an MA meter: priced from the observations.
+            cost = provider_turn_debit(t, markup=self._markup)
+            self._state = dataclasses.replace(self._state, cost_str=format_cost(cost))
             return
         cost = cost_of_totals(
             state.usage_totals,
