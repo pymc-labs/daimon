@@ -1377,6 +1377,15 @@ def test_a_bearer_server_without_a_key_still_loads_off_the_mcp_service() -> None
     assert not McpIdentitySettings().names_requester
 
 
+def test_unscoped_names_holds_only_the_servers_that_opted_out_of_channel_scoping() -> None:
+    """`channel_scoped` defaults to True, so only an explicit false lists a server."""
+    scoped = _bearer_server()
+    open_one = scoped.model_copy(update={"name": "open", "channel_scoped": False})
+    settings = McpIdentitySettings(servers=[scoped, open_one])
+    assert settings.unscoped_names == frozenset({"open"}), "only the opted-out server"
+    assert McpIdentitySettings(servers=[scoped]).unscoped_names == frozenset()
+
+
 def test_a_key_must_name_a_bearer_server() -> None:
     with pytest.raises(ValidationError, match="only servers whose auth is bearer"):
         McpIdentitySettings(servers=[_bearer_server()], bearers={"other": SecretStr("key")})

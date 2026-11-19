@@ -92,6 +92,8 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    # Identity-relay servers that set `channel_scoped=false` (`daimon.core.relay_scope`).
+    relay_unscoped: frozenset[str] = frozenset()
     # The web app's links, from `settings.web`; None when there is no web app.
     web_links: WebLinks | None = None
     membership_resolver: MembershipResolver | None = None
@@ -244,6 +246,7 @@ def build_turn_deps(
         agent_github_app=settings.github_app,
         github_mcp_router=_github_mcp_router(settings),
         public_url=str(settings.mcp.public_url) if settings.mcp.public_url is not None else None,
+        relay_unscoped=settings.mcp_identity.unscoped_names,
         web_links=WebLinks.from_settings(web if isinstance(web, WebSettings) else None),
         tool_safety=settings.tool_safety,
         microsoft_send=settings.microsoft_accounts.configured,
