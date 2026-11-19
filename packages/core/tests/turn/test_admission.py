@@ -2843,7 +2843,9 @@ async def test_admit_leaves_an_agent_whose_only_relay_server_is_unscoped_as_it_w
         db_session, db_session_factory, tmp_path, [grove], unscoped=frozenset({"grove"})
     )
     assert open_agent.hold is None and not open_agent.relay_scoped, "no hold, session resumes"
-    assert not open_agent.origin_seal_ids, "its session is not sealed"
+    assert open_agent.grant is not None and open_agent.grant.subject.is_admin, "admin kept"
+    assert not open_agent.origin_seal_ids and not open_agent.source_sealed, "not sealed"
+    assert not open_agent.memory_read_only, "memory stays writable"
     identity = open_agent.identity
     assert identity.personal_memory and identity.shared_memory and identity.channel_memory
     assert open_agent.feature_on("repo_memory")
