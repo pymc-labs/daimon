@@ -322,4 +322,4 @@ daimon usage pending <tenant-uuid> --limit 1000 --json
 Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 `admission_missing`, `model_mismatch` or `tariff_context_invalid`. Pass
 `--cursor <next-cursor>` for the next page. The command is read-only. The scheduler re-reads a GPT turn's
-unknown usage for a day after the turn.
+usage for a day, until it is final.
