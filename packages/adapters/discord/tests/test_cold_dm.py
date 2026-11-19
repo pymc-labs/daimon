@@ -10,19 +10,12 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.testing.shared_helpers import Session as _Session
 
 _OFF = (
     "Private chats with Daimon are off here.\n"
     "Mention me in a channel, or ask a server admin to run `/dm-me enable`."
 )
-
-
-class _Session:
-    async def __aenter__(self) -> _Session:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None
 
 
 def _cog() -> DirectMessageCog:

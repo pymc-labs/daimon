@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .conftest import make_tenant
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
 
 _GUILD_ID = 123456
 _THREAD_ID = 9999
@@ -63,20 +64,6 @@ def _http(code: int, *, status: int = 400, cls: type[discord.HTTPException] | No
     """A Discord API error carrying `code`; production saw 10003 as a 400 and as a 404."""
     response = Mock(status=status, reason="Discord")
     return (cls or discord.HTTPException)(response, {"code": code, "message": f"code {code}"})
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 class _SSE(httpx.AsyncByteStream):

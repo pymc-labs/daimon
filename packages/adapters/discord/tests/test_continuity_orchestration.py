@@ -54,6 +54,7 @@ from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
 
 _run_outcome = partial(RunOutcome, ma_session_id="sess_test", recovered=False)
 
@@ -97,20 +98,6 @@ def _final_answer_text(message: MagicMock) -> str:
     ]
     assert contents, "the answer must have replaced the embed"
     return str(contents[-1])
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _stub_resolved_config(

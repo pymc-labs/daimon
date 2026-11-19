@@ -25,6 +25,7 @@ from daimon.core.authz import (
     origin_ids,
 )
 from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
+from daimon.testing.shared_helpers import Session as _Session
 
 PACKAGES = Path(__file__).resolve().parents[2]
 
@@ -186,16 +187,6 @@ def test_a_funnel_with_no_origin_is_refused_by_default() -> None:
 
 
 # --- the fixes the review asked for ---------------------------------------------------
-
-
-class _Session:
-    """Stands in for a session where the code under test only passes it on."""
-
-    async def __aenter__(self) -> _Session:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None
 
 
 def _sessions() -> _Session:

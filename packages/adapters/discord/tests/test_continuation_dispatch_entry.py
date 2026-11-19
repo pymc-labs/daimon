@@ -56,6 +56,7 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+from .shared_fakes import AsyncIter as _AsyncIter
 
 _resolved_config = partial(
     ResolvedConfig,
@@ -67,20 +68,6 @@ _resolved_config = partial(
 
 
 _THREAD_ID = 4242
-
-
-class _AsyncIter:
-    def __init__(self, items: list[object]) -> None:
-        self._items = iter(items)
-
-    def __aiter__(self) -> _AsyncIter:
-        return self
-
-    async def __anext__(self) -> object:
-        try:
-            return next(self._items)
-        except StopIteration as err:
-            raise StopAsyncIteration from err
 
 
 def _make_guild(

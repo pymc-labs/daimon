@@ -316,3 +316,13 @@ def native_events() -> tuple[BetaManagedAgentsStreamSessionEvents, ...]:
         processed_at=NOW,
     )
     return text, done
+
+
+class Session:
+    """Stands in for a session where the code under test only passes it on."""
+
+    async def __aenter__(self) -> Session:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None

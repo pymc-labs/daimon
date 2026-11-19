@@ -9,16 +9,9 @@ from daimon.adapters.discord.agent_setup import channel_environment as env
 from daimon.adapters.discord.origin import interaction_origin
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.testing.shared_helpers import Session as _Session
 
 SEALED = TenantAccessPolicy(channel_rules={"123": ChannelRule(readers="own", writers="own")})
-
-
-class _Session:
-    async def __aenter__(self) -> _Session:
-        return self
-
-    async def __aexit__(self, *_: object) -> None:
-        return None
 
 
 def _noargs_obj(*_: object) -> object:
