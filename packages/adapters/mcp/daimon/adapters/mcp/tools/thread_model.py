@@ -35,6 +35,8 @@ from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.thread_model_switch import ThreadPick, pick_thread
 from daimon.core.thread_models import (
+    EFFORT_NOT_CLAUDE,
+    EFFORT_OFF_CLAUDE,
     THREAD_MODEL_CHOICES,
     ThreadModelRefused,
     choose_thread_model,
@@ -51,10 +53,6 @@ _UNATTENDED = (
     "Only someone in the conversation can change its model, and nobody started "
     "this run. Nothing was changed."
 )
-
-
-_EFFORT_NOT_CLAUDE = "The effort was not set: only Claude models take one."
-_EFFORT_OFF_CLAUDE = "The effort was not set: this agent doesn't run on Anthropic."
 
 
 @dataclass(frozen=True)
@@ -89,7 +87,7 @@ async def _set_thread_model_impl(
         if not wants_effort:
             raise ToolError("Name a model, an effort, or both. Nothing changed.")
         if await _off_claude(runtime, auth, origin):
-            raise ToolError(_EFFORT_OFF_CLAUDE + " Nothing changed.")
+            raise ToolError(EFFORT_OFF_CLAUDE + " Nothing changed.")
         return await _choose_claude(runtime, auth, origin, None, effort)
     chosen, _reset = resolve_effort(effort)
     model_id = THREAD_MODEL_CHOICES.get(model.strip().lower())
@@ -105,9 +103,9 @@ async def _set_thread_model_impl(
     if not wants_effort:
         return result
     if ":" in result.model and not result.model.startswith(f"{DEFAULT_BACKEND}:"):
-        return _with_note(result, _EFFORT_NOT_CLAUDE)
+        return _with_note(result, EFFORT_NOT_CLAUDE)
     if await _off_claude(runtime, auth, origin):
-        return _with_note(result, _EFFORT_OFF_CLAUDE)
+        return _with_note(result, EFFORT_OFF_CLAUDE)
     # The pick is kept as a Claude model: keep the effort beside it.
     return await _choose_claude(runtime, auth, origin, None, effort)
 

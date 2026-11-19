@@ -31,7 +31,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.thread_model_flow import NO_AGENT, thread_pick_result
+from daimon.core.thread_model_flow import NO_AGENT, NOTHING_CHANGED, thread_pick_result
 from daimon.core.thread_model_switch import (
     ThreadPick,
     pick_thread,
@@ -40,11 +40,19 @@ from daimon.core.thread_model_switch import (
     thread_pick_for,
 )
 from daimon.core.thread_models import (
+    EFFORT_NOT_CLAUDE,
+    EFFORT_OFF_CLAUDE,
+    THREAD_MODEL_CHOICES,
     ThreadModelChange,
+    ThreadModelRefused,
     choose_thread_model,
     describe_thread_model,
     may_choose_thread_model,
+    model_efforts,
+    model_label,
+    resolve_effort,
 )
+from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -157,6 +165,12 @@ async def _pick_of(interaction: BotInteraction, place: _Place, *, admin: bool) -
     )
 
 
+async def _off_claude(pick: ThreadPick) -> bool:
+    """Whether the conversation's agent runs on another provider, so it takes no effort."""
+    revision = await pick.service.current(pick.agent)
+    return revision is not None and revision.backend not in (None, DEFAULT_BACKEND)
+
+
 async def may_switch_thread(
     interaction: BotInteraction, tenant_id: uuid.UUID, thread: discord.Thread
 ) -> bool:
@@ -243,6 +257,15 @@ class ModelCog(commands.Cog):
             or not channel_backend.backend_selection_enabled(runtime.settings.turn)
         )
         if legacy:
+            if (
+                choice is None
+                and effort is not None
+                and channel_backend.backend_selection_enabled(runtime.settings.turn)
+            ):
+                admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
+                pick = await _pick_in(interaction, place, admin=admin)
+                if pick is not None and await _off_claude(pick):
+                    raise UserFacingError(f"{EFFORT_OFF_CLAUDE} {NOTHING_CHANGED}")
             change = await choose_thread_model(
                 sessionmaker,
                 tenant_id=place.tenant_id,
@@ -257,18 +280,40 @@ class ModelCog(commands.Cog):
         pick = await _pick_in(interaction, place, admin=admin)
         if pick is None:
             raise UserFacingError(NO_AGENT)
+        off = False
+        if effort is not None:
+            # Refuse before the pick is kept: a refusal changes nothing.
+            chosen, _reset = resolve_effort(effort)
+            model_id = THREAD_MODEL_CHOICES.get(word)
+            off = await _off_claude(pick)
+            if (
+                chosen is not None
+                and model_id is not None
+                and chosen not in model_efforts(model_id)
+                and not off
+            ):
+                raise ThreadModelRefused(
+                    f"{model_label(model_id)} doesn't take an effort. {NOTHING_CHANGED}"
+                )
         done = await pick_thread(
             pick, pick_value(choice), thread_id=place.conversation_id, admin=admin
         )
-        if effort is not None and isinstance(done, ThreadModelChange):
-            done = await choose_thread_model(
-                sessionmaker,
-                tenant_id=place.tenant_id,
-                platform="discord",
-                thread_id=place.conversation_id,
-                effort=effort,
-            )
-        return thread_pick_result(done)
+        text = thread_pick_result(done)
+        if effort is None or not isinstance(done, ThreadModelChange):
+            return text
+        picked = done.model_id or "default"
+        if ":" in picked and not picked.startswith(f"{DEFAULT_BACKEND}:"):
+            return f"{text} {EFFORT_NOT_CLAUDE}"
+        if off:
+            return f"{text} {EFFORT_OFF_CLAUDE}"
+        kept = await choose_thread_model(
+            sessionmaker,
+            tenant_id=place.tenant_id,
+            platform="discord",
+            thread_id=place.conversation_id,
+            effort=effort,
+        )
+        return kept.note
 
     @model.autocomplete("choice")
     async def _choices(

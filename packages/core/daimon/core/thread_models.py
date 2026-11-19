@@ -56,6 +56,9 @@ THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
 #: The efforts a conversation can pick, plus "default" for the agent's own.
 THREAD_EFFORTS: Final = ("low", "medium", "high", "xhigh", "max")
 
+EFFORT_NOT_CLAUDE: Final = "The effort was not set: only Claude models take one."
+EFFORT_OFF_CLAUDE: Final = "The effort was not set: this agent doesn't run on Anthropic."
+
 
 _NO_XHIGH: Final = ("low", "medium", "high", "max")
 

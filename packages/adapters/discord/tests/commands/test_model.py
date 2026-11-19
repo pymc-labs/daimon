@@ -283,3 +283,52 @@ async def test_an_unknown_effort_is_refused_and_changes_nothing(
 
     assert "isn't an effort this conversation can use" in content
     assert await _stored(db_session_factory, guild_id) is None
+
+
+async def test_an_effort_the_model_refuses_keeps_the_model_unchanged(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000012
+    await _registered_guild(db_session_factory, guild_id)
+    _with_selection(monkeypatch)
+    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=False))
+    picked = AsyncMock()
+    monkeypatch.setattr(model_command, "pick_thread", picked)
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+
+    content = await _run(interaction, "haiku", "max")
+
+    assert "doesn't take an effort. Nothing changed." in content
+    picked.assert_not_awaited()
+    assert await _stored(db_session_factory, guild_id) is None
+
+
+async def test_an_effort_with_a_pick_on_another_provider_is_noted_not_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000013
+    await _registered_guild(db_session_factory, guild_id)
+    _with_selection(monkeypatch)
+    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=False))
+    done = ThreadModelChange(model_id="openai:gpt-5", note="Now on GPT-5.")
+    monkeypatch.setattr(model_command, "pick_thread", AsyncMock(return_value=done))
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+
+    content = await _run(interaction, "openai:gpt-5", "high")
+
+    assert content == "Now on GPT-5. The effort was not set: only Claude models take one."
+
+
+async def test_an_effort_alone_is_refused_on_an_agent_off_claude(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000014
+    await _registered_guild(db_session_factory, guild_id)
+    _with_selection(monkeypatch)
+    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=True))
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+
+    content = await _run(interaction, None, "high")
+
+    assert "this agent doesn't run on Anthropic. Nothing changed." in content
+    assert await _stored(db_session_factory, guild_id) is None
