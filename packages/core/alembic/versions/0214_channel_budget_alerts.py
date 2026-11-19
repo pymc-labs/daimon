@@ -6,7 +6,7 @@ support channel, at the limit and at each further full multiple of it).
 `alert_window_key` and `alert_level` record the highest multiple already
 alerted in a window, so each alert goes out once across workers and restarts.
 
-downgrade: safe
+downgrade: destructive
 """
 
 from __future__ import annotations
