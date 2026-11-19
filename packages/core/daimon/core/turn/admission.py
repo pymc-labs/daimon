@@ -59,7 +59,7 @@ from daimon.core.channel_backend import (
 from daimon.core.channel_backend import log_backend_unsupported as _log_backend_unsupported
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError
@@ -2318,8 +2318,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         not authorize(
             policy, subject=grant.subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         )
-        or not deps.direct_message_policies.get(grant.tenant_id, DirectMessagePolicy()).allows(
-            grant.subject.platform_user_id or ""
+        or not env_admits(
+            deps.direct_message_policies, grant.tenant_id, grant.subject.platform_user_id or ""
         )
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")

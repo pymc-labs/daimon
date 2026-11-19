@@ -13,8 +13,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0211_provider_key_gate"
-down_revision: str | None = "0210_outbox_attribution"
+revision: str = "0213_provider_key_gate"
+down_revision: str | None = "0212_outbox_attribution"
 branch_labels: str | None = None
 depends_on: str | None = None
 

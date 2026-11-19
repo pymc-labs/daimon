@@ -9,7 +9,7 @@ from __future__ import annotations
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
-from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.access_policy import DM_SCOPE_PREFIX, place_thread_id
 from daimon.core.posted_controls import PostedCard
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -44,7 +44,11 @@ async def post_own_card(
         from daimon.adapters.mcp.tools.discord._switch_card import post_switch_card
 
         return await post_switch_card(
-            runtime, auth, channel_id=origin.thread_id, card=card, origin=place
+            runtime,
+            auth,
+            channel_id=place_thread_id(origin.thread_id) or origin.parent_channel_id,
+            card=card,
+            origin=place,
         )
     if origin.platform == "web":
         return await _notify_web(runtime, origin, card)

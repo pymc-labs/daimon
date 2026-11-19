@@ -24,7 +24,7 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Web |
+| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -55,7 +55,7 @@ Where each feature can be set, and its default.
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -63,7 +63,7 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
-| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  | On by default on Teams |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -86,6 +86,7 @@ Where each feature can be set, and its default.
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| Callback watch lifetime | `callback_watch_lifetime` | Limit | 30 days | ✓ | ✓ |  |  |  |  |
 | Answer time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | Unattended run time limit | `unattended_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -94,7 +95,7 @@ Where each feature can be set, and its default.
 | Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
-| Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
@@ -604,14 +605,14 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Direct messages
 
-Conversations may move to a direct message with the agent. The agent that answers there is the team's DM agent, which is chosen apart from this.
+People may message the agent directly; on for the team, every agent takes part unless it opts out. Who may message which agent is set apart from this.
 
 | | |
 | --- | --- |
 | Key | `direct_messages` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
 ## Direct message wait
@@ -905,6 +906,18 @@ The longest one long job may run. The smallest setting wins.
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Callback watch lifetime
+
+How long a callback watch lasts, new or moved in, before it must be renewed. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `callback_watch_lifetime` |
+| Values | `0` (Permanent), `90` (90 days), `30` (30 days), `7` (7 days) |
+| Default | `30` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
 
 ## Answer time limit
 

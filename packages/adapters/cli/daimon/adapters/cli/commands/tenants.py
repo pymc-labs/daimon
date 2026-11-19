@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -941,70 +940,3 @@ async def tenants_access_policy_set(
             )
         for name in dropped:
             console.print(f"  {name} has no rule now (runs anywhere)")
-
-
-@tenants_app.command("dm-policy")
-def tenants_dm_policy_command(
-    platform: str,
-    external_id: str,
-    agent: Annotated[
-        str | None, typer.Option("--agent", help="Tenant-owned cold DM agent name.")
-    ] = None,
-    clear_agent: Annotated[
-        bool, typer.Option("--clear-agent", help="Disable cold DM discovery.")
-    ] = False,
-    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
-    json_output: Annotated[bool, JSON_OPTION] = False,
-) -> None:
-    """Inspect or update tenant DMs; an unset agent leaves /dm-me moves available."""
-
-    console = Console()
-
-    async def run() -> None:
-        async with build_runtime(load_settings()) as runtime:
-            result = await tenants_dm_policy(
-                rt=runtime,
-                platform=platform,
-                external_id=external_id,
-                agent=agent,
-                clear_agent=clear_agent,
-                enabled=enabled,
-            )
-        console.print(json.dumps(result) if json_output else result, markup=False)
-
-    run_cli(run(), console=console)
-
-
-async def tenants_dm_policy(
-    *,
-    rt: CliRuntime,
-    platform: str,
-    external_id: str,
-    agent: str | None = None,
-    clear_agent: bool = False,
-    enabled: bool | None = None,
-) -> dict[str, str | bool | None]:
-    from daimon.core.stores.direct_messages import (
-        dm_enabled,
-        get_dm_agent_name,
-        set_dm_agent_name,
-        set_dm_enabled,
-    )
-
-    if agent is not None and clear_agent:
-        raise typer.BadParameter("--agent and --clear-agent are mutually exclusive")
-    tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=external_id)
-    async with rt.sessionmaker.begin() as session:
-        tenant = await get_tenant(session, tenant_id)
-        if tenant is None:
-            raise typer.BadParameter("tenant not found")
-        if agent is not None and tenant.platform != "discord":
-            raise typer.BadParameter("cold DMs currently require Discord")
-        if agent is not None or clear_agent:
-            await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
-        if enabled is not None:
-            await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
-        return {
-            "enabled": await dm_enabled(session, tenant_id=tenant_id),
-            "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
-        }

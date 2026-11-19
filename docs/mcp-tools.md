@@ -708,7 +708,7 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | Discord callers | Watch a listed read tool from this conversation: a Discord reader or an MCP server's. |
+| `create_watch` | Discord callers | Watch a listed read tool from this conversation, or wake on posts to a secret link. |
 | `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
 | `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
 | `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
@@ -750,7 +750,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message settings. |
 
 ## `wizard`
 

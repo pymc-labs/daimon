@@ -18,11 +18,13 @@ def test_the_setting_defaults_to_off_with_presets() -> None:
     spec = FEATURES["dm_debounce_seconds"]
     assert spec.default == "0", "a deployment opts in to the wait"
     assert {"0", "1", "3", "5"} <= set(spec.values)
-    assert spec.platforms == frozenset({"discord", "slack"}), "web has no hold-and-merge path"
+    assert spec.platforms == frozenset({"discord", "slack", "teams"}), (
+        "web has no hold-and-merge path"
+    )
     assert dm_debounce.MAX_WAIT_S == 10.0
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_the_wait_follows_the_workspace_setting(db_session_factory, platform) -> None:
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform=platform)
@@ -245,3 +247,59 @@ async def test_stopping_ends_every_wait_and_skips_later_ones() -> None:
     assert turns.groups == [["one"], ["two"]], "both answered as they are"
     assert monotonic() - started < 1.0, "neither waited"
     assert ("two", True) not in turns.marks, "a burst that never waits is never marked"
+
+
+async def test_a_pick_answers_everything_held_at_once_marked_once() -> None:
+    bursts: DmBursts[str, str] = DmBursts(str)
+    burst = bursts.open("k", "one")
+    turns = _Turns()
+    pick: list[str] = []
+
+    async def click() -> None:
+        assert bursts.join("k", "two") is burst, "sent while the pick is open: held"
+        pick.append("agent")
+        bursts.wake("k")
+
+    later = asyncio.create_task(_later(0.05, click))
+    started = monotonic()
+    assert await burst.hold(lambda: _found(pick), turns.react, 5.0) == "agent"
+    await burst.answer(5.0, turns.react, turns.answer)
+    await later
+    assert monotonic() - started < 1.0, "woken at once, and no wait after the pick"
+    assert turns.groups == [["one", "two"]], "one turn answers both"
+    assert turns.marks == [("one", True), ("one", False)], "the first is marked once"
+
+
+async def test_a_pick_made_elsewhere_is_found_by_the_recheck(monkeypatch) -> None:
+    monkeypatch.setattr(dm_debounce, "RECHECK_S", 0.05)
+    burst = DmBurst("one", str)
+    pick: list[str] = []
+    asyncio.get_running_loop().call_later(0.1, pick.append, "agent")
+    started = monotonic()
+    assert await burst.hold(lambda: _found(pick), _Turns().react, 5.0) == "agent"
+    assert monotonic() - started < 1.0
+
+
+async def test_a_pick_not_made_in_time_or_cut_by_a_stop_holds_nothing() -> None:
+    burst = DmBurst("one", str)
+    pick: list[str] = []
+    assert await burst.hold(lambda: _found(pick), _Turns().react, 0.05) is None
+    assert burst.unanswered == ["one"] and not burst.stopped, "the caller says it expired"
+    asyncio.get_running_loop().call_later(0.05, burst.stop)
+    started = monotonic()
+    assert await burst.hold(lambda: _found(pick), _Turns().react, 5.0) is None
+    assert burst.stopped and monotonic() - started < 1.0
+
+
+async def test_a_refused_pick_ends_the_hold_at_once() -> None:
+    """The refusal speaks for the burst, so the caller posts no expiry."""
+    bursts: DmBursts[str, str] = DmBursts(str)
+    burst = bursts.open("k", "one")
+    asyncio.get_running_loop().call_later(0.05, bursts.refuse, "k")
+    started = monotonic()
+    assert await burst.hold(lambda: _found([]), _Turns().react, 5.0) is None
+    assert burst.refused and not burst.stopped and monotonic() - started < 1.0
+
+
+async def _found(pick: list[str]) -> str | None:
+    return pick[0] if pick else None

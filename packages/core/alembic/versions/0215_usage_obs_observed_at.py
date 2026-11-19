@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0213_usage_obs_observed_at"
-down_revision: str | None = "0212_gemini_records"
+revision: str = "0215_usage_obs_observed_at"
+down_revision: str | None = "0214_gemini_records"
 branch_labels: str | None = None
 depends_on: str | None = None
 

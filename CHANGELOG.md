@@ -127,6 +127,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's
   idle relay vault sweep reads only session vault ids and waits ten minutes
   after a restart before its first run.
+- **Agents can wake on posts to a private link.** `create_watch` with source
+  `callback` DMs the owner a secret link; each post to it wakes the agent once.
+  Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
+  `callback_watch_lifetime` feature (30 days by default, or permanent) and a post
+  may carry up to `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default).
+  `daimon watches import` also carries over such watches and held reminders from
+  every file of an export, and `daimon watches go-live` makes everything an import
+  holds for an agent live in one step, in place of `daimon watches confirm`.
+  Reminders fire in the private conversation, thread or channel they came from,
+  only while the agent may post there and the owner can still see it. A rerun
+  updates what has not gone live, `--full` cancels what no file of the run lists,
+  and `unpause`, `renew` and `rotate-link` manage what came in.
+  Moving people in never messages them. A timers or callback import names its
+  agent: held timers belong to it, so another agent's `go-live` and `--full` run
+  leave them alone. Reminders in a private conversation or channel only fire for an
+  agent on Managed Agents (a plain channel's own backend setting wins over the agent's);
+  `go-live` lists the others by name and schedules none.
+  Each watch imports in its own transaction, so watch ingress never waits for a
+  whole import. Importing the same files again after a privacy purge restores the
+  purged rows, so delete the import files after use. `daimon watches confirm` is
+  removed. After the `callback_watch_imports` migration, roll back by downgrading
+  it first, because an old sidecar refuses the new grant. Reminders set in a
+  private conversation now fire; those already due when this deploys are settled
+  without firing. A callback watch cannot be made in a private conversation, and
+  the lane proxy now routes callback links with the configured body limit.
+- **Operators can move people in from another bot.** `daimon tags import` opts
+  listed Discord members out of being tagged. `daimon dm import-history` holds
+  each person's earlier private conversation for their first DM here with the
+  agent it names, which starts from it once, without saying so.
 - **Answer and unattended run time limits.** Two new workspace and agent settings, set
   by server admins, limit how long one turn may run: `turn_time_limit` for a person's
   message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
@@ -185,12 +214,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a chat admin. The reason is required, and the audit log records the
   operator, the old and new value and the reason. Other features refuse
   `--reason`. Chat users who are not admins and agent keys are refused as before.
+- **Choose who may DM which agent.** Each agent has a DM grant (every member, only those
+  listed, or all but those listed, by person or group: a Discord role, Slack user group
+  or Teams team), and a server has a default agent and ordered rules that send a person,
+  a group or everyone to an agent. A locked rule decides alone. When several agents
+  admit a person, a picker lets them choose, answers the messages sent meanwhile in one
+  turn and remembers the choice. A server with no rules or narrower grants keeps its
+  earlier DM behaviour: only the default agent answers, and a Teams personal chat
+  without one keeps its own agent. `/dm-me`, cold DMs (Slack too), Teams personal chats
+  (DMs on by default there), hand-overs and agents that send DMs follow the same grants,
+  and a failed group lookup refuses. Slack user groups need the `usergroups:read` scope
+  and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web
+  app (Admin > Agent access and Admin > Workspace, with a "Check a person" box that
+  reads the person's groups from the platform) or from chat, each change checked and
+  audited; `daimon features set direct_messages on|off` turns DMs on or off
+  (`daimon tenants dm-policy` is gone: `dm default` and `features set` replace it).
+  `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
+  access; until it is removed the env setting applies with it on every path, `dm
+  explain` included. Erasing a person removes their pick, rules and grant entries.
+- **Teams personal chats follow the DM settings.** The DM wait, DM history depth
+  and read-only DM memory apply to them as they do to Discord and Slack DMs.
 - **Direct messages take files, forwards and replies.** A picture or a file sent in a
   direct message reaches the agent as it does in a channel, and a message with only a
   picture is answered. A forwarded message is passed as untrusted content, and a
   reply shows the message it answers. A forward is also passed in channels.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
-  messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
+  messages each direct message reply carries: 12 (the default; 100 on Teams), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. It applies to
   Discord, Slack and web direct messages. A higher setting costs more.
 - **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3
@@ -201,7 +250,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message gets an eyes reaction until it is answered. An approval reply such as "yes"
   is answered on its own, at once. A restart answers held messages at once. If
   `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
-  sent. It applies to Discord and Slack, set per workspace or deployment.
+  sent. It applies to Discord, Slack and Teams, set per workspace or deployment.
 - **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
   with no model, written by a new pod, makes old pods fail turns in that conversation
   until the rollout ends. Avoid changing a conversation's effort while it rolls out.

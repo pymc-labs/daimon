@@ -448,7 +448,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
-_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "web"})
+_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
@@ -592,13 +592,15 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="off",
-        tiers=("deployment", "workspace"),
+        tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "Conversations may move to a direct message with the agent. The agent that answers "
-            "there is the team's DM agent, which is chosen apart from this."
+            "People may message the agent directly; on for the team, every agent takes part "
+            "unless it opts out. Who may message which agent is set apart from this."
         ),
-        platforms=_DM_PLATFORMS,
+        # Teams personal chats always reached an agent, so they stay on unless turned off.
+        platforms=_DM_PLATFORMS | {"teams"},
+        platform_defaults={"teams": "on"},
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -619,7 +621,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
             "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
             "and never an approval reply."
         ),
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -632,7 +634,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc="A reply in a direct message can read the agent's memory but not change it.",
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
 )
@@ -993,6 +995,18 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         minimum=1,
     ),
     _limit(
+        "callback_watch_lifetime",
+        "Callback watch lifetime",
+        "How long a callback watch lasts, new or moved in, before it must be renewed. "
+        "The smallest setting wins.",
+        {"0": "Permanent", "90": "90 days", "30": "30 days", "7": "7 days"},
+        default="30",
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+        zero_unlimited=True,
+    ),
+    _limit(
         "turn_time_limit",
         "Answer time limit",
         (
@@ -1224,6 +1238,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "100": "100 messages",
         },
         default="12",
+        # Teams personal chats replayed up to 100 messages before this setting existed.
+        platform_defaults={"teams": "100"},
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),

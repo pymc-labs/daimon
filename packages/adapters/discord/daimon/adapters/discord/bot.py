@@ -99,6 +99,7 @@ from daimon.adapters.discord.typed_stop import (
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
@@ -107,7 +108,7 @@ from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.channel_listing import run_channel_listing
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings, env_dm_policy
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     check_wake_responder,
@@ -119,6 +120,7 @@ from daimon.core.continuity.messages import (
     render_current_work_must_finish,
     render_preparation_failed,
 )
+from daimon.core.continuity.scope_timers import DeliveryRetry, RunScopeTimer
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.continuity.watch_reports import run_watch_report_poller
@@ -680,13 +682,14 @@ class DaimonBot(commands.Bot):
             self.http = http_client
             self._connection.http = http_client
         self._ingress_clock = clock
-        self.runtime = with_budget_notifier(
-            runtime, self.open_member_dm, self.is_closed, client=self
-        )
         self.membership_resolver = GatewayMembershipResolver(self)
         self.runtime = replace(
-            self.runtime,
-            turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
+            runtime,
+            turn_deps=replace(runtime.turn_deps, membership_resolver=self.membership_resolver),
+        )
+        # After the resolver: a notice's grant check reads the recipient's current roles.
+        self.runtime = with_budget_notifier(
+            self.runtime, self.open_member_dm, self.is_closed, client=self
         )
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
@@ -1206,8 +1209,8 @@ class DaimonBot(commands.Bot):
                         self.runtime.sessionmaker,
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
-                        dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
-                            row.tenant_id, DirectMessagePolicy()
+                        dm_policy=lambda row: env_dm_policy(
+                            self.runtime.settings.direct_message_policies, row.tenant_id
                         ),
                         client=self,
                         output_client=self.runtime.anthropic,
@@ -3994,10 +3997,23 @@ class DaimonBot(commands.Bot):
         """
         if self.draining:
             return True
+        if wake.thread_id.startswith(DM_SCOPE_PREFIX):
+            return await self._open_scope_timers(wake)
+        if wake.thread_id.startswith(CHANNEL_SCOPE_PREFIX):
+            return await self._open_scope_timers(wake, run_timer=self._run_channel_timer)
         try:
-            channel = self.get_channel(int(wake.thread_id)) or await self.fetch_channel(
-                int(wake.thread_id)
+            thread_id = int(wake.thread_id)
+        except ValueError:
+            # A scope that names no Discord channel can never open: settle, do not retry.
+            await skip_thread_wakes(
+                self.runtime.sessionmaker,
+                thread=wake,
+                reason="thread_unavailable",
+                now=datetime.now(UTC),
             )
+            return True
+        try:
+            channel = self.get_channel(thread_id) or await self.fetch_channel(thread_id)
         except (discord.NotFound, discord.Forbidden):
             channel = None
         except discord.HTTPException as exc:
@@ -4017,6 +4033,131 @@ class DaimonBot(commands.Bot):
             )
         )
         return True
+
+    async def _open_scope_timers(
+        self, wake: WakeThread, *, run_timer: RunScopeTimer | None = None
+    ) -> bool:
+        """Dispatch the due timers of a private DM or channel scope, each in its own task."""
+        from daimon.core.continuity.scope_timers import dispatch_scope_timer
+        from daimon.core.continuity.wakes import (
+            claim_wake,
+            list_dispatchable_wakes,
+            settle_wake,
+        )
+
+        rows = await list_dispatchable_wakes(
+            self.runtime.sessionmaker,
+            tenant_id=wake.tenant_id,
+            platform=wake.platform,
+            thread_id=wake.thread_id,
+            now=datetime.now(UTC),
+        )
+        for row in rows:
+            if row.reason != "timer":
+                # Nothing but timers runs in a private scope; never leave one listed forever.
+                claim = await claim_wake(
+                    self.runtime.sessionmaker,
+                    idempotency_key=row.idempotency_key,
+                    now=datetime.now(UTC),
+                )
+                if claim is not None:
+                    await settle_wake(
+                        self.runtime.sessionmaker,
+                        claim,
+                        status="skipped",
+                        now=datetime.now(UTC),
+                        skip_reason="thread_unavailable",
+                    )
+                continue
+            self._spawn(
+                dispatch_scope_timer(
+                    self.runtime.sessionmaker,
+                    row,
+                    run_timer=run_timer or self._run_dm_timer,
+                    dispatch_errors=(discord.HTTPException,),
+                )
+            )
+        return True
+
+    async def _run_channel_timer(self, row: TaskContinuationRow, seed: str) -> None:
+        """Run one started timer as an unattended turn of its owner and post it in the channel."""
+        from daimon.adapters.discord.timer_delivery import (
+            ChannelAccess,
+            deliver_channel_timer,
+            require_channel_timer_access,
+        )
+        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_channel_timer
+
+        async def check_access() -> ChannelAccess:
+            return await require_channel_timer_access(self.runtime.sessionmaker, row, self)
+
+        async def run_turn(access: ChannelAccess) -> str:
+            member = access.member
+            role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
+                else Role.USER
+            )
+            try:
+                reply = await run_channel_timer(
+                    self.runtime.turn_deps,
+                    row,
+                    prompt=seed,
+                    role=role,
+                    role_ids=tuple(member_role_ids(member)),
+                    category_id=access.category_id,
+                )
+            except DirectMessageAccessRevoked as error:
+                log.info("timer.refused", place="channel", reason=error.reason)
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
+            return reply.text
+
+        await deliver_channel_timer(
+            row,
+            check_access=check_access,
+            run_turn=run_turn,
+            channel_for=self.get_partial_messageable,
+        )
+
+    async def _run_dm_timer(self, row: TaskContinuationRow, seed: str) -> None:
+        """Run one started timer as a private DM turn of its owner and DM the reply."""
+        from daimon.adapters.discord.timer_delivery import deliver_dm_timer
+        from daimon.core.direct_messages import (
+            DirectMessageAccessRevoked,
+            DirectMessageClaimLost,
+            run_dm_timer,
+        )
+
+        async def run_turn() -> str:
+            try:
+                reply = await run_dm_timer(self.runtime.turn_deps, row, prompt=seed)
+            except DirectMessageAccessRevoked as error:
+                log.info("timer.refused", place="dm", reason=error.reason)
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
+            except DirectMessageClaimLost:
+                # The owner's DM fence dropped mid-turn: offer the timer again.
+                raise DeliveryRetry from None
+            return reply.text
+
+        async def member_present(guild_id: int, user_id: int) -> bool:
+            try:
+                guild = self.get_guild(guild_id) or await self.fetch_guild(guild_id)
+                member = await guild.fetch_member(user_id)
+            except (discord.NotFound, discord.Forbidden):
+                return False
+            return not member.bot
+
+        await deliver_dm_timer(
+            self.runtime.sessionmaker,
+            row,
+            run_turn=run_turn,
+            open_dm=self.open_member_dm,
+            member_present=member_present,
+            dm_policy=lambda tenant_id: env_dm_policy(
+                self.runtime.settings.direct_message_policies, tenant_id
+            ),
+            membership_resolver=self.membership_resolver,
+        )
 
     async def _open_watch_report(self, row: TaskContinuationRow) -> None:
         """The report poller's hook: dispatch one watch report in its own task."""
@@ -4088,9 +4229,10 @@ class DaimonBot(commands.Bot):
                 run_turn=run_turn,
                 open_dm=self.open_member_dm,
                 member_present=member_present,
-                dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
-                    tenant_id, DirectMessagePolicy()
+                dm_policy=lambda tenant_id: env_dm_policy(
+                    self.runtime.settings.direct_message_policies, tenant_id
                 ),
+                membership_resolver=self.membership_resolver,
             )
             return
         if watch.delivery != "new_thread":

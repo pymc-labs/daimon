@@ -171,10 +171,12 @@ TAIL = (
     "0207_skill_manifest_bytes",
     "0208_active_turn_deadline",
     "0209_thread_model_effort",
-    "0210_outbox_attribution",
-    "0211_provider_key_gate",
-    "0212_gemini_records",
-    "0213_usage_obs_observed_at",
+    "0210_dm_access",
+    "0211_callback_watch_imports",
+    "0212_outbox_attribution",
+    "0213_provider_key_gate",
+    "0214_gemini_records",
+    "0215_usage_obs_observed_at",
 )
 HEAD = TAIL[-1]
 

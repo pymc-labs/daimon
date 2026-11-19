@@ -127,3 +127,6 @@ def test_dm_memory_defaults_to_twelve_and_scales_its_characters() -> None:
     assert (found.value, found.tier) == ("50", "agent"), "a lower tier can only shrink it"
     cap = DmHistoryCap.of(_snapshot(found))
     assert (cap.turns, cap.chars) == (50, 50_000)
+    assert (spec.default_for("teams"), spec.default_for("slack")) == ("100", "12"), (
+        "an unrouted Teams personal chat keeps the 100 messages it replayed before"
+    )

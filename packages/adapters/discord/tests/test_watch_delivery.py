@@ -20,6 +20,7 @@ from daimon.adapters.discord.watch_delivery import (
 )
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.wakes import list_dispatchable_wakes, list_due_wake_threads
+from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores import watches
 from daimon.core.stores.domain import TaskContinuationRow, WatchFiringRow, WatchRow
 from daimon.core.stores.task_continuations import get_continuation, list_due_watch_report_rows
@@ -133,6 +134,9 @@ def dm_store(monkeypatch):
         watch_delivery, "watch_seed", AsyncMock(side_effect=lambda *_a, **_k: state.seed)
     )
     monkeypatch.setattr(watch_delivery, "pause_watch", pause)
+    state.granted = True
+    state.admits = AsyncMock(side_effect=lambda *_a, **_k: state.granted)
+    monkeypatch.setattr(watch_delivery, "sender_admits", state.admits)
     return state
 
 
@@ -145,7 +149,20 @@ def _ports(*, text="report", present=None, allowed=("555",)):
         dm_policy=lambda _tenant: DirectMessagePolicy(
             mode="allowlist", recipient_ids=list(allowed)
         ),
+        membership_resolver=CachedMembershipResolver(_roles),
     ), dm
+
+
+async def _roles(_tenant, _guild, user_id):
+    return Membership(is_member=True, role_ids=("staff",) if user_id == "555" else ())
+
+
+async def test_dm_report_when_the_grant_lists_a_role_then_the_owners_roles_decide(dm_store):
+    ports, _dm = _ports()
+    await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    groups = dm_store.admits.await_args.kwargs["groups"]
+    assert await groups("555", frozenset({"staff", "other"})) == {"staff"}
+    assert await groups("556", frozenset({"staff"})) == frozenset()
 
 
 async def test_dm_report_goes_only_to_the_owner_with_mentions_off(dm_store):
@@ -156,6 +173,17 @@ async def test_dm_report_goes_only_to_the_owner_with_mentions_off(dm_store):
     kwargs = dm.send.await_args.kwargs
     assert kwargs["content"] == "Two new rows. <@999>"
     assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
+
+
+async def test_agent_grant_leaving_the_owner_out_runs_no_turn_and_pauses_the_watch(dm_store):
+    """The watch's agent no longer admits the owner: nothing is sent and the watch pauses."""
+    dm_store.granted = False
+    ports, dm = _ports()
+    with pytest.raises(AdmissionDenied):
+        await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    ports["run_turn"].assert_not_awaited()
+    dm.send.assert_not_awaited()
+    assert dm_store.paused, "the watch is paused"
 
 
 async def test_dm_disabled_runs_no_turn_and_pauses_the_watch(dm_store):
