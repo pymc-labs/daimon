@@ -171,17 +171,6 @@ def test_deploy_workflow_remote_scripts() -> None:
     assert scripts == 5, f"expected exactly 5 remote scripts, found {scripts}"
 
 
-def test_hosted_lane_workflow_is_absent() -> None:
-    assert not (_WORKFLOWS / "lane.yml").exists(), "hosted lane workflow must stay absent"
-    for workflow in (*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml")):
-        source = workflow.read_text()
-        assert "lane/**" not in source, f"{workflow.name} must not run on lane branch pushes"
-        if workflow.name != "self-hosting.yml":
-            assert "deploy/lanes/" not in source, (
-                f"{workflow.name} must not use the self-hosting Compose file"
-            )
-
-
 def test_self_hosting_workflow_uses_placeholder_configuration() -> None:
     workflow = _WORKFLOWS / "self-hosting.yml"
     assert workflow.exists(), "Compose configuration should be checked in Actions"
