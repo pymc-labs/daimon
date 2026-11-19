@@ -585,12 +585,12 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         category="chat",
         effect="display",
         values={
-            "3": "3 seconds",
             "0": "Off",
             "1": "1 second",
+            "3": "3 seconds",
             "5": "5 seconds",
         },
-        default="3",
+        default="0",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
