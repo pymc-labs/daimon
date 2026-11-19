@@ -3,8 +3,8 @@
 The SDK has no types for this API, so the request shapes below are written from the
 API reference. They are closed: an undeclared key is a 400 `Unknown parameter`, as
 the API answers (#1394). Replies carry what the API adds on its own: web search and
-MCP tool defaults echoed onto agents and sessions (#1148), and a turn that ends
-before its usage is counted (#1769), which a later turn read returns.
+MCP tool defaults echoed onto agents and sessions (#1148), and a turn resource
+that reports the usage its terminal event carried only a moment later (#1769).
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from daimon.testing.sim.script import Script, Turn
 
 Json = Any
 _LATENCY_S = 0.05
+#: When a turn resource fills in usage its terminal event already carried (#1769).
+_LATE_USAGE_S = 2.0
 
 
 class _Mcp(TypedDict, total=False):
@@ -167,7 +169,7 @@ class OpenAIAPI(StrictFake):
 
     script: Script = field(default_factory=Script)
     host: str = "api.openai.com"
-    # Count usage only on a later turn read, as the API sometimes does (#1769).
+    # Turn reads say usage null for a moment after the event that carried it (#1769).
     late_usage: bool = False
     reported: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]])
     resources: dict[str, dict[str, Json]] = field(default_factory=dict[str, dict[str, Json]])
@@ -439,8 +441,10 @@ class OpenAIAPI(StrictFake):
             "output_tokens_details": {"reasoning_tokens": 0},
         }
         self.reported.append((script.input_tokens, script.output_tokens))
-        turn.update(status="completed", usage=usage)
-        ended = {**turn, "usage": None} if self.late_usage else dict(turn)
+        turn.update(status="completed", usage=None if self.late_usage else usage)
+        if self.late_usage:
+            asyncio.get_running_loop().call_later(_LATE_USAGE_S, turn.update, {"usage": usage})
+        ended = {**turn, "usage": usage}
         events += [
             self._event(sid, "turn.item.done", turn_id=tid, item=answer),
             self._event(sid, "turn.completed", turn=ended),
