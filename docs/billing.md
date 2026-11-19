@@ -62,7 +62,8 @@ the ledger and to a finished turn's summary line. Usage panels and
 > **Warning:** An Anthropic model with no pricing row runs free: the debit is
 > zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
 > self-hosted turns on an unpriced model are refused instead. Token rates
-> exclude container and storage charges.
+> exclude container and storage charges: an OpenAI workspace's hosted
+> container fee is not passed on to the tenant.
 
 ## The gates
 

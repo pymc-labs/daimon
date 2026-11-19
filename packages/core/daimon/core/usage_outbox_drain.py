@@ -2,8 +2,8 @@
 
 Usage recorded while a profile's infrastructure cost was unknown stayed pending in the
 accounting outbox (SMOKE fc0fa16a: 156 of 156 rows on staging since 10-15), so it was
-never debited. Once a profile is known
-to have no infrastructure (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES) this drain
+never debited. Once a profile settles at $0
+infrastructure (infrastructure_cost.ZERO_INFRASTRUCTURE_PROFILES) this drain
 applies those rows through the same apply_usage_outbox the live path uses.
 
 Idempotent: apply_usage_outbox claims a row in the transaction that writes its ledger
@@ -17,7 +17,7 @@ from decimal import Decimal
 
 import structlog
 from daimon.core.accounting_outbox import apply_usage_outbox
-from daimon.core.infrastructure_cost import NO_INFRASTRUCTURE_PROFILES, known_infrastructure_usd
+from daimon.core.infrastructure_cost import ZERO_INFRASTRUCTURE_PROFILES, known_infrastructure_usd
 from daimon.core.pricing import provider_cost_of, provider_prices, unreported_cache_writes
 from daimon.core.stores import mux_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,7 +38,7 @@ async def drain_pending_usage(
     global _cursor
     async with sessionmaker() as db:
         rows = await mux_state.pending_outbox_for_profiles(
-            db, NO_INFRASTRUCTURE_PROFILES, limit=limit, after=_cursor
+            db, ZERO_INFRASTRUCTURE_PROFILES, limit=limit, after=_cursor
         )
     last = rows[-1].row if rows else None
     _cursor = (

@@ -114,11 +114,13 @@ async def test_drained_usage_ignores_an_agent_of_another_tenant(sm):
     assert set(by_agent) == {None}, "attribution is tenant-scoped"
 
 
-async def test_the_drain_leaves_a_profile_with_unknown_infrastructure_pending(sm):
-    """An OpenAI persistent workspace runs a hosted container: its cost stays unknown."""
+async def test_pending_openai_workspace_usage_drains_at_zero_infrastructure(sm):
+    """No meter reports a persistent workspace's container fee: its tokens settle at $0
+    infrastructure instead of staying pending forever."""
     await pending_usage(sm, provider="openai")
-    assert await drain_pending_usage(sm, markup=Decimal(1)) == (0, Decimal(0))
-    assert await _pending(sm) == 1 and await _debited(sm) == 0
+    applied, usd = await drain_pending_usage(sm, markup=Decimal(1))
+    assert applied == 1 and usd > 0, "the pending OpenAI row is debited"
+    assert await _pending(sm) == 0 and await _debited(sm) == -usd, "exactly once"
 
 
 async def test_rows_the_drain_cannot_price_never_block_the_rest(sm):
@@ -135,8 +137,8 @@ async def test_rows_the_drain_cannot_price_never_block_the_rest(sm):
 
 
 async def test_a_binding_that_ever_had_another_profile_stays_pending(sm):
-    """A binding id survives a rebind: an earlier persistent-workspace generation's row
-    must not be settled as if it were inline reuse at $0 infrastructure."""
+    """A binding id survives a rebind: an earlier self-hosted generation's row must not
+    be settled as if it were inline reuse at $0 infrastructure."""
     from daimon.core._models import ProviderBinding
     from sqlalchemy import insert, select
 
@@ -152,8 +154,8 @@ async def test_a_binding_that_ever_had_another_profile_stays_pending(sm):
                 binding_id=current.binding_id,
                 generation=current.generation - 1,
                 tenant_id=current.tenant_id,
-                provider="openai",
-                profile="openai.persistent_workspace",
+                provider="selfhosted",
+                profile="selfhosted.loop",
                 binding=current.binding,
             )
         )

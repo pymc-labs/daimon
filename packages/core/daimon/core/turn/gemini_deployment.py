@@ -690,7 +690,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             deployment,
         ),
         # Inline reuse runs no sandbox or container: its usage settles at infrastructure
-        # $0 (infrastructure_cost.NO_INFRASTRUCTURE_PROFILES), never pending forever.
+        # $0 (infrastructure_cost.ZERO_INFRASTRUCTURE_PROFILES), never pending forever.
         usage_store=GeminiUsageRuntime(accounting, prices, known_infrastructure_usd(PROFILE)),
     )
 

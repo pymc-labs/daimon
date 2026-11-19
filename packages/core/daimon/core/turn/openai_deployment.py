@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -19,6 +20,7 @@ import structlog
 from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
@@ -52,6 +54,7 @@ from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import SessionControls, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
@@ -587,6 +590,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     # the per-model daily cap and the deadline bound it too. Astra included.
     native_limit = spend_limit if native_cap else None
     price = provider_prices(deployment.profile).get((revision.backend, revision.model))
+    infrastructure_usd = known_infrastructure_usd(deployment.profile)
+
+    async def known_infrastructure(observation: UsageObservation) -> Decimal | None:
+        return infrastructure_usd
 
     async def notify_spend_cap() -> None:
         from daimon.core.stores.agent_notices import record_agent_notices
@@ -620,8 +627,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         price=price,
         spend_guard=guard,
         late_usage=LATE_USAGE,
-        # A conversation-only session runs no container: its usage settles at $0
-        # infrastructure. A persistent workspace's container cost stays unknown.
+        # Settles at $0 infrastructure (infrastructure_cost), never pending forever.
+        infrastructure=known_infrastructure,
         session_plan=plan,
         authorization=authorize,
         mcp_secrets=None
