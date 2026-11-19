@@ -346,6 +346,13 @@ async def _purge_principal_in_session(
     microsoft_user_tokens_count = 0
     lead_intakes_count = 0
     host_call_cards_count = 0
+    # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
+    is_platform = isinstance(principal, PlatformPrincipalRow)
+    await routines_store.erase_sandbox_setter(
+        session,
+        ids=[] if is_platform else [str(principal.id)],
+        platform_users=[(principal.tenant_id, principal.external_id)] if is_platform else [],
+    )
     if isinstance(principal, PlatformPrincipalRow):
         lead_intakes_count = await lead_intake_store.erase_actor(
             session, principal.tenant_id, principal.external_id
@@ -670,12 +677,7 @@ async def _purge_account_transaction(
 
     report = PurgeReport()
     github_account_link = await github_links_store.get_account_link(session, account_id=account_id)
-    # Who set a routine's sandbox opt-in: keep the change, drop the person.
-    await routines_store.erase_sandbox_setter(
-        session,
-        ids=[str(account_id), *(str(principal.id) for principal in cli_list)],
-        platform_users=[(pp.tenant_id, pp.external_id) for pp in pp_list],
-    )
+    await routines_store.erase_sandbox_setter(session, ids=[str(account_id)])
     for principal in (*cli_list, *pp_list):
         sub = await _purge_principal_in_session(session, principal=principal)
         report = report.merge(sub)

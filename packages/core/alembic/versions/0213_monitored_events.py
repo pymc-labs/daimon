@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
-revision: str = "0212_monitored_events"
-down_revision: str | None = "0211_callback_watch_imports"
+revision: str = "0213_monitored_events"
+down_revision: str | None = "0212_sandbox_tools_feature"
 branch_labels: str | None = None
 depends_on: str | None = None
 

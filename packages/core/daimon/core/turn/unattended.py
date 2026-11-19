@@ -28,6 +28,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.authz import AgentRef, Subject
     from daimon.core.membership import MembershipResolver
+    from daimon.core.routine_sandbox import RoutineSandbox
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.deps import TurnDeps
@@ -465,6 +467,12 @@ def session_rules_channel(session: BetaManagedAgentsSession, *, platform: str) -
     )
 
 
+#: A DM routine's agent-level sandbox opt-in, set by `run_dm_routine` for its one turn.
+dm_routine_sandbox: ContextVar[RoutineSandbox | None] = ContextVar(
+    "dm_routine_sandbox", default=None
+)
+
+
 def grant_owner_check(deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID) -> PrincipalCheck:
     """The per-send role check for the person a turn runs as."""
     grant = admission.grant
@@ -509,11 +517,15 @@ async def dm_session_authority(
     tenant_id: uuid.UUID,
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
     entry_point: UnattendedEntryPoint | None = None,
-) -> tuple[PolicyApproval, Callable[[], Awaitable[None]]]:
+    sandbox: RoutineSandbox | None = None,
+) -> tuple[PolicyApproval, Callable[[], Awaitable[None]], bool]:
     """Authorize unattended DMs entirely from their actual session snapshot.
 
     A replacement gets a new authority; an in-place identity or endpoint change
     refuses the batch instead of combining rules and hints from different agents.
+    The third value is whether built-ins stay on: only for a `routine` whose agent
+    an operator opted in (`sandbox`), whose session matches it, and that
+    `unattended_capabilities` still allows.
     """
     from daimon.core.turn.admission import decide_before_send
 
@@ -548,6 +560,18 @@ async def dm_session_authority(
             ),
         )
     urls = {server.name: server.url for server in actual.agent.mcp_servers}
+    builtins = False
+    if sandbox is not None and entry_point == "routine":
+        from daimon.core.routine_sandbox import builtins_allowed, run_matches_pin
+
+        builtins = await run_matches_pin(
+            deps.anthropic, sandbox.pin, actual, tenant_id=tenant_id, records=deps.sessionmaker
+        )
+        if not builtins:
+            await sandbox.on_drift()
+        builtins = builtins and await builtins_allowed(
+            deps.sessionmaker, deps.settings, tenant_id, "discord", actual.agent.id
+        )
     posture = unattended_posture(
         deps.tool_safety,
         session=actual,
@@ -557,6 +581,7 @@ async def dm_session_authority(
         channel_id=None,
         fernet=deps.fernet,
         entry_point=entry_point,
+        routine_sandbox_tools=builtins,
     )
 
     async def gate() -> None:
@@ -579,7 +604,8 @@ async def dm_session_authority(
             session_factory=deps.sessionmaker,
             tenant_id=tenant_id,
             entry_point=entry_point,
+            routine_sandbox_tools=builtins,
             principal_check=grant_owner_check(deps, admission, tenant_id),
         )
 
-    return posture, gate
+    return posture, gate, builtins

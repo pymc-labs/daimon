@@ -582,7 +582,7 @@ async def test_the_migration_carries_the_guards_the_models_install(sm: Factory) 
     for name, install, remove in (
         ("0142_mux_account_erasure", _erasure_guards.INSTALL, _erasure_guards.REMOVE),
         (
-            "0212_monitored_events",
+            "0213_monitored_events",
             _erasure_guards.MONITORING_INSTALL,
             _erasure_guards.MONITORING_REMOVE,
         ),
