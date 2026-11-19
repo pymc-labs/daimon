@@ -202,7 +202,7 @@ async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is
         pending = (await mux_state.pending_outbox(db))[0].observation
     measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
     measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
-    rereads, now = DurableRereads(budget_s=0.05), datetime.now(UTC)
+    rereads, now = DurableRereads(budget_s=1.0), datetime.now(UTC)  # room for a real read
     assert await rereads.run(sm, markup=Decimal(1), now=now) == 1, "the slow read is cut off"
     assert await _debited(sm) == 0, "nothing was read through"
     later = now + timedelta(seconds=1)
