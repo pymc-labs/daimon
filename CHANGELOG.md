@@ -11,9 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name and picture stay, and its reader variant is `default-reader`. On upgrade,
   `daimon defaults apply` renames each workspace's seeded agent and its managed
   self-hosted record in place, keyless or not, so sessions, threads, routines,
-  defaults, tool and access rules keep working; audit history keeps the old name
-  and `daimon` stays taken by the renamed agent. A workspace with its own
-  `default` keeps it, and requests for `default` reach that agent: apply reports
+  defaults, tool and access rules keep working; audit history and settled
+  queued wakes keep the old name and `daimon` stays taken by the renamed agent.
+  A workspace with its own `default` keeps it, and requests for `default` reach that agent: apply reports
   the rename as deferred, exits zero and tries again next time. Another
   workspace's rename error is reported without failing apply. A workspace's own
   unmanaged `daimon` record is not renamed. Copies such as `daimon-copy` keep

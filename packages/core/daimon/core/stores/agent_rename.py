@@ -3,8 +3,9 @@
 Used by the defaults rename step when a seeded agent is renamed in place.
 Rows that reference an agent by id already follow it. Audit and history rows
 (`security_audit_events`, `agent_tool_rule_history`, `channel_changes`,
-`long_job_policy_history`, `routine_sandbox_history`) and the immutable
-neutral catalog keep the name they recorded.
+`long_job_policy_history`, `routine_sandbox_history`), settled
+`task_continuations` and the immutable neutral catalog keep the name they
+recorded.
 """
 
 from __future__ import annotations
@@ -66,6 +67,13 @@ _LIVE_NAME_COLUMNS: tuple[tuple[str, str], ...] = (
     ("dm_rules", "agent_name"),
     ("host_call_cards", "agent_name"),
 )
+# Tables whose settled rows are history and keep the old name: only rows in these
+# statuses move. Postgres re-checks every row an UPDATE touches, and a NOT VALID
+# check (0169/0194 on `task_continuations.reason`) lets historical rows violate
+# it, so touching one would roll back the whole rename. `turn_outcomes.origin`,
+# the only other NOT VALID check, and the NOT VALID foreign keys (0142, 0150)
+# sit on columns this module never updates.
+_LIVE_STATUSES: dict[str, tuple[str, ...]] = {"task_continuations": ("pending", "claimed")}
 # Keyed by agent name: a row already under the new name wins, the old one stays.
 _KEYED_NAME_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("agent_avatars", "agent_name", ("tenant_id",)),
@@ -93,11 +101,10 @@ async def rename_agent_references(
     for table_name, column_name in _LIVE_NAME_COLUMNS:
         table = _table(table_name)
         column = table.c[column_name]
-        await session.execute(
-            update(table)
-            .where(table.c.tenant_id == tenant_id, _matches(column, old))
-            .values({column_name: new})
-        )
+        where = [table.c.tenant_id == tenant_id, _matches(column, old)]
+        if table_name in _LIVE_STATUSES:
+            where.append(table.c.status.in_(_LIVE_STATUSES[table_name]))
+        await session.execute(update(table).where(*where).values({column_name: new}))
     for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
         table = _table(table_name)
         column = table.c[column_name]
