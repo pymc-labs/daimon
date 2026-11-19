@@ -439,5 +439,21 @@ async def test_an_alert_budget_keeps_its_alert_channel_and_never_blocks(
             window="monthly",
             starts_at=None,
             ends_at=None,
+            on_limit="stop",
             alert_channel_id=_THREAD,
         )
+
+
+async def test_set_when_on_limit_omitted_then_an_alert_budget_still_alerts(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=True)
+    window = {"window": "monthly", "starts_at": None, "ends_at": None}
+    await _set_channel_budget_impl(
+        runtime, auth, channel_id=_PARENT, limit_usd="5", **window, on_limit="alert"
+    )
+    edited = await _set_channel_budget_impl(
+        runtime, auth, channel_id=_PARENT, limit_usd="8", **window
+    )
+    assert edited.on_limit == "alert", "editing only the limit keeps the alert mode"

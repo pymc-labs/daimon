@@ -9633,15 +9633,13 @@
       'description': '''
         Set or replace a channel's spending budget. Admin-only.
         <blank line>
-        With ``on_limit`` ``stop`` (the default), once the channel's spend in the
-        window reaches ``limit_usd`` (a decimal string such as ``"25.00"``;
-        ``"0"`` stops the channel), new turns there are refused, including
-        routines that post there. With ``alert``, turns are never refused:
-        Daimon posts an alert when spend reaches the limit and again at each
-        further full multiple of it, once each per window, to
-        ``alert_channel_id`` (a channel of this workspace) or, when unset, the
-        workspace's support channel. Spend is the tenant's debits for the
-        channel, markup included.
+        With ``on_limit`` ``stop``, once the channel's spend in the window
+        reaches ``limit_usd`` (a decimal string such as ``"25.00"``; ``"0"``
+        stops the channel), new turns there are refused, including routines
+        that post there. With ``alert``, turns continue and Daimon posts an
+        alert at the limit and each further multiple, to ``alert_channel_id``
+        or the support channel. Omitted, ``on_limit`` keeps the budget's mode;
+        a new budget stops. Spend is the channel's debits, markup included.
         <blank line>
         ``window``: ``monthly`` resets each UTC calendar month and takes no
         dates; ``total`` counts everything since ``starts_at`` (or ever);
@@ -9681,12 +9679,19 @@
             'type': 'string',
           }),
           'on_limit': dict({
-            'default': 'stop',
-            'enum': list([
-              'stop',
-              'alert',
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'stop',
+                  'alert',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
             ]),
-            'type': 'string',
+            'default': None,
           }),
           'starts_at': dict({
             'anyOf': list([
