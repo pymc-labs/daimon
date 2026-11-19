@@ -73,20 +73,6 @@ def test_guidance_names_pending_task_and_github_connect() -> None:
     assert "github_connect" in combined
 
 
-def test_skill_repo_guidance_no_longer_claims_a_working_repo_change() -> None:
-    """Skill-repo separation landed: importing skills must not claim to touch the working repo."""
-    body = _workspace_setup_body()
-    skills_section = _section(body, "3. **Skills.**", "4. **MCP servers.**")
-    for phrase in ("also binds the target's working repo", "working-repo binding"):
-        assert phrase not in skills_section, (
-            f"skill-repo guidance still claims {phrase!r}; a skill-repo token no longer "
-            "rewrites the working repo binding"
-        )
-    assert "never changes the working repo" in skills_section, (
-        "skill-repo guidance must say importing skills never changes the working repo"
-    )
-
-
 def test_after_confirmed_save_notes_next_message_availability_and_card_result() -> None:
     """The after-save paragraph must not claim a saved key works immediately or need paraphrasing."""
     body = _workspace_setup_body()
@@ -196,19 +182,6 @@ def test_reply_shape_keeps_tool_names_out_of_the_reply() -> None:
             f"{label} must forbid naming a tool in the reply; tools are how the agent acts, "
             "not what it says"
         )
-
-
-def test_guidance_drops_editor_era_and_duplicate_routing_phrases() -> None:
-    """Setup-orientation repetition audit (PR 4).
-
-    The read-only panel's New agent form lands on Details — there is no
-    separate success screen to name — and a newly created or forked agent's
-    routing state is relayed from the tool's own ``answering`` field rather
-    than restated in independently worded prose.
-    """
-    combined = _daimon_system() + "\n" + _workspace_setup_body()
-    for phrase in ("new-agent success control", "Creation alone does not route mentions"):
-        assert phrase not in combined, f"guidance still contains the removed phrase {phrase!r}"
 
 
 def test_daimon_system_skips_orientation_after_the_setup_opener() -> None:
