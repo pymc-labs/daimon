@@ -7,6 +7,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 from unittest.mock import MagicMock
 
 import httpx
@@ -148,6 +149,7 @@ def _budget(
     ends_at: datetime | None = None,
     spent: str = "1.2",
     is_active: bool = True,
+    on_limit: Literal["stop", "alert"] = "stop",
 ) -> ChannelBudgetStatus:
     row = ChannelBudgetRow(
         id=uuid.uuid4(),
@@ -161,6 +163,7 @@ def _budget(
         set_by_account_id=None,
         created_at=_NOW,
         updated_at=_NOW,
+        on_limit=on_limit,
     )
     return ChannelBudgetStatus(budget=row, spent_usd=Decimal(spent), is_active=is_active)
 
@@ -187,6 +190,7 @@ def _budget(
             _budget("fixed", starts_at=_ends(2), ends_at=_ends(10), is_active=False),
             "$1.20 of $5.00 used from 2025-01-02 until 2025-01-10 (ended)",
         ),
+        (_budget("monthly", on_limit="alert"), "$1.20 of $5.00 used this month (alerts only)"),
     ],
 )
 def test_channel_budget_phrase_follows_the_window(status: ChannelBudgetStatus, phrase: str) -> None:
