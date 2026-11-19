@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -497,6 +497,47 @@ async def test_old_generations_are_erased_with_the_slot(world: World) -> None:
     assert result.db.mux_binding_generations == 3 and result.db.mux_journal_sessions == 3
     assert await count(world.sm, "provider_binding", "binding_id = :id", id=binding.id) == 0
     assert await count(world.sm, "journal_session", "binding_id = :id", id=binding.id) == 0
+
+
+async def _with_an_openai_generation(world: World) -> None:
+    openai = world.a_private.binding.model_copy(
+        update={
+            "generation": 2,
+            "provider": "openai",
+            "profile": "openai.agents_sdk",
+            "native_refs": {"session": "session-openai-a", "account_scope": "scope-1"},
+        }
+    )
+    await world.store.put_binding(openai, expected_generation=1)
+
+
+async def test_the_erased_accounts_private_provider_sessions_go_to_the_provider_delete(
+    world: World,
+) -> None:
+    await _with_an_openai_generation(world)
+    sent: list[mux_erasure.ProviderSession] = []
+
+    async def delete(sessions: Iterable[mux_erasure.ProviderSession]) -> int:
+        sent.extend(sessions)
+        return len(sent)
+
+    await purge_account(sm=world.sm, account_id=world.a.account_id, delete_provider=delete)
+
+    assert {(item.provider, item.session_id) for item in sent} == {
+        ("anthropic", "session-private-a"),
+        ("openai", "session-openai-a"),
+    }, "only A's private sessions, never B's or the shared one"
+    assert next(i for i in sent if i.provider == "openai").account_scope_id == "scope-1"
+
+
+async def test_a_provider_outage_never_fails_the_erasure(world: World) -> None:
+    async def down(_: Iterable[mux_erasure.ProviderSession]) -> int:
+        raise OSError("provider unreachable")
+
+    result = await purge_account(sm=world.sm, account_id=world.a.account_id, delete_provider=down)
+
+    assert result.db.mux_binding_generations >= 1, "the committed erasure stands"
+    assert await count(world.sm, "provider_binding_slot", "account_id = :a", a=world.a.key) == 0
 
 
 async def test_orphaned_rows_are_erased_by_the_account_key_alone(sm: Factory) -> None:

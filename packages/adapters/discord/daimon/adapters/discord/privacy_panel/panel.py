@@ -26,7 +26,7 @@ def _export_placeholder_message(bot_display_name: str) -> str:
 
 
 def build_privacy_main_container(
-    *, bot_display_name: str = "daimon"
+    *, bot_display_name: str = "daimon", providers: tuple[str, ...] = ()
 ) -> discord.ui.Container[discord.ui.LayoutView]:
     """Main panel V2 container — no accent: the title and who stores what.
 
@@ -35,7 +35,7 @@ def build_privacy_main_container(
     """
     container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
         layout.header(PRIVACY_TITLE),
-        discord.ui.TextDisplay("\n\n".join(privacy_lines(bot_display_name))),
+        discord.ui.TextDisplay("\n\n".join(privacy_lines(bot_display_name, providers))),
     )
     return container
 
@@ -48,9 +48,11 @@ class PrivacyPanelView(discord.ui.LayoutView):
         account_id: uuid.UUID,
         allowed_user_id: int,
         user_name: str,
+        providers: tuple[str, ...] = (),
     ) -> None:
         super().__init__(timeout=600)
         self.runtime = runtime
+        self.providers = providers
         self.account_id = account_id
         self.allowed_user_id = allowed_user_id
         self.user_name = user_name
@@ -88,7 +90,9 @@ class PrivacyPanelView(discord.ui.LayoutView):
             buttons.append(delete_btn)
         buttons.append(done_btn)
         action_row: discord.ui.ActionRow[PrivacyPanelView] = discord.ui.ActionRow(*buttons)
-        container = build_privacy_main_container(bot_display_name=self._bot_display_name)
+        container = build_privacy_main_container(
+            bot_display_name=self._bot_display_name, providers=providers
+        )
         container.add_item(layout.hairline())
         container.add_item(action_row)
         self.add_item(container)
@@ -121,6 +125,7 @@ class PrivacyPanelView(discord.ui.LayoutView):
             allowed_user_id=self.allowed_user_id,
             user_name=self.user_name,
             preview=preview,
+            providers=self.providers,
         )
         await interaction.response.edit_message(
             view=cascade_view,
@@ -131,7 +136,9 @@ class PrivacyPanelView(discord.ui.LayoutView):
         # Controls-less re-render (view=None empties a V2 message).
         await interaction.response.edit_message(
             view=layout.static_view(
-                build_privacy_main_container(bot_display_name=self._bot_display_name)
+                build_privacy_main_container(
+                    bot_display_name=self._bot_display_name, providers=self.providers
+                )
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )

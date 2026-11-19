@@ -27,7 +27,7 @@ from mux.drivers.openai.turn import (
     RecoveryJournal,
     merge_history,
 )
-from mux.drivers.openai.usage import OpenAIUsage, UsageRevisions
+from mux.drivers.openai.usage import MemoryUsageRevisions, OpenAIUsage, UsageRevisions
 from mux.drivers.openai.vaults import OpenAIVaults, SecretResolver
 from mux.errors import ExtensionVersionError, UnsupportedCapability
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
@@ -129,6 +129,7 @@ __all__ = [
     "Context",
     "MCPSecretResolver",
     "MemoryRecoveryJournal",
+    "MemoryUsageRevisions",
     "OpenAIAgents",
     "OpenAIArtifacts",
     "OpenAIDriver",

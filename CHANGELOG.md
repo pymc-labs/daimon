@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the connector data they use. A server that already saved a list keeps it. The
   web admin page still offers every keyed provider. Connector relay to another
   provider (`mcp_connector_relay`) is now off until an operator turns it on.
+- **Privacy names every provider that stores your conversations, and Delete
+  reaches OpenAI.** The privacy panel on Discord, Slack and Teams and the
+  privacy policy name OpenAI and Google (Gemini) on servers where an admin
+  enabled them. Deleting your account now also asks OpenAI to delete the
+  conversations stored there, and logs any it could not. Google offers no
+  delete for stored Gemini conversations, so the policy says Google keeps
+  them for its own retention period.
+
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's

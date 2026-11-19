@@ -26,6 +26,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.platform_words import DESCRIPTIONS
+from daimon.core.privacy import account_other_providers
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -100,6 +101,9 @@ class PrivacyCog(commands.Cog):
                 account_id=account_id,
                 allowed_user_id=interaction.user.id,
                 user_name=user_name,
+                providers=await account_other_providers(
+                    runtime.sessionmaker, account_id=account_id
+                ),
             )
             await interaction.followup.send(
                 view=view,

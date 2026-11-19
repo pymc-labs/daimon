@@ -156,6 +156,7 @@ def build_privacy_main_container(
     policy_url: str,
     display_name: str = "daimon",
     delete_enabled: bool = True,
+    providers: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Main privacy view: the title, two lines on who stores what, then the buttons.
 
@@ -206,7 +207,7 @@ def build_privacy_main_container(
     elif slack_connect_url is not None:
         action_elements.append(_connect_button(slack_connect_url))
 
-    body = "\n\n".join(escape_mrkdwn(line) for line in privacy_lines(display_name))
+    body = "\n\n".join(escape_mrkdwn(line) for line in privacy_lines(display_name, providers))
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{PRIVACY_TITLE}*"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": body}},
@@ -227,6 +228,7 @@ def build_delete_modal(
     user_name: str,
     view_id: str,
     display_name: str = "daimon",
+    providers: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Single delete confirmation modal.
 
@@ -247,7 +249,7 @@ def build_delete_modal(
         separators=(",", ":"),  # minimal whitespace to stay well under 3000 chars
     )
 
-    scope = "\n\n".join(escape_mrkdwn(line) for line in delete_scope_lines(display_name))
+    scope = "\n\n".join(escape_mrkdwn(line) for line in delete_scope_lines(display_name, providers))
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": scope}},
         {"type": "divider"},
