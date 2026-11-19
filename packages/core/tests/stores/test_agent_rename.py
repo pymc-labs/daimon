@@ -238,3 +238,24 @@ def test_agent_name_columns_when_schema_walked_then_each_is_renamed_or_kept() ->
     }
     assert found <= handled, f"rename or keep each agent-name column: {found - handled}"
     assert handled <= found, f"drop entries for columns that are gone: {handled - found}"
+
+
+# JSON payloads that could hold an agent name, with why none is moved.
+_KEPT_JSON_COLUMNS = {
+    ("agent_drafts", "config"): "keyed by agent id; a name edit is refused and never written",
+    ("agent_drafts", "base_config"): "the same draft's starting point",
+    ("channel_config_revision", "revision"): "backend, profile and model only, and immutable",
+    ("thread_lease", "active"): "a holder and a fence, no agent name",
+    ("wizard_session", "spec"): "a form's prompt and steps, no agent name",
+}
+
+
+def test_kept_json_columns_when_schema_walked_then_still_exist() -> None:
+    found = {
+        (table.name, column.name)
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+    }
+    assert set(_KEPT_JSON_COLUMNS) <= found, (
+        f"drop entries for columns that are gone: {set(_KEPT_JSON_COLUMNS) - found}"
+    )
