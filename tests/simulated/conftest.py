@@ -11,5 +11,5 @@ from daimon.testing.pytest_plugin import db_preflight as db_preflight
 
 
 @pytest.fixture(autouse=True)
-def _fresh_database(db_clean: None) -> None:
+def _fresh_database(db_clean: None) -> None:  # pyright: ignore[reportUnusedFunction]
     """Every simulated install starts from an empty database: a fresh tenant."""

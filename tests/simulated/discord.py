@@ -69,7 +69,7 @@ class _Bot(DaimonBot):
         self.errors: list[str] = []
 
     def _schedule_event(self, coro: Any, event_name: str, *args: Any, **kwargs: Any) -> Any:
-        task = super()._schedule_event(coro, event_name, *args, **kwargs)  # pyright: ignore[reportUnknownMemberType]
+        task: asyncio.Task[None] = super()._schedule_event(coro, event_name, *args, **kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
         self.tasks.append(task)
         return task
 
@@ -143,11 +143,11 @@ class Discord:
         self.http.connection_state, self.http.guild_id, self.http.bot_user_id = state, GUILD, BOT
         return guild
 
-    async def say(self, text: str, *, thread: int | None = None) -> list[dict[str, Any]]:
+    async def say(self, text: str, *, thread: int | None = None) -> list[str]:
         """Mention the bot in the channel (or a thread); return the posts the turn made."""
         self._next_id += 1
         channel = thread or CHANNEL
-        payload = {
+        payload: dict[str, Any] = {
             "id": str(self._next_id),
             "guild_id": str(GUILD),
             "channel_id": str(channel),
@@ -198,7 +198,7 @@ class Discord:
         )
         message = await self.http.get_message(channel_id, message_id)
         token = f"sim-{message_id}"
-        payload = {
+        payload: dict[str, Any] = {
             "id": str(discord.utils.time_snowflake(discord.utils.utcnow())),
             "application_id": str(BOT),
             "type": discord.InteractionType.component.value,
@@ -235,11 +235,12 @@ class Discord:
         for message_id, items in views.items():
             for (_, custom_id), item in items.items():
                 if getattr(item, "label", None) == label and confirmation_requester(item.view):
-                    return message_id, custom_id
+                    return cast(int, message_id), custom_id
         return None
 
     async def settle(self) -> None:
         """Wait until all the work a message started is done, or it waits on a card."""
+        busy: list[asyncio.Task[Any]] = []
         for _ in range(200):
             await asyncio.sleep(0.05)
             busy = [t for t in asyncio.all_tasks() - self._idle if t is not asyncio.current_task()]

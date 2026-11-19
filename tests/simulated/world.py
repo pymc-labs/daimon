@@ -144,11 +144,13 @@ async def set_agent_backend(
 ) -> None:
     """An admin moving the default agent onto `backend` in its settings card."""
     service, actor = await _backends(world, tenant_id, platform, user_id)
+    name = world.deps.deployment_default.agent_name
+    assert name, "the deployment default names an agent"
     agent = await load_backend_agent(
         world.anthropic,
         world.sessions,
         tenant_id=tenant_id,
-        agent_name=world.deps.deployment_default.agent_name,
+        agent_name=name,
     )
     current = await service.current(agent)
     await service.set_backend(agent, backend, current.local if current else 0, actor)

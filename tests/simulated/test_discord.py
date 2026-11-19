@@ -26,12 +26,22 @@ def _fake(w: World, provider: Provider):
     return {"anthropic": w.api, "openai": w.openai, "gemini": w.gemini}[provider]
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+@pytest.mark.parametrize(
+    ("provider", "late_usage"),
+    [
+        ("anthropic", False),
+        ("openai", False),
+        # The turn ends before OpenAI has counted it; a later read has the usage (#1769).
+        pytest.param("openai", True, id="openai-late-usage"),
+        ("gemini", False),
+    ],
+)
 async def test_a_turn_streams_calls_a_tool_and_survives_a_restart(
-    provider: Provider, db_preflight: None, db_nullpool_engine: AsyncEngine
+    provider: Provider, late_usage: bool, db_preflight: None, db_nullpool_engine: AsyncEngine
 ) -> None:
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with world(sessions) as w:
+        w.openai.late_usage = late_usage
         d = Discord(w)
         await d.install()
         await _on(w, d, provider)
@@ -54,5 +64,27 @@ async def test_a_turn_streams_calls_a_tool_and_survives_a_restart(
         billed = w.api.reported + ([] if fake is w.api else fake.reported)
         metered = sorted((r.input_tokens, r.output_tokens) for r in rows)
         assert metered == sorted(billed), f"one usage row per model call: {metered}"
+        assert not d.bot.errors, f"the bot raised: {d.bot.errors}"
+        w.network.assert_clean()
+
+
+async def test_a_confirmed_tool_waits_for_approve(
+    db_preflight: None, db_nullpool_engine: AsyncEngine
+) -> None:
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with world(sessions) as w:
+        d = Discord(w)
+        await d.install()
+        watch = Tool(
+            "create_watch", {"source": "https://feeds.example.com/news"}, server="daimon-mcp"
+        )
+        w.script.add(Turn("Watching the feed now.", watch))
+
+        asked = await d.say("watch the news feed")
+        assert asked[-1].endswith("Approve\nDeny\nDetails"), f"a confirmation card: {asked}"
+        assert w.api.sessions.events, "the model is paused on the tool call"
+
+        done = await d.press("Approve")
+        assert "Watching the feed now." in done[-1], f"the reply after Approve: {done}"
         assert not d.bot.errors, f"the bot raised: {d.bot.errors}"
         w.network.assert_clean()
