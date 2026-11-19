@@ -673,3 +673,31 @@ async def test_usage_when_the_turn_resource_lacks_it_then_the_terminal_event_pri
     usage = await io.replay_usage()
     assert [(u.input_tokens, u.output_tokens) for u in usage] == [(100, 20)], usage
     assert priced_cents(usage, _price()) is not None, "the spend cap can price the turn"
+
+
+async def test_history_reads_more_than_five_thousand_events_in_large_pages():
+    from types import SimpleNamespace
+
+    from daimon.core.turn.openai_codec import PROFILE
+
+    total, requested = 6500, []
+
+    async def list_events(scope, session, *, page):
+        requested.append(page.limit)
+        start = int(page.cursor) + 1 if page.cursor else 0
+        data = [
+            SimpleNamespace(
+                id=str(i), session_id=session.id, native=SimpleNamespace(provider="openai")
+            )
+            for i in range(start, min(start + page.limit, total))
+        ]
+        more = start + len(data) < total
+        return SimpleNamespace(data=data, has_more=more, next_cursor=data[-1].id if more else None)
+
+    backend = SimpleNamespace(
+        capabilities=lambda: SimpleNamespace(profile_id=PROFILE),
+        events=SimpleNamespace(list=list_events),
+    )
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=Persistence())
+    assert len(await io._history()) == total
+    assert requested == [1000] * 7
