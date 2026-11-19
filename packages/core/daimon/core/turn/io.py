@@ -584,6 +584,15 @@ def turn_io(
     selected_profile = profile or (
         backend.capabilities().profile_id if backend is not None else "anthropic.managed_agents"
     )
+    if selected_profile == "anthropic.managed_agents" and (
+        scope.is_platform
+        or scope.is_legacy_host_authorized
+        or not scope.tenant_id.strip()
+        or not scope.account_id.strip()
+    ):
+        # Every caller passes an admitted tenant and account; a host-wide scope
+        # would skip the session ownership check below.
+        raise ScopeViolation(session_id, "a turn requires a real tenant and account scope")
     codec = _TURN_CODECS.get(selected_profile)
     if codec is None:
         from daimon.core.turn.runtimes import ensure_channel_runtime
