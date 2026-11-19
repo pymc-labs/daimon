@@ -7,12 +7,14 @@ from uuid import UUID
 
 import httpx
 import pytest
+import structlog.testing
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import startup_replay
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.testing.turn_router import turn_events
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.errors import MuxError, ProviderError, UnsupportedCapability
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
@@ -154,6 +156,37 @@ async def test_api_error_is_still_handled_without_an_event_read(code: int) -> No
         assert await startup_replay.completed_orphan_text(new, row()) is None
     after.assert_consumed()
     assert len(after.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderError("upstream", retryable=False, native_code="malformed_event"),
+        UnsupportedCapability(("event_history",), "anthropic.managed_agents"),
+    ],
+)
+async def test_a_mux_error_on_the_event_replay_reads_no_result(
+    monkeypatch: pytest.MonkeyPatch, error: MuxError
+) -> None:
+    """An unreadable replay is no result, never a failed orphan sweep."""
+
+    class FailingReplay:
+        async def replay(self, *, timeout_s: float) -> list[object]:
+            raise error
+
+    monkeypatch.setattr(startup_replay, "turn_io", lambda *args, **kwargs: FailingReplay())
+    after = ScriptedTransport()
+    after.queue(
+        ScriptedReply(
+            "GET", "/v1/sessions/session-N7", httpx.Response(200, json={"status": "idle"})
+        )
+    )
+    with structlog.testing.capture_logs() as logs:
+        async with after.client() as new:
+            assert await startup_replay.completed_orphan_text(new, row()) is None
+    after.assert_consumed()
+    assert [entry["event"] for entry in logs] == ["turn.orphan_result_read_failed"]
+    assert logs[0]["error_type"] == type(error).__name__
 
 
 @pytest.mark.parametrize("payload", [{}, {"id": None, "metadata": None}])

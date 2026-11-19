@@ -19,6 +19,7 @@ from daimon.core.turn.io import turn_io
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState, extract_final_response
 from mux.drivers.anthropic import SessionReads
+from mux.errors import MuxError
 
 log = structlog.get_logger()
 ORPHAN_RESULT_READ_TIMEOUT_S = 5.0
@@ -77,7 +78,9 @@ async def completed_orphan_text(
             ):
                 return None
             return extract_final_response(state.content) or None
-    except (anthropic.APIError, TimeoutError, DaimonError) as err:
+    # The event replay raises mux errors (a malformed event, an unsupported profile):
+    # an unreadable result must not fail the orphan sweep, which then reruns every turn.
+    except (anthropic.APIError, TimeoutError, DaimonError, MuxError) as err:
         log.warning(
             "turn.orphan_result_read_failed",
             thread_id=row.thread_id,
