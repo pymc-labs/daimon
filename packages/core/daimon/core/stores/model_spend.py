@@ -16,7 +16,7 @@ from daimon.core.pricing import (
 )
 from mux.state.usage_ledger import AppliedUsage
 from pydantic import ValidationError
-from sqlalchemy import ColumnElement, DateTime, cast, select
+from sqlalchemy import ColumnElement, DateTime, and_, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
@@ -42,10 +42,10 @@ async def model_spend_today(
 ) -> Decimal:
     """Observed usage today on `model` at list price.
 
-    Each observation is priced at its upper bound (`provider_cost_of`, so long-context
-    rates count) and falls back to its token floor while it is still partial. Without
-    a tariff current today the spend can't be known: `SpendUnpriced`, never $0. A
-    malformed usage row is skipped and logged; it never stops a turn from starting.
+    Each observation is priced by `provider_cost_of` and falls back to its token floor
+    while it is still partial. Without a tariff current today the spend can't be known:
+    `SpendUnpriced`, never $0. A malformed usage row is skipped and logged; it never
+    stops a turn from starting.
     """
     if rates is None or not rates.current_on(now.date()):
         raise SpendUnpriced(model)
@@ -53,8 +53,8 @@ async def model_spend_today(
     rows = await _latest_today(
         session,
         now,
+        provider,
         UsageObservation.tenant_id == tenant_id,
-        observation["session"]["provider"].astext == provider,
         observation["model"]["id"].astext == model,
     )
     return sum((_cost(usage, rates) for usage in rows), Decimal(0))
@@ -67,8 +67,7 @@ async def provider_spend_today(session: AsyncSession, *, provider: str, now: dat
     today is skipped and logged: no such model is run (`CappedFlashAccounting`, the
     OpenAI daily cap), so only usage from before its tariff lapsed is left out.
     """
-    observation = UsageObservation.applied["observation"]
-    rows = await _latest_today(session, now, observation["session"]["provider"].astext == provider)
+    rows = await _latest_today(session, now, provider)
     spent = Decimal(0)
     for usage in rows:
         model = usage.observation.model.id if usage.observation.model is not None else None
@@ -81,16 +80,23 @@ async def provider_spend_today(session: AsyncSession, *, provider: str, now: dat
 
 
 async def _latest_today(
-    session: AsyncSession, now: datetime, *where: ColumnElement[bool]
+    session: AsyncSession, now: datetime, provider: str, *where: ColumnElement[bool]
 ) -> list[AppliedUsage]:
-    """The newest revision of each observation observed since `now`'s UTC midnight."""
+    """The newest revision of each `provider` observation observed since `now`'s UTC
+    midnight, by the indexed columns; a row older code wrote without them, by its JSON."""
     observation = UsageObservation.applied["observation"]
+    midnight = utc_midnight(now)
+    today = or_(
+        and_(UsageObservation.provider == provider, UsageObservation.observed_at >= midnight),
+        and_(
+            UsageObservation.provider.is_(None),
+            observation["session"]["provider"].astext == provider,
+            cast(observation["observed_at"].astext, DateTime(timezone=True)) >= midnight,
+        ),
+    )
     latest = (
         select(UsageObservation.applied)
-        .where(
-            *where,
-            cast(observation["observed_at"].astext, DateTime(timezone=True)) >= utc_midnight(now),
-        )
+        .where(today, *where)
         .distinct(UsageObservation.binding_id, UsageObservation.observation_id)
         .order_by(
             UsageObservation.binding_id,

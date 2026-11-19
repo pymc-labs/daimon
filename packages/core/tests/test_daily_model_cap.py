@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
+from daimon.core import _models
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.pricing import ProviderPrice, minimum_cost_of
@@ -22,6 +23,7 @@ from daimon.testing.factories import make_tenant
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.contracts.usage import UsageObservation
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 TENANT, OTHER = (
@@ -249,6 +251,18 @@ async def test_the_provider_ceiling_sums_every_tenant_and_refuses_at_its_limit(s
     async with sessions() as db:
         total = await provider_spend_today(db, provider="openai", now=NOW)
     assert total == 2 * one, "both tenants count"
+    stored = _models.UsageObservation
+    async with sessions() as db, db.begin():
+        cleared = await db.execute(
+            update(stored)
+            .where(stored.provider == "openai", stored.observed_at.is_not(None))
+            .values(provider=None, observed_at=None)
+        )
+    assert cleared.rowcount == 2, "the writer fills the indexed columns"
+    async with sessions() as db:
+        assert await provider_spend_today(db, provider="openai", now=NOW) == total, (
+            "a row older code wrote without the indexed columns counts by its JSON"
+        )
 
     await ProviderCeiling({"openai": total + 1}).check(sessions, provider="openai", now=NOW)
     with pytest.raises(AdmissionDenied) as refused:

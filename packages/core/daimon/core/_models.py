@@ -4758,6 +4758,8 @@ class UsageObservation(Base):
         PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
         # The OpenAI daily model cap reads one tenant's observations per turn.
         Index("ix_usage_observation_tenant_id", "tenant_id"),
+        # The provider daily ceiling reads today's observations of one provider.
+        Index("ix_usage_observation_provider_observed_at", "provider", "observed_at"),
     )
 
     # No foreign key to the slot: erasing a private slot must leave these rows
@@ -4768,6 +4770,9 @@ class UsageObservation(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.AppliedUsage` as JSON.
     applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Copied from `applied` for the daily reads; NULL on a row older code wrote.
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AccountingOutbox(Base):

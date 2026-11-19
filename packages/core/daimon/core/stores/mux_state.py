@@ -801,6 +801,8 @@ async def record_usage(
             revision=applied.revision,
             tenant_id=tenant_id,
             applied=_json(applied),
+            provider=applied.observation.session.provider,
+            observed_at=applied.observation.observed_at,
         )
     )
     await session.execute(
