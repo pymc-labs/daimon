@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -37,13 +37,13 @@ from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.hosted_io import OpenAITurnIO
 from daimon.core.turn.io import TurnCodecRequest, TurnIO
-from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
+from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateTurn, LateUsage, reread_turn
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
     invocation_baseline,
 )
-from daimon.core.turn.persistence import TurnPersistence, UncertainSend, current_persistence
+from daimon.core.turn.persistence import UncertainSend, current_persistence
 from daimon.core.turn.prepare import (
     CONTINUED,
     PreparedTurn,
@@ -54,7 +54,6 @@ from daimon.core.turn.replace_binding import (
     OldSession,
     binding_decision,
     end_session,
-    hold_slot,
     recorded_facts,
     replace_binding,
 )
@@ -685,46 +684,34 @@ async def _prepare_with_runtime(
         turn_id = observation.turn_id
         # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
         if not observation.final and late is not None and turn_id is not None:
-            ended = observation.observed_at
-            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id, ended))
-        return settled
-
-    async def reread(now: datetime, turn_id: str, ended: datetime) -> bool:
-        """One late read of an ended root turn, under the thread's lease.
-
-        True once the turn resource itself gave final usage, or the thread has no
-        such turn to read; a fallback value never ends the re-reads.
-        """
-        bound = await store.get_binding(slot)
-        if bound is None or bound.native_refs.get("session") != ref.id:
-            log.warning(
-                "late_usage.rebound",
-                turn_id=turn_id,
-                session_id=ref.id,
-                bound_session_id=None if bound is None else bound.native_refs.get("session"),
+            turn = LateTurn(
+                tenant_id=tenant_id,
                 binding_id=binding_id,
-            )
-            return True  # the thread moved to another session
-        async with hold_slot(store, slot, now) as lease:
-            reading = TurnPersistence(
-                store, bound, scope, operation_key="late-usage:" + turn_id, session_ref=ref
-            )
-            async with asyncio.timeout(read_timeout_s):
-                with reading.holding(lease):
-                    values = await driver(runtime, revision, scope, bound).usage.reconcile_turn(
-                        scope, ref, turn_id
-                    )
-        known = [value for value in values if value.completeness != "unknown"]
-        if known:  # measures how long OpenAI takes to report a turn's usage
-            log.info(
-                "openai_late_usage.found",
+                slot=slot,
+                session=ref,
                 turn_id=turn_id,
-                final=any(value.final for value in known),
-                after_s=round((now - ended).total_seconds(), 1),
+                model_id=model_id,
+                price=runtime.price,
+                infrastructure=runtime.infrastructure,
+                observed_at=observation.observed_at,
+                platform_user_id=user_id,
+                channel_id=channel_id,
+                agent_id=agent_id,
             )
-        for value in known:
-            await record(observation=value)
-        return any(value.final for value in values) or not values
+            late.defer(
+                f"{binding_id}:{observation.id}",
+                lambda now: reread_turn(
+                    turn,
+                    sessionmaker=sessionmaker,
+                    store=store,
+                    usage=driver(runtime, revision, scope).usage,
+                    scope=scope,
+                    markup=markup,
+                    now=now,
+                    read_timeout_s=read_timeout_s,
+                ),
+            )
+        return settled
 
     return PreparedTurn(
         admission=request.admission,

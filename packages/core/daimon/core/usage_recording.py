@@ -305,6 +305,7 @@ async def record_provider_usage(
     """
     from daimon.core.accounting_outbox import record_observation_usage
     from daimon.core.provider_turn_cost import LATE_TURN_COSTS
+    from daimon.core.stores.mux_state import get_newest_usage_revision
     from daimon.core.turn.outcomes import current_outcome
 
     if tenant_id is None:
@@ -342,10 +343,13 @@ async def record_provider_usage(
             channel_id=channel_id,
             agent_id=agent_id,
         )
-    # Whichever reader recorded the revision first, an ended turn's footer shows its debit.
-    LATE_TURN_COSTS.settle(
-        observation, price=provider_price, infrastructure_usd=infrastructure_usd, markup=markup
-    )
+        newest = await get_newest_usage_revision(session, binding_id, observation.id)
+    # Whichever reader recorded the revision first, an ended turn's footer shows its debit;
+    # a stale revision, recorded after a newer one, must not overwrite the newer debit.
+    if newest == observation.revision:
+        LATE_TURN_COSTS.settle(
+            observation, price=provider_price, infrastructure_usd=infrastructure_usd, markup=markup
+        )
     if (outcome := current_outcome.get()) is not None:
         outcome.note_usage(
             observation,

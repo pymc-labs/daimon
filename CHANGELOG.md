@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's usage after the turn ended, the summary line is edited to show that
   debit and the money left, unless a later turn has started in the thread.
   Daimon reads that usage again from 2 seconds after the turn, doubling up to
-  an hour, and the scheduler keeps its slower pace. The line shows no cost
+  an hour, and the scheduler reads usage still unknown 10 minutes after the
+  turn. The line shows no cost
   while Daimon cannot know it, such as an unpriced model or usage the provider
   never reported.
 
@@ -44,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The privacy panel says what admins can read. Rows are deleted with the
   person's account and after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
 
-- **Late GPT usage survives a restart.** OpenAI can report a turn's usage long
+- **Unknown GPT usage survives a restart.** OpenAI can report a turn's usage long
   after the turn ends. Daimon re-read it only for about an hour, in the process
   that ran the turn, so a restart or a later answer left the turn unbilled. The
   scheduler now re-reads such turns from their pending usage for a day, then

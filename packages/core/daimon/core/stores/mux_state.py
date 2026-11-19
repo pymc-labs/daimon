@@ -820,6 +820,18 @@ async def record_usage(
     return OutboxRow.model_validate(_json(row))
 
 
+async def get_newest_usage_revision(
+    session: AsyncSession, binding_id: str, observation_id: str
+) -> int | None:
+    """The newest revision recorded for an observation; None before any."""
+    return await session.scalar(
+        select(func.max(UsageObservation.revision)).where(
+            UsageObservation.binding_id == binding_id,
+            UsageObservation.observation_id == observation_id,
+        )
+    )
+
+
 async def pending_outbox(session: AsyncSession, *, limit: int = 100) -> list[OutboxRow]:
     bodies = await session.scalars(
         select(AccountingOutbox.row)
