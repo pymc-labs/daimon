@@ -1472,9 +1472,9 @@ async def test_agent_origin_openai_host_preserves_its_switch_before_paid_request
     """The OpenAI host runs a counterpart proven against the agent's switch, so a row
     that lost that switch's association is refused before the paid request.
 
-    Deliberate difference: the self-hosted host re-puts an agent revision with no
-    association (`test_an_agent_saved_on_a_selfhosted_model_runs_a_reply`), since it
-    runs the record itself and a record born on its provider stores none.
+    Only a record born on OpenAI stores none and runs
+    (`tests/simulated/test_without_anthropic.py`), as on the self-hosted host
+    (`test_an_agent_saved_on_a_selfhosted_model_runs_a_reply`).
     """
     import httpx
     from daimon.core._models import ChannelConfigRevision
