@@ -47,7 +47,7 @@ from mux.drivers.gemini.skill_deployment import (
     SkillBundlePublisher,
     verify_retained_deployments,
 )
-from mux.drivers.gemini.storage import Records, Storage, read_records
+from mux.drivers.gemini.storage import Records, Storage
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -76,7 +76,7 @@ class GeminiUsage(Base):
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
     ) -> Page[UsageObservation]:
         # A committed snapshot: listing usage never waits behind the account's writers.
-        async with read_records(self._storage) as records:
+        async with self._storage.read() as records:
             record = self._record(records, scope, session)
             return page_values(tuple(record.observation_history.values()), page)
 

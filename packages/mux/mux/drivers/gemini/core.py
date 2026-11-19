@@ -83,7 +83,7 @@ from mux.drivers.gemini.storage import (
     Storage,
     UploadedBundle,
     owner,
-    read_records,
+    session_refs,
 )
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
@@ -372,7 +372,7 @@ class Base:
         records transaction, so a slow provider read never holds the account's
         records row (every other session in the account waits on it).
         """
-        async with read_records(self._storage) as snapshot:
+        async with self._storage.read() as snapshot:
             seen = self._record(snapshot, scope, session)
             pending = tuple(seen.interactions.items())
         fetched: list[tuple[str, str, Object]] = []
@@ -895,6 +895,11 @@ class GeminiSessions(Base):
             request,
             mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             uploading=tuple(p.id for p in uploaded_pins(records, scope, self._account, pins)),
+            refs=session_refs(
+                agent,
+                records.environments.get(spec.environment.id) if spec.environment else None,
+                spec,
+            ),
         )
         records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
         return id_
@@ -1325,7 +1330,7 @@ class GeminiEvents(Base):
                         "no longer accepts (mcp_server_name); start a new thread.",
                     ),
                 ) from None
-            prior = records.sends.get((*owner(scope), key))
+            prior = record.sends.get(key)
             if prior is not None:
                 if prior[0] != scope.principal_id:
                     raise ScopeViolation(key, "operation belongs to another principal")
@@ -1361,7 +1366,7 @@ class GeminiEvents(Base):
                         raw = await self._get(record, receipt.input_ids[0])
                         self._accept(record, raw, receipt.turn_id, events)
                         record.unknown_delivery = False
-                        records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
+                        record.sends[key] = scope.principal_id, digest, receipt
                         return receipt
                 return prior[2]
             if record.unknown_delivery:
@@ -1453,7 +1458,7 @@ class GeminiEvents(Base):
             # an accepted POST into a fresh request, even under a different key.
             unknown = SendReceipt(operation_id=key, status="outcome_unknown", input_ids=())
             record.unknown_delivery = True
-            records.sends[(*owner(scope), key)] = scope.principal_id, digest, unknown
+            record.sends[key] = scope.principal_id, digest, unknown
         try:
             raw = await self._transport.create(request)
         except ProviderError as exc:
@@ -1513,7 +1518,7 @@ class GeminiEvents(Base):
                 record.mount_echo_digests[interaction] = sorted(sent)
             self._accept(record, raw, root, events)
             record.unknown_delivery = False
-            records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
+            record.sends[key] = scope.principal_id, digest, receipt
             return receipt
 
     async def open_stream(
@@ -1571,7 +1576,7 @@ class GeminiEvents(Base):
                         # The reconcile just committed this turn's events: read them from
                         # the committed snapshot, never waiting behind the account's
                         # writers again (J6g PAKM6G failed busy here).
-                        async with read_records(self._storage) as records:
+                        async with self._storage.read() as records:
                             current = self._record(records, scope, session)
                             batch = tuple(e for e in current.events.values() if e.turn_id == root)
                         for item in batch:
@@ -1630,7 +1635,7 @@ class GeminiEvents(Base):
                 await close()
 
     async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        async with read_records(self._storage) as records:
+        async with self._storage.read() as records:
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
@@ -1721,7 +1726,7 @@ class GeminiEvents(Base):
     async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
         # The provider read runs holding no lock (a stop waits on it repeatedly), then a
         # short transaction applies it to the same turn's same interaction only.
-        async with read_records(self._storage) as snapshot:
+        async with self._storage.read() as snapshot:
             seen = self._record(snapshot, scope, receipt.session)
             if seen.root != receipt.turn_id or seen.current is None:
                 raise ProviderError("conflict", retryable=False)

@@ -425,7 +425,6 @@ async def test_expired_workspace_never_opens_a_fresh_host_thread(harness: Harnes
 async def test_restart_restores_ack_with_persisted_fallback_model(harness: Harness) -> None:
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
-    from mux.drivers.gemini.storage import owner
 
     fallback = ModelRef(provider="gemini", id="gemini-flash-latest")
     first = GeminiManagedAgents(
@@ -439,8 +438,9 @@ async def test_restart_restores_ack_with_persisted_fallback_model(harness: Harne
     message = (UserMessage(content=(TextPart(text="hello"),)),)
     receipt = await first.events.send(SCOPE, harness.session, message, key="recover-key")
     async with harness.storage.transaction() as records:
-        principal, digest, prior = records.sends[(*owner(SCOPE), "recover-key")]
-        records.sends[(*owner(SCOPE), "recover-key")] = (
+        sends = records.sessions[harness.session.id].sends
+        principal, digest, prior = sends["recover-key"]
+        sends["recover-key"] = (
             principal,
             digest,
             prior.model_copy(update={"status": "outcome_unknown"}),
