@@ -16,6 +16,8 @@ from daimon.core.turn.notices import RefusalNouns, admission_refusal_lines, prov
 _OUT_OF_CREDIT = frozenset(
     {"balance_depleted", "cap_exceeded", "channel_budget_exceeded", "allowance_exhausted"}
 )
+# Spending stops that name the model or provider: the same words as chat.
+_SHARED_COPY = frozenset({"provider_daily_cap_reached", "provider_daily_ceiling_reached"})
 
 
 def _refusal(
@@ -133,6 +135,8 @@ def refusal_for(err: Exception, *, agent: str | None = None, admin: bool = False
             return backend_refusal(err, agent=agent, admin=admin)
         if err.cause == "no_credit_yet":
             return backend_refusal(err, agent=agent, admin=admin)
+        if err.reason in _SHARED_COPY:
+            return _shared(err)
         if err.reason in _OUT_OF_CREDIT:
             return _refusal(
                 "Your credit has run out.", "No answer was given.", "Ask an admin to add credit."

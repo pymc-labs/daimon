@@ -65,7 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Gemini turns are now refused once every tenant together has spent the
   provider's ceiling today, at list price: $200 each by default, set with
   `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and `__GEMINI`. It
-  resets at midnight UTC.
+  resets at midnight UTC. The web app says so in the same words as chat, for
+  this ceiling and for a workspace's daily model cap.
 
 - **Usage settled late counts against the person and the right channel.** Usage
   that stayed pending and was settled later by the scheduler named no person
