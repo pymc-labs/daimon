@@ -789,7 +789,11 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
         )
         runtime.dm_bursts.wake((team_id, channel_id, user_id))
     except _ERRORS as exc:
-        log.warning("slack.dm.pick_failed", error_type=type(exc).__name__)
+        log.warning(
+            "slack.dm.pick_failed",
+            causes=backend_refusal_causes(exc),
+            error_type=type(exc).__name__,
+        )
         runtime.dm_bursts.refuse((team_id, channel_id, user_id))
         with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]

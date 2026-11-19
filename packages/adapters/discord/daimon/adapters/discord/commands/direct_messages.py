@@ -377,7 +377,11 @@ class DirectMessageCog(commands.Cog):
                 return _Eligibility()
             # Membership and invoker eligibility were established above. Do not
             # disclose which candidate failed, or include exception/resource text.
-            log.warning("discord.dm.discovery_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.discovery_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             await message.channel.send(
                 _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
@@ -993,6 +997,7 @@ class DirectMessageCog(commands.Cog):
         except _DM_FAILURES as exc:
             log.warning(
                 "discord.dm.discovery_failed",
+                causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(message.author.id),
                 reason="discovery_unavailable",
