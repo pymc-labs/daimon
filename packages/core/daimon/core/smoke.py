@@ -50,7 +50,7 @@ from pathlib import Path
 from anthropic import AsyncAnthropic
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.errors import DaimonError
-from daimon.core.headless_runner import TurnPath, run_turn
+from daimon.core.headless_runner import run_turn
 from daimon.core.ma_resolver import ResolverCache, resolve_agent, resolve_environment
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, usage_events
@@ -109,7 +109,6 @@ async def run_smoke_check(
     tool_safety: ToolSafetyPolicy,
     timeout_s: float = SMOKE_TIMEOUT_S,
     on_stage: Callable[[str], None],
-    turn_path: TurnPath | None = None,
 ) -> SmokeResult:
     """Provision the smoke tenant, run one billed bare turn, assert it billed.
 
@@ -117,10 +116,6 @@ async def run_smoke_check(
     row exists for the smoke tenant since the run began. Every other failure
     (resolver miss, MA API error, DB error, a `session.error` turn failure)
     propagates unchanged — see the module docstring's "No-retries posture".
-
-    `turn_path` is the turn path the smoke turn runs on, resolved by the caller
-    at its edge (`load_turn_settings().path`); `None` reads settings once in
-    `headless_runner.run_turn`.
     """
     on_stage("provisioning smoke tenant")
     provisioned = await provision_tenant(
@@ -202,7 +197,6 @@ async def run_smoke_check(
                 tool_safety=tool_safety,
                 account_id=account_id,
                 model_override=SMOKE_MODEL,
-                turn_path=turn_path,
             )
     except TimeoutError as err:
         raise SmokeCheckError(f"smoke turn timed out after {timeout_s}s") from err

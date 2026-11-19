@@ -40,7 +40,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resourc
 )
 from daimon.core.channel_backend import BackendUnsupported, backend_refusal_causes
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
-from daimon.core.config import get_repo_memory_settings, load_turn_settings
+from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.features.eval_key import EvalKey
@@ -1181,8 +1181,6 @@ async def bind_session_impl(
             raise
 
     if profile != "anthropic.managed_agents":
-        if (deps.turn_path or load_turn_settings().path) != "mux":
-            raise AdmissionDenied(reason="backend_unsupported")
         from daimon.core.turn.runtime_manifest import fixed_plan_origin_allowed
 
         if not fixed_plan_origin_allowed(admission.backend_revision_origin) and not (
@@ -1288,7 +1286,6 @@ async def bind_session_impl(
             public_url=deps.public_url,
             platform=platform,
             channel_id=admission.budget_channel_id,
-            turn_path=deps.turn_path,
         )
 
         async def find_carry_over() -> Callable[[str], Awaitable[ContinuityOutcome]] | None:

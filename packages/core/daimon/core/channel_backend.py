@@ -662,7 +662,6 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "model_interaction_resources",
         "model_provider",
         "models",
-        "mux_turn_path",
         "native_authentication_action",
         "native_content_input",
         "native_counterpart",
@@ -1352,7 +1351,7 @@ def resolve_agent_backend(
 
 
 def backend_selection_enabled(settings: TurnSettings) -> bool:
-    return settings.path == "mux" and settings.channel_backends
+    return settings.channel_backends
 
 
 CaptureSource = Callable[[BackendAgent], Awaitable[BackendAgent]]

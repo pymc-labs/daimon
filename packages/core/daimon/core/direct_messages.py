@@ -25,7 +25,6 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
-from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.dm_access import DmAgent, dm_agent_of, permits_dm
@@ -436,7 +435,6 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
         retired = await quarantine_conversation(session, conversation=conversation)
     for session_id in retired:
         with suppress(anthropic.APIError):
-            selected = deps.turn_path or load_turn_settings().path
             scope = resource_scope(
                 tenant_id=str(conversation.tenant_id),
                 account_id=str(conversation.account_id),
@@ -444,13 +442,12 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
             )
             ref = (
                 deps.backend_session_ref(session_id, scope)
-                if selected == "mux" and deps.backend_session_ref is not None
+                if deps.backend_session_ref is not None
                 else None
             )
             await turn_io(
                 deps.anthropic,
                 session_id,
-                path=selected,
                 backend=deps.backend,
                 scope=scope,
                 session_ref=ref,
@@ -1431,7 +1428,7 @@ async def _run_dm_fire(
                 # Re-asked by `reauthorize` right before the session is built.
                 grant=replace(admission.grant, dm_source=source, act_for_creator=True),
             )
-            if deps.backend is not None and (deps.turn_path or load_turn_settings().path) == "mux":
+            if deps.backend is not None:
                 from mux.drivers.anthropic import (
                     SESSION_READS_NAMESPACE,
                     SessionReads,

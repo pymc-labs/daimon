@@ -369,7 +369,6 @@ async def _turn_one(
     prompt: str,
 ) -> Result:
     from anthropic import APIStatusError
-    from daimon.core.config import load_turn_settings
     from daimon.core.headless_runner import run_turn
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.pricing import MODEL_PRICING
@@ -416,7 +415,6 @@ async def _turn_one(
             session_factory=sm,
             deadline=datetime.now(UTC) + timedelta(seconds=240),
             tool_safety=ToolSafetyPolicy(enabled=True),
-            turn_path=load_turn_settings().path,
         )
         first = transport.first_event_at.get(label)
         result = Result(
