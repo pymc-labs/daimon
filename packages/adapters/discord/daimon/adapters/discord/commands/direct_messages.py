@@ -836,7 +836,8 @@ class DirectMessageCog(commands.Cog):
         someone who loses access mid-turn sees no more of it. A failed membership
         lookup proves nothing: the write goes ahead if the previous check (or the
         admission) verified the person, and is refused otherwise, with the next
-        write checking again.
+        write checking again. `conversation` is the claimed one, so a later claim
+        closes the card too.
         """
         runtime = self.bot.runtime
         channel = message.channel
@@ -891,6 +892,7 @@ class DirectMessageCog(commands.Cog):
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
                 budget_channel_id=admission.budget_channel_id,
@@ -1030,7 +1032,7 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=self._turn_card(message, conversation, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:

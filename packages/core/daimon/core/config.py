@@ -786,10 +786,10 @@ class DiscordSettings(BaseModel):
         ge=1,
         description=(
             "Minimum age in seconds before Discord can retire a card after definite "
-            "recovery failure or repeated failed recovery passes. Must be at least the turn "
-            "ceiling plus 15 minutes. Recovery runs at startup and periodically, "
-            "and deletes a known "
-            "pending card when the bot has Manage Messages permission."
+            "recovery failure or repeated failed recovery passes. Must be at least the longest "
+            "turn time limit (180 minutes) plus 15 minutes. Recovery runs at startup and "
+            "periodically, and deletes a known pending card when the bot has Manage Messages "
+            "permission."
         ),
     )
     turn_card_unrecoverable_after_attempts: int = Field(
@@ -806,11 +806,13 @@ class DiscordSettings(BaseModel):
     def _stale_card_age_exceeds_turn_ceiling(cls, age_s: int) -> int:
         # Import after config is initialized: turn.__init__ imports admission,
         # which imports config, so a module-level import would form a cycle.
-        from daimon.core.turn.ceiling import TURN_CEILING_S
+        from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
-        if age_s < TURN_CEILING_S + 15 * 60:
+        # A card's turn may run to the longest time limit; it is not stale before that.
+        if age_s < LONGEST_TURN_CEILING_S + 15 * 60:
             raise ValueError(
-                "turn card unrecoverable age must be at least turn ceiling plus 15 minutes"
+                "turn card unrecoverable age must be at least the longest turn time limit "
+                "plus 15 minutes"
             )
         return age_s
 

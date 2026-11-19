@@ -765,9 +765,9 @@ turn_queue); continuation wakes keep their existing admission path.
 `int` · optional · default `86400`
 
 Minimum age in seconds before Discord can retire a card after definite recovery failure
-or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
-Recovery runs at startup and periodically, and deletes a known pending card when the bot
-has Manage Messages permission.
+or repeated failed recovery passes. Must be at least the longest turn time limit (180
+minutes) plus 15 minutes. Recovery runs at startup and periodically, and deletes a known
+pending card when the bot has Manage Messages permission.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
 
@@ -2121,12 +2121,13 @@ by the adapters.
 
 `float` · optional · default `3000.0`
 
-An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core ~45-minute
-ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn and fires
-first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
-OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
-the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
+ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
+enforced inside headless_runner.run_turn and fires first, producing a
+TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
+ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
+recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
+the core ceiling becomes unreachable for routines. Each routine has its own timeout;
 continuous scheduler ticks do not await in-flight routines. Missed slots follow the
 routine's catch_up_policy.
 

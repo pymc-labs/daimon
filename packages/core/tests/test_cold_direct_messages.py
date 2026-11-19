@@ -21,6 +21,7 @@ from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.direct_messages import (
+    OwnerDmFence,
     claim_message,
     finish_message,
     get_conversation,
@@ -161,26 +162,22 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
     async with db_session_factory.begin() as session:
         first = await claim_message(
             session,
-            platform="discord",
+            fence=OwnerDmFence("discord", "999"),
             route_key="555",
-            external_user_id="999",
             message_id="101",
             expected_scope_id=row.scope_id,
-            now=now,
-            active_until=now,
+            claimed_at=now,
         )
         await finish_message(session, conversation=first, history=[{"role": "user", "text": "hi"}])
     async with db_session_factory.begin() as session:
         assert (
             await claim_message(
                 session,
-                platform="discord",
+                fence=OwnerDmFence("discord", "999"),
                 route_key="555",
-                external_user_id="999",
                 message_id="101",
                 expected_scope_id=row.scope_id,
-                now=now,
-                active_until=now,
+                claimed_at=now,
             )
             is None
         )
@@ -545,10 +542,16 @@ async def test_dm_turn_renders_through_the_adapters_card(
     monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
     card = object()
     built: list[tuple[Admission, asyncio.Event]] = []
+    claims: list[datetime | None] = []
 
-    def card_for(admitted, cancel):
-        built.append((admitted, cancel))
-        return card
+    def card_for(claimed):
+        claims.append(claimed.claimed_at)
+
+        def build(admitted, cancel):
+            built.append((admitted, cancel))
+            return card
+
+        return build
 
     with pytest.raises(Stop):
         await reply_to_dm_result(
@@ -568,6 +571,13 @@ async def test_dm_turn_renders_through_the_adapters_card(
         assert seen["lifecycle"] is card, "the DM turn renders through the adapter's card"
         assert admitted is admission
         assert seen["cancel"] is cancel, "the card's Stop button cancels this turn"
+        assert claims[0] is not None, "the card checks delivery against the turn's own claim"
+        from datetime import UTC, datetime, timedelta
+
+        from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+
+        live_until = datetime.now(UTC) + timedelta(seconds=LONGEST_TURN_CEILING_S)
+        assert claims[0] > live_until, "an older image reading the claim as a deadline sees it live"
     else:
         assert type(seen["lifecycle"]).__name__ == "_CollectReply", "no card renders nothing"
 

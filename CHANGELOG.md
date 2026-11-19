@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Answer and unattended run time limits.** Two new workspace and agent settings, set
+  by server admins, limit how long one turn may run: `turn_time_limit` for a person's
+  message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
+  nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
+  Each takes 15, 20, 30 or 45 minutes, 45 by default, and the smallest setting wins.
+- **Hide the server name on tool lines.** A new workspace or agent setting,
+  `tool_server_names`, drops the connected server's name from the working card's tool lines.
+- **Model and effort reactions in Discord.** A new setting, off by default, reacts
+  to the first message in a thread, and to the first after the model or effort
+  changes, with an emoji for the model and one for the effort.
+- **An answer message cap setting.** In Discord, an answer posts up to 5 messages
+  as before, and past that is attached as a file. A setting from 1 to 1000
+  changes the cap for a workspace, agent, channel or thread.
+- **A channel background setting.** A new setting, `channel_history`, sets how many recent
+  channel messages (none, 10, 25, 50 or 100; 25 by default) a thread started from a channel
+  message reads for background, never more than its chat history setting allows.
+- **Answers in a thread another bot already opened.** When a channel's other
+  bot threads every message, Discord answers in that thread instead of
+  reporting that it could not open one.
+- **An edit that adds a mention gets an answer.** Editing a message to mention
+  the bot in Discord answers it like a new mention, once.
 - **Routines can run role-gated agents for an owner who holds the role.**
   Before, a routine on an agent limited to certain Discord roles was always
   refused. Now it runs as its owner, whose membership is read live at each

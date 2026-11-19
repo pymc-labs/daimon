@@ -787,7 +787,8 @@ async def test_dm_settings_outside_dms_or_without_conversation_shows_no_controls
 async def _card_from_turn(cog, msg, reply, admission):
     await cog.on_message(msg)
     card_for = reply.await_args.kwargs["card_for"]
-    return card_for(admission, asyncio.Event())
+    claimed = await conversation(cog.bot.runtime.sessionmaker)
+    return card_for(claimed)(admission, asyncio.Event())
 
 
 async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
@@ -805,6 +806,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
         grant=row_reply.grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -829,6 +831,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -870,6 +873,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -894,6 +898,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -915,6 +920,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
         grant=grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -954,11 +960,12 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
     )
 
     async def answer(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -985,11 +992,12 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
     )
 
     async def fail(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -1058,11 +1066,12 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
     monkeypatch.setattr(module, "DiscordTurnLifecycle", lifecycle)
 
     async def answer(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),

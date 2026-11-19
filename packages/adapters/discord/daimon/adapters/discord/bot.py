@@ -139,6 +139,7 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import ORPHAN_INTERRUPT_TIMEOUT_S, interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.model_reactions import model_marks
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
@@ -182,11 +183,13 @@ from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
     get_live_thread_session,
+    last_model_marks,
     list_live_thread_sessions,
     list_orphaned_turns,
     lock_orphaned_turn,
     mark_dead,
     mark_turn_active,
+    record_model_marks,
     update_watermark,
 )
 from daimon.core.stores.turn_card_intents import (
@@ -202,7 +205,13 @@ from daimon.core.thread_naming import (
     naming_text,
     strip_mentions,
 )
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    MissingTurnConfigError,
+    admit,
+    backend_facts,
+)
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
@@ -240,6 +249,7 @@ from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
@@ -305,6 +315,8 @@ _DRAIN_NOTICES_S: float = 10.0
 # only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
+MESSAGE_LEDGER_HORIZON = timedelta(minutes=60)
+"""How long the message admission ledger remembers a message before it is pruned."""
 # What a tenant reconcile returns: True on success, False on failure, or the
 # task already reconciling that tenant when the in-flight guard skipped this
 # call (None only if that task could not be identified).
@@ -1952,7 +1964,7 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             for tenant in tenants:
                 await prune_old_messages(
-                    session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - timedelta(minutes=60)
+                    session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - MESSAGE_LEDGER_HORIZON
                 )
             await session.commit()
 
@@ -2926,6 +2938,49 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
         )
 
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """An edit that adds a mention of the bot answers like a fresh mention.
+
+        Only a real content edit counts (pins, flags and embed updates carry no
+        edit time). A message older than the admission ledger's horizon is left
+        alone, since the ledger can no longer tell whether it was answered, as
+        is one that already has a thread.
+        """
+        if self.user is None or payload.guild_id is None:
+            return
+        data = payload.data
+        if not data.get("edited_timestamp"):
+            return
+        # "author" is absent on partial updates such as link previews, though typed as required.
+        if "author" not in data or data["author"].get("bot"):
+            return
+        if not any(user["id"] == str(self.user.id) for user in data.get("mentions", [])):
+            return
+        before = payload.cached_message
+        if before is not None and (
+            before.content == data.get("content")
+            or any(user.id == self.user.id for user in before.mentions)
+        ):
+            return
+        sent_at = discord.utils.snowflake_time(payload.message_id)
+        if datetime.now(UTC) - sent_at > MESSAGE_LEDGER_HORIZON:
+            return
+        try:
+            channel = await self._channel_by_id(payload.channel_id)
+            if not isinstance(channel, discord.abc.Messageable):
+                return
+            message = await channel.fetch_message(payload.message_id)
+        except discord.NotFound:
+            return  # deleted since the edit
+        except discord.HTTPException as exc:
+            log.warning(
+                "discord.edit_fetch_failed", message_id=payload.message_id, status=exc.status
+            )
+            return
+        if message.author.bot or message.thread is not None:
+            return
+        await self.on_message(message)
+
     async def on_message(
         self,
         message: discord.Message,
@@ -3795,6 +3850,49 @@ class DaimonBot(commands.Bot):
         finally:
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
+    async def _model_marks(
+        self, admission: Admission, *, tenant_id: uuid.UUID, thread_id: int
+    ) -> tuple[str, ...]:
+        """The model and effort emoji for a prompted turn's trigger message, when the setting
+        is on and they differ from the pair last shown in this thread."""
+        if not admission.shown("model_reactions", "discord"):
+            return ()
+        backend = admission.backend_revision
+        if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+            model_id, effort = backend.model, backend.effort
+        else:
+            model_id = admission.agent.model.id
+            effort = (admission.agent.model.model_extra or {}).get("effort")
+        marks = model_marks(model_id, effort if isinstance(effort, str) else None)
+        if not marks:
+            return ()
+        async with self.runtime.sessionmaker() as session:
+            shown = await last_model_marks(
+                session, tenant_id=tenant_id, platform="discord", thread_id=str(thread_id)
+            )
+        return () if shown == marks else marks
+
+    async def _thread_started_from(self, message: discord.Message) -> discord.Thread | None:
+        """The thread already opened on `message` (it shares the message's id), if any."""
+        try:
+            found = await self._channel_by_id(message.id)
+        except discord.NotFound:
+            return None
+        # On any failure to reach Discord the caller still shows the usual notice.
+        except discord.HTTPException as exc:
+            log.warning("discord.thread_lookup_failed", message_id=message.id, status=exc.status)
+            return None
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            log.warning(
+                "discord.thread_lookup_failed",
+                message_id=message.id,
+                error_type=type(exc).__name__,
+            )
+            return None
+        if isinstance(found, discord.Thread) and found.parent_id == message.channel.id:
+            return found
+        return None
+
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
@@ -4207,7 +4305,7 @@ class DaimonBot(commands.Bot):
             admitted_name=admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         agent = admission.agent
         try:
             async with self.runtime.sessionmaker.begin() as identity_session:
@@ -4296,6 +4394,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4398,6 +4497,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
                     owner_key=self.runtime.owner_key,
+                    deadline=turn_deadline_at,
                 )
                 await session.commit()
 
@@ -4472,6 +4572,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
@@ -5250,9 +5351,20 @@ class DaimonBot(commands.Bot):
                         name=thread_name, auto_archive_duration=10080
                     )
                 except Exception as exc:
-                    # Only a failure before the thread exists is "couldn't open".
-                    await _explain_thread_open_failure(message)
-                    raise _ThreadOpenFailed(str(exc)) from exc
+                    # Another bot may have threaded this message first; answer there.
+                    opened = await self._thread_started_from(message)
+                    if opened is None:
+                        # Only a failure before the thread exists is "couldn't open".
+                        await _explain_thread_open_failure(message)
+                        raise _ThreadOpenFailed(str(exc)) from exc
+                    log.info("discord.thread_reused_foreign", thread_id=opened.id)
+                    # Not recorded as an `auto_thread` post: it is not our thread to tidy.
+                    self._processing.add(opened.id)
+                    self._thread_stops.claim(opened.id)
+                    self._track_processing_task(opened.id)
+                    if created_thread_ids is not None:
+                        created_thread_ids.append(opened.id)
+                    return opened
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)
@@ -5324,6 +5436,8 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
+        marks_to_show = await self._model_marks(admission, tenant_id=tenant_id, thread_id=thread.id)
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
@@ -5338,6 +5452,8 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
+                model_marks=marks_to_show,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5466,7 +5582,8 @@ class DaimonBot(commands.Bot):
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
         turn_deadline_at = turn_deadline(
-            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC)
+            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
+            ceiling_s=admission.turn_ceiling_s,
         )
 
         discord_settings = self.runtime.settings.discord
@@ -5627,6 +5744,15 @@ class DaimonBot(commands.Bot):
             reused=prepared.reused,
         )
         watch.session_id = prepared.ma_session_id
+        if lifecycle.model_marked:
+            async with self.runtime.sessionmaker.begin() as marks_session:
+                await record_model_marks(
+                    marks_session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    marks=marks_to_show,
+                )
         # What happened to the workspace is the agent's to say, from the turn controls.
         session_state = (
             None
@@ -5648,6 +5774,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
                     owner_key=self.runtime.owner_key,
+                    deadline=turn_deadline_at,
                 )
                 await _at_session.commit()
 
@@ -5864,6 +5991,7 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=turn_send,
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

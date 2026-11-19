@@ -703,6 +703,13 @@ class ThreadSession(Base):
         DateTime(timezone=True), nullable=True
     )
     active_turn_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The running turn's own deadline, so a turn allowed longer than the standard window
+    # is not read as abandoned. NULL keeps the standard window.
+    active_turn_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The model and effort emoji a turn on this session last showed in its thread.
+    model_marks: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -4304,7 +4311,12 @@ class DirectMessageConversation(Base):
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set while a delivery's turn holds the conversation: an identity compared on finish
+    # and delivery, written as a time past the longest turn so an older image, which reads
+    # it as a deadline (the column keeps its first name), still sees the claim live.
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        "active_until", DateTime(timezone=True), nullable=True
+    )
 
 
 class PlatformUserName(Base):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from contextlib import asynccontextmanager
@@ -30,6 +31,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import (
     DirectMessageBusy,
+    OwnerDmFence,
     claim_message,
     dm_enabled,
     finish_message,
@@ -300,7 +302,7 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
         stored = await get_conversation(
             session, platform=platform, route_key="dm-42", external_user_id="42"
         )
-        assert stored is not None and len(stored.history) == 4 and stored.active_until is None
+        assert stored is not None and len(stored.history) == 4 and stored.claimed_at is None
 
 
 async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_session_factory):
@@ -345,36 +347,111 @@ async def test_new_selection_resets_scope_and_rejects_a_stale_membership_check(
 async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
     db_session, db_session_factory, db_engine
 ):
+    """Two claims at once: one wins, the other is busy; another user finds no route."""
     tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     now = datetime.now(UTC)
-
     independent = async_sessionmaker(db_engine, expire_on_commit=False)
 
     async def claim(message_id):
         async with independent.begin() as session:
             return await claim_message(
                 session,
-                platform="discord",
+                fence=OwnerDmFence("discord", "42"),
                 route_key="dm-42",
-                external_user_id="42",
                 message_id=message_id,
                 expected_scope_id=route.scope_id,
-                now=now,
-                active_until=now + timedelta(minutes=1),
+                claimed_at=now,
             )
 
     results = await asyncio.gather(claim("one"), claim("two"), return_exceptions=True)
-    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1
-    winner = next(result for result in results if not isinstance(result, Exception))
+    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1, (
+        f"exactly one claim is busy: {results}"
+    )
+    winner = next(result for result in results if not isinstance(result, BaseException))
     async with db_session_factory.begin() as session:
         assert (
             await get_conversation(
                 session, platform="discord", route_key="dm-42", external_user_id="wrong"
             )
             is None
+        ), "another user has no route"
+        assert await finish_message(session, conversation=winner, history=[]), "winner finishes"
+
+
+async def test_a_dm_turn_whose_owner_fence_drops_stops_instead_of_running_on(
+    db_session, db_session_factory, monkeypatch
+):
+    """A dropped fence connection cancels the turn's body and fails it as interrupted."""
+    _tenant, deps, *_ = await _setup(db_session, db_session_factory)
+    monkeypatch.setattr(core_direct_messages, "_FENCE_CHECK_S", 0.05)
+    ran_on = False
+    with pytest.raises(core_direct_messages.DirectMessageClaimLost):
+        async with core_direct_messages.owner_dm_turn(
+            deps, platform="discord", owner="42", wait=False
+        ) as fence:
+            async with db_session_factory() as session:
+                await session.execute(
+                    sql_text("SELECT pg_terminate_backend(:pid)"), {"pid": fence.pid}
+                )
+            await asyncio.sleep(10)
+            ran_on = True
+    assert fence.lost.is_set(), "the holder noticed its fence is gone"
+    assert not ran_on, "the body was cancelled, not left running"
+
+
+async def test_a_waiting_dm_turn_takes_over_once_the_holder_loses_its_fence(
+    db_session, db_session_factory, monkeypatch
+):
+    """The waiter claims over the stopped holder, whose finish and delivery are refused."""
+    tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission)
+    monkeypatch.setattr(core_direct_messages, "_FENCE_CHECK_S", 0.05)
+    turn = functools.partial(
+        core_direct_messages.owner_dm_turn, deps, platform="discord", owner="42"
+    )
+
+    async def claim(fence, message_id):
+        async with db_session_factory.begin() as session:
+            return await claim_message(
+                session,
+                fence=fence,
+                route_key="dm-42",
+                message_id=message_id,
+                expected_scope_id=route.scope_id,
+                claimed_at=datetime.now(UTC),
+            )
+
+    async def waiter():
+        async with turn(wait=True) as fence:
+            return await claim(fence, "two")
+
+    with pytest.raises(core_direct_messages.DirectMessageClaimLost):
+        async with turn(wait=False) as held:
+            superseded = await claim(held, "one")
+            waiting = asyncio.create_task(waiter())
+            await asyncio.sleep(0.2)
+            assert not waiting.done(), "the waiter waits while the fence is held"
+            async with db_session_factory() as session:
+                await session.execute(
+                    sql_text("SELECT pg_terminate_backend(:pid)"), {"pid": held.pid}
+                )
+            await asyncio.sleep(10)
+    taken = await asyncio.wait_for(waiting, 5)
+    assert taken is not None and superseded is not None, "both messages are claimed"
+    assert taken.claimed_at != superseded.claimed_at, "the waiter holds its own claim"
+    async with db_session_factory.begin() as session:
+        assert not await holds_claim(session, conversation=superseded), "the old claim is gone"
+        assert not await finish_message(session, conversation=superseded, history=[]), (
+            "the stopped turn cannot write its history"
         )
-        await finish_message(session, conversation=winner, history=[])
+    reply = core_direct_messages.DirectMessageReply(
+        text="", conversation=superseded, grant=admission.grant
+    )
+    with pytest.raises(core_direct_messages.DirectMessageAccessRevoked, match="replaced"):
+        await core_direct_messages.require_dm_delivery(deps, reply)
+    async with db_session_factory.begin() as session:
+        assert await finish_message(session, conversation=taken, history=[]), "waiter finishes"
 
 
 async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_calls(
@@ -662,7 +739,7 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
         "an unconfirmed interrupt retires the mapping so the next DM gets a fresh session"
     )
     await engine.dispose()
-    assert stored is not None and stored.active_until is None, "the claim is released"
+    assert stored is not None and stored.claimed_at is None, "the claim is released"
     assert stored.recent_message_ids == ["1"], "the queued DM was never claimed"
 
 
@@ -1853,13 +1930,11 @@ async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
     async with db_session_factory.begin() as session:
         row = await claim_message(
             session,
-            platform="discord",
+            fence=OwnerDmFence("discord", "42"),
             route_key="dm-42",
-            external_user_id="42",
             message_id="claim-1",
             expected_scope_id=route.scope_id,
-            now=now,
-            active_until=now + timedelta(minutes=2),
+            claimed_at=now + timedelta(minutes=2),
         )
         await create_thread_session(
             session,
@@ -1899,7 +1974,7 @@ async def test_a_shutdown_settles_a_dm_only_while_its_claim_holds(
     async with db_session_factory.begin() as session:
         assert await holds_claim(session, conversation=row) == (claim_state == "current")
 
-    await core_direct_messages._settle_shutdown_cancelled_dm(deps, row)
+    await core_direct_messages._settle_cancelled_dm(deps, row)
 
     events = [event["type"] for body in sent for event in body["events"]]
     assert events == (["user.interrupt"] if claim_state == "current" else [])
@@ -1930,7 +2005,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         patch("mux.drivers.anthropic.transport.LegacyTurnTransport.send", stalled),
         patch.object(core_direct_messages, "_SHUTDOWN_INTERRUPT_TIMEOUT_S", 0.05),
     ):
-        await asyncio.wait_for(core_direct_messages._settle_shutdown_cancelled_dm(deps, row), 2)
+        await asyncio.wait_for(core_direct_messages._settle_cancelled_dm(deps, row), 2)
 
     async with db_session_factory() as session:
         assert (
@@ -1946,7 +2021,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         stored = await get_conversation(
             session, platform="discord", route_key="dm-42", external_user_id="42"
         )
-    assert stored is not None and stored.active_until == row.active_until, (
+    assert stored is not None and stored.claimed_at == row.claimed_at, (
         "settling leaves releasing the claim to finish_message"
     )
 
