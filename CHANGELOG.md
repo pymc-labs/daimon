@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn's usage after the turn ended, the summary line is edited to show that
   debit and the money left, unless a later turn has started in the thread.
   Daimon reads that usage again from 2 seconds after the turn, doubling up to
-  an hour, and the scheduler keeps its slower pace. The line shows no cost
+  an hour. The scheduler reads it after that hour, which also covers a restart,
+  so no turn is read twice. The line shows no cost
   while Daimon cannot know it, such as an unpriced model or usage the provider
   never reported.
 

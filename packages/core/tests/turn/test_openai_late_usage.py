@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
+from daimon.core.turn import openai_late_usage
 from daimon.core.turn.openai_late_usage import DELAYS_S, LateUsage
 from structlog.testing import capture_logs
 
@@ -127,3 +130,27 @@ async def test_defer_when_the_key_finished_then_it_can_be_deferred_again() -> No
     late.defer("turn", reread("second"))
     await late.wait()
     assert reads == ["first", "second"], reads
+
+
+#: Reads of a turn's usage that are not a late re-read, and why.
+NOT_LATE_READS = {"hosted_io.py": "the turn's own read when it ends, inside the turn"}
+
+
+def _calling(name: str) -> set[str]:
+    core = Path(openai_late_usage.__file__).parents[1]
+    return {
+        path.name
+        for path in core.rglob("*.py")
+        if any(
+            isinstance(node, ast.Call)
+            and getattr(node.func, "attr", getattr(node.func, "id", None)) == name
+            for node in ast.walk(ast.parse(path.read_text()))
+        )
+    }
+
+
+def test_both_triggers_start_the_one_shared_recheck() -> None:
+    """Found from the code: the in-process and scheduler triggers call `reread_turn`,
+    the only late read of a turn resource."""
+    assert _calling("reread_turn") == {"openai_host.py", "openai_late_usage.py"}
+    assert _calling("reconcile_turn") == {"openai_late_usage.py", *NOT_LATE_READS}

@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import pytest
-from daimon.core import channel_backend
+from daimon.core import channel_backend, usage_recording
 from daimon.core.turn import openai_host
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runtime_for
 from daimon.core.turn.openai_late_usage import LateUsage
@@ -261,6 +261,9 @@ class Wire:
         return httpx.Response(200, json=self.session())
 
 
+_RECORD_PROVIDER_USAGE = usage_recording.record_provider_usage
+
+
 @pytest.fixture(params=["memory", "postgres"])
 async def composed(request, db_session_factory, db_clean, monkeypatch):
     wire = Wire()
@@ -279,6 +282,8 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
         return False  # durable pending, never a known free turn
 
     monkeypatch.setattr(openai_host, "record_provider_usage", record)
+    # The late re-read (`reread_turn`) records through the same recorder.
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record)
 
     async def plan(request):
         return SessionSpec(
@@ -502,9 +507,10 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
 
     from daimon.core.pricing import ProviderPrice
     from daimon.core.stores.tenant_ledger import get_balance
-    from daimon.core.usage_recording import record_provider_usage
 
+    record_provider_usage = _RECORD_PROVIDER_USAGE  # the real recorder, unpatched
     monkeypatch.setattr(openai_host, "record_provider_usage", record_provider_usage)
+    monkeypatch.setattr(usage_recording, "record_provider_usage", record_provider_usage)
     request, wire, store, _, runtime = composed
     first = await prepare_openai(request)
     binding = await store.get_binding(
