@@ -201,8 +201,12 @@ class OpenAIUsage:
         meter: Object = {"usage": turn.get("usage"), "subagent_id": turn.get("subagent_id")}
         if searches:
             meter["web_searches"] = searches
-        rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
         final = not fallback and turn.get("usage") is not None and turn.get("status") in _ENDED
+        # Finality too: the resource confirming the terminal event's counts is
+        # a new revision, never the fallback's revision with another value.
+        if final:
+            meter["final"] = True
+        rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
         return observation(turn, session, revision=rev, web_searches=searches, final=final)
 
     async def _searches(self, session: ResourceRef, turn: Object) -> int:

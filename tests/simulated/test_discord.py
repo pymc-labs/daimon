@@ -40,16 +40,7 @@ async def _metering(
         ("anthropic", False),
         ("openai", False),
         # Only the terminal event has the usage; the turn resource fills it in later (#1769).
-        pytest.param(
-            "openai",
-            True,
-            id="openai-late-usage",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="the late re-read meets the event's usage again at the same revision, "
-                "now final, and retries on UsageRevisionConflict until its backoff ends",
-            ),
-        ),
+        pytest.param("openai", True, id="openai-late-usage"),
         ("gemini", False),
     ],
 )
