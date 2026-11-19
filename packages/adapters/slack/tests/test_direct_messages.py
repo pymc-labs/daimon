@@ -491,6 +491,31 @@ async def test_messages_sent_during_a_turn_are_answered_together_by_the_next(
     assert client.chat_postMessage.await_count == 2, "each turn posts its answer"
 
 
+async def test_a_group_queued_behind_a_turn_runs_on_the_role_read_when_it_starts(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, _client, reply = await _burst_setup(db_session_factory, monkeypatch, 0)
+    live = AsyncMock(side_effect=[Role.ADMIN, Role.USER])
+    monkeypatch.setattr(dm_module, "_live_role", live)
+    gate, started = asyncio.Event(), asyncio.Event()
+
+    async def first_waits(*args: Any, **kwargs: Any) -> str:
+        if reply.await_count == 1:
+            started.set()
+            await gate.wait()
+        return "done"
+
+    reply.side_effect = first_waits
+    first = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _dm("one", "11.1"), team_id=_TEAM)
+    )
+    await asyncio.wait_for(started.wait(), 5)
+    await dm_module.handle_direct_message(runtime, _dm("two", "11.2"), team_id=_TEAM)
+    gate.set()
+    await first
+    assert [call.kwargs["role"] for call in reply.await_args_list] == [Role.ADMIN, Role.USER]
+
+
 def _slow_lookup(monkeypatch: pytest.MonkeyPatch, *, fails: bool = False) -> asyncio.Event:
     """Hold the conversation lookup until the returned event is set; then run it or fail."""
     real = dm_module.get_conversation

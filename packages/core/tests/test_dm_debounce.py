@@ -14,9 +14,9 @@ from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_tenant
 
 
-def test_the_setting_defaults_to_three_seconds_with_off_and_presets() -> None:
+def test_the_setting_defaults_to_off_with_presets() -> None:
     spec = FEATURES["dm_debounce_seconds"]
-    assert spec.default == "3"
+    assert spec.default == "0", "a deployment opts in to the wait"
     assert {"0", "1", "3", "5"} <= set(spec.values)
     assert spec.platforms == frozenset({"discord", "slack", "teams"}), (
         "web has no hold-and-merge path"
@@ -28,7 +28,7 @@ def test_the_setting_defaults_to_three_seconds_with_off_and_presets() -> None:
 async def test_the_wait_follows_the_workspace_setting(db_session_factory, platform) -> None:
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform=platform)
-    assert await debounce_seconds(db_session_factory, None, tenant.id, platform) == 3.0
+    assert await debounce_seconds(db_session_factory, None, tenant.id, platform) == 0.0
     for chosen in ("0", "5"):
         async with db_session_factory.begin() as session:
             await set_feature_value(

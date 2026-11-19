@@ -318,7 +318,10 @@ def _oversized_note(omit_url: bool) -> str:
 
 
 def forwarded_lines(
-    messages: Sequence[discord.Message], *, omit_oversized_image_urls: bool = False
+    messages: Sequence[discord.Message],
+    *,
+    omit_oversized_image_urls: bool = False,
+    sealed_sources: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The ``<forwarded>`` block for messages that forward another message, else nothing.
 
@@ -326,10 +329,14 @@ def forwarded_lines(
     The person could see it, but it is someone else's text, so it is untrusted
     content. Attachments are URL lines (the agent fetches them), never vision blocks.
     An image over the API's pixel cap is marked, and with ``omit_oversized_image_urls``
-    (a rebuild after a dead session) its URL is left out.
+    (a rebuild after a dead session) its URL is left out. A forward whose source channel
+    is in ``sealed_sources`` is left out.
     """
     body: list[str] = []
     for message in messages:
+        source = getattr(getattr(message, "reference", None), "channel_id", None)
+        if source is not None and str(source) in sealed_sources:
+            continue
         for snapshot in getattr(message, "message_snapshots", None) or ():
             text = snapshot.content or _embed_text(snapshot)
             attrs = f" timestamp={quoteattr(snapshot.created_at.isoformat())}"

@@ -51,7 +51,7 @@ Where each feature can be set, and its default.
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Direct message wait | `dm_debounce_seconds` | Chat | 3 seconds | ✓ | ✓ |  |  |  |  |
+| Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -567,8 +567,8 @@ Holds a direct message for more, so a burst gets one reply; at most ten seconds,
 | | |
 | --- | --- |
 | Key | `dm_debounce_seconds` |
-| Values | `3` (3 seconds), `0` (Off), `1` (1 second), `5` (5 seconds) |
-| Default | `3` |
+| Values | `0` (Off), `1` (1 second), `3` (3 seconds), `5` (5 seconds) |
+| Default | `0` |
 | Levels | Deployment, Workspace |
 | Combines | Most specific wins |
 

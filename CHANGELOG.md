@@ -35,14 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. It applies to
   Discord, Slack and web direct messages. A higher setting costs more.
-- **Direct messages wait for you to finish.** `dm_debounce_seconds` (3 by default, or
-  0, 1 or 5; 0 is off) holds a direct message until nothing new has arrived for that
-  long, up to ten seconds after the first, then answers everything sent in one turn.
+- **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3
+  or 5 seconds at the deployment or workspace) holds a direct message until nothing new
+  has arrived for that long, up to ten seconds after the first, then answers everything
+  sent in one turn.
   Messages sent while a reply runs are answered together by the next one. Each held
   message gets an eyes reaction until it is answered. An approval reply such as "yes"
   is answered on its own, at once. A restart answers held messages at once. If
   `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
   sent. It applies to Discord, Slack and Teams, set per workspace or deployment.
+- **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
+  with no model, written by a new pod, makes old pods fail turns in that conversation
+  until the rollout ends. Avoid changing a conversation's effort while it rolls out.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.

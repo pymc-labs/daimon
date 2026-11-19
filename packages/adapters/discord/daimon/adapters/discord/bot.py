@@ -127,6 +127,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
+from daimon.core.direct_messages import sealed_channel_ids
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
@@ -2306,15 +2307,16 @@ class DaimonBot(commands.Bot):
                 )
             )
         if non_production:
-            # Replace commands left by a production deployment with the DM-only ones:
-            # only the global scope reaches DMs, and a DM-only command never shows in
+            # Replace commands left by a production deployment with the DM-capable ones:
+            # only the global scope reaches DMs. A DM-capable command is left out of the
+            # per-guild copy, so it shows once in a guild; a DM-only one never shows in
             # a guild, so registering it globally widens nothing.
-            dm_only = [
+            dm_capable = [
                 command
                 for command in self.tree.get_commands()
                 if isinstance(command, app_commands.Command)
                 and command.allowed_contexts is not None
-                and not command.allowed_contexts.guild
+                and command.allowed_contexts.dm_channel
             ]
             if not self._global_tree_synced:
                 if self.application_id is None:
@@ -2323,10 +2325,10 @@ class DaimonBot(commands.Bot):
                 try:
                     await self.http.bulk_upsert_global_commands(
                         self.application_id,
-                        payload=[command.to_dict(self.tree) for command in dm_only],
+                        payload=[command.to_dict(self.tree) for command in dm_capable],
                     )
                     self._global_tree_synced = True
-                    log.info("tree_cleared_global", dm_only=[c.name for c in dm_only])
+                    log.info("tree_cleared_global", dm_capable=[c.name for c in dm_capable])
                 except discord.HTTPException as exc:
                     log.warning("tree_sync_global_clear_failed", error=str(exc))
                     return
@@ -2338,7 +2340,7 @@ class DaimonBot(commands.Bot):
                     self.tree.clear_commands(guild=guild_obj)
                     if guild.id in command_guild_ids:
                         self.tree.copy_global_to(guild=guild_obj)
-                        for command in dm_only:
+                        for command in dm_capable:
                             self.tree.remove_command(command.name, guild=guild_obj)
                     await self.tree.sync(guild=guild_obj)
                     self._ready_synced_guild_ids.add(guild.id)
@@ -5754,12 +5756,21 @@ class DaimonBot(commands.Bot):
         # API). Inlined images get a URL line too, a handle for external APIs.
         attachment_prefix, image_blocks = await prepare_attachments(attachments)
         forward_messages = query_messages or (message,)
+        # A forward from a sealed channel stays out of every turn but that channel's own.
+        sealed_sources: frozenset[str] = frozenset()
+        if any(getattr(m, "message_snapshots", None) for m in forward_messages):
+            here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
+            sealed_sources = (
+                await sealed_channel_ids(self.runtime.turn_deps, tenant_id=tenant_id) - here
+            )
 
         def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
             # A forwarded message's content is untrusted text the person could see.
             forwarded = "\n".join(
                 forwarded_lines(
-                    forward_messages, omit_oversized_image_urls=omit_oversized_image_urls
+                    forward_messages,
+                    omit_oversized_image_urls=omit_oversized_image_urls,
+                    sealed_sources=sealed_sources,
                 )
             )
             return "\n".join(part for part in (attachment_prefix, forwarded) if part)

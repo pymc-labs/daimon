@@ -504,6 +504,8 @@ def _answerer(
         if not content:
             return
         try:
+            # Read per group: one queued behind a running turn must not run on a stale role.
+            role = await _live_role(client, user_id=user_id, team_id=team_id)
             said = await reply_to_dm(
                 runtime.turn_deps,
                 platform="slack",
