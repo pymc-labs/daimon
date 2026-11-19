@@ -878,3 +878,18 @@ def test_a_config_change_recreates_and_checks_every_worker() -> None:
     for step in (settle, steps["Verify deployed installs match shipped defaults"]):
         assert without_freshness(step["if"]) == f"({reconcile}) != ''"
     assert "steps.refresh.outputs.smoke == 'true'" in steps["Post-deploy smoke turn"]["if"]
+
+
+def test_guard_jobs_run_the_checks_in_parallel_and_stay_out_of_the_deploy_gate() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    runs = lambda job: " ".join(s.get("run", "") for s in jobs[job]["steps"])  # noqa: E731
+    assert "scripts/ci/image_tls_check.py" in runs("image-smoke")
+    assert "daimon:smoke" in runs("image-smoke")
+    assert any(s.get("with", {}).get("load") for s in jobs["image-smoke"]["steps"])
+    assert "scripts/ci/migration_upgrade.py" in runs("migration-upgrade")
+    # The release tag and the parent commit come from history.
+    assert jobs["migration-upgrade"]["steps"][0]["with"]["fetch-depth"] == 0
+    for name in ("image-smoke", "migration-upgrade"):
+        assert jobs[name]["needs"] == "changes"
+        assert jobs[name]["timeout-minutes"] <= 15
+        assert name not in jobs["deploy-gcp"]["needs"]

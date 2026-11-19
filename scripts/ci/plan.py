@@ -36,6 +36,9 @@ FILES: dict[str, str] = {
     ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
     "azure.yaml": "repo",
+    # The scripts the migration-upgrade and image-smoke jobs run.
+    "scripts/ci/migration_upgrade.py": "migration-check",
+    "scripts/ci/image_tls_check.py": "image-check",
     ".github/workflows/ci.yml": "all",
     # Their contract tests are repo tests, but a change deploys everything it can break.
     ".github/workflows/deploy.yml": "deploy-workflow",
@@ -127,7 +130,10 @@ SUITES: dict[str, tuple[str, ...]] = {
     "golden": (*DAIMON, "mux"),
     "testing": (*DAIMON, "mux", "harness", "harness-conformance", "report-host", "notebook-host"),
     "core": (*_HOSTS, "mux"),
-    "migrations": (*_HOSTS, "mux"),
+    "migrations": (*_HOSTS, "mux", "migration-upgrade"),
+    # A script, so ruff runs on it as well.
+    "migration-check": ("lint", "migration-upgrade"),
+    "image-check": ("lint", "image-daimon"),
     "discord": _HOSTS,
     "slack": _HOSTS,
     "teams": _HOSTS,
@@ -197,6 +203,8 @@ JOBS: dict[str, tuple[str, ...]] = {
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
     "docker-build": ("image-daimon", "image-notebook-host", "image-report-host"),
+    "image-smoke": ("image-daimon",),
+    "migration-upgrade": ("migration-upgrade",),
     "harness-image": ("image-harness",),
 }
 ALL_SUITES = tuple(sorted({s for suites in (*SUITES.values(), *JOBS.values()) for s in suites}))

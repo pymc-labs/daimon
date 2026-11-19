@@ -84,7 +84,7 @@ def test_web_adapter_change_runs_only_its_suites() -> None:
     paths = ["packages/adapters/web/daimon/adapters/web/app.py"]
     suites, jobs = _tests(paths)
     assert suites == {"web", "parity", "lint", "shard-check", "image-daimon"}
-    assert jobs == {"lint", "pytest-db", "shard-check", "docker-build"}
+    assert jobs == {"lint", "pytest-db", "shard-check", "docker-build", "image-smoke"}
     # Only the selected legs start.
     result = plan.plan_tests(paths)
     legs = {job: json.loads(result[job])["include"] for job in plan.MATRICES}
@@ -108,7 +108,24 @@ def test_without_a_base_every_leg_runs() -> None:
 
 def test_test_helpers_run_every_pytest_job() -> None:
     _, jobs = _tests(["packages/testing/daimon/testing/asgi.py"])
-    assert jobs == set(plan.JOBS) - {"web", "docker-build", "harness-image"}
+    assert jobs == set(plan.JOBS) - {
+        "web",
+        "docker-build",
+        "harness-image",
+        "image-smoke",
+        "migration-upgrade",
+    }
+
+
+def test_a_migration_runs_the_upgrade_check_and_nothing_else_does() -> None:
+    _, jobs = _tests(["packages/core/alembic/versions/0220_x.py"])
+    assert "migration-upgrade" in jobs
+    _, jobs = _tests(["packages/adapters/slack/daimon/adapters/slack/app.py"])
+    assert "migration-upgrade" not in jobs
+    _, jobs = _tests(["scripts/ci/migration_upgrade.py"])
+    assert jobs == {"lint", "migration-upgrade"}
+    _, jobs = _tests(["scripts/ci/image_tls_check.py"])
+    assert jobs == {"lint", "docker-build", "image-smoke"}
 
 
 def test_a_journey_file_runs_the_journeys() -> None:
