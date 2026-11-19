@@ -356,7 +356,8 @@ async def _set_channel_budget_impl(
         except ChannelBudgetError as err:
             raise ToolError(f"{err}. Nothing was saved.") from err
 
-    parse(None)  # refused before any lookup or write
+    if on_limit is not None or alert_channel_id is None:
+        parse(None)  # refused before any lookup or write; a lone alert_channel needs the row
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
     async with runtime.session_factory() as session:
         spec = parse(

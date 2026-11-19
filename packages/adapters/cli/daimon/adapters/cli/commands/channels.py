@@ -212,7 +212,8 @@ async def budget_set(
         except ChannelBudgetError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
-    parse(None)  # refused before any lookup or write
+    if on_limit is not None or alert_channel is None:
+        parse(None)  # refused before any lookup or write; a lone alert_channel needs the row
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     target = await parent_channel(
         rt,
