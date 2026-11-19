@@ -60,7 +60,8 @@ daimon watches go-live --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAM
 ```
 
 Each file lists at most 25 watches, plus `timers`. Give every file of one export
-in the same run, which is one transaction. A callback watch keeps its
+in the same run. Each watch commits on its own, so watch ingress waits at most
+for one; a rerun finishes a run that stopped. A callback watch keeps its
 token's SHA-256 and also gets a new private link. The links go only to
 `--urls-out` (mode 0600), as `{source id: url}`, merged with an earlier file;
 they are never printed. Set `DAIMON_WATCHES__CALLBACK_BASE_URL` first. Owners
@@ -83,8 +84,10 @@ its owner to resume it, and a timer is never scheduled.
 Imported watches start paused and report to the owner's private conversation.
 Check each owner, channel and thread, which the import prints, then run
 `go-live`. It checks that the agent is an unarchived agent of the tenant, which
-must be a live Discord server. A timers-only `import` that is given `--agent-id`
-and `--agent-name` checks them too.
+must be a live Discord server. An `import` with timers or callback watches
+needs `--agent-id` and `--agent-name` and checks them too. Held timers belong to
+that agent: only its `go-live` schedules them and only its `--full` run cancels
+them. `daimon watches confirm` is removed; use `go-live`.
 
 `go-live` makes every watch imported for that agent live on the owner, channel
 and thread the import printed: polled and callback watches resume. A page watch
@@ -98,6 +101,10 @@ conversation fire in that person's private messages, ones set in a thread fire i
 one-off reminders set in a plain channel fire in that channel. A channel reminder
 runs unattended, as its owner, and only if the agent can still post there and the
 owner can still see it; otherwise it is settled with a reason and nothing is sent.
+
+Reminders in a private conversation or a plain channel fire only for an agent on
+Managed Agents. For any other agent `go-live` lists them by name, counts them as
+`not_scheduled`, schedules none and leaves them held for a rerun.
 
 Channel reminders whose channel id is not numeric are counted. Any past the 25
 pending a person may hold are skipped. Notes and instructions over their limit
@@ -114,6 +121,14 @@ are updated. A rerun never pauses again what `unpause` released. With `--full` i
 cancels held timers that no file of the run lists. An export split over several
 files may list its timers in only one, so `--full` refuses a run whose files list
 no timers.
+
+A privacy purge erases the held rows of the person, but importing the same files
+again restores them. Delete the import files, and the `--urls-out` file, after
+use.
+
+Reminders and callback watches made natively in a private conversation: the first
+deploy settles the reminders already due there, which never fired before, so none
+fires at once. A callback watch cannot be made in a private conversation.
 
 ```bash
 daimon watches unpause --tenant TENANT_UUID --all-timers   # or --timer-id, --watch-id

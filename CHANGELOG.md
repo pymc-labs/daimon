@@ -19,7 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only while the agent may post there and the owner can still see it. A rerun
   updates what has not gone live, `--full` cancels what no file of the run lists,
   and `unpause`, `renew` and `rotate-link` manage what came in.
-  Moving people in never messages them.
+  Moving people in never messages them. A timers or callback import names its
+  agent: held timers belong to it, so another agent's `go-live` and `--full` run
+  leave them alone. Reminders in a private conversation or channel only fire for an
+  agent on Managed Agents; `go-live` lists the others by name and schedules none.
+  Each watch imports in its own transaction, so watch ingress never waits for a
+  whole import. Importing the same files again after a privacy purge restores the
+  purged rows, so delete the import files after use. `daimon watches confirm` is
+  removed. After the `callback_watch_imports` migration, roll back by downgrading
+  it first, because an old sidecar refuses the new grant. Reminders set in a
+  private conversation now fire; those already due when this deploys are settled
+  without firing. A callback watch cannot be made in a private conversation, and
+  the lane proxy now routes callback links with the configured body limit.
 - **Operators can move people in from another bot.** `daimon tags import` opts
   listed Discord members out of being tagged. `daimon dm import-history` holds
   each person's earlier private conversation for their first DM here with the

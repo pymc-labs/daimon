@@ -148,6 +148,10 @@ image as the others, after migrations.
 3. Keep the executor private on port 8767, with no published port or proxy
    route. For MCP server watches it needs outbound HTTPS to the listed URLs.
 4. Put the sidecar behind a TLS proxy that exposes only the callback paths.
+   Callback watches need the route `POST /callbacks/watches/<watch id>/<token>`,
+   with a body limit of `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by
+   default). The lane `Caddyfile.sidecar` does both; give the same variable to
+   the `sidecar` and the proxy.
 5. Set [`DAIMON_WATCHES__ENABLED`](configuration.md#daimon_watches__enabled)
    to `true`, then turn on the database `global` gate. Watches fire only once the
    operator has done both, whatever the Watches feature says at any level.
@@ -209,7 +213,7 @@ DAIMON_WATCHES__CALLBACK_BASE_URL=https://hooks.example.com
 Only a SHA-256 of each token is stored and compared in constant time. Every
 refusal answers the same `403`; oversized bodies get `413` and a body with a NUL
 byte `400`. A retried post of the same body within five minutes wakes the agent
-once and still answers `202`. Wakes share the
+once and still answers `202`. A callback watch cannot be made in a DM. Wakes share the
 per-watch and per-owner limits above, and a flood of bad links is rate limited
 per address and in the database. Keep the proxy from logging paths.
 
