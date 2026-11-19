@@ -1914,7 +1914,15 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit, 
 
 
 async def test_an_agent_saved_on_a_selfhosted_model_runs_a_reply(composed):
-    """The agent's own choice prepares and replies like a channel pin; shared stays refused."""
+    """The agent's own choice prepares and replies like a channel pin; shared stays refused.
+
+    No agent revision is retained here, as for a record born on its provider, and the
+    host re-puts the revision with none. Deliberate difference: the OpenAI host refuses
+    a missing association before its paid request, because it runs a counterpart proven
+    against the agent's switch
+    (`test_agent_origin_openai_host_preserves_its_switch_before_paid_request`); the
+    self-hosted host runs the record itself.
+    """
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.outcomes import drain_outcomes
 

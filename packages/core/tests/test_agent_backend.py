@@ -28,6 +28,7 @@ from daimon.core.channel_backend import (
     BackendUnsupported,
     CompatibilityItem,
     TenantBackendPolicy,
+    ThreadBackend,
     check_backend,
     clear_channel_backend,
     compatibility_preview,
@@ -38,7 +39,7 @@ from daimon.core.channel_backend import (
     set_channel_backend,
 )
 from daimon.core.config import TurnSettings
-from daimon.core.stores import access_policy, mux_state, security_audit
+from daimon.core.stores import access_policy, mux_state, security_audit, thread_models
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from mux.contracts.config import BackendConfig
@@ -284,6 +285,36 @@ async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) 
         explicit = await set_channel_backend(session, channel, BackendConfig())
         assert explicit.local > second.local
         assert (await resolve_validated(session, channel, agent, enabled=True))[0] == explicit
+
+
+async def test_a_conversation_revision_is_re_put_under_its_own_thread(owned) -> None:
+    """A conversation's model choice is stored as `thread` and admitted as the agent's
+    own; a host re-puts it under that thread, never as the agent's `[agent, local]`."""
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    consent = await service.set_backend(agent, "openai", 0, actor)
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="chan")
+    async with sessions.begin() as session:
+        await thread_models.put_thread_consent(
+            session, platform="discord", thread_id="thread", revision=consent
+        )
+        revision, _, source = await resolve_validated(
+            session, channel, agent, enabled=True, thread=ThreadBackend("thread", consent)
+        )
+        assert revision is not None and source == "agent", "it runs as the agent's own"
+        assert await mux_state.config_origin(session, channel, revision.local) == "thread"
+        retained = await mux_state.get_config_agent_revision(
+            session, revision, agent_id=agent.agent_id
+        )
+        assert retained == consent, "the conversation's consent is retained"
+        assert (
+            await mux_state.put_agent_config_revision(session, revision, retained=retained)
+            == revision
+        ), "a host re-puts the conversation's revision with its thread"
+        with pytest.raises(ConfigRevisionConflict):
+            await mux_state.put_config_revision(
+                session, revision, origin="agent", agent_revision=retained
+            )
 
 
 async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(owned) -> None:
