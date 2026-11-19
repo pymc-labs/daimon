@@ -203,7 +203,8 @@ JOBS: dict[str, tuple[str, ...]] = {
     "pytest-notebook-host": ("notebook-host",),
     "shard-check": ("shard-check",),
     "docker-build": ("image-daimon", "image-notebook-host", "image-report-host"),
-    "image-smoke": ("image-daimon",),
+    # The simulated turns run inside the built image.
+    "image-smoke": ("image-daimon", "simulated"),
     "migration-upgrade": ("migration-upgrade",),
     "harness-image": ("image-harness",),
 }

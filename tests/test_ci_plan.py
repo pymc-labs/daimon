@@ -112,7 +112,6 @@ def test_test_helpers_run_every_pytest_job() -> None:
         "web",
         "docker-build",
         "harness-image",
-        "image-smoke",
         "migration-upgrade",
     }
 
@@ -124,6 +123,8 @@ def test_a_migration_runs_the_upgrade_check_and_nothing_else_does() -> None:
     assert "migration-upgrade" not in jobs
     _, jobs = _tests(["scripts/ci/migration_upgrade.py"])
     assert jobs == {"lint", "migration-upgrade"}
+    _, jobs = _tests(["tests/simulated/test_discord.py"])
+    assert "image-smoke" in jobs
     _, jobs = _tests(["scripts/ci/image_tls_check.py"])
     assert jobs == {"lint", "docker-build", "image-smoke"}
 

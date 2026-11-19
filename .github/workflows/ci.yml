@@ -547,12 +547,30 @@ jobs:
           cache-from: type=gha,scope=report-host
 
   # Runs the built daimon image: its certificate roots must complete a TLS
-  # handshake with each provider (a stale store fails only after deploy).
+  # handshake with each provider, and the simulated turns (tests/simulated) run
+  # on the image's own Python and site-packages, so a provider SDK or module
+  # missing from the image fails here instead of after deploy. The checkout is
+  # mounted read-only and only the test tooling is added to the container.
   image-smoke:
     needs: changes
     if: contains(fromJSON(needs.changes.outputs.jobs), 'image-smoke')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -567,6 +585,24 @@ jobs:
           tags: daimon:smoke
       - name: provider TLS with the image's certificate roots
         run: docker run --rm -i --entrypoint python daimon:smoke - < scripts/ci/image_tls_check.py
+      - name: create the test database with the image's alembic
+        env:
+          PGPASSWORD: daimon
+        run: |
+          psql -h localhost -U daimon -d daimon -v ON_ERROR_STOP=1 -c "CREATE DATABASE daimon_test;"
+          docker run --rm --network host -e DAIMON_DATABASE_URL="$DAIMON_DATABASE__TEST_URL" \
+            daimon:smoke alembic upgrade head
+      - name: simulated turns on the image's own Python
+        # Versions match uv.lock (tests/test_ci_workflow_contract.py checks).
+        run: >-
+          docker run --rm --network host -v "$PWD:/src:ro" -w /src
+          -e DAIMON_DATABASE__TEST_URL -e GITHUB_ACTIONS -e CI
+          -e PYTHONPATH=/src/packages/testing
+          --entrypoint sh daimon:smoke -c
+          'uv pip install --python /app/.venv/bin/python --no-cache
+          pytest==9.0.3 pytest-asyncio==1.3.0 pytest-timeout==2.4.0 pytest-xdist==3.8.0
+          && exec python -m pytest tests/simulated -p no:cacheprovider -n 4 --dist worksteal
+          --timeout=300 --durations=5'
 
   # Upgrades a database from the latest release and from the parent commit to
   # this tree's head as a role that is not a superuser, with rows in place.

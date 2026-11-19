@@ -885,6 +885,11 @@ def test_guard_jobs_run_the_checks_in_parallel_and_stay_out_of_the_deploy_gate()
     runs = lambda job: " ".join(s.get("run", "") for s in jobs[job]["steps"])  # noqa: E731
     assert "scripts/ci/image_tls_check.py" in runs("image-smoke")
     assert "daimon:smoke" in runs("image-smoke")
+    assert "tests/simulated" in runs("image-smoke")
+    # The tooling added to the image is what the lock pins.
+    lock = (_ROOT / "uv.lock").read_text()
+    for pin in re.findall(r"\b(pytest[\w-]*)==([\d.]+)", runs("image-smoke")):
+        assert f'name = "{pin[0]}"\nversion = "{pin[1]}"' in lock, pin
     assert any(s.get("with", {}).get("load") for s in jobs["image-smoke"]["steps"])
     assert "scripts/ci/migration_upgrade.py" in runs("migration-upgrade")
     # The release tag and the parent commit come from history.
