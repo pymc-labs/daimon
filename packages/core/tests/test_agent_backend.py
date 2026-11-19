@@ -1135,19 +1135,20 @@ async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overr
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
     default = await service.tenant_policy(agent.tenant_id)
-    assert default.enabled_backends == ("anthropic", "openai"), "keyed, never configured"
+    assert default.enabled_backends == ("anthropic",), "a key alone never opts a tenant in"
 
-    await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), default.revision, actor)
+    chosen_list = ("anthropic", "openai")
+    await service.set_tenant_allowlist(agent.tenant_id, chosen_list, default.revision, actor)
 
     async with sessions() as session:
         stored = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
-    assert stored.enabled_backends == ("anthropic",) and stored.backends_explicit is True
+    assert stored.enabled_backends == chosen_list and stored.backends_explicit is True
     chosen = await service.tenant_policy(agent.tenant_id)
-    assert chosen.enabled_backends == ("anthropic",)
+    assert chosen.enabled_backends == chosen_list
 
     await service.set_tenant_allowlist(agent.tenant_id, None, chosen.revision, actor)
 
     async with sessions() as session:
         followed = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
     assert followed.backends_explicit is False, "None goes back to the deployment default"
-    assert followed.enabled_backends == ("anthropic", "openai")
+    assert followed.enabled_backends == ("anthropic",)

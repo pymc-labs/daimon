@@ -34,7 +34,7 @@ const UNMIRRORED: ServerSkillOption[] = [
 const UNFOLLOWED = new Set(["ag_pricing:survey-weighting", "ag_pricing:geo-lift"])
 const HELD = new Set(["ag_pricing:segment-profiles"])
 /** Agents whose skills settings fix. */
-const MANAGED = new Set(["ag_daimon"])
+const MANAGED = new Set(["ag_default"])
 
 export const mirrorOf = (id: string): MirrorDoc | null => MIRRORS.get(id)?.doc ?? null
 

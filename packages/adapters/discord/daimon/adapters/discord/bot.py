@@ -100,7 +100,12 @@ from daimon.adapters.discord.typed_stop import (
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
-from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_identity import (
+    AgentIdentity,
+    identity_enabled_for,
+    is_builtin_agent,
+    resolve_agent_identity,
+)
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
@@ -125,6 +130,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_threa
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.continuity.watch_reports import run_watch_report_poller
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
+from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
@@ -1477,11 +1483,12 @@ class DaimonBot(commands.Bot):
                 if agent_name is None:
                     log.info("guild_seed_roster_check_skipped", tenant_id=str(tenant_id))
                 else:
-                    default_agent = await find_agent_by_daimon_tag(
+                    default_agent = await find_agent_or_builtin(
                         self.runtime.anthropic,
                         tenant_id=tenant_id,
                         name=agent_name,
                         records=self.runtime.sessionmaker,
+                        surface="discord_roster",
                     )
                     if default_agent is None:
                         seed_ok = False
@@ -3810,6 +3817,7 @@ class DaimonBot(commands.Bot):
             client=self,
             public_base_url=self.runtime.settings.mcp.app_root_url,
             identity_enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
+            default_agent_name=self.runtime.deployment_default.agent_name,
         )
 
     async def _may_post_in(self, *, tenant_id: uuid.UUID, channel: object) -> bool:
@@ -4446,7 +4454,11 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
-                    is_builtin=agent.name.casefold() == "daimon",
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,
@@ -5529,7 +5541,11 @@ class DaimonBot(commands.Bot):
                     identity_session,
                     tenant_id=tenant_id,
                     agent_name=agent.name,
-                    is_builtin=agent.name.casefold() == "daimon",
+                    is_builtin=is_builtin_agent(
+                        name=agent.name,
+                        metadata=agent.metadata,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
                     public_base_url=self.runtime.settings.mcp.app_root_url,
                     enabled=identity_enabled_for(self.runtime.settings, "discord", guild_id),
                     background_sessionmaker=self.runtime.sessionmaker,

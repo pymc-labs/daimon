@@ -20,7 +20,7 @@ from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
-from mux.contracts.errors import ProviderErrorCategory
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
 from mux.drivers.gemini.mcp_auth import (
     RedactedCredential,
     contains_secret,
@@ -436,32 +436,59 @@ def high_demand(error: Exception) -> bool:
 
 
 _QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
+_RETRY_INFO = "type.googleapis.com/google.rpc.RetryInfo"
+_RETRY_DELAY = re.compile(r"(\d+(?:\.\d+)?)s")
 # "limit: 0" wherever the line ends: before ", model:", a newline or the end.
 _ZERO_LIMIT = re.compile(r"limit: 0\b")
 
 
-def quota_failure(error: Exception) -> tuple[str, str | None] | None:
-    """A 429's quota cause: ("quota_zero" | "quota_exhausted", model) or None.
-
-    `quota_zero` is a quota of 0 for the model on this project's plan (the
-    free tier gives some models none): retrying never helps. Any other spent
-    quota is a rate limit that refills. Only Google's own structured fields are
-    read; the message is checked for its "limit: 0" line alone.
-    """
+def _error_payload(error: Exception) -> dict[str, object] | None:
+    """The `error` object of Google's JSON error body, wherever the SDK kept the body."""
     body: object = getattr(error, "body", None) or getattr(error, "details", None)
     if not isinstance(body, dict):
         return None
     outer = cast(dict[str, object], body)
     nested: object = outer.get("error", outer)
-    if not isinstance(nested, dict):
-        return None
-    payload = cast(dict[str, object], nested)
+    return cast(dict[str, object], nested) if isinstance(nested, dict) else None
+
+
+def _error_details(payload: dict[str, object]) -> list[dict[str, object]]:
     details = payload.get("details")
+    return [
+        cast(dict[str, object], item)
+        for item in (cast(list[object], details) if isinstance(details, list) else [])
+        if isinstance(item, dict)
+    ]
+
+
+def retry_delay(error: Exception) -> float | None:
+    """Seconds Google's `RetryInfo.retryDelay` asks a 429 to wait, if it names one."""
+    payload = _error_payload(error)
+    for detail in _error_details(payload) if payload is not None else []:
+        delay = detail.get("retryDelay")
+        if (
+            detail.get("@type") == _RETRY_INFO
+            and isinstance(delay, str)
+            and (match := _RETRY_DELAY.fullmatch(delay)) is not None
+        ):
+            return float(match.group(1))
+    return None
+
+
+def quota_failure(error: Exception) -> tuple[str, str | None] | None:
+    """A 429's quota cause: ("quota_zero" | "quota_daily" | "quota_exhausted", model) or None.
+
+    `quota_zero` is a quota of 0 for the model on this project's plan (the
+    free tier gives some models none): retrying never helps. `quota_daily` is a
+    spent per-day quota, which refills only at the day's end. Any other spent
+    quota is a rate limit that refills within minutes. Only Google's own structured fields are
+    read; the message is checked for its "limit: 0" line alone.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        return None
     violations: list[dict[str, object]] = []
-    for item in cast(list[object], details) if isinstance(details, list) else []:
-        if not isinstance(item, dict):
-            continue
-        detail = cast(dict[str, object], item)
+    for detail in _error_details(payload):
         if detail.get("@type") == _QUOTA_FAILURE:
             found = detail.get("violations")
             violations += [
@@ -480,7 +507,8 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     model = next(iter(models)) if len(models) == 1 else None
     message = payload.get("message")
     zero = isinstance(message, str) and _ZERO_LIMIT.search(message) is not None
-    return ("quota_zero" if zero else "quota_exhausted"), model
+    daily = any("PerDay" in str(v.get("quotaId", "")) for v in violations)
+    return ("quota_zero" if zero else "quota_daily" if daily else "quota_exhausted"), model
 
 
 def connect_failure(error: BaseException) -> bool:
@@ -532,13 +560,14 @@ def normalize_error(error: Exception) -> ProviderError:
         )
     if status == 429 and (quota := quota_failure(error)) is not None:
         code, model = quota
-        # A quota of 0 never refills: retrying it only looks like a stall.
+        # A zero quota never refills and a daily one not for hours: retrying looks like a stall.
         return ProviderError(
             "rate_limited",
-            retryable=code != "quota_zero",
+            retryable=code == "quota_exhausted",
             native_code=code,
             native_error_code=http,
             native_param=model,
+            retry_after_s=None if code == "quota_zero" else bounded_retry_after(retry_delay(error)),
         )
     category = categories.get(status or 0, "upstream")
     return ProviderError(
@@ -546,6 +575,7 @@ def normalize_error(error: Exception) -> ProviderError:
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
         native_error_code=http,
+        retry_after_s=bounded_retry_after(retry_delay(error)) if status == 429 else None,
     )
 
 

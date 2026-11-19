@@ -164,6 +164,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                 )
             finally:
                 listener.cancel()
+                await deps.provider_clients.aclose()
     finally:
         await drain_outcomes()
         await drain_budget_notices()

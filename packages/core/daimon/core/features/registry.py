@@ -626,7 +626,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
+            "Holds a direct message for more, so a burst gets one reply; at most five seconds, "
             "and never an approval reply."
         ),
         platforms=_DM_PLATFORMS | {"teams"},
@@ -705,12 +705,12 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="on",
+        default="off",
         tiers=("deployment",),
         binds="turn",
         doc=(
-            "An agent's own connectors work on OpenAI and Gemini agents: Daimon calls "
-            "them for the agent with the person's sign-in. Off leaves them out there."
+            "An agent's own connectors work on OpenAI and Gemini agents with the person's "
+            "sign-in, and that provider receives what they return. Off leaves them out."
         ),
         platforms=_CALL_GATE_PLATFORMS,
         authority=_ADMIN,

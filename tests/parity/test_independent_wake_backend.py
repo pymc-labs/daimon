@@ -22,6 +22,7 @@ from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.config import DatabaseSettings, Settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.wakes import enqueue_wake
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import mux_state
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
@@ -138,6 +139,7 @@ async def test_turn_tail_drains_other_callers_timer_with_its_own_provider_contex
             _env_file=None,  # type: ignore[call-arg]
         ),
         turn_deps=SimpleNamespace(),
+        deployment_default=DeploymentDefault(),
     )
     app = MagicMock()
     app.runtime = runtime

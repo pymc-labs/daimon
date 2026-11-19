@@ -329,6 +329,9 @@ async def test_runtime_owner_leaves_the_turn_pool_capacity_available(
     )
     async with build_runtime(settings) as runtime:
         engine = runtime.sessionmaker.kw["bind"]
+        # The context-provider warmup borrows a turn-pool connection at startup;
+        # stop it so only a misplaced owner connection could still be checked out.
+        await runtime.turn_deps.context_providers.aclose()
         assert engine.pool.checkedout() == 0, "the owner connection must not consume a turn slot"
         async with runtime.sessionmaker() as session:
             assert await owner_is_alive(session, runtime.owner_key)

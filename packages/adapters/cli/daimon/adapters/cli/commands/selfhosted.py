@@ -15,6 +15,8 @@ from uuid import UUID, uuid4
 import typer
 from daimon.core.config import HarnessAuthBinding, SelfhostedModelPrice
 from daimon.core.db import build_engine
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
+from daimon.core.defaults.owned import builtin_record_name
 from daimon.core.stores.selfhosted_resources import (
     SelfHostedAgents,
     SelfHostedEnvironments,
@@ -45,7 +47,10 @@ async def initialize(
     environment_name: str,
     harness: HarnessConfig,
 ) -> tuple[str, str]:
-    """Reuse matching named resources; refuse drift rather than rewriting them."""
+    """Reuse matching named resources; refuse drift rather than rewriting them.
+
+    The built-in name reuses an install's `daimon` record, as requests for it do.
+    """
     scope = Scope(
         tenant_id=str(tenant_id),
         account_id="operator",
@@ -53,6 +58,7 @@ async def initialize(
         authorization_id="cli-deployment-operator",
     )
     agents = SelfHostedAgents(sessionmaker)
+    name = await builtin_record_name(agents, scope, name)
     environments = SelfHostedEnvironments(sessionmaker)
     agent_spec = AgentSpec(
         name=name, model=ModelRef(provider=LOOP.provider, id=model), system=system
@@ -249,7 +255,7 @@ def selfhosted_init_command(
     model: Annotated[
         str, typer.Option("--model", help="Azure model deployment name.")
     ] = "gpt-6.1-sol",
-    name: Annotated[str, typer.Option("--name")] = "daimon",
+    name: Annotated[str, typer.Option("--name")] = BUILTIN_AGENT_NAME,
     environment_name: Annotated[str, typer.Option("--environment-name")] = "default",
     auth_mode: Annotated[
         str, typer.Option("--auth-mode", help="bearer_env or entra.")

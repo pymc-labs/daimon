@@ -29,7 +29,7 @@ const PLATFORM_PROVIDER = { slack: "slack", teams: "microsoft" } as const
 
 /** Agents reachable on the web. Northwind Support is fixed to a confidential channel, so it is absent here. */
 export const AGENTS: AgentRef[] = [
-  { id: "ag_daimon", name: "Daimon", avatar: face(11), model: "Sonnet 5.5", description: "General assistant",
+  { id: "ag_default", name: "Daimon", avatar: face(11), model: "Sonnet 5.5", description: "General assistant",
     starters: ["What changed in Almanac this week?", "Email the readout to the team", "Draft a client update"] },
   { id: "ag_mmm", name: "MMM Analyst", avatar: face(4), model: "Opus 5.5", description: "Media mix models with PyMC-Marketing",
     starters: ["Summarize the Q3 readout for Larkspur", "Which channels have the widest intervals?"] },
@@ -47,12 +47,12 @@ const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString
 export const SESSIONS: Record<string, ChatSession[]> = {
   p_maya: [
     { id: "s_q3", title: "Q3 media mix readout for Larkspur", agent: agent("ag_mmm"), updated_at: hoursAgo(0.3) },
-    { id: "s_churn", title: "Cobalt churn model priors", agent: agent("ag_daimon"), updated_at: hoursAgo(3) },
+    { id: "s_churn", title: "Cobalt churn model priors", agent: agent("ag_default"), updated_at: hoursAgo(3) },
     { id: "s_pr", title: "Review PR #412 adstock refactor", agent: agent("ag_review"), updated_at: hoursAgo(26) },
     { id: "s_tide", title: "Tidewater promo elasticity", agent: agent("ag_pricing"), updated_at: hoursAgo(50) },
     { id: "s_brief", title: "Brightwave account brief", agent: agent("ag_sales"), updated_at: hoursAgo(80) },
-    { id: "s_onboard", title: "Onboarding checklist for Marco", agent: agent("ag_daimon"), updated_at: hoursAgo(200) },
-    { id: "s_hiring", title: "Draft data scientist job post", agent: agent("ag_daimon"), updated_at: hoursAgo(260) },
+    { id: "s_onboard", title: "Onboarding checklist for Marco", agent: agent("ag_default"), updated_at: hoursAgo(200) },
+    { id: "s_hiring", title: "Draft data scientist job post", agent: agent("ag_default"), updated_at: hoursAgo(260) },
   ],
   p_jordan: [
     { id: "s_vis1", title: "Price test for the unlimited plan", agent: agent("ag_pricing"), updated_at: hoursAgo(1) },

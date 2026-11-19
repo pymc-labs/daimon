@@ -24,6 +24,7 @@ from daimon.core._models import (
     Routine,
     UserConfig,
 )
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_environments import (
     build_limited_channels_confirm,
     build_limited_network_confirm,
@@ -34,7 +35,9 @@ from daimon.core.privacy import (
     MONITORED_LINE,
     PurgePreview,
     PurgePreviewRow,
+    account_other_providers,
     collect_purge_preview,
+    delete_scope_lines,
     privacy_lines,
     summary_line,
 )
@@ -48,6 +51,7 @@ from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import (
     link_principals,
     make_account,
@@ -179,6 +183,31 @@ async def test_account_purge_deletes_github_user_after_last_link(
     assert second_report.db.github_user_links == 1
     async with db_session_factory() as session:
         assert await session.get(GitHubUserLink, 101) is None
+
+
+async def test_privacy_copy_names_a_provider_only_for_a_tenant_that_enabled_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    opted_in = await make_account(db_session, tenant=await make_tenant(db_session))
+    await set_access_policy(
+        db_session,
+        tenant_id=opted_in.tenant_id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai", "gemini")),
+    )
+    default = await make_account(db_session, tenant=await make_tenant(db_session))
+    await db_session.commit()
+
+    chosen = await account_other_providers(db_session_factory, account_id=opted_in.id)
+    unchosen = await account_other_providers(db_session_factory, account_id=default.id)
+
+    assert chosen == ("openai", "gemini")
+    assert unchosen == (), "a tenant that never opted in names only Anthropic"
+    stored = " ".join(privacy_lines("daimon", chosen))
+    assert "OpenAI" in stored and "Gemini" in stored
+    removed = " ".join(delete_scope_lines("daimon", chosen))
+    assert "retention period" in removed, "Gemini keeps stored conversations"
+    assert "OpenAI" not in " ".join(privacy_lines("daimon") + delete_scope_lines("daimon"))
 
 
 async def test_collect_purge_preview_returns_zero_counts_when_account_has_no_data(

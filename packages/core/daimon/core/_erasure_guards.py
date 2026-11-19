@@ -21,7 +21,7 @@ passes untouched, as does a NULL owner (a shared slot). The statements are plain
 the migration that installs them can carry its own copy; a test keeps the two equal.
 
 Not covered by a trigger: a write into a shared conversation, which names no account
-in its row. Migration 0142 installs `INSTALL`; 0213 adds `MONITORING_INSTALL`.
+in its row. Migration 0142 installs `INSTALL`; 0217 adds `MONITORING_INSTALL`.
 """
 
 from __future__ import annotations

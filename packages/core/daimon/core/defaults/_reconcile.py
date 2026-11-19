@@ -10,12 +10,12 @@ This module imports neither `apply` nor `provisioning` (Landmine L4).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
-from anthropic.types.beta import SkillListResponse
+from anthropic.types.beta import BetaManagedAgentsAgent, SkillListResponse
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.defaults.backfill_guidance import backfill_credential_guidance
 from daimon.core.defaults.loader import (
@@ -24,13 +24,23 @@ from daimon.core.defaults.loader import (
     load_skill_paths,
     load_skill_spec,
 )
-from daimon.core.defaults.ma_index import list_skills_strict
+from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_strict
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.defaults.owned import reconcile_owned_environment
 from daimon.core.defaults.preflight import check_models_accepted
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.reconcile_environments import reconcile_environment
 from daimon.core.defaults.reconcile_skills import reconcile_skill
+from daimon.core.defaults.rename_agents import (
+    AgentRenameAmbiguous,
+    AgentRenameBlocked,
+    SeededRename,
+    move_seeded_rename,
+    pending_renames,
+    plan_seeded_rename,
+    rename_seeded_agent,
+    write_seeded_rename,
+)
 from daimon.core.defaults.report import Action, ApplyReport, ResourceKind, ResourceOutcome
 from daimon.core.defaults.sweep import (
     sweep_removed_agents,
@@ -40,6 +50,7 @@ from daimon.core.defaults.sweep import (
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.model_presets import model_choice_id
 from daimon.core.specs import AgentSpec, EnvironmentSpec
+from daimon.core.stores.agent_rename import list_tenants_with_selfhosted_agent
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
@@ -111,6 +122,71 @@ async def _channel_skill_ids(
         return None
 
 
+def _check_skill_references(agent_specs: list[AgentSpec], skill_names_present: set[str]) -> None:
+    """Raise `DefaultsError` for an agent that names a custom skill the tree lacks."""
+    for spec in agent_specs:
+        for ref in spec.skills:
+            if ref.type == "custom" and ref.skill_id not in skill_names_present:
+                raise DefaultsError(
+                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
+                    "add defaults/skills/<name>/SKILL.md first."
+                )
+
+
+def reconcile_lock_key(tenant_id: uuid.UUID) -> str:
+    """The advisory lock key every reconcile and rename of this tenant takes."""
+    return f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
+
+
+async def rename_selfhosted_defaults(
+    session_factory: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic | None,
+    defaults_root: Path,
+    *,
+    dry_run: bool,
+    skip_tenant_ids: Collection[uuid.UUID] = (),
+    only_tenant_ids: Collection[uuid.UUID] | None = None,
+) -> ApplyReport:
+    """Run pending seeded renames for every tenant with a self-hosted record to move.
+
+    Self-hosted deployments may have no Anthropic credentials, so this needs only
+    Postgres; a `client` also lets each tenant's managed agents move with it.
+    The tree is checked first, so a bad one fails before any write. Run it after
+    `apply_defaults` has passed its pre-flight, and pass the tenants that apply
+    renamed itself as `skip_tenant_ids` so none is reported twice;
+    `only_tenant_ids` limits the pass to those tenants.
+    """
+    report = ApplyReport()
+    agents_root = defaults_root / "agents"
+    specs = load_agent_specs(agents_root) if agents_root.exists() else []
+    skill_names = {load_skill_spec(d)[0].name for d in load_skill_paths(defaults_root / "skills")}
+    _check_skill_references(specs, skill_names)
+    for old, new in pending_renames({spec.name for spec in specs}):
+        async with session_factory() as session:
+            tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
+        for tenant_id in tenant_ids:
+            if tenant_id in skip_tenant_ids or (
+                only_tenant_ids is not None and tenant_id not in only_tenant_ids
+            ):
+                continue
+            with structlog.contextvars.bound_contextvars(tenant_id=str(tenant_id)):
+                await _run_isolated(
+                    report,
+                    lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(
+                        client,
+                        session_factory,
+                        tenant_id=tenant_id,
+                        old=old,
+                        new=new,
+                        lock_key=reconcile_lock_key(tenant_id),
+                        dry_run=dry_run,
+                    ),
+                    kind="agent",
+                    name=new,
+                )
+    return report
+
+
 async def _run_per_resource(
     report: ApplyReport,
     fn: Callable[[], Awaitable[ResourceOutcome]],
@@ -118,6 +194,22 @@ async def _run_per_resource(
     kind: ResourceKind,
     name: str,
 ) -> ResourceOutcome:
+    outcome = await _run_isolated(report, fn, kind=kind, name=name)
+    assert outcome is not None, "fn returns an outcome"
+    return outcome
+
+
+async def _run_isolated(
+    report: ApplyReport,
+    fn: Callable[[], Awaitable[ResourceOutcome | None]],
+    *,
+    kind: ResourceKind,
+    name: str,
+) -> ResourceOutcome | None:
+    """Run one step, recording an error as its outcome; None adds nothing.
+
+    Only a rename that must wait on the workspace is deferred; any other error fails.
+    """
     try:
         outcome = await fn()
     except (APIError, DaimonError) as err:
@@ -130,12 +222,9 @@ async def _run_per_resource(
             error=str(err),
             causes=backend_refusal_causes(err),
         )
-        outcome = ResourceOutcome(
-            kind=kind,
-            name=name,
-            action=Action.FAILED,
-            error=str(err),
-        )
+        deferred = isinstance(err, AgentRenameBlocked | AgentRenameAmbiguous)
+        action = Action.DEFERRED if deferred else Action.FAILED
+        outcome = ResourceOutcome(kind=kind, name=name, action=action, error=str(err))
     except Exception as err:  # per-resource isolation boundary
         _log.exception("defaults.reconcile_unexpected", kind=kind, name=name)
         outcome = ResourceOutcome(
@@ -144,7 +233,8 @@ async def _run_per_resource(
             action=Action.FAILED,
             error=f"internal error: {type(err).__name__}",
         )
-    report.add(outcome)
+    if outcome is not None:
+        report.add(outcome)
     return outcome
 
 
@@ -181,20 +271,33 @@ async def _reconcile_core(
     skill_names_present = {load_skill_spec(d)[0].name for d in skill_dirs}
 
     # Validate agent->skill references before any MA write.
-    for spec in agent_specs:
-        for ref in spec.skills:
-            if ref.type == "custom" and ref.skill_id not in skill_names_present:
-                raise DefaultsError(
-                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
-                    "add defaults/skills/<name>/SKILL.md first."
-                )
+    _check_skill_references(agent_specs, skill_names_present)
 
+    lock_key = reconcile_lock_key(tenant_id)
+    renames = pending_renames({s.name for s in agent_specs})
     if not anthropic_configured(client):
+        # Records only: the rename moves them, then the owned pass finds them.
+        for old, new in renames:
+            await _run_isolated(
+                report,
+                lambda old=old, new=new: rename_seeded_agent(
+                    None,
+                    session_factory,
+                    tenant_id=tenant_id,
+                    old=old,
+                    new=new,
+                    lock_key=lock_key,
+                    dry_run=dry_run,
+                ),
+                kind="agent",
+                name=new,
+            )
         return await _reconcile_owned(
             client,
             session_factory,
             agent_specs,
             env_specs,
+            report=report,
             tenant_id=tenant_id,
             account_id=account_id,
             dry_run=dry_run,
@@ -213,7 +316,38 @@ async def _reconcile_core(
                 f"aborting before any writes. Rejections: {failed}"
             )
 
-    async def _run_passes(skill_session: AsyncSession | None) -> ApplyReport:
+    async def _halted(step: Callable[[], Awaitable[None]]) -> bool:
+        """Run one rename step; True when it could not run (reported deferred or failed)."""
+        outcome = await _run_isolated(report, step, kind="agent", name=renames[0][1])
+        return outcome is not None
+
+    async def _plan(
+        session: AsyncSession,
+    ) -> tuple[list[SeededRename], list[BetaManagedAgentsAgent] | None] | None:
+        """The due renames and the listing they were planned from, which the agent
+        pass reuses when none is due; None when it could not run."""
+        if not renames:
+            return [], None
+        due: list[SeededRename] = []
+        listed: list[BetaManagedAgentsAgent] = []
+
+        async def _step() -> None:
+            listed.extend(await list_agents_by_tenant(client, tenant_id=tenant_id))
+            for old, new in renames:
+                rename = await plan_seeded_rename(
+                    listed, session, tenant_id=tenant_id, old=old, new=new
+                )
+                if rename is not None:
+                    due.append(rename)
+
+        return None if await _halted(_step) else (due, listed)
+
+    async def _run_passes(
+        skill_session: AsyncSession | None,
+        *,
+        skip_agents: bool,
+        agents: list[BetaManagedAgentsAgent] | None,
+    ) -> ApplyReport:
         # Skill pass.
         skills_view = None
         if skill_dirs:
@@ -264,7 +398,7 @@ async def _reconcile_core(
 
         # Agent pass — account_id threads the guild ownership axis.
         seeded_agent_ids: set[str] = set()
-        for spec in agent_specs:
+        for spec in [] if skip_agents else agent_specs:
             outcome = await _run_per_resource(
                 report,
                 lambda spec=spec: reconcile_agent(
@@ -276,6 +410,7 @@ async def _reconcile_core(
                     public_url=public_url,
                     skills_view=skills_view if dry_run else None,
                     sessions=session_factory,
+                    agents=agents,
                 ),
                 kind="agent",
                 name=spec.name,
@@ -285,7 +420,7 @@ async def _reconcile_core(
 
         # The seeded pass owns its own fingerprints. User-created agents have no
         # spec to reconcile, so refresh their system guidance separately.
-        if not dry_run:
+        if not dry_run and not skip_agents:
             await backfill_credential_guidance(
                 client,
                 tenant_id=tenant_id,
@@ -304,9 +439,10 @@ async def _reconcile_core(
             tenant_scoped_display_title(tenant_id=tenant_id, name=name)
             for name in skill_names_present
         }
-        await _run_sweep(
-            report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
-        )
+        if not skip_agents:
+            await _run_sweep(
+                report, sweep_removed_agents, "agent", client, present_agents, tenant_id, dry_run
+            )
         await _run_sweep(
             report,
             sweep_removed_environments,
@@ -330,25 +466,73 @@ async def _reconcile_core(
         )
         return report
 
+    # Seeded agents are renamed in place before the agent pass and sweep: the
+    # sweep would archive the old name and the pass would create the new one.
+    # While a rename is deferred, failed or (dry run) pending, both are skipped.
     if dry_run:
         # Verification is read-only and must not acquire a DB lock transaction.
-        return await _run_passes(skill_session=None)
+        async with session_factory() as read_session:
+            planned = await _plan(read_session)
+        for rename in planned[0] if planned else ():
+            report.add(rename.outcome)
+        return await _run_passes(
+            None,
+            skip_agents=planned is None or bool(planned[0]),
+            agents=planned[1] if planned else None,
+        )
 
     # Advisory lock covers every provider list/write through the final sweep.
     # The transaction context releases it on success, exception, or cancellation.
     # Share this session with the skill pass to avoid nested pool checkout while
     # holding a lock connection (some test and operator pools have one connection).
-    lock_key = f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
-    async with session_factory() as lock_session, lock_session.begin():
-        await lock_session.execute(
-            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": lock_key},
+    async def _lock(session: AsyncSession) -> None:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": lock_key}
         )
-        report = await _run_passes(skill_session=lock_session)
+
+    async def _finish(
+        lock_session: AsyncSession,
+        *,
+        skip_agents: bool,
+        agents: list[BetaManagedAgentsAgent] | None,
+    ) -> ApplyReport:
+        result = await _run_passes(lock_session, skip_agents=skip_agents, agents=agents)
         await prune_seeded_skills(
             lock_session, tenant_id=tenant_id, present_names=skill_names_present
         )
-        return report
+        return result
+
+    async with session_factory() as lock_session, lock_session.begin():
+        await _lock(lock_session)
+        planned = await _plan(lock_session)
+        due = planned[0] if planned else []
+        if due:
+
+            async def _write() -> None:
+                async with lock_session.begin_nested():
+                    for rename in due:
+                        await write_seeded_rename(lock_session, rename, tenant_id=tenant_id)
+
+            if await _halted(_write):
+                due, planned = [], None
+        if not due:
+            return await _finish(
+                lock_session, skip_agents=planned is None, agents=planned[1] if planned else None
+            )
+
+    # The rows committed first: a provider failure below leaves the agents under
+    # their old names, so the next apply plans the same renames again.
+    async def _move() -> None:
+        for rename in due:
+            await move_seeded_rename(client, session_factory, rename, tenant_id=tenant_id)
+
+    moved = not await _halted(_move)
+    if moved:
+        for rename in due:
+            report.add(rename.outcome)
+    async with session_factory() as lock_session, lock_session.begin():
+        await _lock(lock_session)
+        return await _finish(lock_session, skip_agents=not moved, agents=None)
 
 
 async def _reconcile_owned(
@@ -357,6 +541,7 @@ async def _reconcile_owned(
     agent_specs: list[AgentSpec],
     env_specs: list[EnvironmentSpec],
     *,
+    report: ApplyReport,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID | None,
     dry_run: bool,
@@ -367,7 +552,6 @@ async def _reconcile_owned(
     No preflight, MA skill pass or sweep: those are Managed Agents resources.
     Skills reach these agents through the neutral skill host at admission.
     """
-    report = ApplyReport()
     for env in env_specs:
         await _run_per_resource(
             report,

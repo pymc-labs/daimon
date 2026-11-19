@@ -35,15 +35,23 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_ACCESS_POLICY
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.config import TurnSettings, load_selfhosted_settings
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.defaults.builtin_agent import (
+    builtin_lookup_names,
+    find_agent_or_builtin,
+    resolve_builtin_agent_name,
+)
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_MANAGED,
+    MA_METADATA_KEY_NAME,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.errors import DaimonError
 from daimon.core.finer_drops import FINER_DROPS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
-from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.neutral_resources import HostAgentView, NeutralResourceHost
 from daimon.core.permissions import sealed_outside
 from daimon.core.pricing import (
     MODEL_PRICING,
@@ -124,6 +132,35 @@ async def is_selfhosted_channel(
     """Whether this channel forbids auxiliary Anthropic calls, even while admission is off."""
     revision = await current_backend(session, channel_ref(tenant_id, platform, channel_id))
     return revision is not None and revision.backend == "selfhosted"
+
+
+async def channel_provider(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> Provider | None:
+    """The provider a channel is pinned to, or None when nobody configured it."""
+    revision = await current_backend(session, channel_ref(tenant_id, platform, channel_id))
+    return revision.backend if revision is not None else None
+
+
+async def agent_native_provider(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str, agent_name: str
+) -> Provider | None:
+    """The non-Anthropic provider an agent's preference puts it on, else None.
+
+    Looked up by the saved id, then by name, since a routine's saved id can predate
+    a recreate; a friendly name only ever refuses here, it never authorizes.
+    """
+    preference = await agent_backends.current(
+        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
+    )
+    if preference is not None:
+        return preference.backend if preference.backend != DEFAULT_BACKEND else None
+    for provider in PROVIDERS:
+        if provider != DEFAULT_BACKEND and await agent_backends.has_backend_preference_by_name(
+            session, tenant_id=tenant_id, agent_name=agent_name, backend=provider
+        ):
+            return provider
+    return None
 
 
 async def effective_thread_backend(
@@ -2072,6 +2109,28 @@ async def answers_for_everyone(
     return tenant is not None and tenant.agent_name == agent.name
 
 
+async def _find_legacy_builtin(
+    host: NeutralResourceHost, tenant_id: uuid.UUID, agent_name: str
+) -> HostAgentView | None:
+    """The seeded agent under its old name when nothing holds the built-in name.
+
+    Unlike the turn path, an explicit name that matches a workspace's own
+    agent stays on that agent: an admin editing their `default` means it.
+    """
+    views: dict[str, HostAgentView] = {}
+    for name in builtin_lookup_names(agent_name)[1:]:
+        view = await host.find(name)
+        if (
+            view is not None
+            and (view.revision.agent.spec.metadata or {}).get(MA_METADATA_KEY_MANAGED) == "true"
+        ):
+            views[name] = view
+    target = resolve_builtin_agent_name(
+        agent_name, views, tenant_id=tenant_id, surface="load_backend_agent"
+    )
+    return views.get(target)
+
+
 async def load_backend_agent(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -2086,6 +2145,8 @@ async def load_backend_agent(
         if resource_host.scope.tenant_id != str(tenant_id):
             raise AgentBackendRefused("tenant_mismatch")
         view = await resource_host.find(agent_name)
+        if view is None:
+            view = await _find_legacy_builtin(resource_host, tenant_id, agent_name)
         if view is None:
             raise AgentBackendRefused("agent_not_found")
         row = await resource_host.read(view.revision.catalog_id)
@@ -2129,8 +2190,13 @@ async def load_backend_agent(
         if metadata.get(MA_METADATA_KEY_NAME) != agent_name or actual.archived_at is not None:
             raise AgentBackendRefused("agent_not_found")
     else:
-        actual = await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=agent_name, records=sessionmaker
+        # Miss only (see `_find_legacy_builtin`): the seeded agent not yet renamed.
+        actual = await find_agent_or_builtin(
+            anthropic,
+            tenant_id=tenant_id,
+            name=agent_name,
+            records=sessionmaker,
+            surface="load_backend_agent",
         )
     if actual is None:
         raise AgentBackendRefused("agent_not_found")

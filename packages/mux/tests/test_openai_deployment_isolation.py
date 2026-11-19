@@ -301,3 +301,51 @@ async def test_invented_keylog_path_refuses_before_file_creation(
             if client is not None:
                 await client.close()
         assert client is None or client.is_closed()
+
+
+async def test_shared_clients_serve_every_call_with_one_client_and_tls_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requests and a stream on one `OpenAIClients` build one SDK client and one TLS context.
+
+    A stream closes only its response; `aclose` closes the client.
+    """
+    contexts: list[ssl.SSLContext] = []
+    original = httpx.create_ssl_context
+
+    def context(*, trust_env: bool) -> ssl.SSLContext:
+        contexts.append(original(trust_env=trust_env))
+        return contexts[-1]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("stream") == "true":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content="")
+        return httpx.Response(200, json={"id": "native"})
+
+    built: list[AsyncOpenAI] = []
+    original_client = deployment._ConfiguredTransport._client  # pyright: ignore[reportPrivateUsage]
+
+    def client(self: deployment._ConfiguredTransport) -> AsyncOpenAI:  # pyright: ignore[reportPrivateUsage]
+        built.append(original_client(self))
+        return built[-1]
+
+    monkeypatch.setattr(httpx, "create_ssl_context", context)
+    monkeypatch.setattr(deployment, "_http_transport", lambda: httpx.MockTransport(handle))
+    monkeypatch.setattr(deployment._ConfiguredTransport, "_client", client)  # pyright: ignore[reportPrivateUsage]
+    clients = deployment.OpenAIClients()
+    transport = deployment.configured_transport(
+        api_key="selected-key", project="selected-project", clients=clients
+    )
+    await transport.request("GET", "/agents/sessions/s")
+    stream = await transport.open_stream("/agents/sessions/s/events")
+    assert [item async for item in stream] == []
+    await transport.request("GET", "/agents/sessions/s")
+    assert len(built) == 1, "one SDK client across calls"
+    assert not built[0].is_closed(), "a call or stream never closes the shared client"
+    other = deployment.configured_transport(
+        api_key="selected-key", project="other-project", clients=clients
+    )
+    await other.request("GET", "/agents/sessions/s")
+    assert len(built) == 2, "a different project gets its own client"
+    await clients.aclose()
+    assert all(item.is_closed() for item in built), "shutdown closes every client"

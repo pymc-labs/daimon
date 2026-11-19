@@ -93,6 +93,35 @@ async def test_errors_are_owned_redacted_and_mutations_never_retry(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("headers", "code", "wait"),
+    [
+        ({"retry-after-ms": "1500", "retry-after": "9"}, "rate_limit_exceeded", 1.5),
+        ({"retry-after": "12"}, "rate_limit_exceeded", 12.0),
+        ({"retry-after": "100000"}, "rate_limit_exceeded", 600.0),
+        ({}, "rate_limit_exceeded", 30.0),
+        ({"retry-after": "5"}, "insufficient_quota", None),
+    ],
+)
+async def test_a_429_carries_its_bounded_wait_unless_the_quota_never_refills(
+    headers: dict[str, str], code: str, wait: float | None
+) -> None:
+    """`retry-after-ms`, then `retry-after`, else 30 s, at most 10 minutes; billing quota none."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers=headers, json={"error": {"code": code}})
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(sdk).request("POST", "/agents/sessions/s/events", body={})
+    assert exc.value.retry_after_s == wait, "wait from the 429's headers"
+
+
+@pytest.mark.asyncio
 async def test_real_sdk_sse_and_close_before_first_event() -> None:
     wire = {"type": "agent.session.idle", "event_id": "idle", "session": {"id": "s"}}
 

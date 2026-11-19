@@ -62,6 +62,9 @@ The compute reconciler deletes the remaining tagged apps as unregistered orphans
 upstream machine/file deletion requires the scheduler and Fly to be available.
 
 Deliberate carve-outs:
+- Sessions at other model providers: an OpenAI session an account's private slot named is
+  deleted through the driver after the commit (`daimon.core.provider_purge`), failures
+  logged. Gemini stored interactions have no delete there and stay for Google's retention.
 - Provider-neutral (mux) state: a person's private slots, with their binding generations,
   journal, leases, operations and release requests, are erased with the account, and the
   account is fenced so no retained scope or lease writes again (`stores.mux_erasure`).
@@ -149,6 +152,7 @@ from daimon.core.memory_resource import (
     delete_personal_memory_stores_for_account,
     sweep_erased_personal_memory,
 )
+from daimon.core.provider_purge import ProviderSessionDeleter, delete_provider_sessions
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
@@ -346,6 +350,8 @@ async def _purge_principal_in_session(
     microsoft_user_tokens_count = 0
     lead_intakes_count = 0
     host_call_cards_count = 0
+    dm_rules_count = 0
+    dm_grant_users_count = 0
     # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
     is_platform = isinstance(principal, PlatformPrincipalRow)
     await routines_store.erase_sandbox_setter(
@@ -463,6 +469,13 @@ async def _purge_principal_in_session(
             platform=principal.platform,
             platform_user_id=principal.external_id,
         )
+        # The person's own routing rules and listed-grant entries, as the account purge does.
+        dm_keys = [(principal.tenant_id, principal.external_id)]
+        dm_now = datetime.now(UTC)
+        dm_rules_count = await dm_access_store.delete_user_rules(session, keys=dm_keys, now=dm_now)
+        dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
+            session, keys=dm_keys, now=dm_now
+        )
     else:
         routines_count = 0
         kind = "cli"
@@ -570,6 +583,8 @@ async def _purge_principal_in_session(
         teams_messages=teams_messages_count,
         microsoft_user_tokens=microsoft_user_tokens_count,
         host_call_cards=host_call_cards_count,
+        dm_rules=dm_rules_count,
+        dm_grant_users=dm_grant_users_count,
     )
 
 
@@ -647,7 +662,12 @@ def _queued_name_keys(principals: Iterable[Principal]) -> list[platform_names.Us
 
 async def _purge_account_transaction(
     session: AsyncSession, *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+) -> tuple[
+    PurgeReport,
+    mux_erasure_store.MuxRetained,
+    list[platform_names.UserKey],
+    tuple[mux_erasure_store.ProviderSession, ...],
+]:
     """Everything `purge_account` deletes locally, in the caller's transaction.
 
     Takes the account lock, then the erasure locks (see `stores.mux_erasure` for the lock
@@ -695,6 +715,8 @@ async def _purge_account_transaction(
             session, account_id=account_id, principal_ids=principal_ids
         )
     ).retained
+    # Named before `erase` drops the bindings that hold their ids.
+    provider_sessions = await mux_erasure_store.provider_sessions(session, account_id=account_id)
     mux_erased = await mux_erasure_store.erase(
         session, account_id=account_id, principal_ids=principal_ids
     )
@@ -780,6 +802,8 @@ async def _purge_account_transaction(
     dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
         session, keys=platform_user_keys, now=dm_now
     )
+    # An admin's account id stays in the rows they set; the settings are the workspace's.
+    await dm_access_store.clear_setter(session, setter=str(account_id))
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
@@ -839,7 +863,7 @@ async def _purge_account_transaction(
             monitored_events=monitored_count,
         )
     )
-    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list))
+    return db_report, mux_retained, _queued_name_keys((*cli_list, *pp_list)), provider_sessions
 
 
 #: A purge that cannot get the account lock, or loses a deadlock, rolls back whole and
@@ -862,7 +886,12 @@ def _retryable(error: DBAPIError) -> bool:
 
 async def _purge_account_with_retries(
     sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
-) -> tuple[PurgeReport, mux_erasure_store.MuxRetained, list[platform_names.UserKey]]:
+) -> tuple[
+    PurgeReport,
+    mux_erasure_store.MuxRetained,
+    list[platform_names.UserKey],
+    tuple[mux_erasure_store.ProviderSession, ...],
+]:
     for attempt in range(1, PURGE_ATTEMPTS + 1):
         try:
             async with sm() as session, session.begin():
@@ -888,6 +917,7 @@ async def purge_account(
     sm: async_sessionmaker[AsyncSession],
     account_id: uuid.UUID,
     anthropic: AsyncAnthropic | None = None,
+    delete_provider: ProviderSessionDeleter = delete_provider_sessions,
 ) -> AccountPurgeResult:
     """Delete every principal under `account_id`, then user_config + account.
 
@@ -902,10 +932,16 @@ async def purge_account(
     Sessions are enumerated across EVERY linked-principal tenant —
     `principal_links` permits an account to span tenants.
     """
-    db_report, mux_retained, queued_names = await _purge_account_with_retries(
+    db_report, mux_retained, queued_names, provider_sessions = await _purge_account_with_retries(
         sm, account_id=account_id
     )
     platform_names.forget_users(queued_names)
+    # Other providers' copies of the conversations, once the erasure has committed.
+    # A boundary catch like the Anthropic one below: the account is already erased.
+    try:
+        await delete_provider(provider_sessions)
+    except Exception:  # the erasure committed; a provider outage must not fail it
+        log.warning("purge.provider_sessions_failed", account_id=str(account_id), exc_info=True)
 
     # DB transaction committed. Upstream deletion is best-effort,
     # looped over every tenant the account's principals belonged to.

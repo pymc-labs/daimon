@@ -43,9 +43,9 @@ const github: Github = {
 const mcp: Mcp = {
   servers: [
     { id: "a1b2c3d4e5f6", name: "Linear", url: "https://mcp.linear.app/sse", signed_in: 5, agents: [
-      { id: "ag_daimon", name: "Daimon", shared: false, signed_in: 4 }, { id: "ag_sales", name: "Sales Desk", shared: false, signed_in: 1 },
+      { id: "ag_default", name: "Daimon", shared: false, signed_in: 4 }, { id: "ag_sales", name: "Sales Desk", shared: false, signed_in: 1 },
     ] },
-    { id: "b2c3d4e5f6a1", name: "Notion", url: "https://mcp.notion.com/mcp", signed_in: 3, agents: [{ id: "ag_daimon", name: "Daimon", shared: false, signed_in: 3 }] },
+    { id: "b2c3d4e5f6a1", name: "Notion", url: "https://mcp.notion.com/mcp", signed_in: 3, agents: [{ id: "ag_default", name: "Daimon", shared: false, signed_in: 3 }] },
     { id: "c3d4e5f6a1b2", name: "Warehouse", url: "https://warehouse.fernhill.example/mcp", signed_in: 0, agents: [
       { id: "ag_mmm", name: "MMM Analyst", shared: true, signed_in: 0 }, { id: "ag_pricing", name: "Pricing Analyst", shared: true, signed_in: 0 },
     ] },

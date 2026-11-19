@@ -206,6 +206,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
     request = replace(request, admission=replace(request.admission, backend_revision=linked))
     calls.clear()
     yield request, quote, native, calls, posts
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
 
 
@@ -567,6 +568,8 @@ GATED = (
     "rotate_watch_key",
     "lead_intake_resolve",
     "set_routine_sandbox_tools",
+    "request_agent_backend_switch",
+    "set_thread_model",
 )
 
 
@@ -1209,30 +1212,6 @@ async def test_a_gemini_root_offers_and_runs_the_hand_off_tools(template):
     assert "mcp" not in quote.declared_drops
     async with handoff_mcp(request) as app:
         await offered_and_run(app, await live_token(request))
-
-
-@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
-async def test_the_switch_tool_is_offered_in_a_template_its_card_posted_by_daimon(
-    template, monkeypatch
-):
-    """The switch tool posts Daimon's own card, so a template may call it; the rest stay out."""
-    from daimon.core.mcp_oauth import discovery
-
-    request, *_ = template
-    catalogue = frozenset({"search_tools", "call_tool", "request_agent_backend_switch", *GATED})
-
-    async def listed(_url, _token):
-        return catalogue
-
-    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
-    from daimon.core.turn.runtime_manifest import capture_preparation_source
-
-    captured = await capture_preparation_source(request, fresh=True)
-    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
-    (connection,) = representation.target.mcp_servers
-    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert allowed == {"search_tools", "call_tool", "request_agent_backend_switch"}
-    assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)

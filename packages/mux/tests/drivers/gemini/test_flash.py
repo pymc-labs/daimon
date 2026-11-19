@@ -37,6 +37,28 @@ async def test_503_only_chain_accounts_each_attempt_and_preserves_selected_model
     assert object_value(request()["agent_config"])["model"] == FLASH_MODELS[0]
 
 
+async def test_an_accounting_503_skips_that_model_unsent() -> None:
+    class SkipAlias(Accounting):
+        async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
+            await super().before_attempt(model=model, attempt=attempt)
+            if model.id == FLASH_MODELS[1]:
+                raise ProviderError("overloaded", retryable=True, native_code="503")
+
+    source, accounting = FakeTransport(), SkipAlias()
+    source.responses.extend(
+        [
+            ProviderError("overloaded", retryable=True, native_code="503"),
+            {"id": "interaction", "status": "completed"},
+        ]
+    )
+    await FlashTransport(source, accounting).create(request())
+    assert [object_value(r["agent_config"])["model"] for r in source.requests] == [
+        FLASH_MODELS[0],
+        FLASH_MODELS[2],
+    ]
+    assert [r.outcome for r in accounting.receipts] == ["refused", "accepted"]
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -329,7 +351,7 @@ async def test_a_failed_release_never_breaks_the_call() -> None:
 
 @pytest.mark.parametrize(
     ("native_code", "rejected"),
-    [("quota_zero", 429), ("quota_exhausted", 429), (None, None)],
+    [("quota_zero", 429), ("quota_daily", 429), ("quota_exhausted", 429), (None, None)],
 )
 def test_a_429_naming_its_quota_is_a_definite_rejection(
     native_code: str | None, rejected: int | None
@@ -340,7 +362,7 @@ def test_a_429_naming_its_quota_is_a_definite_rejection(
 
     error = ProviderError(
         "rate_limited",
-        retryable=native_code != "quota_zero",
+        retryable=native_code not in ("quota_zero", "quota_daily"),
         native_code=native_code,
         native_error_code="http_429",
     )

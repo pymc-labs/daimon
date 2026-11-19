@@ -442,9 +442,7 @@ class OpenAIEvents:
                 await task
             await close(source)
 
-    @owned
-    async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
-        self._c.check(scope, session, "session")
+    async def _refreshed_history(self, session: ResourceRef) -> tuple[Event, ...]:
         previous = await self._journal.read(session) or ()
         try:
             normalizer = EventNormalizer(session.id, prior=previous)
@@ -460,6 +458,17 @@ class OpenAIEvents:
                 "upstream", retryable=False, native_code="malformed_snapshot"
             ) from None
         await self._journal.replace(session, saved)
+        return tuple(saved)
+
+    @owned
+    async def list(self, scope: Scope, session: ResourceRef, *, page: PageRequest) -> Page[Event]:
+        self._c.check(scope, session, "session")
+        saved: tuple[Event, ...]
+        if page.cursor is None:
+            # Only the first page asks OpenAI; later pages read what that call saved.
+            saved = await self._refreshed_history(session)
+        else:
+            saved = tuple(await self._journal.read(session) or ())
         ordered = saved[::-1] if page.order == "desc" else saved
         start = 0
         if page.cursor is not None:

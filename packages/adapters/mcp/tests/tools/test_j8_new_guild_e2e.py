@@ -16,12 +16,14 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import _fork_agent_impl  # pyright: ignore[reportPrivateUsage]
 from daimon.core import agent_fork
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.channel_backend import NO_CAPTURE, load_backend_agent, make_backend_service
 from daimon.core.config import McpSettings, Settings, TurnSettings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenants
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.tenant_balance import is_over_balance
 from daimon.testing.db import db_committing_engine as db_committing_engine
@@ -192,7 +194,8 @@ async def test_make_a_copy_of_yourself_on_gpt(joined, monkeypatch, channel):
             db, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_copy")
         )
     assert owner == account_id
-    # ...and moving it to GPT is offered on this brand-new server's defaults.
+    # ...and moving it to GPT is offered once the admin opts the server in: keys
+    # alone leave a brand-new server on Anthropic.
     from daimon.core.mux_backend import resource_scope
     from daimon.core.mux_compat import retrieve_agent
 
@@ -202,6 +205,13 @@ async def test_make_a_copy_of_yourself_on_gpt(joined, monkeypatch, channel):
         client, sm, tenant_id=tenant_id, agent_name=copy.name, actual_agent=native
     )
     service = make_backend_service(sm, SETTINGS.turn, capture_source=NO_CAPTURE)
+    assert not (await service.preview(agent, "openai")).allowed, "keys alone opt nobody in"
+    async with sm.begin() as db:
+        await set_access_policy(
+            db,
+            tenant_id=tenant_id,
+            policy=TenantAccessPolicy(enabled_backends=("anthropic", "openai")),
+        )
     preview = await service.preview(agent, "openai")
     assert preview.allowed, preview
     assert preview.target_backend == "openai"

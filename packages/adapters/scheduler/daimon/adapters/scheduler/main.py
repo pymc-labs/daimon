@@ -52,9 +52,10 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_backend import (
+    agent_native_provider,
     backend_refusal_causes,
+    channel_provider,
     effective_thread_backend,
-    is_selfhosted_channel,
 )
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
@@ -67,6 +68,7 @@ from daimon.core.config import (
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
@@ -191,7 +193,10 @@ from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
+from mux.profiles import PROVIDER_LABELS
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -340,6 +345,16 @@ async def _blocked(
 ) -> bool:
     """Whether one check of the spend gate stops this routine's fire."""
     return await _spend_block(sm, settings, row, platform=platform, check=check) is not None
+
+
+def routines_unsupported_error(provider: Provider) -> str:
+    """The `last_error` a routine records when its agent, channel or thread is not on Anthropic."""
+    if provider == "selfhosted":
+        return "selfhosted_routines_unsupported"
+    return (
+        f"Routines run only on Anthropic, and this one is set to {PROVIDER_LABELS[provider]}. "
+        "Switch its agent or channel back to Anthropic."
+    )
 
 
 async def _build_fire(
@@ -581,8 +596,9 @@ async def _build_fire(
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return
-            # Headless routines have no self-hosted runtime yet. Refuse before
-            # resolving agents, environments, defaults or credentials at Anthropic.
+            # Headless routines run only on Anthropic Managed Agents. A thread, channel
+            # or agent on another provider is refused before anything is resolved at
+            # Anthropic, never quietly run on Claude.
             target = delivery_target(row, platform=platform)
             if is_routine_parent_unknown(row):
                 await record_result(
@@ -594,31 +610,21 @@ async def _build_fire(
                 )
                 return
             parent_channel = routine_destination_channel(row)
+            provider: Provider | None = None
             if row.destination_kind == "thread" and parent_channel is not None:
                 thread_id = (
                     target.thread_ts
                     if platform == "slack" and target is not None
                     else row.destination_id
                 )
-                if (
-                    await effective_thread_backend(
-                        s,
-                        tenant_id=row.tenant_id,
-                        platform=platform,
-                        channel_id=parent_channel,
-                        thread_id=thread_id,
-                        caller_id=row.created_by_user_id,
-                    )
-                    == "selfhosted"
-                ):
-                    await record_result(
-                        s,
-                        row.id,
-                        tail=None,
-                        error="selfhosted_routines_unsupported",
-                        expected_row=row,
-                    )
-                    return
+                provider = await effective_thread_backend(
+                    s,
+                    tenant_id=row.tenant_id,
+                    platform=platform,
+                    channel_id=parent_channel,
+                    thread_id=thread_id,
+                    caller_id=row.created_by_user_id,
+                )
             channels = {
                 channel
                 for channel in (
@@ -629,17 +635,26 @@ async def _build_fire(
                 if channel is not None
             }
             for routine_channel in channels:
-                if await is_selfhosted_channel(
-                    s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
-                ):
-                    await record_result(
-                        s,
-                        row.id,
-                        tail=None,
-                        error="selfhosted_routines_unsupported",
-                        expected_row=row,
+                if provider in (None, DEFAULT_BACKEND):
+                    provider = await channel_provider(
+                        s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
                     )
-                    return
+            if provider in (None, DEFAULT_BACKEND):
+                provider = await agent_native_provider(
+                    s,
+                    tenant_id=row.tenant_id,
+                    agent_id=row.agent_id,
+                    agent_name=row.agent_name,
+                )
+            if provider is not None and provider != DEFAULT_BACKEND:
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error=routines_unsupported_error(provider),
+                    expected_row=row,
+                )
+                return
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
@@ -823,7 +838,7 @@ async def _build_fire(
         # self-healing across MA archive/recreate. The environment follows the
         # routine's channel, then the tenant default, like a turn there would.
         # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
-        agent_tag = row.agent_name or deployment_default.agent_name or "daimon"
+        agent_tag = row.agent_name or deployment_default.agent_name or BUILTIN_AGENT_NAME
         _public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         resolved_agent_id = await resolve_agent(
             client,
@@ -1064,10 +1079,16 @@ async def _build_fire(
 
 @scheduler_step
 async def _drain_pending_usage(sm: async_sessionmaker[AsyncSession], *, markup: Decimal) -> None:
-    """Settle pending usage of profiles with no infrastructure charge; failures retry on
-    the next scheduler tick (an applied row is never applied twice)."""
+    """Re-read late OpenAI usage, then settle pending usage of profiles with no
+    infrastructure charge; failures retry on the next scheduler tick (an applied row
+    is never applied twice)."""
+    from daimon.core.turn.openai_late_usage import DURABLE_REREADS
     from daimon.core.usage_outbox_drain import drain_pending_usage
 
+    try:
+        await DURABLE_REREADS.run(sm, markup=markup, now=datetime.now(UTC))
+    except Exception:
+        log.exception("scheduler.late_usage_reread.failed")
     try:
         await drain_pending_usage(sm, markup=markup)
     except Exception:
@@ -1287,9 +1308,41 @@ async def _sweep_monitored_events(
         log.exception("scheduler.monitoring_sweep.failed")
 
 
+# Each run reads every idle Gemini row; idleness is counted in days.
+_GEMINI_RETENTION_INTERVAL = timedelta(hours=1)
+_last_gemini_retention: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _prune_gemini_records(
+    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
+) -> None:
+    """Prune idle Gemini conversations at most once per interval. Boundary catch:
+    a sweep failure must not kill the scheduler loop; the next interval retries.
+    """
+    current = now or datetime.now(UTC)
+    last = _last_gemini_retention.get("started")
+    if last is not None and current - last < _GEMINI_RETENTION_INTERVAL:
+        return
+    _last_gemini_retention["started"] = current
+    # Lazy: the sweep pulls the Gemini SDK, which an Anthropic-only install lacks.
+    try:
+        from daimon.core.turn.gemini_retention import prune_idle_records
+    except ImportError:
+        return
+    try:
+        counts = await prune_idle_records(sm, now=current, window=timedelta(days=retention_days))
+    except SQLAlchemyError:
+        log.exception("scheduler.gemini_retention.failed")
+        return
+    if counts:
+        log.info("scheduler.gemini_retention", **counts)
+
+
 # Each run lists every vault, and live sessions once a relay vault is old enough.
+# Seeded at import so a restart does not sweep at once.
 _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
-_last_relay_vault_archive: dict[str, datetime] = {}
+_last_relay_vault_archive: dict[str, datetime] = {"started": datetime.now(UTC)}
 
 
 @scheduler_step
@@ -2145,6 +2198,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
+            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2185,6 +2239,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
+            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2233,6 +2288,7 @@ async def run(
         await long_jobs.close()
         await dispatcher.close()
         await dm_turn_deps.context_providers.aclose()
+        await dm_turn_deps.provider_clients.aclose()
         health_server.close()
         await health_server.wait_closed()
         try:

@@ -98,7 +98,7 @@ Where each feature can be set, and its default.
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
-| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
@@ -621,7 +621,7 @@ People may message the agent directly; on for the team, every agent takes part u
 
 ## Direct message wait
 
-Holds a direct message for more, so a burst gets one reply; at most ten seconds, and never an approval reply.
+Holds a direct message for more, so a burst gets one reply; at most five seconds, and never an approval reply.
 
 | | |
 | --- | --- |
@@ -1050,13 +1050,13 @@ On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card a
 
 ## Connectors on OpenAI and Gemini
 
-An agent's own connectors work on OpenAI and Gemini agents: Daimon calls them for the agent with the person's sign-in. Off leaves them out there.
+An agent's own connectors work on OpenAI and Gemini agents with the person's sign-in, and that provider receives what they return. Off leaves them out.
 
 | | |
 | --- | --- |
 | Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
-| Default | `on` |
+| Default | `off` |
 | Levels | Deployment |
 | Combines | Stricter wins |
 

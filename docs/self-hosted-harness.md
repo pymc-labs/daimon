@@ -47,7 +47,7 @@ HTTPS is required outside loopback.
 | `--cache-read-usd` | Follows the input price when unset. |
 | `--infrastructure-usd` | Your audited cost per request. Default `0`. |
 | `--model` | The deployment name. Default `gpt-6.1-sol`. |
-| `--name`, `--environment-name` | Default `daimon` and `default`. |
+| `--name`, `--environment-name` | Both default to `default`. |
 | `--system-file` | Read the system prompt from a file. |
 | `--auth-mode` | `bearer_env` (default) or `entra`. |
 | `--auth-ref` | A variable name, never its value. Default `DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY`. |

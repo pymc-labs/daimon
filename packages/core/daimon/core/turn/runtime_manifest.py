@@ -766,12 +766,11 @@ async def _capture_source_capabilities(
             # which MCP tools raise one, so Daimon posts the card for each gated call
             # while the host call gate is on for this platform. Otherwise a gated tool
             # stays unavailable (the server refuses it for provider-turn credentials).
-            # A retired gate's stored ask runs.
             from daimon.core.features.snapshot import deployment_on_everywhere
-            from daimon.core.tool_safety import RETIRED_GATES, confirmation_gated_tools
+            from daimon.core.tool_safety import confirmation_gated_tools
 
             settings = request.deps.settings
-            gated, carded = confirmation_gated_tools(), RETIRED_GATES
+            gated, carded = confirmation_gated_tools(), frozenset[str]()
             # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
             # its tools out of a template's allowlist, as a Claude session's toolset does. A
             # pinned install keeps its exact allowlist; the server refuses them on call.

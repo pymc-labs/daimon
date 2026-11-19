@@ -3,13 +3,16 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.mux_backend import TurnBackendRequest
+from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
@@ -19,6 +22,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
+from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ScopeViolation, UnsupportedCapability
@@ -135,6 +139,27 @@ async def test_cold_close_never_opens_a_provider_stream(harness: Harness) -> Non
 
 
 @pytest.mark.asyncio
+async def test_the_host_stream_reads_usage_only_for_usage_events(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness.transport.responses.append(interaction("first", text="one"))
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    snapshots, reads = io.usage_snapshots, 0
+
+    async def counted() -> dict[tuple[str, int], UsageObservation]:
+        nonlocal reads
+        reads += 1
+        return await snapshots()
+
+    monkeypatch.setattr(io, "usage_snapshots", counted)
+    stream = await io.open_stream(read_timeout_s=1)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "question"}]}])
+    frames = [frame async for frame in stream]
+    usage = [frame for frame in frames if frame.usage is not None]
+    assert len(frames) > len(usage) == reads == 1, (len(frames), reads)
+
+
+@pytest.mark.asyncio
 async def test_two_host_turns_lazy_stream_reuse_and_real_interaction_usage(
     harness: Harness,
 ) -> None:
@@ -239,6 +264,35 @@ async def test_eof_without_root_outcome_is_a_replayable_connection_loss(harness:
         e.native is not None and e.native.type == "session.status_idle"
         for e in await io.replay_turn_events()
     )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_over_the_spend_limit_is_cancelled_and_told(harness: Harness) -> None:
+    from itertools import count
+
+    from daimon.core.turn.driver import InterruptedDuringRecovery
+
+    told: list[str] = []
+
+    async def notify() -> None:
+        told.append("notified")
+
+    # 64 input and 11 output tokens at $1000/M is 7.5 cents, past a 1 cent limit.
+    price = ProviderPrice(
+        "gemini", "gemini-3.8-flash", date(2020, 1, 1), Decimal(1000), Decimal(1000), Decimal(1)
+    )
+    ticks = count(step=10)
+    guard = SpendGuard(
+        limit_cents=1, price=price, notify=notify, provider="gemini", clock=lambda: next(ticks)
+    )
+    harness.transport.responses.append(interaction("costly"))
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session, spend_guard=guard)
+    stream = await io.open_stream(read_timeout_s=1)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    with pytest.raises(InterruptedDuringRecovery):
+        async for _ in stream:
+            pass
+    assert told == ["notified"]
 
 
 @pytest.mark.asyncio
@@ -393,7 +447,6 @@ async def test_expired_workspace_never_opens_a_fresh_host_thread(harness: Harnes
 async def test_restart_restores_ack_with_persisted_fallback_model(harness: Harness) -> None:
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
-    from mux.drivers.gemini.storage import owner
 
     fallback = ModelRef(provider="gemini", id="gemini-flash-latest")
     first = GeminiManagedAgents(
@@ -407,8 +460,9 @@ async def test_restart_restores_ack_with_persisted_fallback_model(harness: Harne
     message = (UserMessage(content=(TextPart(text="hello"),)),)
     receipt = await first.events.send(SCOPE, harness.session, message, key="recover-key")
     async with harness.storage.transaction() as records:
-        principal, digest, prior = records.sends[(*owner(SCOPE), "recover-key")]
-        records.sends[(*owner(SCOPE), "recover-key")] = (
+        sends = records.sessions[harness.session.id].sends
+        principal, digest, prior = sends["recover-key"]
+        sends["recover-key"] = (
             principal,
             digest,
             prior.model_copy(update={"status": "outcome_unknown"}),

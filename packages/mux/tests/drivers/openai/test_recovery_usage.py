@@ -693,3 +693,18 @@ async def test_reconcile_turn_when_a_fresh_driver_replays_then_the_priced_revisi
     (filled,) = await fresh().usage.reconcile_turn(SCOPE, REF, "root")
     assert (filled.revision, filled.output_tokens) == (priced.revision + 1, 30), filled
     assert filled.final, filled
+
+
+@pytest.mark.asyncio
+async def test_later_history_pages_read_the_journal_not_the_provider(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    pages = [await driver.events.list(SCOPE, REF, page=PageRequest(limit=1))]
+    while pages[-1].has_more:
+        cursor = pages[-1].next_cursor
+        pages.append(await driver.events.list(SCOPE, REF, page=PageRequest(cursor=cursor, limit=1)))
+    assert len(pages) >= 2, "the history spans more than one page"
+    listings = [path for _, path, _, _ in transport.calls if path.endswith(("/turns", "/items"))]
+    assert sorted(listings) == ["/agents/sessions/s/items", "/agents/sessions/s/turns"]
+    with pytest.raises(ProviderError, match="unknown_history_cursor"):
+        await driver.events.list(SCOPE, REF, page=PageRequest(cursor="unknown"))

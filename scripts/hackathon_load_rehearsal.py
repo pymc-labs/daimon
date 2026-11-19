@@ -261,7 +261,7 @@ def _defaults_root(settings: Settings, model: str, temp: Path) -> Path:
         return settings.defaults_root
     root = temp / "defaults"
     shutil.copytree(settings.defaults_root, root)
-    spec = root / "agents" / "daimon.yaml"
+    spec = root / "agents" / "default.yaml"
     source = spec.read_text()
     old = f"model: {expected_agent_model('event')}\n"
     if source.count(old) != 1:
@@ -773,7 +773,7 @@ async def _discord_phase(
                 tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.provision_status != "ready" or tenant.archived_at:
                 raise RuntimeError(f"QA guild {guild_id} has no ready tenant")
-            agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="daimon")
+            agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="default")
             if agent is None:
                 raise RuntimeError(f"QA guild {guild_id} has no default agent")
             print(f"Discord QA guild {guild_id} default agent model: {agent.model.id}", flush=True)
@@ -1172,7 +1172,7 @@ async def _phases(
             raise RuntimeError("no synthetic tenants found for this run-id")
         resolved: list[tuple[str, uuid.UUID, str, str]] = []
         for name, tenant_id in ready[: args.turns]:
-            agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="daimon")
+            agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name="default")
             environment = await find_environment_by_daimon_tag(
                 client, tenant_id=tenant_id, name="default"
             )

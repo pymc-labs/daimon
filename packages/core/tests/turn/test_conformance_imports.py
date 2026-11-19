@@ -69,3 +69,32 @@ print("anthropic host and both conformance modules passed without optional provi
         "anthropic host and both conformance modules passed without optional providers"
         in child.stdout
     )
+
+
+def test_scheduler_imports_and_skips_gemini_retention_without_optional_providers():
+    code = r"""
+import asyncio
+import importlib.abc
+import sys
+
+class NoGemini(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith(("daimon.core.turn.gemini", "mux.drivers.gemini", "google.genai")):
+            raise ModuleNotFoundError(fullname)
+sys.meta_path.insert(0, NoGemini())
+
+from daimon.adapters.scheduler import main
+
+asyncio.run(main._prune_gemini_records(None, retention_days=30))
+print("scheduler ok")
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[4],
+        env={key: os.environ[key] for key in ("PATH", "LANG", "TZ") if key in os.environ},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
+    assert "scheduler ok" in child.stdout, "scheduler should import without the Gemini extra"

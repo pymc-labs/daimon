@@ -46,7 +46,7 @@ const CHAT_PEOPLE: DmPerson[] = people.filter((p) => p.role !== "visitor").map((
 const ROLES = [{ id: "1300000000000000201", name: "Staff" }, { id: "1300000000000000202", name: "MMM team" }, { id: "1300000000000000203", name: "Clients" }]
 const grant = (on: boolean, who: DmGrant["who"] = "members", users: DmPerson[] = [], groups: string[] = []): DmGrant => ({ on, who, users, groups })
 const DM: Record<string, DmGrant> = {
-  ag_daimon: grant(true),
+  ag_default: grant(true),
   ag_mmm: grant(true, "listed", [CHAT_PEOPLE[3]!, CHAT_PEOPLE[5]!], [ROLES[1]!.id]),
   ag_pricing: grant(true, "excluded", [], [ROLES[2]!.id]),
   ag_review: grant(false),
@@ -107,7 +107,7 @@ const KEYED = [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "
 const keyedIds = KEYED.map((p) => p.id)
 
 const settings: WorkspaceSettings = {
-  default_agent: "ag_daimon",
+  default_agent: "ag_default",
   access: { people: null, others: 0 },
   providers: {
     offered: KEYED,
@@ -217,7 +217,7 @@ export const adminHandlers: HttpHandler[] = [
     const raw: Feedback = {
       days,
       agents: [
-        { id: "ag_daimon", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
+        { id: "ag_default", name: "Daimon", up: n(86), down: n(9), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(4) }, { code: "incomplete", label: "Incomplete or cut off", count: n(3) }, { code: "too_slow", label: "Too slow", count: n(2) }] },
         { id: "ag_mmm", name: "MMM Analyst", up: n(41), down: n(6), reasons: [{ code: "inaccurate", label: "Wrong or inaccurate", count: n(3) }, { code: "ignored_request", label: "Didn't do what I asked", count: n(2) }] },
         { id: "ag_review", name: "Code Reviewer", up: n(23), down: n(1), reasons: [{ code: "other", label: "Something else", count: n(1) }] },
         { id: null, name: "Unknown agent", up: n(2), down: 0, reasons: [] },

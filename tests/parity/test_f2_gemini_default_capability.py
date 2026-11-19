@@ -68,7 +68,7 @@ OBJECT = TypeAdapter[Object](Object)
 
 
 def manifest() -> DefaultManifest:
-    raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+    raw = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     skills: list[NamedSkill] = []
     for item in raw["skills"]:
         if item["type"] != "custom" or "platforms" in item:

@@ -38,7 +38,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.privacy import DELETE_PAUSED, collect_purge_preview
+from daimon.core.privacy import DELETE_PAUSED, account_other_providers, collect_purge_preview
 from daimon.core.purge import purge_account
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens
 from daimon.core.stores.identity import find_platform_principal
@@ -90,6 +90,9 @@ class PrivacyPanel:
             delete_enabled=self._runtime.settings.privacy.delete_enabled,
             microsoft_connected=await self._microsoft_connected(tenant_id, user_id),
             monitored=await self._monitored(tenant_id),
+            providers=await account_other_providers(
+                self._runtime.sessionmaker, account_id=account_id
+            ),
         )
 
     async def _monitored(self, tenant_id: uuid.UUID) -> bool:
@@ -132,15 +135,24 @@ class PrivacyPanel:
         if account_id is None:
             return replace_card(no_data_card(bot))
         preview = await collect_purge_preview(sm=self._runtime.sessionmaker, account_id=account_id)
+        providers = await account_other_providers(self._runtime.sessionmaker, account_id=account_id)
         if op == "export":
             return replace_card(export_card(preview, bot=bot))
         name = activity.from_.name or ""
         if op == "delete":
-            return replace_card(confirm_card(preview, account_id=account_id, name=name, bot=bot))
+            card = confirm_card(
+                preview, account_id=account_id, name=name, bot=bot, providers=providers
+            )
+            return replace_card(card)
         typed = str(data.get(CONFIRM_INPUT) or "").strip()
         if not name or typed != name:
             card = confirm_card(
-                preview, account_id=account_id, name=name, bot=bot, error=NAME_MISMATCH
+                preview,
+                account_id=account_id,
+                name=name,
+                bot=bot,
+                error=NAME_MISMATCH,
+                providers=providers,
             )
             return replace_card(card)
         if str(data.get("account")) != str(account_id):

@@ -51,8 +51,10 @@ typo is silent — check the spelling here.
 - [Report Host](#report-host)
 - [Sentry](#sentry)
 - [Billing Policy](#billing-policy)
+- [Provider Daily Ceiling Usd](#provider-daily-ceiling-usd)
 - [Support](#support)
 - [Turn](#turn)
+- [Provider Limits](#provider-limits)
 - [Thread Naming](#thread-naming)
 - [Outbound](#outbound)
 - [Turn Queue](#turn-queue)
@@ -1447,15 +1449,23 @@ Configure the harness HARNESS_MCP_CRED_BINDINGS from the same operator source.
 
 Read from `daimon.core.config.GeminiSettings`. Prefix `DAIMON_GEMINI__`.
 
-Optional Gemini API credentials for media MCP tools.
+Gemini media-tool credentials and stored-conversation retention.
 
-When unset, the media tools skip registration so the ``mcp`` process boots without them.
+When the key is unset, the media tools skip registration so the ``mcp`` process boots
+without them.
 
 ### `DAIMON_GEMINI__API_KEY`
 
 `SecretStr | None` · optional · default unset · secret
 
 Gemini API key used by media-generation MCP tools. Tools are unregistered when unset.
+
+### `DAIMON_GEMINI__RECORDS_RETENTION_DAYS`
+
+`int` · optional · default `30`
+
+Days a Gemini conversation may sit idle before the scheduler prunes its stored history.
+A thread that comes back after that starts a new conversation.
 
 ## Notebook Host
 
@@ -1574,8 +1584,8 @@ secrets. Keep both separate.
 
 `Decimal` · optional · default `1.0`
 
-Multiplier applied to raw Anthropic usage cost before billing the tenant. 1.0 = pass-
-through.
+Multiplier applied to raw provider usage cost (every provider) before billing the
+tenant. 1.0 = pass-through.
 
 ### `DAIMON_BILLING__SELFHOSTED__ADMISSION_CLOCK_SKEW_S`
 
@@ -1619,10 +1629,10 @@ payment before use.
 
 Most a tenant may spend each UTC day on any one Gemini model, in provider USD at list
 price, counted across every agent turn. A Gemini agent turn has no token envelope and
-its usage reaches no ledger debit, so this is the guard. Checked as each turn starts,
-for its first request's model and any Flash fallback of it, never mid-turn; a model with
-no current tariff is refused, and an unpriced fallback never runs. It resets at midnight
-UTC. 0 allows no Gemini turns.
+its usage is debited only once measured, so this is the guard. Checked as each turn
+starts, for its first request's model and any Flash fallback of it, never mid-turn; a
+model with no current tariff never runs on any request. It resets at midnight UTC. 0
+allows no Gemini turns.
 
 ### `DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD`
 
@@ -1632,6 +1642,35 @@ Most a tenant may spend each UTC day on any one OpenAI model, in provider USD at
 price, counted across every agent turn. OpenAI sessions carry no native spend limit on
 this project, so this is the guard. Checked as each turn starts, never mid-turn; a model
 with no current tariff is refused. It resets at midnight UTC. 0 allows no OpenAI turns.
+
+## Provider Daily Ceiling Usd
+
+Read from `daimon.core.config.ProviderDailyCeilingSettings`. Prefix
+`DAIMON_PROVIDER_DAILY_CEILING_USD__`.
+
+The most every tenant together may spend each UTC day on one model provider.
+
+Each tenant's own daily model cap bounds one tenant; tenants are free to create, so only
+this bounds the deployment's provider bill. The default, $200, lets ten tenants each use
+up a $20 model cap in a day and holds the worst case near $6,000 a month per provider.
+Checked with the daily model cap as each turn starts, from today's observed usage at
+list price, re-read at most once a minute per worker.
+
+### `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI`
+
+`Decimal` · optional · default `200`
+
+Most all tenants together may spend each UTC day on OpenAI, in provider USD at list
+price. Once reached, OpenAI turns are refused until midnight UTC. 0 allows no OpenAI
+turns.
+
+### `DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`
+
+`Decimal` · optional · default `200`
+
+Most all tenants together may spend each UTC day on Gemini, in provider USD at list
+price. Once reached, Gemini turns are refused until midnight UTC. 0 allows no Gemini
+turns.
 
 ## Support
 
@@ -1739,6 +1778,32 @@ Capture complete scoped source and resource intent for an agent-selected native 
 Unproved obligations are refused; counterpart identity readback alone never authorizes
 execution. Requires mux and channel_backends; on by default. Emergency stop only: false
 refuses agent-selected native backends.
+
+## Provider Limits
+
+Read from `daimon.core.config.ProviderLimitsSettings`. Prefix
+`DAIMON_PROVIDER_LIMITS__`.
+
+How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`).
+
+### `DAIMON_PROVIDER_LIMITS__KEY_TURNS`
+
+`int` · optional · default `16`
+
+Most turns running at once on one provider API key, across every replica. A turn past
+the cap waits, then is refused as busy.
+
+### `DAIMON_PROVIDER_LIMITS__TENANT_TURNS`
+
+`int` · optional · default `4`
+
+Most of those turns one workspace may hold on one provider API key.
+
+### `DAIMON_PROVIDER_LIMITS__WAIT_S`
+
+`float` · optional · default `20.0`
+
+Seconds a turn waits for a free slot before it is refused as busy.
 
 ## Thread Naming
 
