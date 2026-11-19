@@ -425,11 +425,21 @@ async def test_execution_grant_is_live_tenant_bound_and_revoked(
     async with lead_sessions() as session, session.begin():
         tenant = await make_tenant(session)
         routine = await make_routine(session, tenant=tenant, created_by_user_id="7")
-    async with routine_execution(lead_sessions, tenant.id, routine.id):
+    from daimon.core._models import LeadIntakeExecution
+    from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+
+    lifetime_s = LONGEST_TURN_CEILING_S + 300
+    started = datetime.now(UTC)
+    async with routine_execution(lead_sessions, tenant.id, routine.id, lifetime_s=lifetime_s):
         grant = current_intake_execution.get()
         assert grant is not None
         async with lead_sessions() as session:
             assert await execution_is_active(session, tenant.id, routine.id, grant[1])
+            row = await session.get(LeadIntakeExecution, (tenant.id, grant[1]))
+            assert row is not None, "the grant is stored"
+            assert row.expires_at >= started + timedelta(seconds=lifetime_s), (
+                "the grant lasts as long as the fire may run, the longest time limit included"
+            )
             assert not await execution_is_active(session, uuid4(), routine.id, grant[1])
     async with lead_sessions() as session:
         assert not await execution_is_active(session, tenant.id, routine.id, grant[1])

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -91,7 +90,6 @@ async def test_only_a_discord_direct_message_skips_the_replay_into_a_continuing_
             await start_conversation(
                 session,
                 conversation=row.model_copy(update={"platform": platform}),
-                now=datetime.now(UTC),
             )
     admission = replace(
         admission,

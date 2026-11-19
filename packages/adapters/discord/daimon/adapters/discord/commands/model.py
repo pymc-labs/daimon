@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal, cast
 
+from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import (
     is_guild_admin,
     require_registered_guild_or_dm,
@@ -62,6 +63,7 @@ from discord.ext import commands
 BotInteraction = Interaction[commands.Bot]
 
 _NOT_IN_THREAD = "Use /model inside a conversation thread or a direct message."
+_NOT_HERE = "This bot isn't set up to answer in this server."
 _NOT_ALLOWED = "Only people who can start a conversation here can change its model."
 _LEGACY = (
     app_commands.Choice(name="Haiku", value="haiku"),
@@ -198,7 +200,7 @@ _Effort = Literal["low", "medium", "high", "xhigh", "max", "default"]
 class ModelCog(commands.Cog):
     """Per-conversation model choice."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: DaimonBot) -> None:
         super().__init__()
         self.bot = bot
 
@@ -216,6 +218,8 @@ class ModelCog(commands.Cog):
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
+            if not self.bot._allows_guild(interaction.guild_id):  # pyright: ignore[reportPrivateUsage]
+                raise UserFacingError(_NOT_HERE)
             runtime = _runtime_of(interaction)
             place = await _place_of(interaction)
             if place is None:
@@ -257,14 +261,14 @@ class ModelCog(commands.Cog):
             or not channel_backend.backend_selection_enabled(runtime.settings.turn)
         )
         if legacy:
-            if (
-                choice is None
-                and effort is not None
-                and channel_backend.backend_selection_enabled(runtime.settings.turn)
+            off = False
+            if effort is not None and channel_backend.backend_selection_enabled(
+                runtime.settings.turn
             ):
                 admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
                 pick = await _pick_in(interaction, place, admin=admin)
-                if pick is not None and await _off_claude(pick):
+                off = pick is not None and await _off_claude(pick)
+                if off and choice is None:
                     raise UserFacingError(f"{EFFORT_OFF_CLAUDE} {NOTHING_CHANGED}")
             change = await choose_thread_model(
                 sessionmaker,
@@ -272,9 +276,9 @@ class ModelCog(commands.Cog):
                 platform="discord",
                 thread_id=place.conversation_id,
                 choice=choice,
-                effort=effort,
+                effort=None if off else effort,
             )
-            return change.note
+            return f"{change.note} {EFFORT_OFF_CLAUDE}" if off else change.note
         assert choice is not None
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
         pick = await _pick_in(interaction, place, admin=admin)

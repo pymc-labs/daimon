@@ -24,6 +24,7 @@ from daimon.core.config import Settings, load_settings, load_turn_settings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.headless_runner import unattended_ceiling_s
 from daimon.core.mux_backend import platform_scope, resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
@@ -141,19 +142,30 @@ async def _run_with_defaults(
             + user_message
         )
         keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
+        rules_channel = session_rules_channel(snapshot, platform=platform)
+        ceiling_s = await unattended_ceiling_s(
+            rt.sessionmaker,
+            settings,
+            tenant_id=tenant_id,
+            agent_id=snapshot.agent.id,
+            platform=platform,
+            channel_id=rules_channel,
+            thread_id=None,
+        )
         with unattended_sends(gate):
             return await run_conversation(
                 rt=rt,
                 session_id=session,
                 user_message=user_message,
                 path=path,
+                deadline=turn_deadline(now=datetime.now(UTC), ceiling_s=ceiling_s),
                 tool_confirmation=unattended_posture(
                     settings.tool_safety,
                     session=snapshot,
                     public_url=public_url,
                     session_factory=rt.sessionmaker,
                     tenant_id=tenant_id,
-                    channel_id=session_rules_channel(snapshot, platform=platform),
+                    channel_id=rules_channel,
                     fernet=build_multifernet(keys) if keys else None,
                     entry_point="cli_run",
                 ),
@@ -223,10 +235,10 @@ async def run_conversation_observed(
     cancel = asyncio.Event()
     # `daimon run` is the other caller (besides headless_runner) that bypasses
     # run_prepared_turn, so it threads its own core-owned deadline into the
-    # driver -- fail-safe like headless_runner: a caller that never passes one
-    # still gets a full TURN_CEILING_S window. A human operator running this
-    # interactively can always Ctrl-C, so this bound is a backstop rather than
-    # the primary control; it exists so the CLI is not the one turn path left
+    # driver: the unattended run limit at the session's tenant and agent
+    # (`_run_with_defaults`), and a caller that passes none still gets the
+    # standard TURN_CEILING_S window. An operator can always Ctrl-C, so this
+    # bound is a backstop; it keeps the CLI from being the one turn path left
     # without the core ceiling.
     effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
 

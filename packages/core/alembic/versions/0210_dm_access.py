@@ -1,7 +1,7 @@
 """dm_access: per-agent direct message grants, routing rules and picks
 
-Revision ID: 0209_dm_access
-Revises: 0208_thread_model_effort
+Revision ID: 0210_dm_access
+Revises: 0209_thread_model_effort
 
 downgrade: destructive
 """
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0209_dm_access"
-down_revision: str | None = "0208_thread_model_effort"
+revision: str = "0210_dm_access"
+down_revision: str | None = "0209_thread_model_effort"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

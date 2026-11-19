@@ -466,7 +466,7 @@ async def test_messages_sent_during_a_turn_are_answered_together_by_the_next(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Nothing sent while a turn runs is refused: it is held, marked and merged."""
-    runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 0)
+    runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 0.05)
     gate, started = asyncio.Event(), asyncio.Event()
 
     async def first_waits(*args: Any, **kwargs: Any) -> str:
@@ -482,19 +482,19 @@ async def test_messages_sent_during_a_turn_are_answered_together_by_the_next(
     await asyncio.wait_for(started.wait(), 5)
     await dm_module.handle_direct_message(runtime, _dm("two", "10.2"), team_id=_TEAM)
     await dm_module.handle_direct_message(runtime, _dm("three", "10.3"), team_id=_TEAM)
-    assert _marks(client.reactions_add) == ["10.2", "10.3"], "held while the turn runs"
+    assert _marks(client.reactions_add) == ["10.1", "10.2", "10.3"], "held while the turn runs"
     gate.set()
     await first
     assert [call.kwargs["text"] for call in reply.await_args_list] == ["one", "two\n\nthree"]
     assert reply.await_args.kwargs["merged_message_ids"] == ("10.3",)
-    assert _marks(client.reactions_remove) == ["10.2", "10.3"], "marks come off after it"
+    assert _marks(client.reactions_remove) == ["10.1", "10.2", "10.3"], "marks come off after it"
     assert client.chat_postMessage.await_count == 2, "each turn posts its answer"
 
 
 async def test_a_group_queued_behind_a_turn_runs_on_the_role_read_when_it_starts(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime, _client, reply = await _burst_setup(db_session_factory, monkeypatch, 0)
+    runtime, _client, reply = await _burst_setup(db_session_factory, monkeypatch, 0.05)
     live = AsyncMock(side_effect=[Role.ADMIN, Role.USER])
     monkeypatch.setattr(dm_module, "_live_role", live)
     gate, started = asyncio.Event(), asyncio.Event()
@@ -613,10 +613,10 @@ async def test_a_message_joining_a_burst_with_no_conversation_gets_the_one_notic
     assert dm_module._NOT_SENT not in _notices(client)  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_with_the_wait_off_a_message_sent_during_the_lookup_is_marked_and_merged(
+async def test_with_the_wait_off_a_message_sent_during_the_lookup_gets_its_own_turn(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Off answers at once, but a message that already joined rides along, marked."""
+    """Off gives each message its own turn; one that joined meanwhile is only briefly marked."""
     runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 0)
     release = _slow_lookup(monkeypatch)
     first = asyncio.create_task(
@@ -626,6 +626,6 @@ async def test_with_the_wait_off_a_message_sent_during_the_lookup_is_marked_and_
     await dm_module.handle_direct_message(runtime, _dm("two", "9.2"), team_id=_TEAM)
     release.set()
     await first
-    assert [call.kwargs["text"] for call in reply.await_args_list] == ["one\n\ntwo"]
+    assert [call.kwargs["text"] for call in reply.await_args_list] == ["one", "two"]
     assert _marks(client.reactions_add) == ["9.2"], "only the one that was held is marked"
     assert _marks(client.reactions_remove) == ["9.2"], "and its mark comes off"

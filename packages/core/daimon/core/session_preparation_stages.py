@@ -66,6 +66,7 @@ from daimon.core.stores.domain import (
     UnsavedWorkChoice,
 )
 from daimon.core.stores.thread_sessions import record_snapshot
+from daimon.core.stores.worker_ownership import owner_is_alive
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -176,19 +177,35 @@ async def lock_preparation(
     await try_fence(session, key)
 
 
-def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:
+async def turn_is_active(
+    row: ThreadSessionRow,
+    *,
+    now: dt.datetime,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> bool:
     """Is a turn still plausibly running on this mapping?
 
-    A marker older than the per-turn ceiling cannot belong to a live turn — the
-    turn that wrote it either cleared it or died with its process — so an
-    abandoned marker must not defer every later change forever.
+    A marker older than the turn's ceiling, or naming a worker that is gone, cannot belong
+    to a live turn: the turn that wrote it either cleared it or died with its process, so
+    an abandoned marker must not defer every later change. The ceiling is the standard
+    one, or the stored deadline when a time limit allowed longer.
     """
     if row.active_turn_message_id is None or row.active_turn_started_at is None:
         return False
     # Import lazily: turn.__init__ re-exports run, which imports these stages.
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
-    return (now - row.active_turn_started_at).total_seconds() < TURN_CEILING_S
+    window = TURN_CEILING_S
+    if row.active_turn_deadline is not None:
+        window = max(
+            window, (row.active_turn_deadline - row.active_turn_started_at).total_seconds()
+        )
+    if (now - row.active_turn_started_at).total_seconds() >= window:
+        return False
+    if row.active_turn_owner_key is None:
+        return True
+    async with sessionmaker() as session:
+        return await owner_is_alive(session, row.active_turn_owner_key)
 
 
 def retry_after(preparation: SessionPreparationRow) -> dt.datetime:

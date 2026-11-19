@@ -12,8 +12,9 @@ Behavior:
 from __future__ import annotations
 
 import pytest
-from daimon.adapters.scheduler.settings import SchedulerSettings
-from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.adapters.scheduler.settings import DISPATCH_TIMEOUT_MARGIN_S, SchedulerSettings
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+from pydantic import ValidationError
 
 
 def test_scheduler_settings_defaults_are_sane() -> None:
@@ -36,28 +37,28 @@ def test_scheduler_settings_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> N
 def test_scheduler_settings_new_concurrency_defaults() -> None:
     s = SchedulerSettings()
     assert s.max_concurrent_fires == 10, "default global concurrent-fire cap should be 10"
-    assert s.dispatch_timeout_s == 3000.0, (
-        "default per-fire timeout should be TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S (3000s)"
+    assert s.dispatch_timeout_s == (LONGEST_TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S), (
+        "default per-fire timeout should be LONGEST_TURN_CEILING_S + DISPATCH_TIMEOUT_MARGIN_S"
     )
 
 
 def test_dispatch_timeout_default_sits_above_the_core_turn_ceiling() -> None:
-    """The outer process guard must always sit strictly above the core
-    ~45-minute ceiling, or the core ceiling becomes unreachable for
-    routines -- the core ceiling must fire first."""
+    """The outer process guard must always sit strictly above the longest
+    core ceiling, or the core ceiling becomes unreachable for routines --
+    the core ceiling must fire first."""
     s = SchedulerSettings()
-    assert s.dispatch_timeout_s > TURN_CEILING_S, (
-        "dispatch_timeout_s must stay strictly above TURN_CEILING_S so the "
+    assert s.dispatch_timeout_s > LONGEST_TURN_CEILING_S, (
+        "dispatch_timeout_s must stay strictly above LONGEST_TURN_CEILING_S so the "
         "core ceiling always fires before this outer guard"
     )
 
 
 def test_scheduler_settings_concurrency_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES", "3")
-    monkeypatch.setenv("DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S", "1.5")
+    monkeypatch.setenv("DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S", "3000.5")
     s = SchedulerSettings()
     assert s.max_concurrent_fires == 3, "env should override concurrent-fire cap"
-    assert s.dispatch_timeout_s == 1.5, "env should override per-fire timeout"
+    assert s.dispatch_timeout_s == 3000.5, "env should override per-fire timeout"
 
 
 def test_scheduler_settings_health_port_default() -> None:
@@ -89,3 +90,10 @@ def test_usage_sweep_is_on_by_default() -> None:
 def test_usage_sweep_can_be_disabled_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_SCHEDULER__USAGE_SWEEP_ENABLED", "false")
     assert SchedulerSettings().usage_sweep_enabled is False
+
+
+def test_dispatch_timeout_at_or_below_the_turn_ceiling_is_refused() -> None:
+    for value in (LONGEST_TURN_CEILING_S - 1, LONGEST_TURN_CEILING_S):
+        with pytest.raises(ValidationError, match="must be above"):
+            SchedulerSettings(dispatch_timeout_s=value)
+    assert SchedulerSettings(dispatch_timeout_s=LONGEST_TURN_CEILING_S + 1)

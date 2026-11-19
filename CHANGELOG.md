@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Answer and unattended run time limits.** Two new workspace and agent settings, set
+  by server admins, limit how long one turn may run: `turn_time_limit` for a person's
+  message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
+  nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
+  Each takes 15, 20, 30 or 45 minutes, 45 by default, and the smallest setting wins.
+- **Hide the server name on tool lines.** A new workspace or agent setting,
+  `tool_server_names`, drops the connected server's name from the working card's tool lines.
+- **Model and effort reactions in Discord.** A new setting, off by default, reacts
+  to the first message in a thread, and to the first after the model or effort
+  changes, with an emoji for the model and one for the effort.
+- **An answer message cap setting.** In Discord, an answer posts up to 5 messages
+  as before, and past that is attached as a file. A setting from 1 to 1000
+  changes the cap for a workspace, agent, channel or thread.
+- **A channel background setting.** A new setting, `channel_history`, sets how many recent
+  channel messages (none, 10, 25, 50 or 100; 25 by default) a thread started from a channel
+  message reads for background, never more than its chat history setting allows.
+- **Answers in a thread another bot already opened.** When a channel's other
+  bot threads every message, Discord answers in that thread instead of
+  reporting that it could not open one.
+- **An edit that adds a mention gets an answer.** Editing a message to mention
+  the bot in Discord answers it like a new mention, once.
+- **Routines can run role-gated agents for an owner who holds the role.**
+  Before, a routine on an agent limited to certain Discord roles was always
+  refused. Now it runs as its owner, whose membership is read live at each
+  run and each send; it needs every required role, and an admin without them
+  does not qualify. Saving or editing such a routine needs the same of the
+  person saving. If the owner loses a role the run is skipped, the owner gets
+  one direct message on Discord, and the routine is paused until someone
+  resumes it. `daimon routines check-roles` lists the routines whose owner
+  would be paused or refused. Long jobs are still refused.
+- **A remote MCP server can attribute writes to the person who asked.** An
+  identity relay server set to `"auth": "bearer"` is called with one key from
+  `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the
+  workspaces and agents that may use it. With `"requester_meta": true` Daimon
+  removes any `requester_platform_user_id`, `requester_conversation` or
+  `requester_kind` a tool call carries in `params._meta`, then sets them from
+  the person's own turn (their user id, where it runs, kind `"person"`) or any
+  unattended run such as a routine, watch, timer, wake or DM routine (the person
+  it runs for, its place, kind `"routine"`). A routine's owner is signed into
+  its credential and must still match at call time. Keys are removed under every
+  method's `_meta`. Senders from another organisation, replaced sessions and two
+  turns at once carry none. A body that is not strict JSON, or cannot be
+  re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
+  in the servers JSON only after every service runs this release; older images
+  reject unknown keys.
+- **Other chat apps' names are no longer replaced.** Replies, status lines, routine
+  posts, tool sends and edits, and Discord thread names keep whatever the model
+  wrote. The instruction not to name another chat app, and the quote clause that
+  went with it, are gone from the prompt, and a prompt line that names another chat
+  app is no longer dropped, so a line a tenant wrote such as "post the summary in
+  Slack" stays; each platform's prompt still says where Daimon works there.
+  Because the system prompt changed, existing Discord, Slack and Teams sessions
+  are replaced once.
+- **The operator can set Approvals from the command line.** `daimon features set
+  approvals <on|off> --reason "..."` works for a workspace, channel or thread,
+  without a chat admin. The reason is required, and the audit log records the
+  operator, the old and new value and the reason. Other features refuse
+  `--reason`. Chat users who are not admins and agent keys are refused as before.
 - **Choose who may DM which agent.** Each agent has a DM grant (every member, only those
   listed, or all but those listed, by person or group: a Discord role, Slack user group
   or Teams team), and a server has a default agent and ordered rules that send a person,

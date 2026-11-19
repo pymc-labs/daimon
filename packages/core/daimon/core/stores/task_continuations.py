@@ -306,6 +306,33 @@ async def start_wake_row(
     return started is not None
 
 
+async def renew_wake_row(
+    session: AsyncSession,
+    *,
+    idempotency_key: _uuid.UUID,
+    owner: str,
+    now: datetime,
+    lease: timedelta,
+) -> bool:
+    """Extend a started claim this owner still holds; False once it lost the row."""
+    renewed = (
+        await session.execute(
+            update(TaskContinuation)
+            .where(
+                _READABLE_REASON,
+                TaskContinuation.idempotency_key == idempotency_key,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+                TaskContinuation.started_at.is_not(None),
+            )
+            .values(lease_expires_at=now + lease)
+            .returning(TaskContinuation.id)
+        )
+    ).scalar_one_or_none()
+    await session.flush()
+    return renewed is not None
+
+
 async def settle_wake_row(
     session: AsyncSession,
     *,

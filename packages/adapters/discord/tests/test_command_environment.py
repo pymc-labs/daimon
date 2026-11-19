@@ -212,3 +212,21 @@ async def test_non_production_syncs_a_dm_and_guild_command_globally_only() -> No
         "the guild copy leaves it out, so it shows once"
     )
     await bot.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_joining_a_guild_leaves_dm_capable_commands_out_of_its_copy() -> None:
+    bot, _, _, copy = await _ready_bot("lane-preview", [111], dm_and_guild=True)
+    bot.tree.remove_command.reset_mock()  # type: ignore[attr-defined]
+    copy.reset_mock()
+    bot._provision_joined_guild = AsyncMock(return_value="tenant")  # type: ignore[method-assign]
+    bot._post_welcome = AsyncMock()  # type: ignore[method-assign]
+    bot._seed_tenant_defaults = MagicMock()  # type: ignore[method-assign]
+    bot._spawn = MagicMock()  # type: ignore[method-assign]
+    await bot.on_guild_join(_guild(111))
+    copy.assert_called_once()
+    removed = bot.tree.remove_command.call_args_list  # type: ignore[attr-defined]
+    assert [(call.args[0], call.kwargs["guild"].id) for call in removed] == [("both", 111)], (
+        "the joined guild's copy leaves it out, so it shows once"
+    )
+    await bot.close()  # type: ignore[attr-defined]

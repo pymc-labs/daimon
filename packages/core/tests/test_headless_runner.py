@@ -1768,6 +1768,65 @@ async def test_headless_role_gated_target_is_refused_before_session_creation(
     assert sent == []
 
 
+@pytest.mark.parametrize(
+    ("owner", "facts"),
+    [
+        (None, ("999", True)),
+        ("u1", ("999", True)),
+        ("u1", ("", False)),
+        ("u1", "unreadable"),
+        ("u1", "no_resolver"),
+    ],
+)
+async def test_headless_role_gated_target_refuses_an_owner_without_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    owner: str | None,
+    facts: tuple[str, bool] | str,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.errors import AdmissionDenied
+
+    await set_access_policy(
+        db_session,
+        tenant_id=headless_identity.tenant_id,
+        policy=TenantAccessPolicy(agent_rules={"test-agent": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        if facts == "unreadable":
+            raise RuntimeError("down")
+        assert isinstance(facts, tuple)
+        role, is_member = facts
+        return Membership(is_member=is_member, role_ids=(role,) if role else (), is_admin=True)
+
+    resolver = None if facts == "no_resolver" else CachedMembershipResolver(fetch)
+    created: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    client = _build_client([], session_create_capture=created, send_capture=sent)
+    try:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await run_turn(
+                anthropic=client,
+                agent_id="agent_x",
+                environment_id="env_x",
+                trigger_message="work",
+                tenant_id=headless_identity.tenant_id,
+                session_factory=db_session_factory,
+                runs_as_user=owner,
+                membership_resolver=resolver,
+            )
+    finally:
+        await client.close()
+    assert created == []
+    assert sent == []
+
+
 async def test_routine_receives_shared_repo_memory_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1812,3 +1871,61 @@ async def test_routine_receives_shared_repo_memory_only(
         "a routine never adopts its owner's directives"
     )
     assert "Shared rule" in sent[0]["events"][0]["content"][0]["text"]
+
+
+@pytest.mark.parametrize("requester_meta", [True, False])
+async def test_routine_relay_claim_only_when_a_server_names_the_requester(
+    requester_meta: bool,
+    run_turn: RunTurn,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older MCP image rejects the routine claim keys, so they wait for the opt-in."""
+    from daimon.core.config import (
+        AnthropicSettings,
+        DatabaseSettings,
+        McpIdentitySettings,
+        Settings,
+        SignedIdentityServer,
+    )
+    from pydantic import PostgresDsn, SecretStr
+
+    settings = Settings(
+        database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+        anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="source",
+                url="https://source.example.test/mcp",
+                issuer="daimon-test",
+                audience="https://source.example.test",
+                requester_meta=requester_meta,
+            )
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
+    routine_id = uuid.uuid4()
+    with pytest.raises(_Stop):
+        await run_turn(
+            anthropic=_build_client([]),
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            origin="routine",
+            routine_id=routine_id,
+            runs_as_user="42",
+            feature_settings=settings,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+    assert seen["relay_routine_id"] == (routine_id if requester_meta else None)
+    assert seen["relay_owner"] == ("42" if requester_meta else None)

@@ -84,6 +84,8 @@ HOLD_METADATA_KEY = "daimon_chat_hold"
 RELAY_METADATA_KEY = "daimon_chat_relay"
 RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
 RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
+RELAY_ROUTINE_METADATA_KEY = "daimon_relay_routine"
+RELAY_OWNER_METADATA_KEY = "daimon_relay_owner"
 #: Display-name prefix of a session's own relay vault.
 RELAY_VAULT_PREFIX = "daimon-relay:"
 
@@ -239,6 +241,10 @@ async def chat_mcp_credential(
         metadata[RELAY_AGENT_NAME_METADATA_KEY] = relay.agent_name
         if relay.session_key is not None:
             metadata[RELAY_SESSION_METADATA_KEY] = str(relay.session_key)
+        if relay.routine_id is not None:
+            metadata[RELAY_ROUTINE_METADATA_KEY] = str(relay.routine_id)
+        if relay.owner is not None:
+            metadata[RELAY_OWNER_METADATA_KEY] = relay.owner
     return {
         "metadata": metadata,
         "auth": {"type": "static_bearer", "mcp_server_url": public_url, "token": token},
@@ -623,6 +629,7 @@ async def refresh_relay_vault(
     ):
         return
     raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
+    raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
     context = metadata.get("daimon_chat_context")
     # No vault lock: only the session that mounts this vault refreshes it, while
     # preparing its own turn.
@@ -639,6 +646,8 @@ async def refresh_relay_vault(
             relay=RelayBinding(
                 agent_name=metadata[RELAY_AGENT_NAME_METADATA_KEY],
                 session_key=None if raw_key is None else uuid.UUID(raw_key),
+                routine_id=None if raw_routine is None else uuid.UUID(raw_routine),
+                owner=metadata.get(RELAY_OWNER_METADATA_KEY),
             ),
         )
     # Registered before the provider write, as for the shared vault.

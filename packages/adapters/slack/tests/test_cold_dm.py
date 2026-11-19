@@ -215,7 +215,7 @@ def _row(tenant_id: Any) -> DirectMessageRow:
         tenant_id=tenant_id, account_id=uuid.uuid4(), memory_read_only=False,
         workspace_id="T_ROUTE", channel_id="D_COLD",
         scope_id="dm:x", source_url="", context="", history=[], recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )  # fmt: skip
 
 
@@ -285,7 +285,7 @@ async def test_cold_dm_when_another_message_started_it_then_that_conversation_an
             won = _row(tenant.tenant_id).model_copy(
                 update={"scope_id": "dm:won", "account_id": account.id}
             )
-            await start_conversation(session, conversation=won, now=datetime.now(UTC))
+            await start_conversation(session, conversation=won)
 
     start.side_effect = lose
 
@@ -316,7 +316,7 @@ async def _start_row(factory: async_sessionmaker[AsyncSession], tenant_id: Any) 
     async with factory.begin() as session:
         account = await make_account(session, tenant=await get_tenant(session, tenant_id))
         row = _row(tenant_id).model_copy(update={"account_id": account.id})
-        await start_conversation(session, conversation=row, now=datetime.now(UTC))
+        await start_conversation(session, conversation=row)
 
 
 async def _offered(client: MagicMock) -> dict[str, Any]:

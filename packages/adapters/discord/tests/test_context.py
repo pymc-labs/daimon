@@ -13,7 +13,6 @@ import discord
 import pytest
 from daimon.adapters.discord import context as context_mod
 from daimon.adapters.discord.context import (
-    CHANNEL_BACKFILL_LIMIT,
     CHANNEL_FILE_LIMIT,
     CHANNEL_FILE_MAX_AGE,
     CHANNEL_FILE_SCAN_LIMIT,
@@ -24,6 +23,7 @@ from daimon.adapters.discord.context import (
     forwarded_names,
     input_context,
 )
+from daimon.core.features.model_input import CHANNEL_BACKFILL
 from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES
 from daimon.core.untrusted import UNTRUSTED_NOTE
 
@@ -1254,8 +1254,21 @@ class TestBuildChannelContextXml:
 
     @pytest.mark.asyncio
     async def test_channel_backfill_limit_constant_is_twenty_five(self) -> None:
-        """CHANNEL_BACKFILL_LIMIT module constant must be 25."""
-        assert CHANNEL_BACKFILL_LIMIT == 25, "CHANNEL_BACKFILL_LIMIT must equal 25"
+        """The channel read defaults to 25 messages."""
+        assert CHANNEL_BACKFILL == 25, "CHANNEL_BACKFILL must equal 25"
+
+    @pytest.mark.asyncio
+    async def test_channel_context_reads_the_limit_it_is_given(self) -> None:
+        """A raised channel setting reaches the history fetch; the default stays 25."""
+        trigger = _make_message(msg_id=10, content="hello")
+        channel = _make_text_channel([trigger])
+        thread = _make_thread([trigger])
+
+        await build_channel_context_xml(channel, trigger, thread=thread, limit=50)
+        await build_channel_context_xml(channel, trigger, thread=thread)
+
+        limits = [call.kwargs["limit"] for call in cast(MagicMock, channel.history).call_args_list]
+        assert limits == [50, 25], "the fetch reads the given limit, and 25 without one"
 
     @pytest.mark.asyncio
     async def test_recent_files_cap_and_newest_first(self) -> None:
@@ -2150,6 +2163,14 @@ class TestForwardedInput:
 
         assert forwarded_lines([msg], sealed_sources=frozenset({"900"})) == []
         assert forwarded_lines([msg], sealed_sources=frozenset({"901"})), "another channel's seal"
+
+    def test_a_forward_from_a_thread_of_a_sealed_channel_is_left_out(self) -> None:
+        msg = _forward()
+        msg.reference = MagicMock(channel_id=950)
+        parents = {950: 900}.get
+
+        assert forwarded_lines([msg], sealed_sources=frozenset({"900"}), parent_of=parents) == []
+        assert forwarded_lines([msg], sealed_sources=frozenset({"901"}), parent_of=parents)
 
     def test_a_plain_message_forwards_nothing(self) -> None:
         msg = _make_message(content="hi")

@@ -101,6 +101,10 @@ _NARROWED: dict[str, str] = {
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
+    "model_reactions": "a workspace or agent display choice, read when the turn starts",
+    "tool_server_names": "a workspace or agent display choice, read when the turn starts",
+    "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
+    "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 
@@ -546,6 +550,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "GithubSettings.mcp_router": _SERVICE,
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,
+    "SignedIdentityServer.requester_meta": _SHAPE,
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
     "NotebookSettings.allow_editable": _OPS,
@@ -716,3 +721,10 @@ def test_the_dependency_graph_has_no_cycle(monkeypatch: pytest.MonkeyPatch) -> N
     )
     with pytest.raises(ValueError, match="dependency cycle"):
         resolution_order()
+
+
+@pytest.mark.parametrize("key", ["turn_time_limit", "unattended_time_limit"])
+def test_time_limit_text_matches_its_longest_choice(key: str) -> None:
+    spec = FEATURES[key]
+    assert "45 minutes" in spec.values.values(), "the longest choice the text names"
+    assert "hours" not in spec.doc, "the text names no limit the choices lack"
