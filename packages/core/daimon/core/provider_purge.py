@@ -31,6 +31,11 @@ log = structlog.get_logger(__name__)
 ProviderSessionDeleter = Callable[[Iterable[ProviderSession]], Awaitable[int]]
 
 
+def _only(scope: Scope) -> Callable[[Scope, str, str | None], bool]:
+    """The driver acts for this one tenant's erasure and nothing else."""
+    return lambda asked, _kind, _id: asked == scope
+
+
 async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
     """Delete each OpenAI session through the driver's Sessions port; log the rest."""
     from daimon.core.turn.openai_deployment import usage_transport
@@ -52,9 +57,17 @@ async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
                 "purge.provider_session_kept", provider=item.provider, tenant_id=str(item.tenant_id)
             )
             continue
+        scope = Scope(
+            tenant_id=str(item.tenant_id),
+            account_id="erased",
+            principal_id="daimon",
+            authorization_id="account-erasure",
+        )
         driver = OpenAIDriver(
             transport,
             account_scope_id=item.account_scope_id,
+            profile_id=item.profile,
+            authorization=_only(scope),
             journal=MemoryRecoveryJournal(),
             usage_revisions=MemoryUsageRevisions(),
         )
@@ -64,11 +77,11 @@ async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
             provider=OPENAI,
             account_scope_id=item.account_scope_id,
             tenant_id=str(item.tenant_id),
-            account_id="erased",
+            account_id=scope.account_id,
         )
         try:
             await driver.sessions.delete(
-                Scope.platform(reason="account erasure"),
+                scope,
                 ref,
                 key=f"privacy-delete:{uuid.uuid5(item.tenant_id, item.session_id)}",
             )
