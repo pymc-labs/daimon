@@ -165,7 +165,7 @@ _CORE = (
 #: the legs of its selected suites, so an unselected leg never starts. Add a shard here.
 MATRICES: dict[str, list[Leg]] = {
     "pytest-db": [
-        *_shards("core", 6, _CORE, **{"fetch-depth": 0}),
+        *_shards("core", 4, _CORE, **{"fetch-depth": 0}),
         *_shards("mcp", 2, "packages/adapters/mcp", **{"fetch-depth": 1}),
         *(
             leg

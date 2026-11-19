@@ -84,7 +84,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     deploy = jobs["deploy-gcp"]
     legs = _legs(jobs["pytest-db"])
     discord_legs = _legs(jobs["pytest-discord"])
-    for suite, count in (("core", 6), ("mcp", 2), ("discord", 2)):
+    for suite, count in (("core", 4), ("mcp", 2), ("discord", 2)):
         suite_legs = [leg for leg in legs + discord_legs if leg["suite"] == suite]
         shards = [leg["shard"] for leg in suite_legs]
         assert shards == list(range(count)), f"{suite} must run every shard exactly once"
@@ -173,7 +173,7 @@ def test_core_legs_check_out_full_history() -> None:
     assert checkout["with"]["fetch-depth"] == "${{ matrix.fetch-depth }}"
     legs = _legs(job)
     core = [leg for leg in legs if leg["suite"] == "core"]
-    assert len(core) == 6
+    assert len(core) == 4
     assert all(leg["fetch-depth"] == 0 for leg in core), "core must fetch every branch and commit"
     assert all(isinstance(leg["fetch-depth"], int) for leg in legs)
 
