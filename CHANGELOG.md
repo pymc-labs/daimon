@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The legacy turn path is gone.** Every turn runs through the neutral turn
+  ports. `DAIMON_TURN__PATH=mux` or an empty value is accepted and does nothing;
+  `legacy` now fails at startup, so remove the variable. `daimon run` always
+  runs as the local CLI operator and refuses a session another tenant owns.
+  `daimon-mux` 0.3.0 drops `LegacyTurnTransport`.
+
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the

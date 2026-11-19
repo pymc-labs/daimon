@@ -1696,18 +1696,18 @@ object.
 
 Read from `daimon.core.config.TurnSettings`. Prefix `DAIMON_TURN__`.
 
-Neutral turn ports. mux and backend selection are on by default.
+Neutral turn ports. Backend selection is on by default.
 
-`path`, `channel_backends` and `agent_backends` are emergency stops, not setup: a fresh
-install needs none of them. Setting one off stops new turns at admission and queued or
-retried work before it is sent again.
+`channel_backends` and `agent_backends` are emergency stops, not setup: a fresh install
+needs neither. Setting one off stops new turns at admission and queued or retried work
+before it is sent again.
 
 ### `DAIMON_TURN__PATH`
 
-`'legacy' | 'mux'` · optional · default `mux`
+`'mux'` · optional · default `mux`
 
-Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports.
-Emergency stop only: legacy returns every turn to the Managed Agents-only path.
+Deprecated, no effect: every turn runs through the neutral Events/Sessions ports. The
+legacy value was removed and fails at startup; remove the variable.
 
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
