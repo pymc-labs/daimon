@@ -39,7 +39,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.privacy import collect_purge_preview, held_lines
-from daimon.core.purge import purge_account
+from daimon.core.purge import purge_account, purge_principal
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, set_dm_agent_name, set_dm_enabled
@@ -738,3 +738,68 @@ async def test_purge_account_when_person_has_dm_rows_then_they_are_erased_and_co
         )
     assert [r.subject_id for r in rules] == ["88"], "only the other person's rule stays"
     assert (grant.user_ids, grant.group_ids) == (("88",), ("g1",)), "only the entry is removed"
+
+
+async def test_purge_principal_when_platform_user_has_dm_rows_then_rules_and_entries_go(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Purging one platform user removes their rule and grant entry; others' stay."""
+    tenant = await make_tenant(db_session, workspace_id="G_DM_PURGE_PRINCIPAL")
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id="77", tenant=tenant
+    )
+    for who in ("77", "88"):
+        await store.add_rule(
+            db_session, tenant_id=tenant.id, subject="user", subject_id=who,
+            agent_name="a", locked=False, set_by=None, now=NOW,
+        )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="a", who="listed",
+        user_ids=["77", "88"], group_ids=[], set_by=None, now=NOW,
+    )  # fmt: skip
+    await db_session.commit()
+
+    report = await purge_principal(
+        sm=db_session_factory, principal_id=principal.id, kind="platform"
+    )
+
+    assert (report.db.dm_rules, report.db.dm_grant_users) == (1, 1), "the purge reports each"
+    async with db_session_factory() as fresh:
+        rules = await store.list_rules(fresh, tenant_id=tenant.id)
+        grant = (await store.list_grants(fresh, tenant_id=tenant.id))["a"]
+    assert [r.subject_id for r in rules] == ["88"], "only the other person's rule stays"
+    assert grant.user_ids == ("88",), "only the purged id leaves the grant"
+
+
+async def test_purge_account_when_admin_set_dm_rows_then_set_by_is_cleared(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The admin's account id leaves `set_by` on grants and rules; the settings stay."""
+    tenant = await make_tenant(db_session, workspace_id="G_DM_PURGE_SETBY")
+    admin = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await store.add_rule(
+        db_session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+        agent_name="a", locked=False, set_by=str(admin.id), now=NOW,
+    )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="a", who="members",
+        user_ids=[], group_ids=[], set_by=str(admin.id), now=NOW,
+    )  # fmt: skip
+    await store.set_grant(
+        db_session, tenant_id=tenant.id, agent_name="b", who="members",
+        user_ids=[], group_ids=[], set_by=str(other.id), now=NOW,
+    )  # fmt: skip
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=admin.id)
+
+    async with db_session_factory() as fresh:
+        rules = await store.list_rules(fresh, tenant_id=tenant.id)
+        grants = await store.list_grants(fresh, tenant_id=tenant.id)
+    assert [r.set_by for r in rules] == [None], "the rule stays without its setter"
+    assert (grants["a"].set_by, grants["b"].set_by) == (None, str(other.id)), (
+        "only the purged admin leaves a grant"
+    )
