@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 
 import httpx
 import typer
@@ -254,7 +254,9 @@ async def menu_set(
     spec = load_menu(text)
     pick = None
     if (c := spec.channel) is not None:
-        pick = await _channel_pick(rt, target, c.id, c.team_id, c.service_url, discord_transport)
+        pick = await _channel_pick(
+            rt, target, c.id, c.team_id, c.service_url, discord_transport, teams_needs=_MENU_TEAMS
+        )
     try:
         row = await set_menu(
             rt.sessionmaker,
@@ -594,6 +596,9 @@ async def channel_set(
     console.print(f"support requests go to {pick.channel_id}", markup=False)
 
 
+_MENU_TEAMS: Final = "Teams needs the menu's channel team_id and service_url"
+
+
 async def _channel_pick(
     rt: CliRuntime,
     target: _Target,
@@ -601,6 +606,8 @@ async def _channel_pick(
     team: str | None,
     service_url: str | None,
     transport: Transport,
+    *,
+    teams_needs: str = "Teams needs --team and --service-url",
 ) -> ChannelPick:
     """A channel of the workspace for requests, as `channel set` and a menu's `channel` take."""
     channel = await parent_channel(
@@ -611,7 +618,7 @@ async def _channel_pick(
         transport=transport,
     )
     if target.platform == "teams" and not (team and service_url):
-        raise typer.BadParameter("Teams needs --team and --service-url")
+        raise typer.BadParameter(teams_needs)
     return ChannelPick(
         platform=target.platform,
         channel_id=channel,
