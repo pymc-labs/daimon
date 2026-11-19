@@ -591,8 +591,10 @@ class TeamsTurnLifecycle(OutputGate):
         for message_id, (actions, shown, error) in list(self._notices.items()):
             if shown is not None:
                 self._notices[message_id] = (actions, summary, error)
-                await self._amend(message_id, lambda text: text, _SUFFIX_EVENTS)
-                applied = True
+                # A refused edit (a 429) leaves it False, so the debit is shown again later.
+                applied = (
+                    await self._amend(message_id, lambda text: text, _SUFFIX_EVENTS) or applied
+                )
         draw, controls_id = self._controls
         if (controls := draw(summary)) is None:
             return applied
