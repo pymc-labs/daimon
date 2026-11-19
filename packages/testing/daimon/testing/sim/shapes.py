@@ -46,7 +46,7 @@ def violations(value: _Json, hint: _Hint, path: str = "$") -> list[str]:
         return _model(value, hint, path)
     if isinstance(hint, type) and issubclass(hint, enum.Enum):
         return [] if value in {m.value for m in hint} else [f"{path}: {value!r} not in enum"]
-    name = getattr(origin or hint, "__name__", "")
+    name: str = getattr(cast(object, origin or hint), "__name__", "")
     if origin in (dict, collections.abc.Mapping) or hint is dict:
         if not isinstance(value, dict):
             return [f"{path}: expected object"]

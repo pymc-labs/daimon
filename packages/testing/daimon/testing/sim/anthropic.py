@@ -283,6 +283,8 @@ class AnthropicAPI(StrictFake):
 
     def _message(self, request: httpx.Request, _: re.Match[str]) -> httpx.Response:
         body = json.loads(request.content)
+        # Daimon's own small calls (a thread's title): billed like any model call.
+        self.reported.append((40, 4))
         return httpx.Response(
             200,
             json={

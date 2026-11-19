@@ -21,6 +21,8 @@ from daimon.testing.sim.shapes import violations
 
 type Handler = Callable[[httpx.Request, re.Match[str]], httpx.Response | Awaitable[httpx.Response]]
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
+# Hosts production probes that are unreachable off their cloud: refused quietly.
+_OFF_CLOUD = frozenset({"metadata.google.internal"})
 
 
 @dataclass
@@ -120,7 +122,8 @@ class ProviderNetwork:
                 return await fake.handle(request)
             if request.url.host in _LOOPBACK:
                 return await real_async(transport, request)
-            network.refused.append(f"{request.method} {request.url.host}")
+            if request.url.host not in _OFF_CLOUD:
+                network.refused.append(f"{request.method} {request.url.host}{request.url.path}")
             raise httpx.ConnectError(f"simulated network: no route to {request.url.host}")
 
         def handle_sync(transport: httpx.HTTPTransport, request: httpx.Request):
