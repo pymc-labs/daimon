@@ -5,8 +5,8 @@
 by name, time and outcome only, from the call whose result told them. Both are keyed on
 the agent that answers and read when a question is asked, so a conversation begun earlier
 is kept from the switch on, never before it, and an answer is kept only when its question
-was. `must_tell` decides when the person is told, with the same words on every path, and
-`record_notice` notes it once shown.
+was. `must_tell` decides when the person is told, once per person and agent from each
+switch on and with the same words on every path, and `record_notice` notes it once shown.
 """
 
 from __future__ import annotations
@@ -81,8 +81,9 @@ class KeptQuestion:
 
 def must_tell(state: MonitoringState, told_at: datetime | None) -> bool:
     """The one rule: tell the person when the turn is monitored and they were not told
-    since monitoring was last switched on. `told_at` is their newest notice row: in the
-    conversation, or over MCP on any call to the agent (`stores.monitoring.last_notice_at`)."""
+    since monitoring was last switched on. `told_at` is their newest notice row for the
+    agent: in any chat, or over MCP (`stores.monitoring.last_notice_at`), so once per
+    person and agent, not per conversation."""
     if not state.on:
         return False
     return told_at is None or (state.since is not None and told_at < state.since)
@@ -245,7 +246,6 @@ async def capture_question(
                 agent_id=agent_id,
                 platform=platform,
                 account_id=account_id,
-                conversation=conversation,
             )
             subject = store.MonitoredSubject(
                 tenant_id, agent_id, platform, account_id, conversation
@@ -275,14 +275,15 @@ async def _told_at(
     agent_id: uuid.UUID,
     platform: MonitoredPlatform,
     account_id: uuid.UUID,
-    conversation: str | None,
 ) -> datetime | None:
-    if platform == "mcp":
-        return await store.last_notice_at(
-            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
-        )
+    """The person's newest notice for this agent, once per person and agent: in any chat,
+    or over MCP."""
     return await store.last_notice_at(
-        session, tenant_id=tenant_id, agent_id=agent_id, conversation=conversation
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        account_id=account_id,
+        mcp=platform == "mcp",
     )
 
 
@@ -316,16 +317,48 @@ async def monitored_notice(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     platform: MonitoredPlatform,
+    account_id: uuid.UUID | None = None,
 ) -> MonitoringNotice | None:
     """The notice a place shown before any question carries while the agent is
-    monitored (web chat, `describe_agent`, the MCP briefing); None when it is not."""
+    monitored (web chat, `describe_agent`, the MCP briefing); None when it is not. With
+    `account_id`, only until that person was told or dismissed it (`must_tell`)."""
     if not await may_monitor(sessions, settings, tenant_id=tenant_id, platform=platform):
         return None
     async with sessions() as session:
         state = await monitoring_state(
             session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
         )
+        if account_id is not None:
+            told_at = await _told_at(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                account_id=account_id,
+            )
+            return notice_for(platform) if must_tell(state, told_at) else None
     return notice_for(platform) if state.on else None
+
+
+async def dismiss_notice(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    conversation: str,
+) -> bool:
+    """Note that a web chat person dismissed the notice above the composer, which counts as
+    told until monitoring is switched on again. True when noted."""
+    async with sessions() as session:
+        state = await monitoring_state(
+            session, settings, tenant_id=tenant_id, agent_id=agent_id, platform="web"
+        )
+    if not state.on:
+        return False
+    subject = store.MonitoredSubject(tenant_id, agent_id, "web", account_id, conversation)
+    return await record_notice(sessions, subject, CHAT_NOTICE)
 
 
 async def capture_answer(
@@ -472,7 +505,6 @@ async def _untold(
         agent_id=agent_id,
         platform="mcp",
         account_id=account_id,
-        conversation=None,
     )
     return must_tell(state, told_at)
 

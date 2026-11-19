@@ -159,21 +159,20 @@ async def last_notice_at(
     *,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
-    conversation: str | None = None,
-    account_id: uuid.UUID | None = None,
+    account_id: uuid.UUID,
+    mcp: bool,
 ) -> datetime | None:
-    """When the person was last told this agent is monitored: in `conversation`, or over
-    MCP on any of `account_id`'s calls to it."""
-    stmt = select(func.max(MonitoredEvent.created_at)).where(
-        MonitoredEvent.tenant_id == tenant_id,
-        MonitoredEvent.agent_id == agent_id,
-        MonitoredEvent.kind == "notice",
+    """When the person was last told this agent is monitored: in any chat (Discord, Slack,
+    Teams, web) or, with `mcp`, on any of their calls to it over MCP."""
+    return await session.scalar(
+        select(func.max(MonitoredEvent.created_at)).where(
+            MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.agent_id == agent_id,
+            MonitoredEvent.account_id == account_id,
+            MonitoredEvent.kind == "notice",
+            MonitoredEvent.platform == "mcp" if mcp else MonitoredEvent.platform != "mcp",
+        )
     )
-    if account_id is not None:
-        stmt = stmt.where(MonitoredEvent.platform == "mcp", MonitoredEvent.account_id == account_id)
-    else:
-        stmt = stmt.where(MonitoredEvent.conversation == conversation)
-    return await session.scalar(stmt)
 
 
 async def open_question_refs(

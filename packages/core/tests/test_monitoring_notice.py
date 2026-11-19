@@ -25,7 +25,9 @@ from daimon.core.monitoring import (
     MonitoringNotice,
     MonitoringState,
     capture_question,
+    dismiss_notice,
     monitored_agents,
+    monitored_notice,
     monitors_any,
     must_tell,
     record_notice,
@@ -234,12 +236,11 @@ async def _switch(
     CACHE.clear()  # As `change_feature` does.
 
 
-async def test_each_conversation_is_told_once_per_switch_on(
+async def test_each_person_is_told_once_per_agent_per_switch_on(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The first kept question tells until the notice is shown, later ones do not; a
-    conversation begun before the switch is told, and switching off and on again tells it
-    again."""
+    """The first kept question tells until the notice is shown; after that no chat, thread
+    or platform tells again. Switching off and on again tells once more."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
@@ -247,21 +248,52 @@ async def test_each_conversation_is_told_once_per_switch_on(
     assert await _keep(sm, tid, aid, platform="slack", thread_id="before") is None
     await _switch(sm, tid, "monitor_direct_messages", "on")
 
-    for platform, is_dm in (("discord", True), ("slack", True), ("teams", True), ("web", None)):
-        unshown = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
-        first = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
-        assert unshown is not None and unshown.notice == CHAT_NOTICE, platform
-        assert first is not None and first.notice == CHAT_NOTICE, "an unshown notice tells again"
-        assert await record_notice(sm, first.subject, CHAT_NOTICE, turn_ref=first.turn_ref)
-        again = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
-        assert again is not None and again.notice is None, platform
-    begun = await _keep(sm, tid, aid, platform="slack", thread_id="before")
-    assert begun is not None and begun.notice == CHAT_NOTICE
+    unshown = await _keep(sm, tid, aid, platform="discord", thread_id="one")
+    first = await _keep(sm, tid, aid, platform="discord", thread_id="one")
+    assert unshown is not None and unshown.notice == CHAT_NOTICE
+    assert first is not None and first.notice == CHAT_NOTICE, "an unshown notice tells again"
+    assert await record_notice(sm, first.subject, CHAT_NOTICE, turn_ref=first.turn_ref)
+    for platform, is_dm, thread in (
+        ("discord", True, "one"),
+        ("discord", True, "two"),
+        ("slack", True, "before"),
+        ("teams", True, "t"),
+        ("web", None, "w"),
+    ):
+        kept = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=thread)
+        assert kept is not None and kept.notice is None, (platform, thread)
 
     await _switch(sm, tid, "monitor_direct_messages", "off")
     await _switch(sm, tid, "monitor_direct_messages", "on")
-    told = await _keep(sm, tid, aid, platform="discord", thread_id="discord")
+    told = await _keep(sm, tid, aid, platform="discord", thread_id="two")
     assert told is not None and told.notice == CHAT_NOTICE, "a new switch-on must tell again"
+
+
+async def test_a_dismissed_web_notice_stays_gone_until_monitoring_restarts(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    sm, tid, agent = db_session_factory, tenant.id, _agent_uuid(tenant.id)
+
+    async def shown() -> MonitoringNotice | None:
+        return await monitored_notice(
+            sm, None, tenant_id=tid, agent_id=agent, platform="web", account_id=account.id
+        )
+
+    assert not await dismiss_notice(
+        sm, None, tenant_id=tid, agent_id=agent, account_id=account.id, conversation="w"
+    ), "nothing to dismiss while the agent is not monitored"
+    await _switch(sm, tid, "monitor_direct_messages", "on")
+    assert await shown() == CHAT_NOTICE
+    assert await dismiss_notice(
+        sm, None, tenant_id=tid, agent_id=agent, account_id=account.id, conversation="w"
+    )
+    assert await shown() is None
+    await _switch(sm, tid, "monitor_direct_messages", "off")
+    await _switch(sm, tid, "monitor_direct_messages", "on")
+    assert await shown() == CHAT_NOTICE
 
 
 async def test_mcp_questions_carry_the_mcp_notice(

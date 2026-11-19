@@ -119,7 +119,8 @@ and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
 starts an empty conversation with the same server and the agent routing picks.
 Buttons expire after fifteen minutes, and only the latest set works. When
 workspace admins [monitor](features.md#monitor-direct-messages) the agent, a
-card tells the person once, at their first message after it starts.
+card tells the person once per agent, at their first message after it starts,
+in whichever conversation that is.
 
 A cold conversation starts with no history and no channel access. Switching
 server or starting a new one never carries the old history across. An active

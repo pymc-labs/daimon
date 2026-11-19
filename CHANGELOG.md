@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace admins turn it on and read it, never an agent's owner, on the agent
   page, in a Monitoring tab in admin, or with the `list_monitored_activity` and
   `get_monitored_conversation` tools. Operators see counts and times with
-  `daimon monitoring list`. People see a neutral notice at their first direct
-  message, in web chat, in the MCP descriptions and in their first tool result.
+  `daimon monitoring list`. People see a neutral notice once per agent, at their first direct
+  message, in web chat (where they can dismiss it), in the MCP descriptions and
+  in their first tool result.
   The privacy panel says what admins can read. Rows are deleted with the
   person's account and after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
 - **Sandbox tools in routines is a setting with levels.** The
