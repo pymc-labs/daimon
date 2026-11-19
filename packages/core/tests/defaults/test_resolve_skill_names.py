@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.defaults.skills import resolve_skill_names
+from daimon.core.errors import DefaultsError
+from daimon.testing.builders import skill_listed
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+
+_CREATED_AT = "2026-04-21T00:00:00Z"
+_TENANT_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+_TENANT_B = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000002")
+
+
+def _skill_item(*, id_: str, display_title: str, source: str = "custom") -> dict[str, object]:
+    return skill_listed(
+        id=id_,
+        type=source,
+        display_title=display_title,
+        created_at=_CREATED_AT,
+        updated_at=_CREATED_AT,
+        source=source,
+    ).model_dump(mode="json")
+
+
+def _make_client(skills: list[dict[str, object]]) -> object:
+    router = MARouter()
+    router.add("GET", r"/v1/skills", lambda req, _m: list_response(skills))
+    return build_fake_anthropic_http(router.dispatch)
+
+
+async def test_resolve_skill_names_raises_when_given_another_tenants_full_canonical_title() -> None:
+    """A string that IS another tenant's canonical title gets re-prefixed and misses."""
+    # Tenant B's canonical title for "brainstorming"
+    tenant_b_canonical = tenant_scoped_display_title(tenant_id=_TENANT_B, name="brainstorming")
+    # MA has tenant B's skill only
+    client = _make_client(
+        [
+            _skill_item(id_="skill_b", display_title=tenant_b_canonical),
+        ]
+    )
+    with pytest.raises(DefaultsError) as exc_info:
+        # Tenant A tries to attach using tenant B's full canonical title as a string
+        await resolve_skill_names(client, [tenant_b_canonical], tenant_id=_TENANT_A)
+    message = str(exc_info.value)
+    # The error must name the unresolved entry (tenant B's canonical title, as Tenant A gave it)
+    assert tenant_b_canonical in message, "error must name the unresolved skill string"
+    # The error must NOT expose tenant B's canonical title as an "available" skill
+    assert (
+        tenant_b_canonical not in message.split("available:")[1]
+        if "available:" in message
+        else True
+    ), "error must not expose another tenant's canonical title in the available list"
+
+
+async def test_resolve_skill_names_error_excludes_foreign_tenant_titles() -> None:
+    """Error listing available skills must show only caller's own bare names, not other tenants'."""
+    title_a = tenant_scoped_display_title(tenant_id=_TENANT_A, name="my-skill")
+    title_b = tenant_scoped_display_title(tenant_id=_TENANT_B, name="other-skill")
+    # Both tenants' skills are in the org-wide MA list
+    client = _make_client(
+        [
+            _skill_item(id_="skill_a", display_title=title_a),
+            _skill_item(id_="skill_b", display_title=title_b),
+        ]
+    )
+    with pytest.raises(DefaultsError) as exc_info:
+        await resolve_skill_names(client, ["missing-skill"], tenant_id=_TENANT_A)
+    message = str(exc_info.value)
+    assert "my-skill" in message, "error must list caller's own available bare skill name"
+    assert title_b not in message, (
+        "error must NOT expose tenant B's canonical title in available list (no cross-tenant leak)"
+    )
+
+
+async def test_resolve_skill_names_hides_skills_the_caller_may_not_see() -> None:
+    def _hide(skill_id: str, body: str) -> bool:
+        return skill_id == "skill_hidden" and body == "local/notes"
+
+    hidden = tenant_scoped_display_title(tenant_id=_TENANT_A, name="local/notes")
+    shown = tenant_scoped_display_title(tenant_id=_TENANT_A, name="shared/notes")
+    client = _make_client(
+        [
+            _skill_item(id_="skill_hidden", display_title=hidden),
+            _skill_item(id_="skill_shown", display_title=shown),
+        ]
+    )
+    with pytest.raises(DefaultsError) as exc_info:
+        await resolve_skill_names(
+            client, ["local/notes"], tenant_id=_TENANT_A, is_skill_hidden=_hide
+        )
+    message = str(exc_info.value)
+    assert "shared/notes" in message, "visible skills stay listed as available"
+    assert "skill_hidden" not in message and message.count("local/notes") == 1, (
+        "a hidden skill resolves as missing and is not offered back"
+    )
+    result = await resolve_skill_names(
+        client, ["shared/notes"], tenant_id=_TENANT_A, is_skill_hidden=_hide
+    )
+    assert result == [{"type": "custom", "skill_id": "skill_shown"}], "visible skills resolve"

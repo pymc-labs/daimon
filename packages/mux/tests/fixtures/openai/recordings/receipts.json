@@ -1,0 +1,889 @@
+{
+  "provider": "openai",
+  "model": "gpt-6-luna",
+  "complete_certificate": false,
+  "scope": "normalized metadata-only replay; missing live adapters stay pending",
+  "native_event_count": 0,
+  "fixtures": [
+    {
+      "fixture_id": "C01",
+      "result": {
+        "fixture_id": "C01",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host attribution, batching and workspace binding adapter not wired"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host attribution, batching and workspace binding adapter not wired"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "2cc4138ad882425fb76a57a0464e9880",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C01",
+        "timestamp": "2026-10-09T22:30:16.960680Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C01.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C01",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C02",
+      "result": {
+        "fixture_id": "C02",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): native hosted expiry classification and host session preparation unverified"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "native hosted expiry classification and host session preparation unverified"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "27513346958949f984c6441b302c5daa",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C02",
+        "timestamp": "2026-10-09T22:30:16.978526Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C02.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C02",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C03",
+      "result": {
+        "fixture_id": "C03",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host intent, atomic send claiming and restart receipt recovery not injected"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host intent, atomic send claiming and restart receipt recovery not injected"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "a7b6da712d21473a909f9c4a48103d6f",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C03",
+        "timestamp": "2026-10-09T22:30:16.998530Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C03.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C03",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C04",
+      "result": {
+        "fixture_id": "C04",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host lease/fencing and transactional journal crash-recovery adapter are not injected"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host lease/fencing and transactional journal crash-recovery adapter are not injected"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "8ab5b2a9aae048c69de2ba4d546eb280",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C04",
+        "timestamp": "2026-10-09T22:30:17.021331Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C04.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C04",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C05",
+      "result": {
+        "fixture_id": "C05",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): live adapter cannot arrange child-first completion, exact root/item aliases and deterministic disconnect/pagination faults"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "live adapter cannot arrange child-first completion, exact root/item aliases and deterministic disconnect/pagination faults"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "df0cee47be8549428f5633ae543d6e9a",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C05",
+        "timestamp": "2026-10-09T22:30:17.043684Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C05.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C05",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C06",
+      "result": {
+        "fixture_id": "C06",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): shared probe requires root alias and deterministic pre/post-cancel observation barrier; lifecycle smoke does not establish the EOF assertion"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "shared probe requires root alias and deterministic pre/post-cancel observation barrier; lifecycle smoke does not establish the EOF assertion"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "3ef534cf5ae0485b972c9dbca92b4d02",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C06",
+        "timestamp": "2026-10-09T22:30:17.062392Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C06.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C06",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C07",
+      "result": {
+        "fixture_id": "C07",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): current native usage snapshots need a shared revision/outbox StateStore adapter"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "current native usage snapshots need a shared revision/outbox StateStore adapter"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "2ba12c739c8e42a98928f433677d5246",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C07",
+        "timestamp": "2026-10-09T22:30:17.077493Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C07.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C07",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C08",
+      "result": {
+        "fixture_id": "C08",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (capability_unavailable): conditional required-mount replacement refused; host preparation adapter absent"
+        ],
+        "pending_reason": {
+          "kind": "capability_unavailable",
+          "detail": "conditional required-mount replacement refused; host preparation adapter absent"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "161ac9a7dd434a2bbc74e008c88f9949",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C08",
+        "timestamp": "2026-10-09T22:30:17.104408Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C08.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C08",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C09",
+      "result": {
+        "fixture_id": "C09",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): live publication of two exact binary artifacts plus shared vault and download interruption is not arranged; normalized tapes cannot certify binary fidelity"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "live publication of two exact binary artifacts plus shared vault and download interruption is not arranged; normalized tapes cannot certify binary fidelity"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "1d1d4d24ed724a4193335c013586cdc3",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C09",
+        "timestamp": "2026-10-09T22:30:17.120582Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C09.json",
+      "result_origin": "offline reconstruction of typed pending; original empty tape and settled ledger receipt survived manifest interruption",
+      "request_counts": null,
+      "metadata_replay": {
+        "fixture_id": "C09",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C10",
+      "result": {
+        "fixture_id": "C10",
+        "status": "pass",
+        "evidence": [
+          "unknown/unsupported requirements and foreign refs refused before mutation",
+          "invalid extension version refused"
+        ],
+        "pending_reason": null
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "cc07c165d28f4146a6a126b162839bcb",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C10",
+        "timestamp": "2026-10-09T22:56:21.824458Z",
+        "status": "uncertain",
+        "tokens": null,
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.03575",
+        "reason": "unknown_usage"
+      },
+      "recording": "C10.json",
+      "cleanup": true,
+      "request_counts": {
+        "agent_create": 1,
+        "observation": 7,
+        "session_create": 1,
+        "cleanup": 7
+      },
+      "resources_created": {
+        "agent": 1,
+        "session": 1
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": {
+        "stage": "cleanup",
+        "error_type": "ProviderError",
+        "category": "conflict"
+      },
+      "cleanup_failures": [],
+      "cleanup_strategy": "driver.sessions.delete bounded idle/409 recovery",
+      "metadata_replay": {
+        "fixture_id": "C10",
+        "metadata_replay": "pass",
+        "batches": 16,
+        "events": 0
+      },
+      "driver_commit": "a0ddd219fd8d1eb8852d7726ee38b6db0bb3f1e6"
+    },
+    {
+      "fixture_id": "C11",
+      "result": {
+        "fixture_id": "C11",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): deployed repository/MCP bindings and separate display titles are unavailable"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "deployed repository/MCP bindings and separate display titles are unavailable"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "bfa7be86194d4bf58ce40245ccea79c5",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C11",
+        "timestamp": "2026-10-09T22:36:33.250175Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C11.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C11",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C12",
+      "result": {
+        "fixture_id": "C12",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): billing identity and overlapping-grain pricing need the host certification hook"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "billing identity and overlapping-grain pricing need the host certification hook"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "f99649329ce6472192b1fb9f75141cdc",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C12",
+        "timestamp": "2026-10-09T22:36:33.271043Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C12.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C12",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C13",
+      "result": {
+        "fixture_id": "C13",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host new-slot binding adoption and restart persistence are not injected"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host new-slot binding adoption and restart persistence are not injected"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "557b33ad04384b78a7d1f941debe12b6",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C13",
+        "timestamp": "2026-10-09T22:36:33.288669Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C13.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C13",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C14",
+      "result": {
+        "fixture_id": "C14",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): existing/new-thread provider registry selection needs the Daimon host adapter"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "existing/new-thread provider registry selection needs the Daimon host adapter"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "e91b6d81f8304b69b7a8e3f975258724",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C14",
+        "timestamp": "2026-10-09T22:36:33.307655Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C14.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C14",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C15",
+      "result": {
+        "fixture_id": "C15",
+        "status": "pass",
+        "evidence": [
+          "migration typed unsupported, binding unchanged, no provider writes"
+        ],
+        "pending_reason": null
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "69b405ee240f4d089f378c1d2b72d013",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C15",
+        "timestamp": "2026-10-09T22:56:37.026623Z",
+        "status": "uncertain",
+        "tokens": null,
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.03575",
+        "reason": "unknown_usage"
+      },
+      "recording": "C15.json",
+      "cleanup": true,
+      "request_counts": {
+        "agent_create": 1,
+        "observation": 8,
+        "session_create": 1,
+        "cleanup": 6
+      },
+      "resources_created": {
+        "agent": 1,
+        "session": 1
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": {
+        "stage": "cleanup",
+        "error_type": "ProviderError",
+        "category": "conflict"
+      },
+      "cleanup_failures": [],
+      "cleanup_strategy": "driver.sessions.delete bounded idle/409 recovery",
+      "metadata_replay": {
+        "fixture_id": "C15",
+        "metadata_replay": "pass",
+        "batches": 16,
+        "events": 0
+      },
+      "driver_commit": "a0ddd219fd8d1eb8852d7726ee38b6db0bb3f1e6"
+    },
+    {
+      "fixture_id": "C16",
+      "result": {
+        "fixture_id": "C16",
+        "status": "pass",
+        "evidence": [
+          "no public raw handle, undeclared namespace/native-input bypass refused before writes"
+        ],
+        "pending_reason": null
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "13d0b69a3cfd4b1a9de10050c67a58c9",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C16",
+        "timestamp": "2026-10-09T22:56:50.120425Z",
+        "status": "uncertain",
+        "tokens": null,
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.03575",
+        "reason": "unknown_usage"
+      },
+      "recording": "C16.json",
+      "cleanup": true,
+      "request_counts": {
+        "agent_create": 1,
+        "observation": 10,
+        "session_create": 1,
+        "cleanup": 5
+      },
+      "resources_created": {
+        "agent": 1,
+        "session": 1
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": {
+        "stage": "cleanup",
+        "error_type": "ProviderError",
+        "category": "conflict"
+      },
+      "cleanup_failures": [],
+      "cleanup_strategy": "driver.sessions.delete bounded idle/409 recovery",
+      "metadata_replay": {
+        "fixture_id": "C16",
+        "metadata_replay": "pass",
+        "batches": 17,
+        "events": 0
+      },
+      "driver_commit": "a0ddd219fd8d1eb8852d7726ee38b6db0bb3f1e6"
+    },
+    {
+      "fixture_id": "C17",
+      "result": {
+        "fixture_id": "C17",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host wake-generation fencing is not exercised by provider event normalization"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host wake-generation fencing is not exercised by provider event normalization"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "098dab665bad4586a185953a3ac47c59",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C17",
+        "timestamp": "2026-10-09T22:36:42.911522Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C17.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C17",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    },
+    {
+      "fixture_id": "C18",
+      "result": {
+        "fixture_id": "C18",
+        "status": "pending",
+        "evidence": [
+          "adapter pending (adapter_dependency): host termination/outcome-row mapping is not supplied; mux cannot import daimon"
+        ],
+        "pending_reason": {
+          "kind": "adapter_dependency",
+          "detail": "host termination/outcome-row mapping is not supplied; mux cannot import daimon"
+        }
+      },
+      "receipt": {
+        "version": 1,
+        "run_id": "b72d25dea7be409db460aea55eb65bf2",
+        "provider": "openai",
+        "model": "gpt-6-luna",
+        "fixture_id": "C18",
+        "timestamp": "2026-10-09T22:36:42.952276Z",
+        "status": "completed",
+        "tokens": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "input_cached_tokens": 0,
+          "input_cache_write_tokens": 0
+        },
+        "reserved_usd": "0.03575",
+        "cost_estimate_usd": "0.000",
+        "reason": "settled"
+      },
+      "recording": "C18.json",
+      "cleanup": true,
+      "request_counts": {},
+      "resources_created": {
+        "agent": 0,
+        "session": 0
+      },
+      "native_max_output_tokens_supported": false,
+      "first_failure": null,
+      "cleanup_failures": [],
+      "metadata_replay": {
+        "fixture_id": "C18",
+        "metadata_replay": "pass",
+        "batches": 0,
+        "events": 0
+      },
+      "driver_commit": "824e629d9c89669c326f0f7a435dba62a5aa2700"
+    }
+  ],
+  "prior_attempts": [
+    {
+      "version": 1,
+      "run_id": "3055ba122e3a41899d1642c775bab977",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "fixture_id": "C10",
+      "timestamp": "2026-10-09T22:30:21.073297Z",
+      "status": "failed",
+      "tokens": null,
+      "reserved_usd": "0.03575",
+      "cost_estimate_usd": "0.03575",
+      "reason": "probe_error"
+    },
+    {
+      "version": 1,
+      "run_id": "1202fa76442046359f3c45eafb0fbd6e",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "fixture_id": "C10",
+      "timestamp": "2026-10-09T22:36:33.221519Z",
+      "status": "failed",
+      "tokens": null,
+      "reserved_usd": "0.03575",
+      "cost_estimate_usd": "0.03575",
+      "reason": "probe_error"
+    },
+    {
+      "version": 1,
+      "run_id": "dea41097609b49249d68e27f524c4ce3",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "fixture_id": "C15",
+      "timestamp": "2026-10-09T22:36:37.386181Z",
+      "status": "failed",
+      "tokens": null,
+      "reserved_usd": "0.03575",
+      "cost_estimate_usd": "0.03575",
+      "reason": "probe_error"
+    },
+    {
+      "version": 1,
+      "run_id": "e5f30c690a3e410f944ec8d96fc35550",
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "fixture_id": "C16",
+      "timestamp": "2026-10-09T22:36:42.885682Z",
+      "status": "failed",
+      "tokens": null,
+      "reserved_usd": "0.03575",
+      "cost_estimate_usd": "0.03575",
+      "reason": "probe_error"
+    }
+  ]
+}
