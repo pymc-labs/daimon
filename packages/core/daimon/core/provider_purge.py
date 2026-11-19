@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterable
 
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.stores.mux_erasure import ProviderSession
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.openai import (
@@ -91,6 +92,7 @@ async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
                 provider=item.provider,
                 tenant_id=str(item.tenant_id),
                 error=type(error).__name__,
+                causes=backend_refusal_causes(error),
             )
             continue
         deleted += 1
