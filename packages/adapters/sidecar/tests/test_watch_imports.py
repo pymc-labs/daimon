@@ -14,6 +14,7 @@ from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.watch_fixtures import install_poll_ports
 from pydantic import ValidationError
+from sqlalchemy import text
 
 pytestmark = pytest.mark.fresh_schema
 
@@ -92,6 +93,29 @@ async def test_unmapped_import_is_paused_silent_and_never_resumes(db_session_fac
         # Pausing again must not erase the mapping refusal.
         await watches.pause_watch(db, row.id)
         assert (await watches.get_watch(db, row.id)).source_state["reason"] == "source_unmapped"
+
+
+async def test_an_unconfirmed_import_is_left_out_of_expiry_notices(db_session_factory, definition):
+    async with db_session_factory.begin() as db:
+        row = await watches.import_watch(db, definition, now=datetime.now(UTC))
+        await db.execute(
+            text(
+                "UPDATE watches SET status = 'expired', "
+                "source_state = source_state || '{\"notice_pending\": true}'::jsonb "
+                "WHERE id = :id"
+            ),
+            {"id": row.id},
+        )
+        assert await watches.claim_import_notice(db, now=datetime.now(UTC)) is None
+        await db.execute(
+            text(
+                "UPDATE watches SET source_state = source_state || '{\"confirmed\": true}'::jsonb "
+                "WHERE id = :id"
+            ),
+            {"id": row.id},
+        )
+        claimed = await watches.claim_import_notice(db, now=datetime.now(UTC))
+        assert claimed is not None and claimed[0].id == row.id, "a confirmed one still is told"
 
 
 async def test_import_is_idempotent_and_never_copies_a_signing_key(db_session_factory, definition):

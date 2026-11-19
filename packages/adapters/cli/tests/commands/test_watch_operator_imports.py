@@ -39,13 +39,20 @@ async def operator(db_nullpool_engine, db_clean, monkeypatch):
     async def runtime(_settings):
         yield SimpleNamespace(sessionmaker=factory, anthropic=object(), settings=None)
 
+    async def agent(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
     monkeypatch.setattr(watch_commands, "build_runtime", runtime)
     monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", agent)
     return SimpleNamespace(tenant=tenant, factory=factory)
 
 
 async def run(*args: str):
-    """The CLI runs its own event loop, so it goes to a thread."""
+    """The CLI runs its own event loop, so it goes to a thread. An import names agent-1
+    unless the test gives its own agent."""
+    if args[0] == "import" and "--agent-id" not in args:
+        args = (*args, "--agent-id", "agent-1", "--agent-name", "analyst")
     return await asyncio.to_thread(CliRunner().invoke, watches_app, list(args))
 
 
@@ -421,3 +428,89 @@ async def test_go_live_lists_a_watch_it_cannot_make_live(operator, tmp_path, mon
     assert live.exit_code == 0 and "refused=1" in live.output, live.output
     assert "not live: Unmapped imported sources" in live.output, live.output
     assert await rows(operator, "SELECT status FROM watches") == [("paused",)]
+
+
+async def test_timers_need_an_agent_to_be_held_for(operator, tmp_path):
+    path = manifest(tmp_path, timers=[timer("t")])
+    result = await asyncio.to_thread(
+        CliRunner().invoke,
+        watches_app,
+        ["import", str(path), "--tenant", str(operator.tenant.id)],
+    )
+    assert result.exit_code == 2 and "--agent-id" in result.output, result.output
+    assert await rows(operator, "SELECT 1 FROM held_timers") == []
+
+
+async def test_go_live_and_full_import_leave_another_agents_timers_alone(
+    operator, tmp_path, monkeypatch
+):
+    async def agent(*_args, name, **_kwargs):
+        return SimpleNamespace(id={"analyst": "agent-1", "writer": "agent-2"}[name])
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", agent)
+    tenant = str(operator.tenant.id)
+    other = ("--agent-id", "agent-2", "--agent-name", "writer")
+    assert (
+        await run("import", str(manifest(tmp_path, timers=[timer("a")])), "--tenant", tenant)
+    ).exit_code == 0
+    stored = ("import", str(manifest(tmp_path, timers=[timer("b")])), "--tenant", tenant)
+    assert (await run(*stored, *other)).exit_code == 0
+
+    full = await run(
+        "import", str(manifest(tmp_path, timers=[timer("c")])), "--tenant", tenant, "--full"
+    )
+    assert "cancelled=1" in full.output, full.output
+    assert await rows(operator, "SELECT source_id, outcome FROM held_timers ORDER BY 1") == [
+        ("a", "cancelled"),
+        ("b", None),
+        ("c", None),
+    ]
+
+    live = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+    assert "timers scheduled=1" in live.output, live.output
+    assert await rows(operator, "SELECT source_id FROM held_timers WHERE outcome IS NULL") == [
+        ("b",)
+    ]
+
+
+async def test_go_live_names_the_timers_an_agent_off_managed_agents_cannot_run(
+    operator, tmp_path, monkeypatch
+):
+    async def off_managed_agents(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(watch_commands, "agent_runs_scope_timers", off_managed_agents)
+    tenant = str(operator.tenant.id)
+    timers = [timer("room", place="channel"), timer("dm", place="direct-message"), timer("t")]
+    await run("import", str(manifest(tmp_path, timers=timers)), "--tenant", tenant)
+
+    live = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+
+    assert live.exit_code == 0, live.output
+    assert "timer dm not scheduled" in live.output and "timer room not scheduled" in live.output
+    assert "timers not_scheduled=2 scheduled=1" in live.output, live.output
+    held = await rows(
+        operator, "SELECT source_id FROM held_timers WHERE outcome IS NULL ORDER BY 1"
+    )
+    assert held == [("dm",), ("room",)], "they stay held, never counted as scheduled"
+
+
+async def test_each_callback_watch_commits_on_its_own(operator, tmp_path, monkeypatch):
+    real = watch_commands.import_callback_watch
+    seen: list[int] = []
+
+    async def spy(db, *args, **kwargs):
+        seen.append(len(await rows(operator, "SELECT 1 FROM watches")))
+        return await real(db, *args, **kwargs)
+
+    monkeypatch.setattr(watch_commands, "import_callback_watch", spy)
+    second = {**callback_entry(), "legacy_id": "22222222-2222-2222-2222-222222222222"}
+    path = manifest(tmp_path, watches=[callback_entry(), second])
+
+    result = await run(
+        *("import", str(path), "--tenant", str(operator.tenant.id)),
+        *("--urls-out", str(tmp_path / "urls.json")),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [0, 1], "the first watch is committed, its lock released, before the next"

@@ -19,7 +19,14 @@ its links then have no expiry either.
 `dm_carry_overs` an earlier private conversation until the person's first DM here with
 the agent it was imported for.
 Settling or taking one empties its words and keeps the row, so a repeated import adds
-nothing.
+nothing. A held timer records the agent it was imported for; only that agent's go-live
+and `--full` runs touch it.
+
+DM timers now run. Pending ones already due are settled here as skipped, so none of them
+fires at deploy.
+
+After this revision, roll back by downgrading the migration first: the old sidecar
+refuses the new grant on `accept_watch_callback`.
 
 downgrade: destructive
 """
@@ -32,6 +39,12 @@ revision: str = "0208_callback_watch_imports"
 down_revision: str | None = "0207_skill_manifest_bytes"
 branch_labels = None
 depends_on = None
+
+SETTLE_DUE_DM_TIMERS = (
+    "UPDATE task_continuations SET status = 'skipped', skip_reason = 'before_dm_timers' "
+    "WHERE reason = 'timer' AND status = 'pending' AND left(thread_id, 3) = 'dm:' "
+    "AND available_at <= now()"
+)
 
 SIGNATURE = "accept_watch_callback(uuid,text,text,integer)"
 
@@ -237,6 +250,7 @@ def upgrade() -> None:
         "held_timers",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("source_id", sa.Text(), nullable=False),
+        sa.Column("agent_id", sa.Text(), nullable=False),
         sa.Column("account_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("external_user_id", sa.Text(), nullable=False),
         sa.Column("platform", sa.Text(), nullable=False),
@@ -259,6 +273,9 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_held_timers_account", "held_timers", ["account_id"])
+    # Timers made in a DM never fired before DM timers ran. Settle the ones already due,
+    # once, so the first deploy does not fire up to 90 days of them at once.
+    op.execute(SETTLE_DUE_DM_TIMERS)
     op.create_table(
         "dm_carry_overs",
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),

@@ -4309,6 +4309,8 @@ class HeldTimer(Base):
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
     source_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    #: The agent the import was made for; only its go-live and `--full` runs touch the row.
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )

@@ -65,7 +65,11 @@ async def test_a_confirmed_channel_timer_is_queued_in_its_own_scope_under_its_ch
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, workspace_id="700000303")
         held = await import_held_timer(
-            session, imported("channel"), tenant_id=tenant.id, now=datetime.now(UTC)
+            session,
+            imported("channel"),
+            tenant_id=tenant.id,
+            agent_id="ag_target",
+            now=datetime.now(UTC),
         )
     assert held.outcome == "held"
 

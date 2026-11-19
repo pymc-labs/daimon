@@ -623,6 +623,11 @@ async def register_callback_watch(
     feature; None makes the watch and its link permanent.
     """
     require_delivery(binding, delivery)
+    if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
+        DM_SCOPE_PREFIX
+    ):
+        # Its posts would be dropped, yet counted: nothing reports from a DM scope.
+        raise ValueError("A callback watch cannot be made in a DM. Make it in a channel or thread.")
     expires_at = callback_end(now, lifetime)
     watch = await register_page_watch(
         session,
@@ -2128,6 +2133,8 @@ async def claim_import_notice(
                 >= now - timedelta(hours=24),
             ),
             Watch.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
+            # An import never messages the owner: leave out what nobody confirmed.
+            Watch.source_state["confirmed"].as_boolean().is_distinct_from(False),
             or_(
                 lifecycle
                 & or_(

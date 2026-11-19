@@ -12,12 +12,15 @@ from daimon.core._models import HeldTimer
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.continuity.timers import MAX_PENDING_TIMERS
 from daimon.core.continuity.watch_imports import NOTE_LIMIT, clip
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores import agent_backends
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import (
     count_pending_timer_rows,
     lock_timer_quota,
     record_continuation,
 )
+from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy import (
     Boolean,
     ColumnElement,
@@ -65,10 +68,19 @@ def supported(definition: ImportedTimer) -> bool:
     )
 
 
+#: Places whose timers only a Managed Agents agent runs (a thread's timers run anywhere).
+SCOPE_PLACES = frozenset({"direct-message", "channel"})
+
+
 async def import_held_timer(
-    session: AsyncSession, definition: ImportedTimer, *, tenant_id: uuid.UUID, now: datetime
+    session: AsyncSession,
+    definition: ImportedTimer,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    now: datetime,
 ) -> TimerImport:
-    """Hold one timer. A rerun updates one nobody has settled yet and adds nothing else.
+    """Hold one timer for an agent. A rerun updates one nobody has settled yet, adding no other.
 
     A timer already due is recorded as settled. A timer for a place that cannot wake is
     refused: it is counted, never stored. A rerun never changes `paused`:
@@ -85,6 +97,7 @@ async def import_held_timer(
     )
     past = definition.fire_at < now + MIN_LEAD
     values = {
+        "agent_id": agent_id,
         "fire_at": definition.fire_at,
         "note": "" if past else note,
         "settled_at": now if past else None,
@@ -111,6 +124,7 @@ async def import_held_timer(
                 where=and_(
                     HeldTimer.settled_at.is_(None),
                     or_(
+                        HeldTimer.agent_id != agent_id,
                         HeldTimer.fire_at != definition.fire_at,
                         HeldTimer.note != values["note"],
                     ),
@@ -128,14 +142,20 @@ async def import_held_timer(
 
 
 async def cancel_missing_timers(
-    session: AsyncSession, *, tenant_id: uuid.UUID, keep: Collection[str], now: datetime
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    keep: Collection[str],
+    now: datetime,
 ) -> int:
-    """Cancel every unsettled timer whose source id is not in `keep`; how many were."""
+    """Cancel the agent's unsettled timers whose source id is not in `keep`; how many."""
     cancelled = (
         await session.execute(
             update(HeldTimer)
             .where(
                 HeldTimer.tenant_id == tenant_id,
+                HeldTimer.agent_id == agent_id,
                 HeldTimer.settled_at.is_(None),
                 HeldTimer.source_id.not_in(list(keep)),
             )
@@ -194,6 +214,38 @@ async def delete_for_users(
     return len(removed)
 
 
+async def agent_runs_scope_timers(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> bool:
+    """Whether the agent is on Managed Agents, the only backend DM and channel timers fire on."""
+    revision = await agent_backends.current(
+        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
+    )
+    return revision is None or revision.backend in (None, DEFAULT_BACKEND)
+
+
+def _open_timers(tenant_id: uuid.UUID, agent_id: str) -> tuple[ColumnElement[bool], ...]:
+    return (
+        HeldTimer.tenant_id == tenant_id,
+        HeldTimer.agent_id == agent_id,
+        HeldTimer.settled_at.is_(None),
+        HeldTimer.paused.is_(False),
+    )
+
+
+async def list_unrunnable_timers(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> list[str]:
+    """Source ids of the agent's open DM and channel timers; they stay held, never scheduled."""
+    return list(
+        await session.scalars(
+            select(HeldTimer.source_id)
+            .where(*_open_timers(tenant_id, agent_id), HeldTimer.place_type.in_(SCOPE_PLACES))
+            .order_by(HeldTimer.source_id)
+        )
+    )
+
+
 async def settle_held_timers(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -201,20 +253,17 @@ async def settle_held_timers(
     agent_id: str,
     agent_name: str,
     now: datetime,
+    scope_timers: bool = True,
 ) -> Counter[Outcome]:
-    """Schedule each held timer for the agent, once. Each settles in its own transaction."""
+    """Schedule each of the agent's held timers, once. Each settles in its own transaction.
+
+    With `scope_timers` false, DM and channel timers are left held: they would never fire.
+    """
     async with sessionmaker() as session:
-        keys = list(
-            await session.scalars(
-                select(HeldTimer.source_id)
-                .where(
-                    HeldTimer.tenant_id == tenant_id,
-                    HeldTimer.settled_at.is_(None),
-                    HeldTimer.paused.is_(False),
-                )
-                .order_by(HeldTimer.fire_at, HeldTimer.source_id)
-            )
-        )
+        query = select(HeldTimer.source_id).where(*_open_timers(tenant_id, agent_id))
+        if not scope_timers:
+            query = query.where(HeldTimer.place_type.not_in(SCOPE_PLACES))
+        keys = list(await session.scalars(query.order_by(HeldTimer.fire_at, HeldTimer.source_id)))
     counts: Counter[Outcome] = Counter()
     for source_id in keys:
         async with sessionmaker.begin() as session:
@@ -273,10 +322,12 @@ __all__ = [
     "EMPTY_NOTE_PROMPT",
     "MIN_LEAD",
     "TimerImport",
+    "agent_runs_scope_timers",
     "cancel_missing_timers",
     "count_for_users",
     "delete_for_users",
     "import_held_timer",
+    "list_unrunnable_timers",
     "settle_held_timers",
     "unpause_timers",
 ]

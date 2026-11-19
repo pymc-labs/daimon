@@ -98,6 +98,32 @@ async def link(db_session_factory, monkeypatch):
     return watch, token
 
 
+async def test_a_callback_watch_cannot_be_made_in_a_dm(db_session_factory, link):
+    watch, _token = link
+    async with db_session_factory.begin() as db:
+        binding = ContinuationRequest(
+            tenant_id=watch.tenant_id,
+            platform="discord",
+            parent_channel_id="dm:scope",
+            thread_id="dm:scope",
+            requester_account_id=watch.owner_account_id,
+            requester_external_user_id="123",
+            target_ma_agent_id="agent-bound",
+            target_name="analyst",
+            requested_work=None,
+            reason="watch_fired",
+            idempotency_key=uuid.uuid4(),
+        )
+        with pytest.raises(ValueError, match="made in a DM"):
+            await watches.register_callback_watch(
+                db,
+                binding,
+                instructions="Summarize.",
+                lifetime=timedelta(days=1),
+                now=datetime.now(UTC),
+            )
+
+
 async def post(client, watch_id, token, body=b"hello", **kw):
     return await client.post(f"/callbacks/watches/{watch_id}/{token}", data=body, **kw)
 
@@ -401,7 +427,9 @@ async def test_held_timers_do_not_fire_until_confirmed_and_settle_once(db_sessio
     first = _timer("a", note="later")
     async with db_session_factory.begin() as db:
         results = [
-            (await import_held_timer(db, t, tenant_id=moved.id, now=now)).outcome
+            (
+                await import_held_timer(db, t, tenant_id=moved.id, agent_id="agent-new", now=now)
+            ).outcome
             for t in (
                 first,
                 _timer("b", minutes=0, note="due"),
@@ -439,7 +467,11 @@ async def test_held_timers_stop_at_the_pending_cap(db_session_factory, moved):
     async with db_session_factory.begin() as db:
         for i in range(27):
             await import_held_timer(
-                db, _timer(f"t{i:02}", minutes=10 + i, note=f"n{i:02}"), tenant_id=moved.id, now=now
+                db,
+                _timer(f"t{i:02}", minutes=10 + i, note=f"n{i:02}"),
+                tenant_id=moved.id,
+                agent_id="agent-new",
+                now=now,
             )
     counts = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
@@ -474,7 +506,7 @@ async def test_paused_timers_are_never_scheduled(db_session_factory, moved):
     flat = _timer("paused-1", paused=True)
     now = datetime.now(UTC)
     async with db_session_factory.begin() as db:
-        held = await import_held_timer(db, flat, tenant_id=moved.id, now=now)
+        held = await import_held_timer(db, flat, tenant_id=moved.id, agent_id="agent-new", now=now)
         assert held.outcome == "held"
     counts = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
@@ -703,13 +735,15 @@ async def test_timer_rerun_updates_unsettled_rows_and_full_cancels_the_missing(
     async with db_session_factory.begin() as db:
         for sid in ("keep", "drop", "paused"):
             timer = _timer(sid, note=sid, paused=sid == "keep")
-            await import_held_timer(db, timer, tenant_id=moved.id, now=now)
+            await import_held_timer(db, timer, tenant_id=moved.id, agent_id="agent-new", now=now)
         # What a rerun says about `paused` is ignored: only the first import counts.
         moved_fire = _timer("keep", minutes=120, note="changed", paused=False)
-        again = await import_held_timer(db, moved_fire, tenant_id=moved.id, now=now)
+        again = await import_held_timer(
+            db, moved_fire, tenant_id=moved.id, agent_id="agent-new", now=now
+        )
         assert again.outcome == "updated", again
         cancelled = await cancel_missing_timers(
-            db, tenant_id=moved.id, keep={"keep", "paused"}, now=now
+            db, tenant_id=moved.id, agent_id="agent-new", keep={"keep", "paused"}, now=now
         )
         assert cancelled == 1
         assert await unpause_timers(db, tenant_id=moved.id, source_id="keep") == 1
@@ -728,10 +762,10 @@ async def test_timer_text_is_stripped_clipped_and_may_be_empty(db_session_factor
     now = datetime.now(UTC)
     async with db_session_factory.begin() as db:
         long = await import_held_timer(
-            db, _timer("long", note="n" * 5000), tenant_id=moved.id, now=now
+            db, _timer("long", note="n" * 5000), tenant_id=moved.id, agent_id="agent-new", now=now
         )
         empty = await import_held_timer(
-            db, _timer("empty", note="   "), tenant_id=moved.id, now=now
+            db, _timer("empty", note="   "), tenant_id=moved.id, agent_id="agent-new", now=now
         )
     assert long.truncated and long.outcome == "held"
     assert empty.outcome == "held" and not empty.truncated

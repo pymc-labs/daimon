@@ -99,6 +99,7 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         monkeypatch.setattr(
             watch_commands, "settle_held_timers", AsyncMock(return_value=Counter(scheduled=1))
         )
+        monkeypatch.setattr(watch_commands, "agent_runs_scope_timers", AsyncMock(return_value=True))
         result = CliRunner().invoke(
             watches_app,
             [

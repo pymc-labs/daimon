@@ -19,8 +19,10 @@ from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExp
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.stores.held_timers import (
     TimerImport,
+    agent_runs_scope_timers,
     cancel_missing_timers,
     import_held_timer,
+    list_unrunnable_timers,
     settle_held_timers,
     unpause_timers,
 )
@@ -218,7 +220,8 @@ def import_command(
         uuid.UUID | None, typer.Option("--tenant", help="Tenant for callback watches and timers")
     ] = None,
     agent_id: Annotated[
-        str | None, typer.Option("--agent-id", help="Agent id that callback watches report to")
+        str | None,
+        typer.Option("--agent-id", help="Agent id that callback watches and timers are for"),
     ] = None,
     agent_name: Annotated[
         str | None, typer.Option("--agent-name", help="Name of that agent")
@@ -232,14 +235,16 @@ def import_command(
         typer.Option("--full", help="Cancel held timers that no file of this run lists"),
     ] = False,
 ) -> None:
-    """Import v1 JSON manifests of one export, offline, in one transaction. Every watch
-    starts paused; no key is copied.
+    """Import v1 JSON manifests of one export, offline. Every watch starts paused; no key
+    is copied.
 
     Give every file of one export in the same run. Their server must be the tenant's.
-    Callback watches keep their token hash and get a new link, written only to
-    --urls-out as {source id: url}. Timers are held until `go-live`. A rerun updates
-    what nobody has confirmed yet; with --full it also cancels held timers that no
-    file lists, and refuses a run whose files list no timers.
+    Each watch commits on its own, so ingress never waits long; a rerun finishes a
+    run that stopped. Callback watches keep their token hash and get a new link, written
+    only to --urls-out as {source id: url}. Timers are held for --agent-id until its
+    `go-live`. A rerun updates what nobody has confirmed yet; with --full it also
+    cancels that agent's held timers that no file lists, and refuses a run whose files
+    list no timers.
     """
     manifests: list[WatchExport] = []
     for export_file in export_files:
@@ -263,9 +268,11 @@ def import_command(
         )
     if (callbacks or timers) and tenant is None:
         raise typer.BadParameter("--tenant is required for callback watches and timers")
+    if (callbacks or timers) and (agent_id is None or agent_name is None):
+        raise typer.BadParameter(
+            "--agent-id and --agent-name are required for callbacks and timers"
+        )
     if callbacks:
-        if agent_id is None or agent_name is None:
-            raise typer.BadParameter("--agent-id and --agent-name are required for callbacks")
         if urls_out is None:
             raise typer.BadParameter("--urls-out is required for callback watches")
         if load_watches_settings().callback_base_url is None:
@@ -285,67 +292,65 @@ def import_command(
                     raise typer.BadParameter(
                         f"The file is for server {guild_id}, not tenant {tenant_id}"
                     )
-        if callbacks or (timers and (agent_id or agent_name)):
-            assert tenant is not None
-            if not (agent_id and agent_name):
-                raise typer.BadParameter("--agent-id and --agent-name go together")
+        if callbacks or timers:
+            assert tenant is not None and agent_id and agent_name
             await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
 
     async def run() -> None:
         base = load_watches_settings().callback_base_url
-        urls: dict[str, str] = {}
         async with build_runtime(load_settings()) as runtime:
             await check_targets(runtime)
             now = datetime.now(UTC)
-            # One transaction for every file: no half-import on crash.
-            async with runtime.sessionmaker.begin() as db:
-                rows: list[WatchRow] = []
-                over_cap = 0
-                for entry in others:
-                    try:
+            rows: list[WatchRow] = []
+            over_cap = 0
+            for entry in others:
+                try:
+                    # The global watch lock lasts one commit, so ingress waits for one watch.
+                    async with runtime.sessionmaker.begin() as db:
                         rows.append(await import_watch(db, entry, now=now))
-                    except OwnerCapExceeded:
-                        over_cap += 1
-                moved: list[CallbackImport] = []
-                cap = (
-                    await callback_lifetime(db, runtime.settings, tenant)
-                    if callbacks and tenant is not None
-                    else None
-                )
-                for entry in callbacks:
-                    assert tenant is not None and agent_id and agent_name
-                    moved.append(
-                        await import_callback_watch(
+                except OwnerCapExceeded:
+                    over_cap += 1
+            moved: list[CallbackImport] = []
+            cap = None
+            if callbacks and tenant is not None:
+                async with runtime.sessionmaker() as db:
+                    cap = await callback_lifetime(db, runtime.settings, tenant)
+            for entry in callbacks:
+                assert tenant is not None and agent_id and agent_name
+                async with runtime.sessionmaker.begin() as db:
+                    item = await import_callback_watch(
+                        db,
+                        entry,
+                        tenant_id=tenant,
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        now=now,
+                        lifetime_cap=cap,
+                    )
+                    if item.token is not None and item.watch is not None and urls_out is not None:
+                        link = f"{base}/callbacks/watches/{item.watch.id}/{item.token}"
+                        # Before the commit: a lost file would lose a link nobody can recover.
+                        _write_urls(urls_out, {item.legacy_id: link})
+                moved.append(item)
+            held: list[TimerImport] = []
+            cancelled = 0
+            if timers:
+                assert tenant is not None and agent_id
+                async with runtime.sessionmaker.begin() as db:
+                    for timer in timers:
+                        held.append(
+                            await import_held_timer(
+                                db, timer, tenant_id=tenant, agent_id=agent_id, now=now
+                            )
+                        )
+                    if full:
+                        cancelled = await cancel_missing_timers(
                             db,
-                            entry,
                             tenant_id=tenant,
                             agent_id=agent_id,
-                            agent_name=agent_name,
+                            keep={t.source_id for t in timers},
                             now=now,
-                            lifetime_cap=cap,
                         )
-                    )
-                held: list[TimerImport] = []
-                for timer in timers:
-                    assert tenant is not None
-                    held.append(await import_held_timer(db, timer, tenant_id=tenant, now=now))
-                cancelled = 0
-                if full:
-                    assert tenant is not None
-                    cancelled = await cancel_missing_timers(
-                        db,
-                        tenant_id=tenant,
-                        keep={t.source_id for t in timers},
-                        now=now,
-                    )
-                for item in moved:
-                    if item.token is not None and item.watch is not None:
-                        urls[item.legacy_id] = (
-                            f"{base}/callbacks/watches/{item.watch.id}/{item.token}"
-                        )
-                if urls and urls_out is not None:
-                    # Before the commit: a lost file would lose links nobody can recover.
-                    _write_urls(urls_out, urls)
             for row in rows:
                 detail = row.source_state.get("mapping_error")
                 suffix = f": {detail}" if detail else ""
@@ -390,8 +395,10 @@ def go_live_command(
 
     Each imported watch is confirmed on the owner, channel and thread the import
     printed, and resumes unless it was paused where it came from. Each unpaused held
-    timer still more than a minute away is scheduled once; a due one is skipped. A
-    watch that cannot go live is listed with the reason and stays as it was.
+    timer still more than a minute away is scheduled once; a due one is skipped. DM and
+    channel timers of an agent not on Managed Agents never fire: they are listed by name,
+    counted as not_scheduled and left held. A watch that cannot go live is listed with
+    the reason and stays as it was.
     """
 
     async def run() -> tuple[Counter[str], Counter[str]]:
@@ -424,14 +431,32 @@ def go_live_command(
                     typer.echo(f"{watch.id} not live: {exc}")
                     continue
                 watches["live" if row.status == "active" else "kept_paused"] += 1
+            async with runtime.sessionmaker() as db:
+                scope_timers = await agent_runs_scope_timers(
+                    db, tenant_id=tenant, agent_id=agent_id
+                )
+                unrunnable = (
+                    []
+                    if scope_timers
+                    else await list_unrunnable_timers(db, tenant_id=tenant, agent_id=agent_id)
+                )
+            for source_id in unrunnable:
+                typer.echo(
+                    f"timer {source_id} not scheduled: DM and channel timers need an agent "
+                    "on Managed Agents"
+                )
             timers = await settle_held_timers(
                 runtime.sessionmaker,
                 tenant_id=tenant,
                 agent_id=agent_id,
                 agent_name=agent_name,
                 now=datetime.now(UTC),
+                scope_timers=scope_timers,
             )
-        return watches, Counter({str(k): n for k, n in timers.items()})
+        counts = Counter({str(k): n for k, n in timers.items()})
+        if unrunnable:
+            counts["not_scheduled"] = len(unrunnable)
+        return watches, counts
 
     watches, timers = asyncio.run(run())
     typer.echo(
