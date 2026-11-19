@@ -38,7 +38,7 @@ from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.membership import MembershipResolver
 from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
+from daimon.core.stores.direct_messages import dm_enabled, dm_turned_off, get_dm_agent_name
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -374,11 +374,12 @@ async def sender_admits(
     Every agent-sent path (the DM tools, routines, watches, notices, support) calls
     this with its platform's lookup. Locks only decide who answers, so they do not
     apply. A message with no sending agent (a notice) uses the workspace default
-    agent's grant, and none when no default is set. A workspace with DMs off, or groups
-    unknown: not admitted.
+    agent's grant, and none when no default is set. A workspace that turned DMs off,
+    or groups unknown: not admitted.
     """
     async with sessionmaker() as session:
-        if not await dm_enabled(session, tenant_id=tenant_id):
+        # Main never needed the feature on for an agent to message someone; off by choice stops it.
+        if await dm_turned_off(session, tenant_id=tenant_id):
             return False
         grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
     if grant is None:

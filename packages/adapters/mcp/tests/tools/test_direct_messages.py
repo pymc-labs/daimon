@@ -14,6 +14,7 @@ from aioresponses import aioresponses
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _dm_groups, direct_messages
+from daimon.core import dm_access
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -26,6 +27,12 @@ from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from slack_sdk.web.async_client import AsyncWebClient
+
+
+@pytest.fixture(autouse=True)
+def _dms_not_turned_off(monkeypatch):
+    """Most tests here run on a mock session, which cannot answer the feature read."""
+    monkeypatch.setattr(dm_access, "dm_turned_off", AsyncMock(return_value=False))
 
 
 def runtime_and_auth(platform="discord", policy=None):

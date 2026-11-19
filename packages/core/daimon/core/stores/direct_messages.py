@@ -257,6 +257,17 @@ async def lock_route(
     )
 
 
+async def dm_turned_off(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether someone set `direct_messages` off for the workspace; the default off is not."""
+    from daimon.core.features.snapshot import FeaturePlace, feature_in
+
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
+    found = await feature_in(session, None, FeaturePlace(tenant_id, platform), "direct_messages")
+    return not found.on and found.tier != "default"
+
+
 async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> str | None:
     return await session.scalar(
         select(DirectMessagePolicy.dm_agent_name).where(DirectMessagePolicy.tenant_id == tenant_id)

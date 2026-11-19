@@ -416,10 +416,10 @@ async def _answer_burst(
             client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
         )
         return
-    role = await _live_role(client, user_id=user_id, team_id=team_id)
     seconds = await debounce_seconds(runtime.sessionmaker, runtime.settings, tenant_id, "slack")
     react = partial(_react, client, channel_id)
     if conversation is None:
+        role = await _live_role(client, user_id=user_id, team_id=team_id)
         decision, groups = await _decide_cold(
             runtime, client, team_id=team_id, user_id=user_id, role=role
         )
@@ -452,7 +452,7 @@ async def _answer_burst(
             user_id=user_id,
             groups=user_group_lookup(runtime, client, team_id=team_id),
         )
-    answer = _answerer(runtime, client, conversation, key, role=role, groups=groups, thread=thread)
+    answer = _answerer(runtime, client, conversation, key, groups=groups, thread=thread)
     await burst.answer(seconds, react, answer)
 
 
@@ -462,7 +462,6 @@ def _answerer(
     conversation: DirectMessageRow,
     key: tuple[str, str, str],
     *,
-    role: Role,
     groups: frozenset[str] | None,
     thread: dict[str, Any],
 ) -> Callable[[list[dict[str, Any]]], Awaitable[None]]:

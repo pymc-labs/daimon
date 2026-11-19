@@ -42,7 +42,7 @@ PlatformId = Annotated[
 GroupsProbe = Callable[[], Awaitable[object]]
 """Lists the platform's groups; raises `GroupLookupFailed` when it cannot."""
 REINSTALL: Final = (
-    "Slack can't read user groups here. Reinstall the Slack app to allow it, then try again."
+    "This workspace's chat app can't read user groups. Reinstall it to allow that, then try again."
 )
 
 

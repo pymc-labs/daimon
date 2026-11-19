@@ -83,7 +83,10 @@ async def chat(
     runtime = cast(
         "McpRuntime",
         SimpleNamespace(
-            session_factory=db_session_factory, client=object(), settings=fake_runtime().settings
+            session_factory=db_session_factory,
+            client=object(),
+            settings=fake_runtime().settings,
+            fernet=None,
         ),
     )
     auth = dataclasses.replace(make_auth(), tenant_id=tenant.id, account_id=account.id)
