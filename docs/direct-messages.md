@@ -87,16 +87,19 @@ daimon dm import-policies --dry-run      # DAIMON_DIRECT_MESSAGE_POLICIES as sto
 `dm` or `features`, before the command; without it the CLI's own tenant is used. As
 in the web app, an unknown agent name is refused and each change is in the
 audit log, under the CLI's local user. Erasing a person removes their pick,
-their personal rules and their entry in any listed grant.
+their unlocked personal rules and their entry in any listed grant. Locked rules
+and exclusions stay, so erasing someone never lifts a restriction.
 
 `DAIMON_DIRECT_MESSAGE_POLICIES` is deprecated. While it is set it applies with
-the stored access on every path, `dm explain` and "Check a person" included, so
-the stricter wins; the Discord service logs a warning. `daimon dm
-import-policies` stores it: an allowlist becomes a listed grant on every agent
-and `disabled` turns DMs off. The setting can then be removed. A notice no agent
-sends, such as a budget notice, is held to the default agent's grant, so an allowlist
-is not imported until a default agent is set (`daimon dm default`). An agent created
-after the import has no grant, so it admits every member: list people on it too.
+the stored access to Discord DMs and every message an agent sends, `dm explain`
+and "Check a person" included, so the stricter wins; the Discord service logs a
+warning. `daimon dm import-policies` stores it: an allowlist becomes a listed
+grant on every agent and `disabled` turns DMs off. The setting can then be removed.
+
+A notice no agent sends, such as a budget notice, is held to the default agent's
+grant, so an allowlist is not imported until a default agent is set (`daimon dm
+default`). An agent created after the import has no grant, so it admits every
+member: list people on it too.
 
 ## What a person sees
 
