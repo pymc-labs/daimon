@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 from daimon.core._models import Base, TenantAccessPolicyRecord
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from sqlalchemy import (
     ColumnElement,
@@ -60,10 +61,15 @@ _LIVE_NAME_COLUMNS: tuple[tuple[str, str], ...] = (
     ("compute_sessions", "agent_name"),
     ("web_workspace_settings", "default_agent"),
     ("web_threads", "agent_name"),
+    ("dm_agent_picks", "agent_name"),
+    ("dm_carry_overs", "agent_name"),
+    ("dm_rules", "agent_name"),
+    ("host_call_cards", "agent_name"),
 )
 # Keyed by agent name: a row already under the new name wins, the old one stays.
 _KEYED_NAME_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("agent_avatars", "agent_name", ("tenant_id",)),
+    ("dm_agent_grants", "agent_name", ("tenant_id",)),
     ("user_skills", "agent_name", ("tenant_id", "principal_id", "name")),
 )
 _POLICY_NAME_KEYS = ("agent_rules", "agent_channel_pins")
@@ -155,10 +161,19 @@ def _selfhosted_rows(tenant_id: uuid.UUID) -> Select[Any]:
     )
 
 
+def _managed(spec: dict[str, Any]) -> bool:
+    return (spec.get("metadata") or {}).get(MA_METADATA_KEY_MANAGED) == "true"
+
+
 def _selfhosted_state(
     rows: Sequence[Row[Any]], *, old: str, new: str
 ) -> tuple[SelfHostedState, Row[Any] | None]:
-    legacy = [row for row in rows if normalize_agent_name(row.name) == normalize_agent_name(old)]
+    """Only a defaults-managed `old` is renamed; a member's own `old` is theirs."""
+    legacy = [
+        row
+        for row in rows
+        if normalize_agent_name(row.name) == normalize_agent_name(old) and _managed(row.spec)
+    ]
     if not legacy:
         return "absent", None
     if len(legacy) > 1:
@@ -179,7 +194,7 @@ async def inspect_selfhosted_rename(
 async def rename_selfhosted_agent(
     session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
 ) -> SelfHostedState:
-    """Rename the tenant's live self-hosted agent `old` in place ("pending" → done).
+    """Rename the tenant's live managed self-hosted agent `old` in place ("pending" → done).
 
     A live `new` is never merged into: both are left alone ("taken"). Two live
     records that differ only in case are left alone too ("ambiguous"). The
@@ -192,21 +207,28 @@ async def rename_selfhosted_agent(
         await session.execute(
             update(table)
             .where(table.c.id == row.id)
-            .values(name=new, spec={**row.spec, "name": new}, updated_at=func.now())
+            .values(name=new, spec=_renamed_spec(row.spec, new), updated_at=func.now())
         )
     return state
+
+
+def _renamed_spec(spec: dict[str, Any], new: str) -> dict[str, Any]:
+    """`spec` under `new`, with the `daimon_name` its SDK-shaped view reports."""
+    metadata = {**(spec.get("metadata") or {}), MA_METADATA_KEY_NAME: new}
+    return {**spec, "name": new, "metadata": metadata}
 
 
 async def list_tenants_with_selfhosted_agent(
     session: AsyncSession, *, name: str
 ) -> list[uuid.UUID]:
-    """Tenants holding a live self-hosted agent named `name`, in any case."""
+    """Tenants holding a live managed self-hosted agent named `name`, in any case."""
     table = _table("selfhosted_agents")
+    managed = table.c.spec["metadata"][MA_METADATA_KEY_MANAGED].astext == "true"
     return list(
         (
             await session.scalars(
                 select(table.c.tenant_id)
-                .where(table.c.archived_at.is_(None), _matches(table.c.name, name))
+                .where(table.c.archived_at.is_(None), managed, _matches(table.c.name, name))
                 .distinct()
                 .order_by(table.c.tenant_id)
             )

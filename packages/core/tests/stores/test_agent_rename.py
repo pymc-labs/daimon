@@ -157,8 +157,9 @@ async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_
         (["daimon", "default"], "taken", ["daimon", "default"]),
         (["daimon-copy"], "absent", ["daimon-copy"]),
         (["daimon", "Daimon"], "ambiguous", ["Daimon", "daimon"]),
+        (["member:daimon"], "absent", ["daimon"]),
     ],
-    ids=["renamed", "taken", "absent", "case-duplicates"],
+    ids=["renamed", "taken", "absent", "case-duplicates", "member-owned"],
 )
 async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
     names: list[str],
@@ -172,8 +173,11 @@ async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
     await db_session.commit()
     caller = scope(str(tenant.id), str(account.id))
     agents = SelfHostedAgents(db_session_factory)
-    for name in names:
-        await agents.create(caller, agent_spec(name), key=f"create-{name}")
+    for entry in names:
+        owner, _, name = entry.rpartition(":")
+        metadata = {"daimon_name": name} | ({} if owner else {"daimon_managed": "true"})
+        spec = agent_spec(name).model_copy(update={"metadata": metadata})
+        await agents.create(caller, spec, key=f"create-{name}")
 
     async with db_session_factory() as session, session.begin():
         outcome = await rename_selfhosted_agent(
@@ -184,13 +188,13 @@ async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
     rows = (
         await db_session.execute(
             text(
-                "SELECT name, spec->>'name' FROM selfhosted_agents"
+                "SELECT name, spec->>'name', spec->'metadata'->>'daimon_name' FROM selfhosted_agents"
                 " WHERE tenant_id = :t AND archived_at IS NULL ORDER BY 1"
             ),
             {"t": tenant.id},
         )
     ).tuples()
-    assert [(n, n) for n in after] == list(rows), "the record and its spec carry the same name"
+    assert [(n, n, n) for n in after] == list(rows), "record, spec and metadata agree on the name"
     revisions = (
         await db_session.execute(
             text("SELECT DISTINCT revision FROM selfhosted_agents WHERE tenant_id = :t"),
@@ -209,6 +213,8 @@ _KEPT_NAME_COLUMNS = {
     ("neutral_skill_versions", "agent_name"): "the neutral catalog is immutable",
     ("credential_requests", "target"): "a credential's target, not an agent",
     ("session_preparations", "target_fingerprint"): "a hash, not a name",
+    ("selfhosted_agent_versions", "name"): "a revision keeps the name it was saved under",
+    ("turn_origins", "helper_key"): "a helper turn's session key, not a name",
 }
 # Moved outside the column lists: by `rename_selfhosted_agent` and by hand.
 _OTHER_RENAMED = {("selfhosted_agents", "name"), ("user_config", "agent_name")}
