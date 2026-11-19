@@ -2305,15 +2305,16 @@ class DaimonBot(commands.Bot):
                 )
             )
         if non_production:
-            # Replace commands left by a production deployment with the DM-only ones:
-            # only the global scope reaches DMs, and a DM-only command never shows in
+            # Replace commands left by a production deployment with the DM-capable ones:
+            # only the global scope reaches DMs. A DM-capable command is left out of the
+            # per-guild copy, so it shows once in a guild; a DM-only one never shows in
             # a guild, so registering it globally widens nothing.
-            dm_only = [
+            dm_capable = [
                 command
                 for command in self.tree.get_commands()
                 if isinstance(command, app_commands.Command)
                 and command.allowed_contexts is not None
-                and not command.allowed_contexts.guild
+                and command.allowed_contexts.dm_channel
             ]
             if not self._global_tree_synced:
                 if self.application_id is None:
@@ -2322,10 +2323,10 @@ class DaimonBot(commands.Bot):
                 try:
                     await self.http.bulk_upsert_global_commands(
                         self.application_id,
-                        payload=[command.to_dict(self.tree) for command in dm_only],
+                        payload=[command.to_dict(self.tree) for command in dm_capable],
                     )
                     self._global_tree_synced = True
-                    log.info("tree_cleared_global", dm_only=[c.name for c in dm_only])
+                    log.info("tree_cleared_global", dm_capable=[c.name for c in dm_capable])
                 except discord.HTTPException as exc:
                     log.warning("tree_sync_global_clear_failed", error=str(exc))
                     return
