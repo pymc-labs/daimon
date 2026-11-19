@@ -334,6 +334,17 @@ def test_parse_budget_spec_reads_the_limit_mode() -> None:
         parse_budget_spec(**base, alert_channel_id="c-9")
 
 
+async def test_parse_budget_spec_when_no_mode_given_then_keeps_the_current_one(
+    db_session: AsyncSession,
+) -> None:
+    """Editing only the limit keeps an alert budget alerting, to the same channel."""
+    current = await make_channel_budget(db_session, on_limit="alert", alert_channel_id="c-9")
+    base = {"limit_usd": "8", "window": "monthly", "on_limit": None}
+    kept = parse_budget_spec(**base, current=current)
+    assert (kept.on_limit, kept.alert_channel_id) == ("alert", "c-9"), "mode and channel kept"
+    assert parse_budget_spec(**base).on_limit == "stop", "a new budget stops"
+
+
 @pytest.mark.parametrize(
     ("spent", "level"),
     [("4.99", 0), ("5", 1), ("9.99", 1), ("10", 2), ("27", 5)],

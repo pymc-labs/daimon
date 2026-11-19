@@ -127,15 +127,22 @@ def parse_budget_spec(
     window: str,
     starts_at: str | None = None,
     ends_at: str | None = None,
-    on_limit: str = "stop",
+    on_limit: str | None = "stop",
     alert_channel_id: str | None = None,
+    current: ChannelBudgetRow | None = None,
 ) -> BudgetSpec:
     """Validate a budget request from a tool or the CLI, before anything is written.
 
     The caller has checked `alert_channel_id` is a channel Daimon can post in, in the workspace.
+    `on_limit` None keeps `current`'s mode and alert channel, so editing only the limit never
+    turns an alert budget into a stop one; a new budget stops.
     """
     if window not in BUDGET_WINDOWS:
         raise ChannelBudgetError(f"window must be one of {', '.join(BUDGET_WINDOWS)}")
+    if on_limit is None:
+        on_limit = "stop" if current is None else current.on_limit
+        if alert_channel_id is None and current is not None:
+            alert_channel_id = current.alert_channel_id
     mode: BudgetOnLimit = "alert" if on_limit == "alert" else "stop"
     if on_limit != mode:
         raise ChannelBudgetError(f"on_limit must be one of {', '.join(BUDGET_ON_LIMIT)}")
