@@ -128,7 +128,7 @@ async def test_writers_none_is_real_admission_policy_and_teardown_restores_it(
         policy = await load_access_policy(session, tenant_id=uuid.UUID(binding.scope.tenant_id))
     decision = authorize(
         policy,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         action=Action.START_TURN,
         place=Place(channel_id=min(binding.channels)),
     )
@@ -138,7 +138,7 @@ async def test_writers_none_is_real_admission_policy_and_teardown_restores_it(
         restored = await load_access_policy(session, tenant_id=uuid.UUID(binding.scope.tenant_id))
     assert authorize(
         restored,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         action=Action.START_TURN,
         place=Place(channel_id=min(binding.channels)),
     )

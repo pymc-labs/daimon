@@ -39,6 +39,7 @@ from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, env_admits, env_dm_policy
 from daimon.core.direct_messages import (
     ColdDmNotices,
@@ -703,7 +704,11 @@ class DirectMessageCog(commands.Cog):
                 else:
                     text = "This conversation changed. Use its latest controls."
             except _DM_FAILURES as exc:
-                log.warning("discord.dm.restart_failed", error_type=type(exc).__name__)
+                log.warning(
+                    "discord.dm.restart_failed",
+                    causes=backend_refusal_causes(exc),
+                    error_type=type(exc).__name__,
+                )
                 text = _error_text(
                     exc,
                     "Couldn't start a new conversation. Please retry.",
@@ -906,7 +911,11 @@ class DirectMessageCog(commands.Cog):
                 embed=build_notice_embed("Ready in your DMs.", neutral=True), ephemeral=True
             )
         except _DM_FAILURES as exc:
-            log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.move_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             message = _error_text(
                 exc,
                 "Couldn't open the conversation. Check that your DMs are open and retry.",
@@ -1031,6 +1040,7 @@ class DirectMessageCog(commands.Cog):
         except _DM_FAILURES as exc:
             log.warning(
                 "discord.dm.reply_failed",
+                causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
             )
@@ -1359,7 +1369,11 @@ class DirectMessageCog(commands.Cog):
                 path="dm",
                 alert_webhook_url=self.bot.runtime.settings.ops.alert_webhook_url,
             )
-            log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.turn_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             if isinstance(exc, DirectMessageAccessRevoked):
                 self._suppress(message, exc.reason)
                 return

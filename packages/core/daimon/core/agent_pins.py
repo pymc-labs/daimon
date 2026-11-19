@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import replace
 from datetime import datetime
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -25,9 +26,10 @@ from daimon.core.authz import (
     agent_names,
     authorize,
     build_agent_ref,
+    origin_ids,
 )
 from daimon.core.native_admins import load_stored_subject
-from daimon.core.permissions import any_agent_rules
+from daimon.core.permissions import SEALED_REFUSAL, any_agent_rules
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -100,11 +102,17 @@ async def pin_refusal(
         ),
         place=place,
     )
-    return None if decision else PIN_WRITE_REFUSAL
+    if decision:
+        return None
+    return SEALED_REFUSAL if decision.reason == "sealed_channel" else PIN_WRITE_REFUSAL
 
 
 async def request_pin_refusal(
-    session: AsyncSession, *, row: CredentialRequestRow, agent: BetaManagedAgentsAgent | None
+    session: AsyncSession,
+    *,
+    row: CredentialRequestRow,
+    agent: BetaManagedAgentsAgent | None,
+    location_verified: bool = False,
 ) -> str | None:
     """Refusal copy when a private form may not be applied to its pinned target, else None.
 
@@ -115,15 +123,25 @@ async def request_pin_refusal(
     stored role, the signal the MCP gate reads too; so are the requester's
     A stored Slack group or Teams team counts for nothing here: the check runs
     under the policy lock, so it makes no live lookup (`load_stored_subject`).
+
+    ``location_verified`` is for a caller that has just checked the click came from the
+    channel and thread the form was posted in. Then the submitter is inside that place
+    for the inside-only rule of a private channel's agent (`sealed_outside`). A web,
+    link or unchecked caller leaves it False: it proves no place, so it is outside.
     """
 
     async def stored_subject() -> Subject:
-        return await load_stored_subject(
+        subject = await load_stored_subject(
             session,
             tenant_id=row.tenant_id,
             platform=row.platform,
             account_id=row.account_id,
             platform_user_id=row.requester_platform_user_id,
+        )
+        if not location_verified:
+            return subject
+        return replace(
+            subject, origin_channel_ids=origin_ids(row.parent_channel_id, row.origin_thread_id)
         )
 
     async def target() -> BetaManagedAgentsAgent | None:
@@ -154,6 +172,7 @@ async def consume_form_unless_pinned(
     row: CredentialRequestRow,
     agent: BetaManagedAgentsAgent | None,
     now: datetime,
+    location_verified: bool = False,
 ) -> CredentialRequestRow | None:
     """Decide the pin rule and spend the form in the caller's consume transaction.
 
@@ -168,7 +187,9 @@ async def consume_form_unless_pinned(
     `consume_credential_request`: None when the form is no longer consumable.
     """
     await lock_access_policy(session, tenant_id=row.tenant_id)
-    refusal = await request_pin_refusal(session, row=row, agent=agent)
+    refusal = await request_pin_refusal(
+        session, row=row, agent=agent, location_verified=location_verified
+    )
     if refusal is not None:
         raise FormPinRefused(refusal)
     return await consume_credential_request(session, token=row.token, now=now)

@@ -272,6 +272,7 @@ async def test_add_upload_and_publish_replace_native_agents_with_durable_exact_p
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill()),
+        reply("GET", "/skills/uploaded/versions/1", version("uploaded")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/uploaded/versions/1", version()),
         reply("POST", "/agents", raw_agent(first, case.scope, "replacement-1")),
@@ -279,6 +280,7 @@ async def test_add_upload_and_publish_replace_native_agents_with_durable_exact_p
         reply("GET", "/skills/uploaded", native_skill()),
         reply("GET", "/agents/replacement-1", raw_agent(first, case.scope, "replacement-1")),
         reply("POST", "/skills/uploaded/versions", version(value="2")),
+        reply("GET", "/skills/uploaded/versions/2", version(value="2")),
         reply("GET", "/agents/replacement-1", raw_agent(first, case.scope, "replacement-1")),
         reply("GET", "/skills/uploaded/versions/2", version(value="2")),
         reply("POST", "/agents", raw_agent(second, case.scope, "replacement-2")),
@@ -335,10 +337,10 @@ async def test_add_upload_and_publish_replace_native_agents_with_durable_exact_p
             == b"---\nname: notes\ndescription: Work carefully\n---\nWrite notes.\n"
         )
     assert (
-        json.loads(case.trace.requests[5].body)["metadata"]["mux_skill_pins"]
+        json.loads(case.trace.requests[6].body)["metadata"]["mux_skill_pins"]
         == '[{"id":"uploaded","version":"1"}]'
     )
-    actual_tools = json.loads(case.trace.requests[5].body)["tools"]
+    actual_tools = json.loads(case.trace.requests[6].body)["tools"]
     assert actual_tools == [
         {"type": "web_search"},
         {
@@ -370,6 +372,7 @@ async def test_restart_reuses_retained_upload_after_failed_attachment_without_an
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill()),
+        reply("GET", "/skills/uploaded/versions/1", version("uploaded")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/uploaded/versions/1", version()),
         reply("POST", "/agents", {"error": {"message": "offline attach failure"}}, 500),
@@ -430,6 +433,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill("new-owned")),
+        reply("GET", "/skills/new-owned/versions/1", version("new-owned")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/shared/versions/1", version("shared")),
         reply("GET", "/skills/new-owned/versions/1", version("new-owned")),
@@ -444,7 +448,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             tenant_id=uuid.UUID(case.scope.tenant_id),
             platform="discord",
             channel_id="123",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default=DeploymentDefault(agent_name="source"),
             readers="own",
             writers="own",
@@ -460,7 +464,7 @@ async def test_actual_channel_rule_copy_keeps_owned_bundle_and_shared_pin_and_re
             tenant_id=uuid.UUID(case.scope.tenant_id),
             platform="discord",
             channel_id="123",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default=DeploymentDefault(agent_name="source"),
             readers="own",
             writers="own",
@@ -587,7 +591,7 @@ async def test_source_owned_unversioned_pin_needs_native_default_resolution_befo
                 case.sessions,
                 source_name="source",
                 new_name="copy",
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default_agent_name=None,
             )
     case.trace.assert_consumed()
@@ -615,6 +619,7 @@ async def test_injected_real_driver_pin_resolver_copies_native_default_not_newes
         ),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill("copied-owned")),
+        reply("GET", "/skills/copied-owned/versions/1", version("copied-owned")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/copied-owned/versions/1", version("copied-owned")),
         reply("POST", "/agents", raw_agent(copied, case.scope, "copy-agent")),
@@ -637,7 +642,7 @@ async def test_injected_real_driver_pin_resolver_copies_native_default_not_newes
             case.sessions,
             source_name="source",
             new_name="copy",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default_agent_name=None,
         )
     case.trace.assert_consumed()
@@ -668,7 +673,7 @@ async def test_failed_owned_skill_copy_is_reported_and_shared_pin_survives(setup
             case.sessions,
             source_name="source",
             new_name="copy",
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             default_agent_name=None,
         )
     case.trace.assert_consumed()
@@ -705,6 +710,7 @@ async def test_catalog_cas_race_retains_native_replacements_without_a_fenced_unp
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill()),
+        reply("GET", "/skills/uploaded/versions/1", version("uploaded")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/uploaded/versions/1", version()),
         reply("POST", "/agents", raw_agent(desired, case.scope, "losing-replacement")),
@@ -872,6 +878,7 @@ async def test_unknown_catalog_commit_keeps_the_published_native_ref_and_restart
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("POST", "/skills", native_skill()),
+        reply("GET", "/skills/uploaded/versions/1", version("uploaded")),
         reply("GET", "/agents/original", raw_agent(original, case.scope)),
         reply("GET", "/skills/uploaded/versions/1", version()),
         reply("POST", "/agents", raw_agent(desired, case.scope, "replacement")),
@@ -895,7 +902,7 @@ async def test_unknown_catalog_commit_keeps_the_published_native_ref_and_restart
         )
     case.trace.assert_consumed()
     assert recovered.action == "unchanged" and not recovered.newly_attached
-    assert all(request.method == "GET" for request in case.trace.requests[6:])
+    assert all(request.method == "GET" for request in case.trace.requests[7:])
     assert all(request.method != "DELETE" for request in case.trace.requests)
     current = await case.catalog.get_agent(case.scope, "source")
     assert current is not None and current.agent.ref.id == "replacement"
@@ -982,7 +989,7 @@ async def test_channel_rule_refuses_mismatched_resource_scope_before_lookup(
                 ),
                 platform="discord",
                 channel_id="123",
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default=DeploymentDefault(agent_name="source"),
                 readers="own",
                 resource_host=case.host(sdk),

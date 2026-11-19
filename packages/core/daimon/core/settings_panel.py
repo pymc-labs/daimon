@@ -25,6 +25,7 @@ from typing import Final
 
 from anthropic import AsyncAnthropic
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.authz import origin_ids
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -38,10 +39,11 @@ from daimon.core.features.service import (
     change_feature,
     read_features,
     tier_word,
+    unseen_setup_allows,
     where,
 )
 from daimon.core.features.service import change_refusal as feature_refusal
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, lacks_only_server_setup
 from daimon.core.features.surface import (
     CATEGORIES,
     change_note,
@@ -120,19 +122,37 @@ async def chat_actor(
     return FeatureActor(tenant_id, account, "panel", user_id, admin_for)
 
 
+def _names_from(agents: AgentLoader) -> Callable[[str], Awaitable[Sequence[str | None]]]:
+    async def names(agent_id: str) -> Sequence[str | None]:
+        return [a.name for a in await agents() if a.id == agent_id]
+
+    return names
+
+
 async def apply_choice(
     sessions: Sessions,
     settings: Settings,
     actor: FeatureActor,
     raw: object,
     place: FeaturePlace,
+    *,
+    agents: AgentLoader | None = None,
 ) -> tuple[bool, str] | None:
     """Apply a pressed choice (`features.surface.parse_choice`): ``(True, what changed)``,
-    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing."""
+    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing.
+
+    The panel's own channel is where the press started: the platform shows the panel only to
+    someone who can see that channel (`FeatureActor.inside`)."""
     if (choice := parse_choice(raw)) is None:
         return None
-    if choice.agent:
-        place = replace(place, agent_id=choice.agent)
+    chosen = choice.agent
+    actor = replace(
+        actor,
+        inside=origin_ids(place.channel_id, place.thread_id),
+        agent_names=_names_from(agents) if agents is not None else None,
+    )
+    if chosen:
+        place = replace(place, agent_id=chosen)
     try:
         change = await change_feature(
             sessions,
@@ -251,7 +271,8 @@ def _short(view: FeatureView, platform: str) -> str:
 
 async def _root(sessions: Sessions, settings: Settings, place: FeaturePlace) -> PanelScreen:
     specs = _on_platform(place)
-    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
+    views = listed(views, settings, place)
     groups = {view.spec.category for view in views}
     here = "this thread" if place.thread_id else "this channel"
     return PanelScreen(
@@ -279,7 +300,8 @@ async def _category(
     wanted: int,
 ) -> PanelScreen:
     specs = [spec for spec in _on_platform(place) if spec.category == category]
-    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
+    views = listed(views, settings, place)
     page, first, last = _page(len(views), wanted)
     shorts = [(view.spec, _short(view, place.platform)) for view in views[first:last]]
     return PanelScreen(
@@ -322,7 +344,8 @@ async def _feature(
     )
     title = spec.name
     lines = [f"In effect: {source_text(spec, view.resolved, place.platform)}."]
-    if view.resolved.unavailable is not None:
+    unseen = lacks_only_server_setup(spec, settings, place)
+    if view.resolved.unavailable is not None and not unseen:
         return PanelScreen(title, tuple(lines), back=back)
     selects: list[PanelSelect] = []
     paging: tuple[PanelOption, ...] = ()
@@ -345,6 +368,13 @@ async def _feature(
             page=page,
             picker=picker_page,
         )
+        if unseen:  # Setup only the MCP server may carry: Off and its lock still apply.
+            options = tuple(
+                (token, label)
+                for token, label in options
+                if (picked := parse_choice(token)) is not None
+                and unseen_setup_allows(spec, picked.value, settings, place)
+            )
         if options:
             choices = tuple(PanelOption(value, label) for value, label in options)
             selects.append(PanelSelect(f"Change for {where(own.tier, place.platform)}", choices))
@@ -454,7 +484,7 @@ async def press(
         return await show(sessions, settings, actor, place, raw, agents=agents)
     if not FEATURES[choice.key].on_platform(place.platform):
         return None
-    done = await apply_choice(sessions, settings, actor, raw, place)
+    done = await apply_choice(sessions, settings, actor, raw, place, agents=agents)
     if done is None:
         return None
     screen = await _feature(

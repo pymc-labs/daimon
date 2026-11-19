@@ -146,7 +146,7 @@ class ThreadModelChange:
     model_id: str | None
     """The model now chosen, None for the agent's own."""
     note: str
-    """What to tell the person, in one sentence."""
+    """What to tell the person: the change, then anything off on the new provider."""
     effort: str | None = None
     """The effort now chosen, None for the agent's own."""
 

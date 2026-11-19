@@ -51,7 +51,11 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
+from daimon.core.channel_backend import (
+    backend_refusal_causes,
+    effective_thread_backend,
+    is_selfhosted_channel,
+)
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
@@ -110,6 +114,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
+    routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
@@ -181,7 +186,6 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
-from daimon.core.web_links import WebLinks
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
@@ -206,8 +210,10 @@ def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Await
     async def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
         try:
             await step(*args, **kwargs)
-        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError):
-            log.exception("scheduler.step.failed", step=step.__name__)
+        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError) as error:
+            log.exception(
+                "scheduler.step.failed", step=step.__name__, causes=backend_refusal_causes(error)
+            )
 
     return guarded
 
@@ -470,7 +476,7 @@ async def _build_fire(
                 row,
                 platform="discord",
                 direct_post=direct_post,
-                web=WebLinks.from_settings(settings.web),
+                web=await routine_links(sm, settings, row, "discord"),
             )
             + "\n"
             + row.trigger_message
@@ -923,7 +929,7 @@ async def _build_fire(
                     row,
                     platform=platform,
                     direct_post=direct_post,
-                    web=WebLinks.from_settings(settings.web),
+                    web=await routine_links(sm, settings, row, platform),
                     held=fire_hold is not None,
                 )
                 + "\n"
@@ -1030,8 +1036,8 @@ async def _sweep_pending_files(
     """
     try:
         await sweep_pending_file_deletes(client, sm, now=datetime.now(UTC))
-    except anthropic.APIError:
-        log.exception("scheduler.sweep.failed")
+    except anthropic.APIError as error:
+        log.exception("scheduler.sweep.failed", causes=backend_refusal_causes(error))
 
 
 @scheduler_step
@@ -1058,11 +1064,11 @@ async def _sweep_headless_usage(
     """
     try:
         await sweep_headless_usage(client, sm, markup=markup)
-    except (anthropic.APIError, SQLAlchemyError):
+    except (anthropic.APIError, SQLAlchemyError) as error:
         # Named boundary: a sweep failure (upstream MA error OR a DB write that
         # trips a constraint, e.g. a stray foreign-tenant session) must not kill
         # the sweep loop. Idempotent recording means the next pass retries.
-        log.exception("scheduler.usage_sweep.failed")
+        log.exception("scheduler.usage_sweep.failed", causes=backend_refusal_causes(error))
 
 
 @scheduler_step
@@ -1229,8 +1235,8 @@ async def _archive_idle_relay_vaults(
     _last_relay_vault_archive["started"] = current
     try:
         await archive_idle_relay_vaults(client, now=current)
-    except (anthropic.APIError, ValueError):
-        log.exception("scheduler.relay_vault_archive.failed")
+    except (anthropic.APIError, ValueError) as error:
+        log.exception("scheduler.relay_vault_archive.failed", causes=backend_refusal_causes(error))
 
 
 @scheduler_step

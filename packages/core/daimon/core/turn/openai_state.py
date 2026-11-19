@@ -109,15 +109,27 @@ async def invocation_baseline(
     return observed_roots, False
 
 
+async def _newest(session: ResourceRef, observation_id: str) -> Event | None:
+    current: Event | None = None
+    for row in await journal(session):
+        if row.type == _REVISION and row.payload.get("observation_id") == observation_id:
+            current = row
+    return current
+
+
 class OpenAIUsageRevisions:
+    async def latest(
+        self, session: ResourceRef, observation_id: str
+    ) -> Mapping[str, JsonValue] | None:
+        current = await _newest(session, observation_id)
+        meter = current.payload.get("meter") if current is not None else None
+        return object_json(meter) if isinstance(meter, dict) else None
+
     async def revise(
         self, session: ResourceRef, observation_id: str, meter: Mapping[str, JsonValue]
     ) -> int:
         active = persistence(session)
-        current: Event | None = None
-        for row in await journal(session):
-            if row.type == _REVISION and row.payload.get("observation_id") == observation_id:
-                current = row
+        current = await _newest(session, observation_id)
         value = object_json(dict(meter))
         revision = 1
         if current is not None:

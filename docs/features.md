@@ -13,6 +13,10 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
+A chat conversation picks up a change to a feature that hides tools at its next message.
+A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
+with; Daimon refuses a tool turned Off since then.
+
 ## All features
 
 Where each feature can be set, and its default.
@@ -30,7 +34,7 @@ Where each feature can be set, and its default.
 | Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -70,7 +74,9 @@ Where each feature can be set, and its default.
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Feedback to support | `support_feedback` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -314,9 +320,9 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Web app links
+## Web app
 
-Each message tells the agent the web app's address and the pages it may link to.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
 
 | | |
 | --- | --- |
@@ -761,14 +767,39 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
+Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
 
 | | |
 | --- | --- |
 | Key | `support_escalation` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Feedback to support
+
+A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+
+| | |
+| --- | --- |
+| Key | `support_feedback` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` |
+
+## Own support channel
+
+An admin may send Ask a person requests to a channel of their own instead of the default one; whoever runs Daimon then no longer sees them. Off sends every request to the default channel.
+
+| | |
+| --- | --- |
+| Key | `support_own_channel` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment |
 | Combines | Off above is a ceiling |
 
 ## GitHub access

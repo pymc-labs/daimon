@@ -10,6 +10,7 @@ import structlog
 from anthropic.types.beta import SkillListResponse
 from daimon.core.defaults.ma_index import (
     _SKILLS_PAGE_LIMIT,  # pyright: ignore[reportPrivateUsage]
+    agent_id_in_tenant,
     find_agent_by_daimon_tag,
     find_skill_by_display_title,
     list_skills_lenient,
@@ -428,3 +429,22 @@ async def test_find_skill_by_display_title_degrade_returns_match_on_full_page() 
     assert match is not None and match.id == "sk_target", (
         "degrade mode must return the match from a full page"
     )
+
+
+async def test_agent_id_in_tenant_when_named_by_id_or_name_then_only_the_tenants_resolve() -> None:
+    mine = ma_agent(id="agent_mine", name="daimon", tenant_id=_TENANT).model_dump(mode="json")
+    theirs = ma_agent(id="agent_theirs", name="other", tenant_id=_OTHER_TENANT).model_dump(
+        mode="json"
+    )
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([mine, theirs]))
+    client = build_fake_anthropic_http(router.dispatch)
+
+    async def resolve(ref: str) -> str | None:
+        return await agent_id_in_tenant(client, tenant_id=_TENANT, ref=ref)
+
+    assert await resolve("agent_mine") == "agent_mine", "an id of the tenant's agent"
+    assert await resolve("agent_nope") is None, "an id nobody has"
+    assert await resolve("agent_theirs") is None, "another tenant's agent"
+    assert await resolve("daimon") == "agent_mine", "a name resolves to its id"
+    assert await resolve("ghost") is None, "an unknown name"

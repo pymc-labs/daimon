@@ -56,6 +56,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import EnvironmentPicker
 from daimon.core.errors import DaimonError
 from daimon.core.platform_words import words_for
@@ -509,6 +510,7 @@ class RoutingView(PanelViewBase):
                 tenant_id=str(panel_tenant_id(self.state)),
                 channel_id=str(self.state.channel_id),
                 actor_account_id=str(self.state.account_id),
+                causes=backend_refusal_causes(error),
             )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True

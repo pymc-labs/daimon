@@ -75,7 +75,9 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
         seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
     place = _place(actor)
     views = await read_features(db_session_factory, _settings(), place)
-    discord = {v.spec.key for v in listed(views) if v.spec.on_platform("discord")}
+    discord = {
+        v.spec.key for v in listed(views, _settings(), place) if v.spec.on_platform("discord")
+    }
     assert seen == discord, "the groups list exactly the features that are set up or set"
 
 
@@ -89,7 +91,7 @@ async def test_a_feature_that_is_not_set_up_and_not_set_is_not_listed(
         v.spec.key
         for v in views
         if v.spec.on_platform("discord") and v.resolved.unavailable is not None
-    } - {v.spec.key for v in listed(views)}
+    } - {v.spec.key for v in listed(views, _settings(), _place(actor))}
     assert hidden, "the test deployment must have a feature that is not set up"
     root = await panel.open_panel(db_session_factory, _settings(), actor, _place(actor))
     shown: set[str] = set()
@@ -210,7 +212,10 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
     for platform in ("discord", "slack", "teams"):
         place = FeaturePlace.of(actor.tenant_id, platform, "C1")
         shown = {
-            v.spec.key for v in listed(await read_features(db_session_factory, _settings(), place))
+            v.spec.key
+            for v in listed(
+                await read_features(db_session_factory, _settings(), place), _settings(), place
+            )
         }
         for category in {spec.category for spec in FEATURES.values()}:
             screen = await panel.show(
@@ -432,7 +437,11 @@ async def test_a_long_group_pages_and_every_setting_is_reachable(
     keys = [o.value for p in pages for o in p.selects[0].options]
     shown = {
         v.spec.key
-        for v in listed(await read_features(db_session_factory, _settings(), _place(actor)))
+        for v in listed(
+            await read_features(db_session_factory, _settings(), _place(actor)),
+            _settings(),
+            _place(actor),
+        )
         if v.spec.category == "chat" and v.spec.on_platform("discord")
     }
     assert len(pages) > 1, "the group needs more than one page"

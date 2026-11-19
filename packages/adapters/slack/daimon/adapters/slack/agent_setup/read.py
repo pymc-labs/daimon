@@ -13,6 +13,7 @@ from collections.abc import Iterable
 
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.web_button import web_links_at
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
@@ -22,7 +23,6 @@ from daimon.core.scope import (
     DeploymentDefault,
 )
 from daimon.core.stores.identity import get_slack_principal_for_account
-from daimon.core.web_links import panel_links
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -144,7 +144,14 @@ async def load_panel_details(
         public_mcp_url=public_mcp_url(runtime),
         is_admin=is_admin,
         channel_label=f"<#{channel_id}>",
-        web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+        web=await web_links_at(
+            runtime,
+            tenant_id,
+            admin=is_admin,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            agent_id=match.ma_agent_id,
+        ),
         records=runtime.sessionmaker,
     )
 

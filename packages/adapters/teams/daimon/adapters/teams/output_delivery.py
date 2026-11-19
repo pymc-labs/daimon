@@ -60,6 +60,7 @@ from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.image_preview import MAX_PREVIEWS, preview_attachment
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.media.vision import sniff_image_media_type
 from daimon.core.output_delivery import (
@@ -718,7 +719,12 @@ class TeamsOutputDelivery:
             *TEAMS_SEND_ERRORS,
         ) as err:
             # The output stays listed, so the next sweep offers it again.
-            log.warning("teams.file_upload.failed", file_id=offer.file_id, error=type(err).__name__)
+            log.warning(
+                "teams.file_upload.failed",
+                file_id=offer.file_id,
+                error=type(err).__name__,
+                causes=backend_refusal_causes(err),
+            )
             await self._say(
                 offer.conversation_id, offer.service_url, _UPLOAD_FAILED.format(name=offer.filename)
             )

@@ -168,22 +168,34 @@ def test_notification_text_is_the_headline(kind: CardKind, state: CardState) -> 
 @pytest.mark.parametrize("kind", ["call", "switch"])
 def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> None:
     """A call or switch press is answered in place, so the click carries the card id, no token."""
-    import datetime as dt
-    import uuid
-
-    from daimon.core.switch_cards import requested_switch_card
-
-    card = requested_switch_card(
-        uuid.uuid4(),
-        title="Change the model?",
-        facts=("Researcher moves to OpenAI.",),
-        requester_platform_user_id=REQUESTER,
-        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
-    ).model_copy(update={"kind": kind})
+    card = _control_card(kind, REQUESTER)
     blocks = build_card_blocks(card)
     (actions,) = [b for b in blocks if b["type"] == "actions"]
     ids = [e["action_id"] for e in actions["elements"]]
     assert ids == [b.custom_id for b in card.buttons], "each button routes by its custom id"
     assert [e.get("style") for e in actions["elements"]] == [None, "primary"], (
         "only the rightmost button, the card's own action, is filled"
+    )
+
+
+def _control_card(kind: str, requester: str):
+    """A posted control card with Cancel and the filled action rightmost, as posted cards are."""
+    import datetime as dt
+    import uuid
+
+    from daimon.core.posted_controls import FOOTER_TEMPLATE, CardButton, PostedCard
+
+    card_id = uuid.uuid4()
+    return PostedCard(
+        kind=kind,  # pyright: ignore[reportArgumentType]
+        state="requested",
+        headline="Change the model?",
+        facts=("Researcher moves to OpenAI.",),
+        buttons=(
+            CardButton(label="Cancel", style="secondary", custom_id=f"bsw:{card_id}:cancel"),
+            CardButton(label="Switch", style="primary", custom_id=f"bsw:{card_id}:confirm"),
+        ),
+        footer=FOOTER_TEMPLATE,
+        requester_platform_user_id=requester,
+        expires_at_unix=int((dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)).timestamp()),
     )

@@ -66,6 +66,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.continuity.handoff import (
     HandoffAllowed,
@@ -208,6 +209,7 @@ async def recorded_thread_sessions(
                 "thread_handoff.session_unreadable",
                 session_id=row.ma_session_id,
                 error=type(error).__name__,
+                causes=backend_refusal_causes(error),
             )
             facts = SessionFacts(seal_ids=frozenset({_UNREAD_SEAL}))
         else:

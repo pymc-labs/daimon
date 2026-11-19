@@ -1,9 +1,8 @@
-"""A model pick, previewed for the agent editor: the switch card when it asks first."""
+"""A model pick, previewed for the agent editor and the chat: what is off on the new provider."""
 
 from __future__ import annotations
 
-from daimon.core.agent_changes import SwitchConsent
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal, switch_card_text
+from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import BaseModel
 
@@ -17,81 +16,47 @@ class PreviewRefusal(BaseModel):
 
 class ModelPreview(BaseModel):
     """What a pick changes. `moves` is false when it only edits the agent's own record;
-    `card` is true when the pick asks first, with the card's `title` and `lines`."""
+    `lines` say what is off on the new provider, as information."""
 
     moves: bool
-    card: bool
     allowed: bool
     skills: list[str]
     servers: list[str]
     capabilities: list[str]
-    title: str
-    #: The lines under the title, as every switch card says them.
+    #: What is off on the new provider, as every surface says it.
     lines: list[str]
-    #: Every drop the person accepts by confirming, as the apply must send them back.
+    #: The parts that are off there, by kind.
     drops: list[str]
-    digest: str
-    revision: int
     refusal: PreviewRefusal | None = None
 
 
-def preview_doc(
-    switch: ModelSwitchPreview, *, agent_name: str | None, card: bool | None = None
-) -> ModelPreview:
-    """The preview as the editor shows it; `card` defaults to the switch's own rule. Pure."""
+def preview_doc(switch: ModelSwitchPreview) -> ModelPreview:
+    """The preview as the editor and the chat show it. Pure."""
     found = switch.preview
-    title, *lines = switch_card_text(switch, agent_name=agent_name)
     if found is None:
         return ModelPreview(
-            moves=False,
-            card=False,
-            allowed=True,
-            skills=[],
-            servers=[],
-            capabilities=[],
-            title=title,
-            lines=[],
-            drops=[],
-            digest="",
-            revision=0,
+            moves=False, allowed=True, skills=[], servers=[], capabilities=[], lines=[], drops=[]
         )
     return ModelPreview(
         moves=not switch.model.provider == switch.before == DEFAULT_BACKEND,
-        card=switch.asks_first if card is None else card,
         allowed=found.allowed,
         skills=list(found.unsupported_skills),
         servers=list(found.unsupported_mcps),
         capabilities=list(found.unsupported_capabilities),
-        title=title,
-        lines=lines,
+        lines=list(switch.lines()),
         drops=list(found.declared_drops),
-        digest=found.digest,
-        revision=found.setting_revision,
     )
 
 
 def refused_doc(refusal: SwitchRefusal) -> ModelPreview:
-    """A pick that can't go ahead: nothing to confirm, the way out to offer. Pure."""
+    """A pick that can't go ahead, and the way out to offer. Pure."""
     return ModelPreview(
         moves=True,
-        card=True,
         allowed=False,
         skills=[],
         servers=[],
         capabilities=[],
-        title="",
         lines=[],
         drops=[],
-        digest="",
-        revision=0,
         refusal=PreviewRefusal(line=refusal.line, action=refusal.action),
     )
-
-
-def consent_of(
-    drops: list[str] | None, digest: str | None, revision: int | None
-) -> SwitchConsent | None:
-    """The consent an apply carries, or None when the pick showed no preview. Pure."""
-    if digest is None or revision is None:
-        return None
-    return SwitchConsent(accepted_drops=tuple(drops or ()), digest=digest, revision=revision)

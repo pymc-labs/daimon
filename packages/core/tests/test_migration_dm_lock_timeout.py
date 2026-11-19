@@ -10,7 +10,7 @@ from alembic.operations import Operations
 
 
 @pytest.mark.parametrize(
-    "name", ["0134_cold_dm_agent", "0135_routine_dm_destination", "0207_dm_access"]
+    "name", ["0134_cold_dm_agent", "0135_routine_dm_destination", "0209_dm_access"]
 )
 def test_dm_upgrade_sets_lock_timeout_before_ddl(name: str) -> None:
     path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"

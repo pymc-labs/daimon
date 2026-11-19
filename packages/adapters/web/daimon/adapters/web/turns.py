@@ -26,6 +26,7 @@ from daimon.adapters.web.stream import StreamRegistry, TurnStream
 from daimon.adapters.web.stream_events import ReplyView
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Surface
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, WebSettings
 from daimon.core.direct_messages import bounded_turns
 from daimon.core.errors import UserFacingError
@@ -551,7 +552,11 @@ class WebTurns:
             )
         except (anthropic.APIError, ProviderError, OutputPostingUnavailable) as err:
             # Files missed now stay listed; the session's next tool turn sweeps them.
-            log.warning("web.output.sweep_failed", err_type=type(err).__name__)
+            log.warning(
+                "web.output.sweep_failed",
+                err_type=type(err).__name__,
+                causes=backend_refusal_causes(err),
+            )
         return tuple(kept)
 
     def _recover(

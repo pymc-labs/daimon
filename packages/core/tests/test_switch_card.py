@@ -1,12 +1,12 @@
-"""The one switch-card rule and the short card every surface shows."""
+"""What a switch turns off, said once as information after it applies."""
 
 from __future__ import annotations
 
 import uuid
 
-from daimon.core.model_switch import ModelSwitchPreview, switch_card_text
+from daimon.core.model_switch import ModelSwitchPreview
 from daimon.core.stores.domain import CompatibilityPreview
-from daimon.core.switch_card import loss_words, needs_switch_card, switch_card_lines
+from daimon.core.switch_card import loss_words, switch_lines
 from mux.contracts.ids import ModelRef
 
 _LIMIT = "Shared threads are unavailable on this selection."
@@ -28,11 +28,7 @@ def _preview(
         cost_line="Costs about the same per message",
         allowed=allowed,
         digest="d" * 64,
-        drop_consent={
-            "declared_drops": list(drops),
-            "source_pin": "a" * 64,
-            "target_digest": "b" * 64,
-        },
+        declared_drops=drops,
         skill_names={"sk_1": "Pricing"},
     )
 
@@ -46,19 +42,35 @@ def _switch(preview: CompatibilityPreview | None) -> ModelSwitchPreview:
     )
 
 
-def test_a_switch_that_loses_nothing_needs_no_card() -> None:
-    """No drop and no shared-thread limit: the pick applies at once, like a Claude model."""
-    assert not needs_switch_card(None), "Claude to Claude has no preview"
-    assert not needs_switch_card(_preview()), "a lossless cross-provider pick"
-    assert not _switch(_preview()).asks_first, "the pick's own rule agrees"
+def test_a_switch_that_loses_nothing_says_nothing() -> None:
+    """No drop and no shared-thread limit: no line at all, like a pick between Claude models."""
+    assert _switch(None).lines() == (), "Claude to Claude has no preview"
+    assert _switch(_preview()).lines() == (), "a lossless cross-provider pick"
+    assert _switch(None).allowed, "a pick without a preview is allowed"
 
 
-def test_any_drop_or_shared_limit_needs_the_card() -> None:
-    """Every declared drop counts, web search included; so does a shared-thread limit."""
-    assert needs_switch_card(_preview(("builtin_tool:web_search",))), "web search alone asks"
-    assert needs_switch_card(_preview(("memory",))), "memory asks"
-    assert needs_switch_card(_preview(limits=(_LIMIT,))), "a shared-thread limit asks"
-    assert _switch(_preview(allowed=False)).asks_first, "a pick that is off here never applies"
+def test_what_is_off_is_one_line_of_information_then_any_limit() -> None:
+    """The losses name the provider and say they come back; no question, no price."""
+    lines = switch_lines(_preview(("memory", "skill:sk_1"), limits=(_LIMIT,)))
+    assert lines == (
+        "Off on OpenAI: memory and Pricing skill. They come back when you switch back.",
+        _LIMIT,
+    ), lines
+    assert not any("?" in line for line in lines), "information, never a question"
+    assert "Costs" not in " ".join(lines), "the price stays on the model select"
+    assert switch_lines(_preview(limits=(_LIMIT,))) == (_LIMIT,), "no empty loss line"
+
+
+def test_lines_escape_names_for_the_surface() -> None:
+    """A surface's escape reaches every name it shows."""
+    lines = _switch(_preview(("memory",), limits=(_LIMIT,))).lines(escape=str.upper)
+    assert lines[0].endswith("MEMORY. They come back when you switch back."), lines
+    assert lines[1] == _LIMIT.upper(), lines
+
+
+def test_a_pick_that_is_off_here_is_not_allowed() -> None:
+    """The provider gate stays: a refused target reads as not allowed."""
+    assert not _switch(_preview(allowed=False)).allowed, "a provider off here never applies"
 
 
 def test_the_loss_words_name_saved_keys_first() -> None:
@@ -69,14 +81,3 @@ def test_the_loss_words_name_saved_keys_first() -> None:
     assert loss_words(tuple(f"mcp_server:{'m' * 60}{i}" for i in range(20))).endswith("…"), (
         "a long list is clipped"
     )
-
-
-def test_the_card_is_a_title_and_one_line_per_fact() -> None:
-    """Title, what stops working, any limit; no price, no None lines, no category labels."""
-    text = switch_card_text(_switch(_preview(("memory",), limits=(_LIMIT,))), agent_name="Ada")
-    assert text == ("Switch Ada to GPT-5?", "Stops working: memory", _LIMIT), text
-    assert "Costs" not in " ".join(text), "the price stays on the model select"
-    assert switch_card_lines(_preview(limits=(_LIMIT,))) == (_LIMIT,), "no empty loss line"
-    assert switch_card_text(_switch(_preview()), agent_name=None) == (
-        "Switch this conversation to GPT-5?",
-    ), "a conversation pick names the conversation"

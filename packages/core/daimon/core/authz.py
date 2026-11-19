@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Literal
@@ -33,6 +33,7 @@ from daimon.core.permissions import (
     readable_from,
     ruled_agents,
     run_refusal,
+    sealed_outside,
     session_homes,
     session_readable_from,
 )
@@ -106,6 +107,8 @@ class Action(StrEnum):
     MANAGE_AGENTS = "manage_agents"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
+    # Set support limits, menus and the request channel, or settle a request by hand.
+    SET_SUPPORT = "set_support"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"
     # Set or clear an agent's third-party MCP tool rule: current human admins only.
@@ -145,6 +148,27 @@ class Surface(StrEnum):
 
 
 #: Surfaces whose output reaches only the acting admin.
+#: Every action that changes a channel or an agent. Allowed only from inside a private
+#: channel, or its own agent's channel (`sealed_outside`), for admins too. A caller passes the
+#: real policy, the `place` of the channel and the `agent` it changes, or this cannot see them.
+SEALED_SETTINGS_ACTIONS = frozenset(
+    {
+        Action.CONFIGURE,
+        Action.CHANGE_SHARED_AGENT,
+        Action.MINT_CODING_TOKEN,
+        Action.SET_CHANNEL_ENVIRONMENT,
+        Action.SET_CHANNEL_RULE,
+        Action.SET_APPROVAL_GATE,
+        Action.SET_AGENT_RULE,
+        Action.ARCHIVE_CHANNEL_COPY,
+        Action.MANAGE_AGENTS,
+        Action.SET_CHANNEL_BUDGET,
+        Action.SET_CHANNEL_SKILLS,
+        Action.SET_AGENT_TOOL_RULE,
+        Action.SET_CHANNEL_AGENT_TOOL_RULE,
+    }
+)
+
 _ADMIN_ONLY_SURFACES = frozenset({Surface.DM, Surface.HUB})
 
 
@@ -168,6 +192,18 @@ class Subject:
     # The requester belongs to another organisation (or the platform could not
     # say): never an admin, and refused everything outside the held channel.
     client: bool = False
+    # Where the request verifiably started, for a change to a private channel or
+    # its own agent (`sealed_outside`): the channel and thread of the panel, or of
+    # the chat turn. Empty for the web app, the hub and a DM. Never read for an
+    # agent key, which keeps an old origin.
+    origin_channel_ids: frozenset[str] = frozenset()
+    # The deployment operator's own CLI: no person's request, the recovery path.
+    operator: bool = False
+
+    @property
+    def inside(self) -> frozenset[str]:
+        """The channels this request is inside; none for an agent key."""
+        return frozenset() if self.via_agent_key else self.origin_channel_ids
 
 
 @dataclass(frozen=True)
@@ -296,6 +332,8 @@ DenyReason = Literal[
     "outside_hold",
     # A client's call named no origin channel to be held to.
     "origin_required",
+    # A change to a private channel or its own agent must come from inside the channel.
+    "sealed_channel",
 ]
 
 
@@ -373,6 +411,7 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.MANAGE_INTEGRATIONS,
         Action.MANAGE_AGENTS,
         Action.SET_CHANNEL_BUDGET,
+        Action.SET_SUPPORT,
         Action.SET_CHANNEL_SKILLS,
         Action.SET_AGENT_TOOL_RULE,
         Action.SET_CHANNEL_AGENT_TOOL_RULE,
@@ -398,6 +437,8 @@ def _inside_hold(hold: TurnHold, at: Place) -> bool:
 
 
 def _session_inside_hold(hold: TurnHold, facts: SessionFacts) -> bool:
+    if hold.relay:
+        return False
     if facts.private:
         return False
     if facts.thread is not None:
@@ -550,7 +591,7 @@ def _decide_shared_agent_change(req: Request) -> Decision:
 
 def _channel_bound(agent: AgentRef) -> bool:
     """An agent ruled to channels without the web chat. Naming the web chat in every
-    rule lets it answer there, even as a channel's own agent."""
+    rule lets it answer there, unless it is a channel's own agent (`_decide`)."""
     return agent.permissions.keeps_off_web
 
 
@@ -607,7 +648,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         # A web chat is in no channel, so an agent kept to channels never answers there,
         # whoever asks, unless every rule on it names the web chat.
         if req.surface is Surface.WEB and agent.resolved:
-            if _channel_bound(agent):
+            # A channel's own agent answers only in its home, even with "web" in its rule.
+            if _channel_bound(agent) or agent.permissions.home is not None:
                 return _deny("runs_elsewhere")
             if agent.permissions.runs_in:
                 return ALLOW
@@ -616,6 +658,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             and admin_only_surface
             and subject.platform_user_id is not None
             and not subject.via_agent_key
+            # a channel's own agent answers only in its home, admins included.
+            and not (agent.present and agent.permissions.home is not None)
         ):
             return ALLOW
         if not agent.present:
@@ -693,7 +737,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     ):
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
-    if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
+    if req.action in (
+        Action.SET_CHANNEL_BUDGET,
+        Action.SET_SUPPORT,
+        Action.SET_CHANNEL_SKILLS,
+    ):
         # Money, and what a shared agent may do, stay with server admins; an
         # admin's own agent key keeps the rights it always had.
         return ALLOW if subject.is_admin else _deny("admin_required")
@@ -798,10 +846,10 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     # Action.READ_SESSION / Action.CONTINUE_SESSION
     facts = req.session or SessionFacts()
-    # Admins are trusted to READ any channel conversation of the agent from
-    # their own hub session, limited or not, anyone's -- never another
-    # person's private DM, and never to continue it (a follow-up would join
-    # the channel's session). Their own sessions, DMs included, are read
+    # Admins are trusted to READ another person's open channel conversation of
+    # the agent from their own hub session -- never one from a sealed or limited
+    # channel, never another person's private DM, and never to continue it (a
+    # follow-up would join the channel's session). Their own sessions, DMs included, are read
     # without the readers filter: ownership was already proven by the caller.
     hub_read = req.action is Action.READ_SESSION and req.surface is Surface.HUB
     admin_hub_read = (
@@ -813,6 +861,16 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             or (
                 not facts.private
                 and (facts.channel is not None or facts.legacy_thread_id is not None)
+                # never another person's conversation from a channel read only
+                # from inside -- sealed when it ran (seals only grow) or limited now.
+                and session_readable_from(
+                    policy,
+                    (),
+                    channel=facts.channel,
+                    thread=facts.thread,
+                    seal_ids=facts.seal_ids,
+                    legacy_thread_id=facts.legacy_thread_id,
+                )
             )
         )
     )
@@ -877,10 +935,13 @@ def build_subject(
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
     client: bool = False,
+    origin_channel_ids: Collection[str] = (),
+    operator: bool = False,
 ) -> Subject:
     """Who is acting. The one place a caller's identity becomes a `Subject`.
 
-    A client is never an admin, whatever the caller passed.
+    A client is never an admin, whatever the caller passed. `origin_channel_ids`
+    is where the request verifiably started (see `Subject`).
     """
     return Subject(
         is_admin=is_admin and not client,
@@ -889,7 +950,17 @@ def build_subject(
         client=client,
         role_ids=role_ids,
         verified_membership=verified_membership,
+        origin_channel_ids=frozenset(origin_channel_ids),
+        operator=operator,
     )
+
+
+def origin_ids(channel_id: str | None, thread_id: str | None = None) -> frozenset[str]:
+    """The ids a request from `thread_id` under `channel_id` is inside."""
+    ids = {i for i in (channel_id, thread_id) if i}
+    if channel_id and thread_id:
+        ids.add(f"{channel_id}:{thread_id}")
+    return frozenset(ids)
 
 
 def build_turn_place(
@@ -969,7 +1040,7 @@ def authorize(
     agent = agent if agent is not None else AgentRef.none()
     place = place if place is not None else Place()
 
-    return _decide(
+    decision = _decide(
         policy,
         Request(
             subject=subject,
@@ -992,10 +1063,26 @@ def authorize(
             owned_by_caller=owned_by_caller,
         ),
     )
+    # The channel, not a thread under it: its own rule is the thread's to keep.
+    if (
+        decision.allowed
+        and subject.is_admin  # a member's own settings stay as they were
+        and action in SEALED_SETTINGS_ACTIONS
+        and sealed_outside(
+            policy,
+            subject.inside,
+            channel_ids=(place.parent_channel_id or place.channel_id,),
+            agent_names=agent.names,
+            operator=subject.operator,
+        )
+    ):
+        return _deny("sealed_channel")
+    return decision
 
 
 __all__ = [
     "ALLOW",
+    "SEALED_SETTINGS_ACTIONS",
     "Action",
     "AgentReach",
     "AgentRef",
@@ -1013,5 +1100,6 @@ __all__ = [
     "build_subject",
     "build_turn_place",
     "holds_limited_readers",
+    "origin_ids",
     "home_hold",
 ]

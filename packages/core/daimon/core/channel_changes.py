@@ -19,7 +19,7 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import ChannelReaders, ChannelWriters
-from daimon.core.authz import Subject
+from daimon.core.authz import Decision, Subject
 from daimon.core.channel_budget import BudgetSpec, may_set_channel_budget
 from daimon.core.channel_rules import (
     AgentRuleChange,
@@ -30,7 +30,13 @@ from daimon.core.channel_rules import (
 )
 from daimon.core.errors import DaimonError, StaleChannelValue
 from daimon.core.neutral_resources import NeutralResourceHost
-from daimon.core.permissions import ChannelRule, channel_rule, runs_only_in
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    ChannelRule,
+    channel_rule,
+    runs_only_in,
+    sealed_outside,
+)
 from daimon.core.rule_views import (
     BindingRefusal,
     binding_refusal,
@@ -119,10 +125,32 @@ NEEDS_ADMIN = "Only an admin can change this channel."
 CHOOSE_RELEASE_OR_KEEP = "Choose whether this channel's own agents keep their rule or are released."
 
 
-def require_channel_admin(actor: ChannelActor) -> None:
-    """Channel settings are admins' alone; an agent key never counts as one."""
+def refusal_for(decision: Decision) -> ChannelChangeRefused:
+    """Why `authorize` refused a channel change: an admin is needed, or it must come from inside."""
+    if decision.reason == "sealed_channel":
+        return ChannelChangeRefused(SEALED_REFUSAL, kind="forbidden", reason="sealed_channel")
+    return ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+
+
+async def require_channel_admin(
+    sessionmaker: async_sessionmaker[AsyncSession], actor: ChannelActor, channel_id: str | None
+) -> None:
+    """Channel settings are admins' alone; an agent key never counts as one. A private
+    channel's, and its own agent's, are changed only from inside it (`sealed_outside`).
+    `channel_id` None is a workspace setting, which no private channel holds."""
     if not actor.subject.is_admin or actor.subject.via_agent_key:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    if channel_id is None:
+        return
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    if sealed_outside(
+        policy,
+        actor.subject.inside,
+        channel_ids=(channel_id,),
+        operator=actor.subject.operator,
+    ):
+        raise refusal_for(Decision(False, "sealed_channel"))
 
 
 def refused_binding(reason: BindingRefusal, agent_name: str | None) -> ChannelChangeRefused:
@@ -168,7 +196,7 @@ async def set_default_agent(
     Refused when an agent rule would make it refuse every turn here
     (`binding_refusal`), checked under the policy lock with the write.
     """
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     names = tuple(dict.fromkeys((agent_name, *agent_names)))
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
@@ -205,7 +233,7 @@ async def clear_default_agent(
 
     A channel only its own agents read keeps one of them (`clear_refusal`).
     """
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
@@ -243,7 +271,7 @@ async def keep_agent(
     expected: Expected[Sequence[str]] | None = None,
 ) -> AgentRuleChange:
     """Keep `agent_name` to this channel: its rule names the channel alone."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     return await _set_kept(
         anthropic,
         sessionmaker,
@@ -269,7 +297,7 @@ async def release_agent(
     expected: Expected[Sequence[str]] | None = None,
 ) -> AgentRuleChange:
     """Stop keeping `agent_name` here: its rule is cleared, so it may run anywhere."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     async with sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     kept = sorted(runs_only_in(policy, channel_id))
@@ -388,9 +416,14 @@ async def set_access(
 # ---------- Budget ----------
 
 
-def _require_budget_admin(actor: ChannelActor, channel_id: str) -> None:
-    if not may_set_channel_budget(actor.subject, channel_id):
-        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+async def _require_budget_admin(
+    sessionmaker: async_sessionmaker[AsyncSession], actor: ChannelActor, channel_id: str
+) -> None:
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    decision = may_set_channel_budget(policy, actor.subject, channel_id)
+    if not decision:
+        raise refusal_for(decision)
 
 
 async def _current_budget(
@@ -446,7 +479,7 @@ async def set_budget(
     expected: Expected[BudgetValue | None] | None = None,
 ) -> ChannelBudgetRow:
     """Set or replace the channel's budget (`parse_budget_spec` validated `spec`)."""
-    _require_budget_admin(actor, channel_id)
+    await _require_budget_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         before = await _current_budget(
             session, actor, platform=platform, channel_id=channel_id, expected=expected
@@ -483,7 +516,7 @@ async def raise_budget(
     expected: Expected[BudgetValue | None] | None = None,
 ) -> ChannelBudgetRow:
     """Add `amount_usd` to the channel's limit; refused when it has no budget."""
-    _require_budget_admin(actor, channel_id)
+    await _require_budget_admin(sessionmaker, actor, channel_id)
     if amount_usd <= 0:
         raise ChannelChangeRefused("Raise the budget by more than $0.", kind="invalid")
     async with sessionmaker.begin() as session:
@@ -519,7 +552,7 @@ async def clear_budget(
     expected: Expected[BudgetValue | None] | None = None,
 ) -> bool:
     """Remove the channel's budget; False when it had none."""
-    _require_budget_admin(actor, channel_id)
+    await _require_budget_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         before = await _current_budget(
             session, actor, platform=platform, channel_id=channel_id, expected=expected

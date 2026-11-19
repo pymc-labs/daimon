@@ -8,7 +8,6 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,9 +23,12 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.support_escalation import RECORDED_UNDELIVERED
+from daimon.testing.settings_mock import mock_settings
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -112,9 +114,16 @@ async def _delivered(service: TeamsHttpService) -> None:
 
 
 async def _send(
-    service: TeamsHttpService, token: str, note: str, *, user: str = AAD_OBJECT_ID
+    service: TeamsHttpService,
+    token: str,
+    note: str,
+    *,
+    user: str = AAD_OBJECT_ID,
+    card: str | None = None,
 ) -> str:
     click = make_card_action("support", "send", user=user, ask=token, note=note)
+    if card is not None:
+        click["replyToId"] = card
     reply = json.dumps(await post_activity(service, click), ensure_ascii=False)
     await _delivered(service)
     return reply
@@ -196,7 +205,7 @@ async def test_requests_stop_when_the_credits_run_out(
     async with _running(db_session_factory, teams_api_fake, credits=1) as service:
         card = await _form(service, teams_api_fake, make_message_activity(text="support"))
         await _send(service, _token(card), "one")
-        stale = await _send(service, _token(card), "two")
+        stale = await _send(service, _token(card), "two", card="m-8")
         again = await _form(
             service, teams_api_fake, make_message_activity(text="support", activity_id="a-2")
         )
@@ -219,18 +228,25 @@ async def test_a_failed_post_keeps_the_request_undelivered(
 ) -> None:
     fake = _OpsFake(fail=True)
     fake.release.set()
-    async with _running(db_session_factory, fake) as svc:
-        card = await _form(svc, fake, make_message_activity(text="support"))
-        reply = await _send(svc, _token(card), "help")
+    with capture_logs() as logs:
+        async with _running(db_session_factory, fake) as svc:
+            card = await _form(svc, fake, make_message_activity(text="support"))
+            reply = await _send(svc, _token(card), "help")
     assert fake.posting.is_set(), "the post was tried, and failed"
-    assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
+    assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
+        "error"
+    ], "the failure is an error an operator sees"
+    assert RECORDED_UNDELIVERED in reply, "the one shared undelivered reply"
+    assert "Used" not in reply and "left" not in reply, "no used or left line"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"
 
 
-async def test_the_request_is_answered_before_its_delivery_lands(
-    db_session_factory: async_sessionmaker[AsyncSession],
+async def test_a_slow_delivery_does_not_hold_the_invoke(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The invoke waits only briefly for the post, then answers as received."""
+    monkeypatch.setattr(support, "_DELIVERY_WAIT", 0.05)
     fake = _OpsFake()
     async with _running(db_session_factory, fake) as svc:
         card = await _form(svc, fake, make_message_activity(text="support"))
@@ -249,41 +265,24 @@ async def test_the_request_is_answered_before_its_delivery_lands(
 
 
 @pytest.mark.parametrize(
-    ("teams_channel", "discord_channel", "credits", "on"),
+    ("teams_channel", "discord_channel", "own", "on"),
     [
-        (None, None, 3, False),
-        (OPS, None, 0, False),
-        (None, "123", 3, False),
-        (OPS, "123", 3, True),
-        (OPS, None, 3, True),
+        (None, None, "off", False),
+        (None, "123", "off", False),
+        (OPS, None, "off", True),
+        (None, None, "on", True),
     ],
+    ids=["nothing", "discord-only", "deployment", "own-allowed"],
 )
-def test_the_command_exists_only_with_a_teams_channel_and_credits(
-    teams_channel: str | None, discord_channel: str | None, credits: int, on: bool
+def test_the_command_exists_only_when_a_teams_channel_could_take_requests(
+    teams_channel: str | None, discord_channel: str | None, own: str, on: bool
 ) -> None:
     """Discord's channel is Discord's: Teams never posts there, as Slack never does."""
-    settings: Any = SimpleNamespace(
-        support=SupportSettings(
-            teams_escalation_channel_id=teams_channel,
-            escalation_channel_id=discord_channel,
-            credits_per_user=credits,
-        )
+    settings = mock_settings(support_own_channel=own)
+    settings.support = SupportSettings(
+        teams_escalation_channel_id=teams_channel, escalation_channel_id=discord_channel
     )
-    assert support.enabled(settings) is on
-
-
-def test_routed_feedback_needs_the_teams_channel() -> None:
-    """A tenant's 👎 forms never go to Discord's channel, which Teams once posted to."""
-    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    routed = {tenant: True}
-    discord_only: Any = SimpleNamespace(
-        support=SupportSettings(escalation_channel_id="123", feedback_to_support=routed)
-    )
-    teams: Any = SimpleNamespace(
-        support=SupportSettings(teams_escalation_channel_id=OPS, feedback_to_support=routed)
-    )
-    assert not support.routes_feedback(discord_only, tenant)
-    assert support.routes_feedback(teams, tenant)
+    assert support.enabled(settings) is on, f"{teams_channel=} {discord_channel=} {own=}"
 
 
 def _ask(op: str, **data: object) -> dict[str, object]:
@@ -418,50 +417,3 @@ async def test_support_from_a_channel_is_refused_to_someone_who_could_not_ask_th
 
     assert support.NOT_ALLOWED_THERE in reply and '"ask"' not in reply, "no form to send"
     assert await _rows(db_session_factory) == []
-
-
-async def test_admin_dms_for_a_request_follow_the_default_agents_dm_grant(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Support DMs reach only the admins the default agent's DM grant admits."""
-    from datetime import UTC, datetime
-
-    from daimon.adapters.teams.answer_access import AnswerPlace
-    from daimon.core.stores.direct_messages import set_dm_agent_name
-    from daimon.core.stores.dm_access import set_grant
-
-    async with db_session_factory.begin() as session:
-        await set_dm_agent_name(session, tenant_id=TENANT, agent_name="daimon")
-        await set_grant(
-            session, tenant_id=TENANT, agent_name="daimon", who="excluded",
-            user_ids=[LEAD], group_ids=[], set_by=None, now=datetime.now(UTC),
-        )  # fmt: skip
-
-    async def tiers(*_args: object, **_kwargs: object) -> list[list[str]]:
-        return [[LEAD, OTHER_AAD_OBJECT_ID]]
-
-    monkeypatch.setattr(support, "support_recipient_tiers", tiers)
-    sent: list[str] = []
-
-    class _Direct:
-        async def member(self, _channel: str, user_id: str) -> str:
-            return f"29:{user_id}"
-
-        async def open_chat(self, member: str) -> str:
-            return f"a:{member}"
-
-        async def post(self, conversation: str, _body: str) -> None:
-            sent.append(conversation)
-
-    command = SupportCommand(
-        build_teams_runtime(db_session_factory),
-        _Direct(),
-        spawn=MagicMock(),  # type: ignore[arg-type]
-    )
-    asked = support._Asked(  # pyright: ignore[reportPrivateUsage]
-        user_id=AAD_OBJECT_ID, user_name=None, conversation_id=CONVERSATION_ID,
-        thread_id=THREAD_ID, message_id="1", link="",
-        place=AnswerPlace(CHANNEL_ID, "1", is_channel=True),
-    )  # fmt: skip
-    assert await command._chat_admins(TENANT, asked, "help")  # pyright: ignore[reportPrivateUsage]
-    assert sent == [f"a:29:{OTHER_AAD_OBJECT_ID}"], "the excluded admin gets no DM"

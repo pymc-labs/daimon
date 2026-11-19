@@ -47,9 +47,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.model_switch import (
     ModelPicker,
     SwitchRefusal,
-    confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
+    pick_or_refusal,
     preview_model_switch,
 )
 from daimon.core.scope import DeploymentDefault
@@ -71,7 +71,6 @@ from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel
 from rich.console import Console
-from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 TENANT = derive_tenant_uuid(platform="discord", workspace_id="2001")
@@ -93,14 +92,7 @@ class Preview(BaseModel):
     allowed: bool = True
     digest: str = "d" * 64
     target_model: str | None = None
-    # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
-    # drops are declared in these stubs, so the CLI's drop-consent gate reads
-    # the same "nothing to accept" shape it reads from the real preview.
-    drop_consent: object | None = None
-
-    @property
-    def declared_drops(self) -> tuple[str, ...]:
-        return () if self.drop_consent is None else self.drop_consent.declared_drops
+    declared_drops: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,6 +150,11 @@ def seam(monkeypatch):
     service.current = AsyncMock(return_value=None)
     # The owner-or-admin read; this fake has no owners, so admins only.
     service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
+    service.edit_refusal = AsyncMock(
+        side_effect=lambda actual, actor: (
+            None if actor.subject.is_admin else "owner_or_admin_required"
+        )
+    )
     service.tenant_policy = AsyncMock(
         return_value=TenantBackendPolicy(
             tenant_id=TENANT, revision="1", enabled_backends=("anthropic", "openai", "gemini")
@@ -166,26 +163,14 @@ def seam(monkeypatch):
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
-    async def change(
-        actual,
-        target,
-        local,
-        actor,
-        *,
-        expected_preview_digest,
-        model=None,
-        settings=None,
-        accepted_drops=None,
-    ):
-        calls.append((actual, target, local, actor, expected_preview_digest))
+    async def change(actual, target, local, actor, *, model=None, settings=None):
+        calls.append((actual, target, local, actor))
         if service.refused:
             raise Refused(service.refused)
         return SimpleNamespace(backend=target, local=local + 1, model=model)
 
-    async def clear(actual, local, actor, *, expected_preview_digest):
-        return await change(
-            actual, None, local, actor, expected_preview_digest=expected_preview_digest
-        )
+    async def clear(actual, local, actor):
+        return await change(actual, None, local, actor)
 
     service.set_backend = AsyncMock(side_effect=change)
     service.clear_backend = AsyncMock(side_effect=clear)
@@ -264,7 +249,7 @@ def details():
     )
 
 
-def discord_view(seam, *, picker=None, switch=None, switch_value=None):
+def discord_view(seam, *, picker=None, switch_value=None):
     state = PanelState(
         roster=[],
         selected=None,
@@ -279,7 +264,6 @@ def discord_view(seam, *, picker=None, switch=None, switch_value=None):
         runtime=seam.runtime,
         allowed_user_id=42,
         details=state.details,
-        switch=switch,
         switch_value=switch_value,
     )
 
@@ -333,8 +317,8 @@ async def test_direct_mcp_uses_preview_and_reread_for_shared_service_cas(seam, b
         seam.runtime, auth, "analyst", backend=backend, expected_revision=4
     )
     assert seam.loader.await_count == 2
-    _, target, local, actor, digest = seam.calls[0]
-    assert (target, local, digest) == (backend, 4, "d" * 64)
+    _, target, local, actor = seam.calls[0]
+    assert (target, local) == (backend, 4), "the write carries the preview's revision only"
     # A model write builds core's own actor; the fields are what matter.
     assert (actor.tenant_id, actor.account_id, actor.subject) == (
         TENANT,
@@ -368,9 +352,7 @@ async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(seam, a
     assert seam.calls == []
 
 
-@pytest.mark.parametrize(
-    "reason", ["stale_revision", "stale_preview", "backend_not_allowed", "tenant_mismatch"]
-)
+@pytest.mark.parametrize("reason", ["stale_revision", "backend_not_allowed", "tenant_mismatch"])
 async def test_direct_mcp_preserves_shared_service_refusal(seam, reason):
     seam.service.refused = reason
     auth = AuthIdentity(account_id=ACCOUNT, tenant_id=TENANT, role=Role.ADMIN, is_admin=True)
@@ -378,7 +360,8 @@ async def test_direct_mcp_preserves_shared_service_refusal(seam, reason):
         await mcp_agents._set_agent_backend_impl(seam.runtime, auth, "analyst", backend="openai")
 
 
-async def test_chat_turn_cannot_bypass_confirmation_with_direct_mcp_tool(seam):
+async def test_chat_turn_is_pointed_at_the_chat_switch_tool(seam):
+    """In chat the headless tool refuses and names the one that also moves the thread."""
     auth = AuthIdentity(
         account_id=ACCOUNT, tenant_id=TENANT, role=Role.ADMIN, is_admin=True, chat_agent_id=AGENT
     )
@@ -402,7 +385,6 @@ async def test_cli_set_clear_uses_the_same_bound_preview_and_actor(seam, backend
     assert seam.calls[0][2] == 4
     assert seam.calls[0][3].tenant_id == TENANT
     assert seam.calls[0][3].subject.is_admin
-    assert seam.calls[0][4] == "d" * 64
 
 
 def slack_meta(**kwargs):
@@ -425,14 +407,16 @@ async def slack_dispatch(seam, client, *, action_id, meta=None, action=None):
     )
 
 
-async def test_slack_superseded_modal_refuses_before_service_mutation(seam):
-    client = SimpleNamespace(
-        views_update=AsyncMock(side_effect=SlackApiError("stale", {"error": "hash_conflict"}))
-    )
-    meta = slack_meta(backend_revision=4, backend_digest="d" * 64, backend_target="openai")
+async def test_slack_switch_on_an_old_modal_applies_its_pick(seam, monkeypatch):
+    """Switch on a modal from before picks applied at once picks its model; the digest is ignored."""
+    pick = AsyncMock(return_value=SimpleNamespace(lines=()))
+    monkeypatch.setattr(sa, "pick_or_refusal", pick)
+    client = SimpleNamespace(views_update=AsyncMock())
+    meta = slack_meta(backend_revision=3, backend_digest="d" * 64, backend_target="openai:gpt-6")
     await slack_dispatch(seam, client, action_id=sv.ACTION_BACKEND_CONFIRM, meta=meta)
-    assert seam.calls == []
-    assert seam.factory.begins == 1
+    assert pick.await_args is not None, "the old Switch press is a pick"
+    assert pick.await_args.kwargs["value"] == "openai:gpt-6", "it picks the modal's model"
+    client.views_update.assert_awaited_once()
 
 
 def test_slack_metadata_defaults_stay_identical_and_malformed_revision_is_refused():
@@ -572,33 +556,6 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
             role=Role.ADMIN,
             is_admin=True,
         )
-        if surface == "mcp" and drops:
-            # The headless `set_agent_backend` MCP tool has no human to ask for
-            # consent (that is exactly what `request_agent_backend_switch`'s
-            # chat Confirm card is for), so a target that needs declared drops
-            # always refuses here -- never a silent drop, never a guessed
-            # accept.
-            with pytest.raises(ToolError, match="drops_required"):
-                await mcp_agents._set_agent_backend_impl(
-                    rt, auth, "analyst", backend=backend, expected_revision=0
-                )
-            async with persisted.sessions() as session:
-                rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
-            assert [row.operation for row in rows] == ["allowlist"]
-            assert [(r.method, r.path) for r in trace.requests] == [
-                ("GET", "/v1/agents"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments/env_test"),
-                ("GET", "/v1/agents"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments/env_test"),
-            ]
-            assert not trace.violations
-            return
         if surface == "cli":
             for target in (backend, None):
                 console = Console(file=StringIO(), force_terminal=False, highlight=False)
@@ -610,7 +567,6 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
                     yes=True,
                     as_json=True,
                     selector=TenantSelector(tenant_id=str(persisted.tenant.id)),
-                    accept_drops=",".join(drops) if target is not None and drops else None,
                 )
                 assert json.loads(console.file.getvalue())["backend"] == target
         else:
@@ -627,6 +583,9 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
     assert all(
         row.account_id == persisted.account.id and row.outcome == "allowed" for row in writes
     )
+    # What the provider can't carry applies and is recorded, never asked about.
+    expected = "completed" + ("; declared_drops=" + ",".join(drops) if drops else "")
+    assert writes[0].reason == expected, "the set records what it turned off"
     agent = cb.BackendAgent(
         tenant_id=persisted.tenant.id,
         agent_id=writes[0].agent_id,
@@ -659,13 +618,8 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
     assert not trace.replies and not trace.violations
 
 
-async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persisted):
-    # DD3's trusted source capture re-reads the real target agent by id on
-    # every preview (not the list response `load_backend_agent` used before
-    # DD3), so the race this test proves is now visible there: the first
-    # capture (inside the initial `service.preview`) sees the original
-    # agent; the second capture (inside `_change`, just before the write)
-    # sees it changed, which must still land as a digest mismatch refusal.
+async def test_agent_changed_after_the_preview_still_switches(persisted):
+    """A write reads the agent afresh, so an edit after the preview never refuses it."""
     changed = {**persisted.native, "description": "Changed after the preview"}
     calls = {"agent": 0}
 
@@ -699,16 +653,13 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
             role=Role.ADMIN,
             is_admin=True,
         )
-        # Anthropic (same profile as the source): no drops are declared, so
-        # this exercises the digest-staleness refusal alone, independent of
-        # the drop-consent gate exercised elsewhere.
-        with pytest.raises(ToolError, match="stale_preview"):
-            await mcp_agents._set_agent_backend_impl(
-                runtime(persisted, client), auth, "analyst", backend="anthropic"
-            )
+        result = await mcp_agents._set_agent_backend_impl(
+            runtime(persisted, client), auth, "analyst", backend="anthropic"
+        )
+    assert result["revision"] == 1, "the switch applied at the preview's revision"
     async with persisted.sessions() as session:
         rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
-    assert [row.operation for row in rows] == ["allowlist"]
+    assert [row.operation for row in rows] == ["allowlist", "set"], "one audited write"
     assert not trace.replies and not trace.violations
 
 
@@ -1035,8 +986,8 @@ async def _gemini_value(persisted):
     return next(choice.value for choice in choices if choice.provider == "gemini")
 
 
-async def test_panel_switch_confirms_with_the_shown_losses_accepted(persisted):
-    """The shown digest and revision reach the write, which accepts what the preview declared."""
+async def test_panel_pick_across_providers_applies_at_once(persisted):
+    """A cross-provider pick is written in one step, with what is off shown as information."""
     trace = ScriptedTransport(router=persisted.router)
     replies(trace, persisted.native, 12)
     value = await _gemini_value(persisted)
@@ -1060,29 +1011,12 @@ async def test_panel_switch_confirms_with_the_shown_losses_accepted(persisted):
         shown = await preview_model_switch(
             service, edit, actor=actor, agent_name="analyst", value=value
         )
-        assert shown.preview is not None and shown.digest, "a cross-provider pick is previewed"
-        stale = await confirm_or_refusal(
-            service,
-            edit,
-            actor=actor,
-            agent_name="analyst",
-            value=value,
-            digest="not-the-shown-digest",
-            revision=shown.revision,
-            admin=True,
-        )
-        assert isinstance(stale, SwitchRefusal) and stale.reason == "stale_preview"
-        done = await confirm_or_refusal(
-            service,
-            edit,
-            actor=actor,
-            agent_name="analyst",
-            value=value,
-            digest=shown.digest,
-            revision=shown.revision,
-            admin=True,
+        assert shown.preview is not None, "a cross-provider pick is previewed"
+        done = await pick_or_refusal(
+            service, edit, actor=actor, agent_name="analyst", value=value, admin=True
         )
         assert not isinstance(done, SwitchRefusal), getattr(done, "line", "")
+        assert done.lines == shown.lines(), "the pick says what the preview showed is off"
         agent = await cb.load_backend_agent(
             client, persisted.sessions, tenant_id=persisted.tenant.id, agent_name="analyst"
         )
@@ -1166,7 +1100,7 @@ def test_each_panel_offers_an_effort_select_only_where_the_provider_has_levels(s
 
 @pytest.mark.parametrize(
     "action,label",
-    [("switch_back_to_claude", "Switch back to Claude"), ("fresh_preview", "Review again")],
+    [("switch_back_to_claude", "Switch back to Claude"), ("fresh_preview", "Try again")],
 )
 def test_a_refusal_offers_its_one_way_out_on_every_panel(seam, action, label):
     from daimon.core.model_switch import SwitchRefusal
@@ -1179,7 +1113,6 @@ def test_a_refusal_offers_its_one_way_out_on_every_panel(seam, action, label):
         sv.build_model_switch_view(
             (refusal.line,),
             meta=slack_meta(backend_target="gemini:x"),
-            confirm=False,
             action=action,
         )
     )

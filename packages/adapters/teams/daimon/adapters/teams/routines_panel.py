@@ -89,12 +89,14 @@ class RoutinesPanel:
 
     async def command(self, context: CommandContext) -> None:
         user_id, is_admin = context.inbound.user_id, context.is_admin
+        asked = context.asked_in or context.inbound
         await context.send_card(
             await self._panel(
                 context.tenant_id,
                 user_id=user_id,
                 is_admin=is_admin,
                 foreign=context.inbound.is_foreign,
+                where=(asked.channel_id, asked.thread_id),
             )
         )
 
@@ -121,6 +123,7 @@ class RoutinesPanel:
         is_admin: bool,
         notice: str | None = None,
         foreign: bool = False,
+        where: tuple[str | None, str | None],
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
@@ -129,7 +132,15 @@ class RoutinesPanel:
             rows = [row for row in rows if row.created_by_user_id == user_id]
         rows = [routine_for_reader(row, user_id=user_id) for row in rows]
         shown, hidden = panel_rows(rows)
-        links = web_links(self._runtime, tenant_id, admin=is_admin, foreign=foreign)
+        channel_id, thread_id = where
+        links = await web_links(
+            self._runtime,
+            tenant_id,
+            admin=is_admin,
+            foreign=foreign,
+            channel_id=channel_id,
+            thread_id=thread_id,
+        )
         return panel_card(
             shown,
             hidden,
@@ -232,6 +243,7 @@ class RoutinesPanel:
             is_admin=actor.admin_for(DelegatedAction.ROUTINES),
             notice=notice,
             foreign=actor.foreign,
+            where=actor.channel_thread,
         )
         return replace_card(card)
 
@@ -269,6 +281,7 @@ class RoutinesPanel:
                 is_admin=True,
                 notice=created,
                 foreign=actor.foreign,
+                where=actor.channel_thread,
             )
             await edit_origin_card(ctx, panel)
         return dialog_message(created)

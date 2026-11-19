@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 222 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 232 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -45,7 +45,7 @@ Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `grant_admin` | admin only | Make a user or role a Daimon admin, not a web app role (see update_web_person). |
+| `grant_admin` | admin only | Make a user or role a Daimon admin, a role of its own beside any sign-in role. |
 | `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
 | `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
@@ -87,7 +87,7 @@ owners and helpers and save a skill's files.
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
 | `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
-| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
+| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these person or account ids. |
 
 ## `agent_memory`
 
@@ -133,7 +133,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
-| `request_agent_backend_switch` | all callers | Change an agent's model to another provider's; a switch that loses something asks. |
+| `request_agent_backend_switch` | all callers | Change an agent's model to another provider's. |
 | `set_agent_backend` | all callers | Change which provider's model the agent uses, or clear it with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
 | `update_agent` | all callers | Update an agent: change its instructions (system prompt), switch its model, or add existing skills such as build-models. |
@@ -145,7 +145,7 @@ invite.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_allowance` | admin only | Set an allowance for a person (web person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
+| `create_allowance` | admin only | Set an allowance for a person (person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
@@ -158,7 +158,7 @@ tool calls and panel writes, newest first.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
-| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes in the web app, ``security`` for chat tool calls and panel writes. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first. |
 
 ## `channel_budgets`
 
@@ -609,6 +609,24 @@ Skill tools: sync / list / get / delete.
 | `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
 
+## `support`
+
+Support limits for Ask a person, for platform admins acting with personal user
+credentials.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `support_channel_get` | admin only | Show where this workspace's support requests go. |
+| `support_channel_set` | admin only | Send this workspace's support requests to its own channel, or reset it. |
+| `support_limit_clear` | admin only | Remove a support limit, or one person's own limit at a place. |
+| `support_limit_list` | admin only | List the support limits for Ask a person, with credits used. |
+| `support_limit_set` | admin only | Set a support limit for the workspace, an agent or a channel. |
+| `support_menu_get` | admin only | Show one support menu by key, or every menu with no key. |
+| `support_menu_set` | admin only | Set, replace or remove (``body`` null) a support menu. |
+| `support_menu_use` | admin only | Pick the support menu a place offers. |
+| `support_requests_list` | admin only | List support requests, newest first; pending only by default. |
+| `support_requests_settle` | admin only | Settle a support request at ``charge`` credits, or decline it (null). |
+
 ## `task_continuity`
 
 Conversational task handoff and fresh start.
@@ -718,10 +736,10 @@ The web app's people, groups and agent access, from chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_web_person` | admin only | Show one web person: role, status, groups, sign-ins and, for a visitor, their invite. |
+| `get_web_person` | admin only | Show one person: role, status, groups, sign-ins and, for a visitor, their invite. |
 | `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
-| `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
-| `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
+| `list_web_groups` | admin only | List everyone and each group people sign in with, with head counts. |
+| `list_web_people` | admin only | List the workspace's people, oldest first, with role, status and groups. |
 | `set_agent_web_access` | admin only | Turn an agent's web chat on or off and set who may use it: everyone or up to 100 groups or invitees. |
 | `update_web_person` | admin only | Set a web person's role (web app admin or member, not Daimon admin) or suspend or restore them. |
 

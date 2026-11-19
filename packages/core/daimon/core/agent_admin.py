@@ -18,16 +18,22 @@ from daimon.core.agent_editing import (
     system_agent_rejection,
 )
 from daimon.core.agent_fork import AgentCopy, copy_agent
-from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
+from daimon.core.agent_lifecycle import (
+    archive_memory_store_best_effort,
+    archive_sealed_refusal,
+    forget_archived_agent,
+)
 from daimon.core.agent_ownership import agent_name_lock
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target
-from daimon.core.authz import Action, authorize
+from daimon.core.authz import Action, agent_names, authorize
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_compat import archive_agent
+from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_backends, agent_helpers, web_people
+from daimon.core.stores.access_policy import load_access_policy
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,7 +56,10 @@ async def load_admin_target(
 ) -> AgentTarget:
     """The agent, for an admin only."""
     require_admin(actor, what)
-    return await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
+    if target.sealed:
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
+    return target
 
 
 async def set_owners(
@@ -144,6 +153,14 @@ async def set_helpers(
         raise AgentEditError("No such agent.", kind="not_found")
     wanted = list(dict.fromkeys(helper_ids))
     async with session_factory() as session, session.begin():
+        # A private channel's own agent changes only from inside the channel.
+        if sealed_outside(
+            await load_access_policy(session, tenant_id=actor.tenant_id),
+            actor.subject.inside,
+            agent_names=agent_names(agent.name, agent.metadata),
+            operator=actor.subject.operator,
+        ):
+            raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
         before = await agent_helpers.list_helper_ids(
             session, tenant_id=actor.tenant_id, agent_id=agent.id
         )
@@ -181,6 +198,12 @@ async def archive(
             f"{agent.name} is managed by the server and can't be archived.", kind="forbidden"
         )
     name = _display_name(agent)
+    async with deps.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session, tenant_id=actor.tenant_id, name=name, agent=agent, subject=actor.subject
+        )
+    if refusal is not None:
+        raise AgentEditError(refusal, kind="forbidden")
     await archive_agent(deps.client, agent.id, scope=actor.scope(), records=deps.session_factory)
     await archive_memory_store_best_effort(
         anthropic=deps.client,

@@ -101,7 +101,7 @@ def _agent_actor(target: _Target) -> AgentActor:
     return AgentActor(
         tenant_id=target.tenant_id,
         account_id=target.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         surface=Surface.CONFIG,
     )
 
@@ -213,6 +213,7 @@ async def features_set(
         "cli",
         None,
         is_admin,
+        operator=True,
         write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
         if builtin and agent_id
         else None,

@@ -12,6 +12,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
+from daimon.adapters.mcp.tools._web_url import web_aware
 from daimon.core import dm_settings, web_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.dm_access import dm_agents_of
@@ -62,13 +63,15 @@ async def _change_impl(
     dm_rules: list[DmRule] | None = None,
 ) -> WorkspaceSettingsChanged:
     actor = await web_admin_of(runtime, auth)
+    if (modules is not None or default_agent is not None) and not await web_aware(runtime, auth):
+        raise ToolError("modules and default_agent can't change here. Nothing was done.")
     await require_card(
         runtime, auth, tool_name="change_workspace_settings", origin_context_id=origin_context_id
     )
     try:
         people = [uuid.UUID(p) for p in invoker_people]
     except ValueError as err:
-        raise ToolError("invoker_people must be web person ids.") from err
+        raise ToolError("invoker_people must be person ids.") from err
     dm_changed = await _change_dm(runtime, actor, dm_default_agent, dm_rules)
     try:
         changed = await web_admin.change_settings(
@@ -132,9 +135,9 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
         dm_default_agent: str | None = None,
         dm_rules: Annotated[list[DmRule], Field(max_length=MAX_SUBJECTS)] | None = None,
     ) -> WorkspaceSettingsChanged:
-        """Change the web modules, web chat agent, who may start turns (everyone or exactly
-        ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the agent
-        a DM starts with ("" clears it); ``dm_rules`` replaces the ordered rule list, first
+        """Change the workspace's modules and default agent, who may start turns (everyone or
+        exactly ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the
+        agent a DM starts with ("" clears it); ``dm_rules`` replaces the ordered rule list, first
         match wins."""
         return await _change_impl(
             runtime,

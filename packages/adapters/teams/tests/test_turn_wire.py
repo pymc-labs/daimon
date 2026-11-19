@@ -100,7 +100,8 @@ async def _service(
     """The started service over `router`; drained on exit, then every activity is checked.
 
     `one_session` hands every turn `SESSION_ID`; without it `router` creates sessions.
-    `support` turns human support on, posting to a Teams channel."""
+    `support` turns human support on, posting to a Teams channel; without it no
+    workspace may pick its own, so no channel could take a request."""
     runtime = build_teams_runtime(
         db_factory,
         anthropic=build_fake_anthropic(router.dispatch),
@@ -110,6 +111,8 @@ async def _service(
         runtime.settings.support = SupportSettings(
             teams_escalation_channel_id="19:ops@thread.tacv2"
         )
+    else:
+        runtime.settings.features = {"support_own_channel": "off"}
     session = ma_session(id=SESSION_ID, agent_id=AGENT_ID, environment_id=ENV_ID)
     create = patch("daimon.core.turn.prepare.create_session", return_value=session)
     with create if one_session else nullcontext():

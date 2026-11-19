@@ -1,4 +1,4 @@
-"""Slack's model choice for one thread: the shortcut, the pick, one Confirm, and the ask-again card."""
+"""Slack's model choice for one thread: the shortcut, then a pick that applies at once."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ import pytest
 from daimon.adapters.slack import thread_model as module
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.thread_model_flow import ThreadConfirm, ThreadOption, ThreadPickResult
-from daimon.core.thread_model_reask import ThreadReask
+from daimon.core.thread_model_flow import ThreadOption
 from daimon.testing.turn_fakes import deps_for
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
 THREAD = "1700000000.000100"
-CONFIRM = ThreadConfirm("openai:gpt-6", "digest-1", 3)
-LINES = ("Switch this conversation to GPT-6?", "Stops working: memory")
+KEPT = "This conversation runs on GPT-6. Off there: memory."
+#: A Switch posted before picks applied at once: its digest and revision are ignored.
+OLD_CONFIRM = json.dumps({"v": "openai:gpt-6", "d": "digest-1", "r": 3, "c": THREAD})
 
 
 def _runtime() -> SlackRuntime:
@@ -91,7 +91,7 @@ def _click(action_id: str, value: str) -> dict[str, Any]:
 
 
 def _replaced(seams: MagicMock) -> dict[str, Any]:
-    assert seams.replaced.await_args is not None
+    assert seams.replaced.await_args is not None, "the card was replaced"
     return seams.replaced.await_args.args[0]
 
 
@@ -100,96 +100,63 @@ def _buttons(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def test_the_shortcut_shows_the_select_in_the_thread_to_its_caller(seams: MagicMock) -> None:
+    """The select goes to its caller only, in the message's thread, carrying the thread."""
     await module.handle_thread_model_shortcut(
         _runtime(), _shortcut({"ts": "9", "thread_ts": THREAD})
     )
 
     posted = seams.chat_postEphemeral.await_args.kwargs
-    assert (posted["channel"], posted["user"], posted["thread_ts"]) == ("C1", "U1", THREAD)
+    assert (posted["channel"], posted["user"], posted["thread_ts"]) == ("C1", "U1", THREAD), (
+        "in the thread"
+    )
     (select,) = _buttons(posted["blocks"])
-    assert select["type"] == "static_select"
-    assert [o["value"] for o in select["options"]] == ["openai:gpt-6", "default"]
+    assert select["type"] == "static_select", "one select"
+    assert [o["value"] for o in select["options"]] == ["openai:gpt-6", "default"], "the options"
     assert posted["blocks"][1]["block_id"] == f"thread_model:{THREAD}", "the thread rides the block"
 
 
 async def test_the_shortcut_on_a_thread_root_uses_its_own_ts(seams: MagicMock) -> None:
+    """A thread's root message is its own thread."""
     await module.handle_thread_model_shortcut(_runtime(), _shortcut({"ts": THREAD}))
 
-    assert seams.chat_postEphemeral.await_args.kwargs["thread_ts"] == THREAD
+    assert seams.chat_postEphemeral.await_args.kwargs["thread_ts"] == THREAD, "the root's ts"
 
 
 async def test_someone_who_may_not_start_a_turn_is_refused_naming_who_can_help(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
+    """No select for someone who may not choose; the refusal names who can help."""
     monkeypatch.setattr(module, "may_choose_thread_model", AsyncMock(return_value=False))
 
     await module.handle_thread_model_shortcut(_runtime(), _shortcut())
 
     posted = seams.chat_postEphemeral.await_args.kwargs
     assert "blocks" not in posted, "no select is offered"
-    assert "admin" in posted["attachments"][0]["fallback"]
+    assert "admin" in posted["attachments"][0]["fallback"], "names who can help"
     module.build_thread_pick.assert_not_awaited()  # type: ignore[attr-defined]
 
 
-async def test_a_cross_provider_pick_shows_what_changes_with_one_confirm(
+async def test_a_cross_provider_pick_is_kept_at_once_with_no_buttons(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
-    monkeypatch.setattr(
-        module, "pick_thread_model", AsyncMock(return_value=ThreadPickResult("", CONFIRM, LINES))
-    )
+    """A pick on another provider is kept in one step: a neutral notice, never a Confirm."""
+    monkeypatch.setattr(module, "pick_thread_model", AsyncMock(return_value=KEPT))
 
     await module.handle_thread_model_pick(_runtime(), _pick("openai:gpt-6"))
 
     fields_ = _replaced(seams)
-    assert fields_["replace_original"] is True
-    text = fields_["blocks"][0]["text"]["text"]
-    assert all(line in text for line in LINES), "the facts are shown"
-    cancel, confirm = _buttons(fields_["blocks"])
-    assert (confirm["action_id"], cancel["action_id"]) == (
-        module.CONFIRM_ACTION_ID,
-        module.CANCEL_ACTION_ID,
-    )
-    assert json.loads(confirm["value"]) == {
-        "v": "openai:gpt-6",
-        "d": "digest-1",
-        "r": 3,
-        "c": THREAD,
-    }
+    assert fields_["replace_original"] is True, "the select is replaced"
+    assert _buttons(fields_["blocks"]) == [], "nothing to confirm"
+    (card,) = fields_["attachments"]
+    assert card["fallback"] == KEPT, "the core note, unchanged"
     kept = module.pick_thread_model.await_args.kwargs  # type: ignore[attr-defined]
-    assert (kept["conversation_id"], kept["choice"], kept["platform"]) == (THREAD, "openai:gpt-6", "slack")  # fmt: skip
-
-
-async def test_a_refused_pick_is_one_line_with_the_core_words(
-    monkeypatch: pytest.MonkeyPatch, seams: MagicMock
-) -> None:
-    refusal = "Ask an admin or an owner to allow it. Nothing changed."
-    monkeypatch.setattr(
-        module, "pick_thread_model", AsyncMock(return_value=ThreadPickResult(refusal))
-    )
-
-    await module.handle_thread_model_pick(_runtime(), _pick("openai:gpt-6"))
-
-    (card,) = _replaced(seams)["attachments"]
-    assert card["fallback"] == refusal, "the core text, unchanged"
-    assert "blocks" not in _replaced(seams) or _replaced(seams)["blocks"] == []
-
-
-async def test_a_pick_that_cannot_be_confirmed_ends_with_nothing_changed(
-    monkeypatch: pytest.MonkeyPatch, seams: MagicMock
-) -> None:
-    monkeypatch.setattr(
-        module, "pick_thread_model", AsyncMock(return_value=ThreadPickResult("", None, LINES))
-    )
-
-    await module.handle_thread_model_pick(_runtime(), _pick("openai:gpt-6"))
-
-    (card,) = _replaced(seams)["attachments"]
-    assert card["fallback"].endswith("Nothing changed.")
+    assert (kept["conversation_id"], kept["choice"], kept["platform"]) == (THREAD, "openai:gpt-6", "slack"), "kept for this thread"  # fmt: skip
 
 
 async def test_a_pick_without_a_thread_in_its_block_does_nothing(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
+    """A select that doesn't carry its thread changes nothing."""
     keep = AsyncMock()
     monkeypatch.setattr(module, "pick_thread_model", keep)
 
@@ -199,39 +166,45 @@ async def test_a_pick_without_a_thread_in_its_block_does_nothing(
     seams.replaced.assert_not_awaited()
 
 
-async def test_confirm_keeps_the_pick_at_the_digest_it_was_shown(
+async def test_switch_on_an_old_card_keeps_its_pick_and_ignores_its_digest(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
-    kept = AsyncMock(return_value="This conversation runs on GPT-6.")
+    """A Switch posted before picks applied at once keeps its pick as a new pick would."""
+    kept = AsyncMock(return_value=KEPT)
     monkeypatch.setattr(module, "confirm_thread_pick", kept)
-    value = module._confirm_value(CONFIRM, THREAD)  # pyright: ignore[reportPrivateUsage]
 
-    await module.handle_thread_model_confirm(_runtime(), _click(module.CONFIRM_ACTION_ID, value))
+    await module.handle_thread_model_confirm(
+        _runtime(), _click(module.CONFIRM_ACTION_ID, OLD_CONFIRM)
+    )
 
-    assert kept.await_args.args[1] == CONFIRM
-    assert kept.await_args.kwargs == {"conversation_id": THREAD, "admin": True}
+    assert kept.await_args.args[1] == "openai:gpt-6", "only the pick is read"
+    assert kept.await_args.kwargs == {"conversation_id": THREAD, "admin": True}, "for its thread"
     (card,) = _replaced(seams)["attachments"]
-    assert card["fallback"] == "This conversation runs on GPT-6."
+    assert card["fallback"] == KEPT, "the note replaces the card"
 
 
-async def test_confirm_from_someone_who_may_not_changes_nothing(
+async def test_switch_from_someone_who_may_not_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
+    """An old card's Switch is checked again like a fresh pick."""
     kept = AsyncMock()
     monkeypatch.setattr(module, "confirm_thread_pick", kept)
     monkeypatch.setattr(module, "may_choose_thread_model", AsyncMock(return_value=False))
-    value = module._confirm_value(CONFIRM, THREAD)  # pyright: ignore[reportPrivateUsage]
 
-    await module.handle_thread_model_confirm(_runtime(), _click(module.CONFIRM_ACTION_ID, value))
+    await module.handle_thread_model_confirm(
+        _runtime(), _click(module.CONFIRM_ACTION_ID, OLD_CONFIRM)
+    )
 
     kept.assert_not_awaited()
     (card,) = _replaced(seams)["attachments"]
-    assert "admin" in card["fallback"] and card["fallback"].endswith("Nothing changed.")
+    assert "admin" in card["fallback"], "names who can help"
+    assert card["fallback"].endswith("Nothing changed."), "and that nothing changed"
 
 
-async def test_a_forged_confirm_value_changes_nothing(
+async def test_a_forged_switch_value_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, seams: MagicMock
 ) -> None:
+    """A value that doesn't parse is dropped without a reply."""
     kept = AsyncMock()
     monkeypatch.setattr(module, "confirm_thread_pick", kept)
 
@@ -241,65 +214,12 @@ async def test_a_forged_confirm_value_changes_nothing(
     seams.replaced.assert_not_awaited()
 
 
-async def test_cancel_leaves_one_line(seams: MagicMock) -> None:
+async def test_cancel_on_an_old_card_leaves_one_line(seams: MagicMock) -> None:
+    """Cancel on an old card closes it in one line."""
     await module.handle_thread_model_cancel(_runtime(), _click(module.CANCEL_ACTION_ID, "cancel"))
 
     (card,) = _replaced(seams)["attachments"]
-    assert card["fallback"] == "Nothing changed."
-
-
-def _ask(confirm: ThreadConfirm | None = CONFIRM) -> ThreadReask:
-    return ThreadReask(
-        tenant_id=MagicMock(),
-        workspace_id="T1",
-        platform="slack",
-        channel_id="C1",
-        thread_id=THREAD,
-        conversation_id=THREAD,
-        agent_name="Helper",
-        lines=LINES,
-        confirm=confirm,
-    )
-
-
-async def test_the_ask_again_card_is_posted_in_the_thread_with_one_confirm(
-    seams: MagicMock,
-) -> None:
-    await module.slack_thread_reask_notifier(_runtime())(_ask())
-
-    posted = seams.chat_postMessage.await_args.kwargs
-    assert (posted["channel"], posted["thread_ts"]) == ("C1", THREAD)
-    (attachment,) = posted["attachments"]
-    cancel, confirm = _buttons(attachment["blocks"])
-    assert confirm["action_id"] == module.CONFIRM_ACTION_ID
-    assert json.loads(confirm["value"])["c"] == THREAD
-    assert cancel["action_id"] == module.CANCEL_ACTION_ID
-
-
-async def test_a_refused_preview_is_posted_without_buttons(seams: MagicMock) -> None:
-    await module.slack_thread_reask_notifier(_runtime())(_ask(None))
-
-    (attachment,) = seams.chat_postMessage.await_args.kwargs["attachments"]
-    assert _buttons(attachment["blocks"]) == []
-
-
-async def test_a_workspace_without_a_client_raises_so_the_next_message_asks_again(
-    monkeypatch: pytest.MonkeyPatch, seams: MagicMock
-) -> None:
-    monkeypatch.setattr(module, "resolve_web_client", AsyncMock(return_value=None))
-
-    with pytest.raises(RuntimeError):
-        await module.slack_thread_reask_notifier(_runtime())(_ask())
-
-
-def test_the_slack_app_wires_the_ask_again_card_into_its_turns() -> None:
-    runtime = replace(_runtime(), turn_deps=deps_for())
-
-    wired = module.with_thread_reask_notifier(runtime)
-
-    assert wired.turn_deps.thread_reask_notifier is not None
-    stand_in = MagicMock()
-    assert module.with_thread_reask_notifier(stand_in) is stand_in, "a test runtime is untouched"
+    assert card["fallback"] == "Nothing changed.", "one line"
 
 
 @dataclasses.dataclass

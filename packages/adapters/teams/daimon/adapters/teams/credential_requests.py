@@ -46,6 +46,7 @@ from daimon.core.agent_pins import (
     request_pin_refusal,
 )
 from daimon.core.agent_reach import load_target_facts
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
@@ -182,6 +183,8 @@ _MESSAGES: dict[Refusal, str] = {
 }
 
 
+# Every caller below runs after `refusal` returned None for the click, which checks that the
+# click is in the conversation the form was posted in: the submitter is inside that place.
 def refusal(
     row: CredentialRequestRow,
     *,
@@ -302,7 +305,11 @@ async def _guarded(
     try:
         return await work
     except SENDING_PANEL_ERRORS as err:
-        log.error("teams.credential.failed", err_type=type(err).__name__)
+        log.error(
+            "teams.credential.failed",
+            causes=backend_refusal_causes(err),
+            err_type=type(err).__name__,
+        )
         return failed
 
 
@@ -393,13 +400,20 @@ class TeamsCredentialRequests:
             records=self._runtime.sessionmaker,
         )
         async with self._runtime.sessionmaker() as session:
-            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+            pin_refusal = await request_pin_refusal(
+                session, row=row, agent=agent, location_verified=True
+            )
         if pin_refusal is not None:
             return _notice(pin_refusal, row)
         now = datetime.now(UTC)
         try:
             consumed, flow = await begin_oauth_submit(
-                self._runtime.sessionmaker, row=row, agent=agent, app_root_url=root, now=now
+                self._runtime.sessionmaker,
+                row=row,
+                agent=agent,
+                app_root_url=root,
+                now=now,
+                location_verified=True,
             )
         except FormPinRefused as refused:
             return _notice(refused.refusal, row)
@@ -465,7 +479,9 @@ class TeamsCredentialRequests:
         if agent is None:
             return dialog_message(_AGENT_GONE)
         async with self._runtime.sessionmaker() as session:
-            pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
+            pin_refusal = await request_pin_refusal(
+                session, row=row, agent=agent, location_verified=True
+            )
         if pin_refusal is not None:
             return dialog_message(pin_refusal)
         url = activity.service_url
@@ -690,6 +706,7 @@ class TeamsCredentialRequests:
                 value=secret,
                 plan=plan,
                 now=datetime.now(UTC),
+                location_verified=True,
             )
             consumed, state, queued = result.consumed, result.state, result.queued
         except FormPinRefused:
@@ -738,6 +755,7 @@ class TeamsCredentialRequests:
             platform="teams",
             entries=entries,
             now=datetime.now(UTC),
+            location_verified=True,
         )
 
     async def _save_env_file(
@@ -791,7 +809,11 @@ class TeamsCredentialRequests:
         """Spend the form, the pin decided in the same transaction. None when it is not spent."""
         try:
             consumed = await consume_credential_submit(
-                self._runtime.sessionmaker, row=row, agent=agent, now=datetime.now(UTC)
+                self._runtime.sessionmaker,
+                row=row,
+                agent=agent,
+                now=datetime.now(UTC),
+                location_verified=True,
             )
         except FormPinRefused:
             log.info("teams.credential.pin_refused", kind=row.kind)
@@ -1070,7 +1092,9 @@ class TeamsCredentialRequests:
         now = datetime.now(UTC)
         try:
             async with self._runtime.sessionmaker.begin() as session:
-                consumed = await consume_form_unless_pinned(session, row=row, agent=agent, now=now)
+                consumed = await consume_form_unless_pinned(
+                    session, row=row, agent=agent, now=now, location_verified=True
+                )
         except FormPinRefused:
             log.info("teams.credential.pin_refused", kind="mcp")
             return

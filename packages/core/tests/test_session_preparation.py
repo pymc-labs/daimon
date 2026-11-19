@@ -5168,3 +5168,152 @@ def test_an_unscoped_snapshot_serialises_without_a_scope() -> None:
     assert "memory_scope" not in snapshot.model_dump(mode="json")
     scoped = snapshot.model_copy(update={"memory_scope": "channel:slack:C-SYN-1"})
     assert scoped.model_dump(mode="json")["memory_scope"] == "channel:slack:C-SYN-1"
+
+
+_NO_MEMORY = {"memory_personal": "off", "memory_shared": "off", "memory_channel": "off"}
+
+
+async def test_a_relay_agents_channel_turns_never_reuse_a_session_or_carry_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each relay channel turn is a new session with no transfer, built without memory;
+    an agent with no relay server keeps its session (`daimon.core.relay_scope`)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    relay = _with_features(
+        replace(
+            _admission(account=account),
+            relay_scoped=True,
+            hold=TurnHold(platform="discord", channel_id="c1", client=False),
+        ),
+        **_NO_MEMORY,
+    )
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        raise AssertionError("a relay turn carries nothing from the earlier session")
+
+    first = await _prepare(deps, relay, tenant=tenant, account=account, transfer=_transfer)
+    second = await _prepare(deps, relay, tenant=tenant, account=account, transfer=_transfer)
+    assert isinstance(first, PreparedTurn) and isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id
+    carried = second.continuity
+    assert second.reused is False and carried.transfer_kind is None
+    assert carried.user_prefix == "" and not carried.system_blocks
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None and row.effective_config is not None
+    assert dict(row.effective_config.identity_features) == _NO_MEMORY
+
+    plain = _admission(account=account)
+    kept = await _prepare(deps, plain, tenant=tenant, account=account)
+    again = await _prepare(deps, plain, tenant=tenant, account=account)
+    assert isinstance(kept, PreparedTurn) and isinstance(again, PreparedTurn)
+    assert again.ma_session_id == kept.ma_session_id and again.reused is True
+
+
+async def test_a_relay_dm_replaces_a_session_recorded_with_memory_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A relay DM (no hold) may continue its own session, but never one built with memory on."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    before = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(before, PreparedTurn)
+    relay_dm = _with_features(replace(_admission(account=account), relay_scoped=True), **_NO_MEMORY)
+
+    first = await _prepare(deps, relay_dm, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    assert first.ma_session_id != before.ma_session_id, "the memory-on session is replaced"
+    same = await _prepare(deps, relay_dm, tenant=tenant, account=account)
+    assert isinstance(same, PreparedTurn) and same.ma_session_id == first.ma_session_id
+
+
+@pytest.mark.parametrize("relay", [False, True])
+async def test_a_session_with_no_readable_configuration_is_kept_unless_the_agent_is_relay(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    relay: bool,
+) -> None:
+    """An unheld turn binds a session whose configuration cannot be read, as before; a
+    relay agent's turn replaces it, never reusing a session it cannot inspect."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    legacy = await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="thread-1",
+        account_id=account.id,
+        ma_session_id="ses_gone",
+    )
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    if relay:
+        admission = _with_features(replace(admission, relay_scoped=True), **_NO_MEMORY)
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert (prepared.ma_session_id == legacy.ma_session_id) is (not relay)
+
+
+@pytest.mark.parametrize("direction", ["from_relay", "to_relay", "neither"])
+async def test_a_handoff_carries_nothing_out_of_or_into_a_relay_agents_turn(
+    direction: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A relay turn's work never moves to another session or agent, and a relay agent
+    takes none in; a handoff between agents with no relay server carries as before."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    held = TurnHold(platform="discord", channel_id="vault", client=False, relay=True)
+    old = _sealed(_admission(account=account), seal_id="vault")
+    if direction == "from_relay":
+        old = _with_features(replace(old, relay_scoped=True, hold=held), **_NO_MEMORY)
+    first = await _prepare(deps, old, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    successor_agent = _agent(agent_id="ag_successor")
+    _register(transport.state, successor_agent)
+    async with db_session_factory() as session, session.begin():
+        binding = await create_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="vault",
+            thread_id="thread-1",
+            responder_ma_agent_id="ag_successor",
+            responder_name="research-bot",
+            kind="handoff",
+        )
+    calls: list[str] = []
+
+    async def _transfer(**kwargs: Any) -> PreparedReplacement:
+        calls.append(kwargs["old_session_id"])
+        return PreparedReplacement(
+            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
+        )
+
+    new = _sealed(
+        _admission(account=account, agent=successor_agent, thread_binding_id=binding.id),
+        seal_id="vault",
+    )
+    if direction == "to_relay":
+        new = _with_features(replace(new, relay_scoped=True, hold=held), **_NO_MEMORY)
+    handed = await _prepare(deps, new, tenant=tenant, account=account, transfer=_transfer)
+
+    assert isinstance(handed, PreparedTurn) and handed.continuity.state == "replaced"
+    if direction == "neither":
+        assert calls == [first.ma_session_id]
+    else:
+        assert calls == []
+        assert handed.continuity.transfer_kind is None and handed.continuity.user_prefix == ""

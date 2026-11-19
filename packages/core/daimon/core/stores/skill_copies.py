@@ -36,8 +36,18 @@ async def get_skill_sizes(
 
 
 async def put_skill_size(session: AsyncSession, row: SkillSizeRow) -> None:
-    """Record one measurement; a concurrent writer measured the same bytes."""
-    await session.execute(insert(SkillSize).values(**row.model_dump()).on_conflict_do_nothing())
+    """Record one measurement; a concurrent writer measured the same bytes.
+
+    A row measured before `manifest_bytes` was kept gains it from a later one.
+    """
+    statement = insert(SkillSize).values(**row.model_dump())
+    await session.execute(
+        statement.on_conflict_do_update(
+            constraint="pk_skill_sizes",
+            set_={"manifest_bytes": statement.excluded.manifest_bytes},
+            where=SkillSize.manifest_bytes.is_(None),
+        )
+    )
 
 
 async def get_skill_copy(
