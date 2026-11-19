@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -85,14 +85,15 @@ class ProviderCeiling:
 
     Today's spend is re-read at most every `ttl_s` per provider, so a turn start costs
     one scan of the day's usage a minute, not one per turn; turns admitted within that
-    window may pass the ceiling by what they spend.
+    window may pass the ceiling by what they spend. A read never carries into the next
+    UTC day, so midnight refuses or admits as the new day's spend says.
     """
 
     limits_usd: Mapping[str, Decimal]
     ttl_s: float = 60.0
     clock: Callable[[], float] = time.monotonic
-    _read: dict[str, tuple[float, Decimal]] = field(
-        default_factory=dict[str, tuple[float, Decimal]], init=False, repr=False
+    _read: dict[tuple[str, date], tuple[float, Decimal]] = field(
+        default_factory=dict[tuple[str, date], tuple[float, Decimal]], init=False, repr=False
     )
 
     async def check(
@@ -104,11 +105,12 @@ class ProviderCeiling:
         limit = self.limits_usd.get(provider)
         if limit is None:
             return
-        read = self._read.get(provider)
+        key = (provider, now.date())
+        read = self._read.get(key)
         if read is None or self.clock() >= read[0]:
             async with sessionmaker() as session:
                 spent = await provider_spend_today(session, provider=provider, now=now)
-            read = self._read[provider] = (self.clock() + self.ttl_s, spent)
+            read = self._read[key] = (self.clock() + self.ttl_s, spent)
         if read[1] >= limit:
             log.warning(
                 "turn.provider_daily_ceiling_reached", provider=provider, ceiling_usd=str(limit)

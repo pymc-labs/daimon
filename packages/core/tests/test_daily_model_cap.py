@@ -277,6 +277,20 @@ async def test_the_provider_ceiling_sums_every_tenant_and_refuses_at_its_limit(s
     assert "Today's OpenAI budget for this Daimon install is used up." in text, text
 
 
+async def test_the_provider_ceiling_does_not_carry_a_read_across_midnight(sessions):
+    """Yesterday's full ceiling must not refuse the first turns of the next UTC day."""
+    from daimon.core.stores.model_spend import provider_spend_today
+    from daimon.core.turn.daily_model_cap import ProviderCeiling
+
+    await record(sessions, "astra", usage(BINDINGS["astra"][1], "gpt-6-astra"))
+    async with sessions() as db:
+        total = await provider_spend_today(db, provider="openai", now=NOW)
+    ceiling = ProviderCeiling({"openai": total})
+    with pytest.raises(AdmissionDenied):
+        await ceiling.check(sessions, provider="openai", now=NOW)
+    await ceiling.check(sessions, provider="openai", now=NOW + timedelta(days=1))
+
+
 async def test_an_expired_or_missing_tariff_refuses_instead_of_counting_nothing(sessions):
     expired = ProviderPrice(
         "openai",
