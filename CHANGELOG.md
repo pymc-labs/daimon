@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents can wake on posts to a private link.** `create_watch` with source
+  `callback` DMs the owner a secret link; each post to it wakes the agent once.
+  Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
+  `callback_watch_lifetime` feature (30 days by default, or permanent) and a post
+  may carry up to `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default).
+  `daimon watches import` also carries over such watches and held reminders from
+  every file of an export, and `daimon watches go-live` makes everything an import
+  holds for an agent live in one step, in place of `daimon watches confirm`.
+  Reminders fire in the private conversation, thread or channel they came from,
+  only while the agent may post there and the owner can still see it. A rerun
+  updates what has not gone live, `--full` cancels what no file of the run lists,
+  and `unpause`, `renew` and `rotate-link` manage what came in.
+  Moving people in never messages them. A timers or callback import names its
+  agent: held timers belong to it, so another agent's `go-live` and `--full` run
+  leave them alone. Reminders in a private conversation or channel only fire for an
+  agent on Managed Agents (a plain channel's own backend setting wins over the agent's);
+  `go-live` lists the others by name and schedules none.
+  Each watch imports in its own transaction, so watch ingress never waits for a
+  whole import. Importing the same files again after a privacy purge restores the
+  purged rows, so delete the import files after use. `daimon watches confirm` is
+  removed. After the `callback_watch_imports` migration, roll back by downgrading
+  it first, because an old sidecar refuses the new grant. Reminders set in a
+  private conversation now fire; those already due when this deploys are settled
+  without firing. A callback watch cannot be made in a private conversation, and
+  the lane proxy now routes callback links with the configured body limit.
+- **Operators can move people in from another bot.** `daimon tags import` opts
+  listed Discord members out of being tagged. `daimon dm import-history` holds
+  each person's earlier private conversation for their first DM here with the
+  agent it names, which starts from it once, without saying so.
 - **Answer and unattended run time limits.** Two new workspace and agent settings, set
   by server admins, limit how long one turn may run: `turn_time_limit` for a person's
   message in a chat, a direct message or the web app, and `unattended_time_limit` for a run

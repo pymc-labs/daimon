@@ -233,6 +233,7 @@ source_modules = [
     "daimon.core.env_file",
     "daimon.core.direct_messages",
     "daimon.core.dm_access",
+    "daimon.core.dm_carry_over",
     "daimon.core.dm_debounce",
     "daimon.core.dm_explain",
     "daimon.core.dm_import",

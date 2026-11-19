@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 
 import httpx
 import typer
+from daimon.adapters.cli.commands.dm_history import import_history_command
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 dm_app = typer.Typer(help="Who may have a private conversation with which agent.")
 rule_app = typer.Typer(help="Ordered rules that send a person, a group or everyone to an agent.")
 dm_app.add_typer(rule_app, name="rule")
+dm_app.command("import-history")(import_history_command)
 
 _USER = typer.Option("--user", help="Platform user id; repeat for several.")
 _GROUP = typer.Option("--group", help="Role (group) id; repeat for several.")

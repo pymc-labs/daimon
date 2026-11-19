@@ -20,6 +20,7 @@ import anthropic
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.access_policy import (
+    CHANNEL_SCOPE_PREFIX,
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
@@ -59,6 +60,7 @@ from daimon.core.stores.direct_messages import (
     start_conversation,
 )
 from daimon.core.stores.dm_access import set_pick
+from daimon.core.stores.dm_carry_overs import take_carry_over
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
@@ -673,6 +675,20 @@ async def start_cold_dm(
             groups=groups,
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
+        # An imported earlier conversation is used once, by the first private start on
+        # the agent it was imported for: with several DM agents, a start on another
+        # agent must not use it up.
+        carried = await take_carry_over(
+            session,
+            tenant_id=tenant_id,
+            platform=conversation.platform,
+            external_user_id=external_user_id,
+            agent_name=dm_agent.name,
+        )
+        if carried is not None:
+            conversation = conversation.model_copy(
+                update={"history": carried.history, "context": carried.context}
+            )
         if remember_pick:
             await set_pick(
                 session,
@@ -1245,6 +1261,121 @@ async def run_dm_watch(
         ) from error
 
 
+async def run_dm_timer(
+    deps: TurnDeps,
+    row: TaskContinuationRow,
+    *,
+    prompt: str,
+) -> DmRoutineReply:
+    """Run a due DM timer as a fresh private DM turn of its owner.
+
+    The same admission and Managed-Agents-only rules as a DM routine, in a new
+    scope with no history. Nothing is posted here. While the owner has a DM turn
+    running it raises `SessionBusyError` so the timer is offered again later.
+    """
+    if row.reason != "timer":
+        raise DirectMessageAccessRevoked("invoker_not_allowed", message="Not a timer.")
+    try:
+        return await _run_dm_fire(
+            deps,
+            tenant_id=row.tenant_id,
+            owner_user_id=row.requester_external_user_id,
+            agent_name=row.target_name,
+            prompt=prompt,
+            source=None,
+            budget_channel_id=None,
+            timer_row=row,
+        )
+    except DirectMessageAccessRevoked as error:
+        if error.reason != "owner_busy":
+            raise
+        raise SessionBusyError(pending_reasons=("timer",), retry_after=datetime.now(UTC)) from error
+
+
+async def run_channel_timer(
+    deps: TurnDeps,
+    row: TaskContinuationRow,
+    *,
+    prompt: str,
+    role: Role,
+    role_ids: tuple[str, ...] = (),
+    category_id: str | None = None,
+    category_unresolved: bool = False,
+) -> DmRoutineReply:
+    """Run a due channel timer as a fresh, unattended turn of its owner in that channel.
+
+    The row's parent is the channel; its thread is only a queue scope. The caller has
+    proved over REST that the owner still sees the channel and the agent may post there,
+    and passes the owner's role. Admission asks again, so a changed agent, a protected
+    channel or a lost allowance refuses it. Nothing is posted here.
+    """
+    if row.reason != "timer":
+        raise DirectMessageAccessRevoked("invoker_not_allowed", message="Not a timer.")
+    channel_id = row.parent_channel_id
+    scope_id = f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}"
+    owner = row.requester_external_user_id
+    now = datetime.now(UTC)
+    async with deps.sessionmaker() as session:
+        tenant = await get_tenant(session, row.tenant_id)
+    if not tenant_ready(tenant, platform="discord"):
+        raise DirectMessageAccessRevoked(
+            "tenant_unavailable", message="This workspace is not available."
+        )
+    try:
+        admission = await admit(
+            deps,
+            tenant_id=row.tenant_id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id=owner,
+            channel_id=channel_id,
+            role=role,
+            role_ids=role_ids,
+            verified_membership=True,
+            origin="routine",
+            attended=False,
+            now=now,
+            category_id=category_id,
+            category_unresolved=category_unresolved,
+        )
+        if admission.agent.id != row.target_ma_agent_id:
+            raise DirectMessageAccessRevoked(
+                "invoker_not_allowed", message="The timer's agent changed."
+            )
+        if (
+            admission.backend_revision is not None
+            and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
+        ):
+            raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
+        prepared = await bind_session(
+            deps,
+            admission,
+            tenant_id=row.tenant_id,
+            platform="discord",
+            external_user_id=owner,
+            thread_id=scope_id,
+            session_account_id=admission.account_id,
+            reuse_existing=False,
+            deadline=deadline,
+        )
+    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
+        raise _revoked(error) from error
+    if prepared.backend is not None:
+        raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+    return await _run_unattended_turn(
+        deps,
+        prepared,
+        tenant_id=row.tenant_id,
+        parent_channel_id=channel_id,
+        scope_id=scope_id,
+        owner=owner,
+        prompt=prompt,
+        deadline=deadline,
+        account_id=admission.account_id,
+    )
+
+
 async def _run_dm_fire(
     deps: TurnDeps,
     *,
@@ -1255,6 +1386,7 @@ async def _run_dm_fire(
     source: DmSource | None,
     budget_channel_id: str | None,
     watch_row: TaskContinuationRow | None = None,
+    timer_row: TaskContinuationRow | None = None,
 ) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False) as fence:
         now = datetime.now(UTC)
@@ -1336,6 +1468,10 @@ async def _run_dm_fire(
         grant = prepared.admission.grant
         if prepared.backend is not None or grant is None:
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        if timer_row is not None and prepared.admission.agent.id != timer_row.target_ma_agent_id:
+            raise DirectMessageAccessRevoked(
+                "invoker_not_allowed", message="The timer's agent changed."
+            )
         if watch_row is not None:
             from daimon.core.stores.watches import record_delivery_session
 
@@ -1352,40 +1488,71 @@ async def _run_dm_fire(
                     "invoker_not_allowed", message="This report already ran."
                 )
 
-        async def sealed() -> None:
-            raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
+        return await _run_unattended_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            parent_channel_id=scope_id,
+            scope_id=scope_id,
+            owner=owner_user_id,
+            prompt=prompt,
+            deadline=deadline,
+            account_id=admission.account_id,
+            watch_row=watch_row,
+            fence=fence,
+        )
 
-        try:
-            done = await _run_admitted_dm_turn(
+
+async def _run_unattended_turn(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    parent_channel_id: str,
+    scope_id: str,
+    owner: str,
+    prompt: str,
+    deadline: datetime,
+    account_id: uuid.UUID,
+    watch_row: TaskContinuationRow | None = None,
+    fence: OwnerDmFence | None = None,
+) -> DmRoutineReply:
+    """Run an admitted unattended fire in its fresh scope; a drain or lost fence settles it."""
+
+    async def sealed() -> None:
+        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
+
+    try:
+        done = await _run_admitted_dm_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            scope_id=scope_id,
+            external_user_id=owner,
+            role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
+            prompt=prompt,
+            deadline=deadline,
+            on_sealed=sealed,
+            origin="routine",
+            watch_row=watch_row,
+        )
+    except asyncio.CancelledError:
+        if deps.running_turns.is_drain_cancel() or (fence is not None and fence.lost.is_set()):
+            await _settle_cancelled_dm_scope(
                 deps,
-                prepared,
                 tenant_id=tenant_id,
                 platform="discord",
-                parent_channel_id=scope_id,
                 scope_id=scope_id,
-                external_user_id=owner_user_id,
-                role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
-                prompt=prompt,
-                deadline=deadline,
-                on_sealed=sealed,
-                origin="routine",
-                watch_row=watch_row,
+                account_id=account_id,
             )
-        except asyncio.CancelledError:
-            if deps.running_turns.is_drain_cancel() or fence.lost.is_set():
-                await _settle_cancelled_dm_scope(
-                    deps,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    scope_id=scope_id,
-                    account_id=admission.account_id,
-                )
-            raise
-        return DmRoutineReply(
-            text=done.text,
-            session_id=done.session_id,
-            producing_agent_id=prepared.admission.agent.id,
-        )
+        raise
+    return DmRoutineReply(
+        text=done.text,
+        session_id=done.session_id,
+        producing_agent_id=prepared.admission.agent.id,
+    )
 
 
 def _revoked(

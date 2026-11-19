@@ -86,6 +86,7 @@ Where each feature can be set, and its default.
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| Callback watch lifetime | `callback_watch_lifetime` | Limit | 30 days | ✓ | ✓ |  |  |  |  |
 | Answer time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | Unattended run time limit | `unattended_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -905,6 +906,18 @@ The longest one long job may run. The smallest setting wins.
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Callback watch lifetime
+
+How long a callback watch lasts, new or moved in, before it must be renewed. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `callback_watch_lifetime` |
+| Values | `0` (Permanent), `90` (90 days), `30` (30 days), `7` (7 days) |
+| Default | `30` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
 
 ## Answer time limit
 

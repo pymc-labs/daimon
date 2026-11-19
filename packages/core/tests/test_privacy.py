@@ -990,6 +990,8 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "slack_user_tokens": "slack_user_tokens",
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
+        "dm_carry_overs": "dm_carry_overs",
+        "held_timers": "held_timers",
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
@@ -1219,6 +1221,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # shared by everyone there; `set_by` is attribution only, severed by
             # ON DELETE SET NULL. Deleting the row would change the place for others.
             "feature_values",
+            # An imported timer's note waits for an operator to confirm it and is emptied
+            # when settled; account_id is ON DELETE CASCADE, so erasing the account removes it.
+            "held_timers",
             # Support limits, menus and channels are tenant config; `set_by_account_id`
             # is attribution only, severed by ON DELETE SET NULL. A person's own
             # limit rows are deleted by platform user (`support_person_limits`).

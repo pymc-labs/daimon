@@ -1,39 +1,76 @@
-"""Operator-only offline import and explicit binding confirmation."""
+"""Operator-only offline import of watches and reminders, and making them live."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from daimon.adapters.cli.flags import JSON_OPTION
-from daimon.adapters.cli.runtime import build_runtime
-from daimon.core.config import load_settings
-from daimon.core.continuity.watch_imports import WatchExport
+from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.config import load_settings, load_watches_settings
+from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExport
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.stores.domain import WatchRow
+from daimon.core.stores.held_timers import (
+    TimerImport,
+    agent_runs_scope_timers,
+    cancel_missing_timers,
+    import_held_timer,
+    list_unrunnable_timers,
+    settle_held_timers,
+    unpause_timers,
+)
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
+    CallbackImport,
     NoticeReceipt,
+    OwnerCapExceeded,
     WatchActivity,
+    callback_lifetime,
     confirm_import,
-    get_watch,
+    import_callback_watch,
     import_watch,
     list_notice_receipts,
     list_tenant_watches,
+    list_unconfirmed_imports,
+    renew_callback_watch,
+    rotate_callback_link,
     set_watch_limits,
+    unpause_imported_watch,
     watch_ceilings,
 )
 
 watches_app = typer.Typer(
-    help="List a tenant's watches and their owner-notice receipts, import paused watches, "
-    "confirm reviewed bindings and set daily firing limits."
+    help="List a tenant's watches and their owner-notice receipts, import paused watches "
+    "and reminders, make them live and set daily firing limits."
 )
 limits_app = typer.Typer(help="Daily firing limits for every watch, or one tenant's.")
 watches_app.add_typer(limits_app, name="limits")
+
+
+async def check_agent(
+    runtime: CliRuntime, *, tenant_id: uuid.UUID, agent_id: str, agent_name: str
+) -> None:
+    """The tenant must be a live Discord one and the agent one of its unarchived agents."""
+    async with runtime.sessionmaker() as db:
+        tenant = await get_tenant(db, tenant_id)
+    if tenant is None:
+        raise typer.BadParameter(f"No such tenant {tenant_id}")
+    if tenant.platform != "discord" or tenant.archived_at is not None:
+        raise typer.BadParameter(f"Tenant {tenant_id} is archived or not a Discord server")
+    agent = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
+    )
+    if agent is None or agent.id != agent_id:
+        raise typer.BadParameter("--agent-id and --agent-name must name one agent of the tenant")
 
 
 def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
@@ -164,61 +201,361 @@ def notices_command(
     typer.echo("sent: " + (", ".join(f"{kind}={n}" for kind, n in sent.items()) or "none"))
 
 
+def _write_urls(path: Path, urls: dict[str, str]) -> None:
+    """Merge into any earlier map and write it owner-only. The links are secrets."""
+    merged: dict[str, str] = {}
+    if path.exists():
+        merged = json.loads(path.read_text(encoding="utf-8"))
+    merged.update(urls)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(merged, indent=2))
+    path.chmod(0o600)
+
+
 @watches_app.command("import")
-def import_command(export_file: Path) -> None:
-    """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied."""
-    if export_file.stat().st_size > 1048576:
-        raise typer.BadParameter("Watch export exceeds 1 MiB")
-    manifest = WatchExport.model_validate_json(export_file.read_bytes())
+def import_command(
+    export_files: Annotated[list[Path], typer.Argument(metavar="EXPORT_FILE...")],
+    tenant: Annotated[
+        uuid.UUID | None, typer.Option("--tenant", help="Tenant for callback watches and timers")
+    ] = None,
+    agent_id: Annotated[
+        str | None,
+        typer.Option("--agent-id", help="Agent id that callback watches and timers are for"),
+    ] = None,
+    agent_name: Annotated[
+        str | None, typer.Option("--agent-name", help="Name of that agent")
+    ] = None,
+    urls_out: Annotated[
+        Path | None,
+        typer.Option("--urls-out", help="Write new callback links here (JSON, mode 0600)"),
+    ] = None,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Cancel held timers that no file of this run lists"),
+    ] = False,
+) -> None:
+    """Import v1 JSON manifests of one export, offline. Every watch starts paused; no key
+    is copied.
+
+    Give every file of one export in the same run. Their server must be the tenant's.
+    Each watch commits on its own, so ingress never waits long; a rerun finishes a
+    run that stopped. Callback watches keep their token hash and get a new link, written
+    only to --urls-out as {source id: url}. Timers are held for --agent-id until its
+    `go-live`. A rerun updates what nobody has confirmed yet; with --full it also
+    cancels that agent's held timers that no file lists, and refuses a run whose files
+    list no timers.
+    """
+    manifests: list[WatchExport] = []
+    for export_file in export_files:
+        if export_file.stat().st_size > 1048576:
+            raise typer.BadParameter(f"Watch export {export_file.name} exceeds 1 MiB")
+        manifests.append(WatchExport.model_validate_json(export_file.read_bytes()))
+    guilds = {manifest.guild_id for manifest in manifests}
+    if len(guilds) > 1:
+        raise typer.BadParameter("The files are for different servers")
+    guild_id = guilds.pop()
+    entries = [entry for manifest in manifests for entry in manifest.watches]
+    timers = [timer for manifest in manifests for timer in manifest.timers]
+    callbacks = [w for w in entries if isinstance(w, ImportedCallbackWatch)]
+    others = [w for w in entries if not isinstance(w, ImportedCallbackWatch)]
+    if full and not timers:
+        # Later files of a split export list no timers: --full on them alone would
+        # cancel every held reminder.
+        raise typer.BadParameter(
+            "No file lists timers; give every file of the export with --full",
+            param_hint="--full",
+        )
+    if (callbacks or timers) and tenant is None:
+        raise typer.BadParameter("--tenant is required for callback watches and timers")
+    if (callbacks or timers) and (agent_id is None or agent_name is None):
+        raise typer.BadParameter(
+            "--agent-id and --agent-name are required for callbacks and timers"
+        )
+    if callbacks:
+        if urls_out is None:
+            raise typer.BadParameter("--urls-out is required for callback watches")
+        if load_watches_settings().callback_base_url is None:
+            raise typer.BadParameter("Set DAIMON_WATCHES__CALLBACK_BASE_URL first")
+
+    async def check_targets(runtime: CliRuntime) -> None:
+        """The file, tenant and agent must agree before anything is written."""
+        tenants: set[uuid.UUID] = {w.os_binding.tenant_id for w in others}
+        if tenant is not None:
+            tenants.add(tenant)
+        async with runtime.sessionmaker() as db:
+            for tenant_id in tenants:
+                row = await get_tenant(db, tenant_id)
+                if row is None:
+                    raise typer.BadParameter(f"No such tenant {tenant_id}")
+                if row.external_id != guild_id:
+                    raise typer.BadParameter(
+                        f"The file is for server {guild_id}, not tenant {tenant_id}"
+                    )
+        if callbacks or timers:
+            assert tenant is not None and agent_id and agent_name
+            await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
 
     async def run() -> None:
+        base = load_watches_settings().callback_base_url
         async with build_runtime(load_settings()) as runtime:
-            # Whole-file transaction: no half-import or lost owner notice on crash.
-            async with runtime.sessionmaker.begin() as db:
-                rows = [
-                    await import_watch(db, entry, now=datetime.now(UTC))
-                    for entry in manifest.watches
-                ]
+            await check_targets(runtime)
+            now = datetime.now(UTC)
+            rows: list[WatchRow] = []
+            over_cap = 0
+            for entry in others:
+                try:
+                    # The global watch lock lasts one commit, so ingress waits for one watch.
+                    async with runtime.sessionmaker.begin() as db:
+                        rows.append(await import_watch(db, entry, now=now))
+                except OwnerCapExceeded:
+                    over_cap += 1
+            moved: list[CallbackImport] = []
+            cap = None
+            if callbacks and tenant is not None:
+                async with runtime.sessionmaker() as db:
+                    cap = await callback_lifetime(db, runtime.settings, tenant)
+            for entry in callbacks:
+                assert tenant is not None and agent_id and agent_name
+                async with runtime.sessionmaker.begin() as db:
+                    item = await import_callback_watch(
+                        db,
+                        entry,
+                        tenant_id=tenant,
+                        agent_id=agent_id,
+                        agent_name=agent_name,
+                        now=now,
+                        lifetime_cap=cap,
+                    )
+                    if item.token is not None and item.watch is not None and urls_out is not None:
+                        link = f"{base}/callbacks/watches/{item.watch.id}/{item.token}"
+                        # Before the commit: a lost file would lose a link nobody can recover.
+                        _write_urls(urls_out, {item.legacy_id: link})
+                moved.append(item)
+            held: list[TimerImport] = []
+            cancelled = 0
+            if timers:
+                assert tenant is not None and agent_id
+                async with runtime.sessionmaker.begin() as db:
+                    for timer in timers:
+                        held.append(
+                            await import_held_timer(
+                                db, timer, tenant_id=tenant, agent_id=agent_id, now=now
+                            )
+                        )
+                    if full:
+                        cancelled = await cancel_missing_timers(
+                            db,
+                            tenant_id=tenant,
+                            agent_id=agent_id,
+                            keep={t.source_id for t in timers},
+                            now=now,
+                        )
             for row in rows:
                 detail = row.source_state.get("mapping_error")
                 suffix = f": {detail}" if detail else ""
                 typer.echo(f"{row.id} paused {row.source_state.get('reason')}{suffix}")
+            for item in moved:
+                if item.watch is None:
+                    typer.echo(f"callback {item.legacy_id} {item.outcome}")
+                    continue
+                note = f" lifetime capped to {cap.days} days" if item.capped and cap else ""
+                typer.echo(
+                    f"{item.watch.id} paused {item.outcome} callback owner="
+                    f"{item.watch.owner_account_id} channel={item.watch.parent_channel_id} "
+                    f"thread={item.watch.thread_id}{note}"
+                    f"{' link written' if item.token else ''}"
+                )
+            cut = sum(1 for row in rows if row.source_state.get("truncated")) + sum(
+                1 for item in moved if item.truncated
+            )
+            capped = over_cap + sum(1 for item in moved if item.outcome == "owner_cap")
+            if capped or cut:
+                typer.echo(f"watches owner_cap={capped} truncated={cut}")
+            if timers:
+                counts = {
+                    k: sum(1 for t in held if t.outcome == k)
+                    for k in ("held", "updated", "existing", "past", "unsupported")
+                }
+                counts["truncated"] = sum(1 for t in held if t.truncated)
+                if full:
+                    counts["cancelled"] = cancelled
+                typer.echo("timers " + " ".join(f"{k}={n}" for k, n in counts.items()))
 
     asyncio.run(run())
 
 
-@watches_app.command("confirm")
-def confirm_command(
-    watch_id: uuid.UUID,
-    tenant_id: uuid.UUID,
-    owner_account_id: uuid.UUID,
-    agent_id: str,
-    parent_channel_id: str,
-    thread_id: str,
+@watches_app.command("go-live")
+def go_live_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    agent_id: Annotated[str, typer.Option("--agent-id")],
+    agent_name: Annotated[str, typer.Option("--agent-name")],
 ) -> None:
-    """Confirm a mapped import's exact binding. Page watches first need owner key rotation."""
+    """Make everything an import holds for this agent live. Safe to rerun.
+
+    Each imported watch is confirmed on the owner, channel and thread the import
+    printed, and resumes unless it was paused where it came from. Each unpaused held
+    timer still more than a minute away is scheduled once; a due one is skipped. DM and
+    channel timers that would run off Managed Agents never fire (a channel's own backend
+    wins over the agent's): they are listed by name, counted as not_scheduled and left
+    held. A watch that cannot go live is listed with the reason and stays as it was.
+    """
+
+    async def run() -> tuple[Counter[str], Counter[str]]:
+        watches: Counter[str] = Counter()
+        async with build_runtime(load_settings()) as runtime:
+            await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
+            async with runtime.sessionmaker() as db:
+                held = await list_unconfirmed_imports(db, tenant_id=tenant, agent_id=agent_id)
+            for watch in held:
+                if watch.source_state.get("tool") == "read_thread":
+                    typer.echo(
+                        f"Warning: {watch.id} reads messages, which needs a thread ID. "
+                        "Channel and DM IDs are unsupported; use read_channel for channels.",
+                        err=True,
+                    )
+                try:
+                    async with runtime.sessionmaker.begin() as db:
+                        row = await confirm_import(
+                            db,
+                            watch.id,
+                            tenant_id=tenant,
+                            owner_account_id=watch.owner_account_id,
+                            agent_id=agent_id,
+                            parent_channel_id=watch.parent_channel_id,
+                            thread_id=watch.thread_id,
+                            now=datetime.now(UTC),
+                        )
+                except ValueError as exc:
+                    watches["refused"] += 1
+                    typer.echo(f"{watch.id} not live: {exc}")
+                    continue
+                watches["live" if row.status == "active" else "kept_paused"] += 1
+            async with runtime.sessionmaker() as db:
+                unrunnable = await list_unrunnable_timers(
+                    db,
+                    tenant_id=tenant,
+                    agent_id=agent_id,
+                    agent_runs=await agent_runs_scope_timers(
+                        db, tenant_id=tenant, agent_id=agent_id
+                    ),
+                )
+            for source_id in unrunnable:
+                typer.echo(
+                    f"timer {source_id} not scheduled: DM and channel timers need an agent "
+                    "on Managed Agents"
+                )
+            timers = await settle_held_timers(
+                runtime.sessionmaker,
+                tenant_id=tenant,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                now=datetime.now(UTC),
+                skip=unrunnable,
+            )
+        counts = Counter({str(k): n for k, n in timers.items()})
+        if unrunnable:
+            counts["not_scheduled"] = len(unrunnable)
+        return watches, counts
+
+    watches, timers = asyncio.run(run())
+    typer.echo(
+        "watches " + " ".join(f"{k}={watches[k]}" for k in ("live", "kept_paused", "refused"))
+    )
+    typer.echo("timers " + (" ".join(f"{k}={n}" for k, n in sorted(timers.items())) or "none"))
+
+
+@watches_app.command("unpause")
+def unpause_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    watch_id: Annotated[
+        uuid.UUID | None, typer.Option("--watch-id", help="A confirmed imported watch")
+    ] = None,
+    timer_id: Annotated[
+        str | None, typer.Option("--timer-id", help="One held timer, by its source id")
+    ] = None,
+    all_timers: Annotated[
+        bool, typer.Option("--all-timers", help="Every paused held timer of the tenant")
+    ] = False,
+) -> None:
+    """Let a watch or held timers that were paused where they came from run here."""
+    if sum(x is not None and x is not False for x in (watch_id, timer_id, all_timers)) != 1:
+        raise typer.BadParameter("Give exactly one of --watch-id, --timer-id, --all-timers")
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
             async with runtime.sessionmaker.begin() as db:
-                current = await get_watch(db, watch_id)
-                if current is not None and current.source_state.get("tool") == "read_thread":
-                    typer.echo(
-                        "Warning: imported message reads require a thread ID. "
-                        "Channel and DM IDs are unsupported; use read_channel for channel sources.",
-                        err=True,
+                if watch_id is not None:
+                    try:
+                        row = await unpause_imported_watch(
+                            db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                        )
+                    except ValueError as exc:
+                        raise typer.BadParameter(str(exc)) from None
+                    typer.echo(f"{row.id} {row.status}")
+                    return
+                changed = await unpause_timers(db, tenant_id=tenant, source_id=timer_id)
+            typer.echo(f"timers unpaused={changed}")
+
+    asyncio.run(run())
+
+
+@watches_app.command("renew")
+def renew_command(
+    watch_id: uuid.UUID, tenant: Annotated[uuid.UUID, typer.Option("--tenant")]
+) -> None:
+    """Give a callback watch and its links a fresh lifetime from now (set by the
+    callback_watch_lifetime feature; 30 days unless a server admin changed it)."""
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                try:
+                    row = await renew_callback_watch(
+                        db,
+                        watch_id,
+                        tenant_id=tenant,
+                        now=datetime.now(UTC),
+                        lifetime=await callback_lifetime(db, runtime.settings, tenant),
                     )
-                row = await confirm_import(
-                    db,
-                    watch_id,
-                    tenant_id=tenant_id,
-                    owner_account_id=owner_account_id,
-                    agent_id=agent_id,
-                    parent_channel_id=parent_channel_id,
-                    thread_id=thread_id,
-                    now=datetime.now(UTC),
-                )
-            typer.echo(f"{row.id} {row.status}")
+                except ValueError as exc:
+                    raise typer.BadParameter(str(exc)) from None
+            ends = row.expires_at.isoformat() if row.expires_at else "never"
+            typer.echo(f"{row.id} expires {ends}")
+
+    asyncio.run(run())
+
+
+@watches_app.command("rotate-link")
+def rotate_link_command(
+    watch_id: uuid.UUID,
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    urls_out: Annotated[
+        Path | None,
+        typer.Option("--urls-out", help="Write the new link here (JSON, mode 0600), not to screen"),
+    ] = None,
+) -> None:
+    """Replace every link of a callback watch with a new one, shown once."""
+    base = load_watches_settings().callback_base_url
+    if base is None:
+        raise typer.BadParameter("Set DAIMON_WATCHES__CALLBACK_BASE_URL first")
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                try:
+                    token = await rotate_callback_link(
+                        db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                    )
+                except ValueError as exc:
+                    raise typer.BadParameter(str(exc)) from None
+                url = f"{base}/callbacks/watches/{watch_id}/{token}"
+                if urls_out is not None:
+                    _write_urls(urls_out, {str(watch_id): url})
+            if urls_out is None:
+                typer.echo(url)
+            else:
+                typer.echo(f"{watch_id} link written")
 
     asyncio.run(run())
 

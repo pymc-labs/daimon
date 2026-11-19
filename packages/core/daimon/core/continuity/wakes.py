@@ -316,6 +316,7 @@ async def release_wake(
     claim: WakeClaim,
     *,
     retry_at: datetime | None,
+    refund: bool = True,
 ) -> bool:
     """Hand a claim back when the caller KNOWS its turn did not run.
 
@@ -324,7 +325,7 @@ async def release_wake(
     `WAKE_MAX_ATTEMPTS`. `retry_at` is when a wake is offered again; None
     leaves `available_at` alone, which keeps a handoff (NULL) waiting for the
     next turn in its thread, as it did before the wake queue. False when the
-    claim had already been lost.
+    claim had already been lost. `refund=False` leaves the claim counted.
     """
     async with sessionmaker.begin() as session:
         return await release_wake_row(
@@ -332,6 +333,7 @@ async def release_wake(
             idempotency_key=claim.idempotency_key,
             owner=claim.owner,
             retry_at=retry_at,
+            refund=refund,
         )
 
 

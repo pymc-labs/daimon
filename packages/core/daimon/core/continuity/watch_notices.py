@@ -15,7 +15,6 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Protocol
 
-from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.stores.domain import WatchRow
 from daimon.core.stores.watches import (
     REFUSED,
@@ -90,9 +89,6 @@ def notice_text(watch: WatchRow, kind: str) -> str:
     reason = str(watch.source_state.get("reason", ""))
     if kind == "expired":
         return f"{label} expired."
-    if kind == "source_unmapped":
-        # The watch id keeps each owner DM distinct, so a resumed send finds its own message.
-        return f"{label}: {UNMAPPED_NOTICE}"
     if kind == "paused":
         return f"{label}: {reason}"
     if kind == "tool_unlisted":

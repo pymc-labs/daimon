@@ -27,7 +27,7 @@ NO_GRANT_CHECK: dict[str, str] = {
         "the person's own cold DM or `/dm-me`; core `start_cold_dm` and `start_dm` check the grant"
     ),
     "adapters/discord/daimon/adapters/discord/bot.py": (
-        "`open_member_dm` opens the chat routine delivery asked for after its grant check"
+        "`open_member_dm` opens the chat that routine, watch and timer delivery asked for after their grant check"
     ),
 }
 
