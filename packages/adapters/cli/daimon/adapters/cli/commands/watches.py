@@ -14,7 +14,6 @@ from typing import Annotated
 import typer
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core.channel_backend import backend_selection_enabled
 from daimon.core.config import load_settings, load_watches_settings
 from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExport
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -440,7 +439,6 @@ def go_live_command(
                     agent_runs=await agent_runs_scope_timers(
                         db, tenant_id=tenant, agent_id=agent_id
                     ),
-                    channel_backends=backend_selection_enabled(runtime.settings.turn),
                 )
             for source_id in unrunnable:
                 typer.echo(

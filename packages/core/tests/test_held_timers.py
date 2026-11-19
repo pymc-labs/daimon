@@ -147,7 +147,6 @@ async def test_dm_and_channel_timers_stay_held_for_an_agent_off_managed_agents(
             tenant_id=tenant.id,
             agent_id="agent-1",
             agent_runs=False,
-            channel_backends=True,
         )
     counts = await settle_held_timers(
         db_session_factory,
@@ -175,21 +174,19 @@ async def test_a_channels_own_backend_wins_over_the_agents_for_its_timers(
     await hold(db_session_factory, tenant, "room", place="channel")  # channel "900"
     channel = ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="900")
 
-    async def unrunnable(*, agent_runs: bool, channel_backends: bool = True) -> list[str]:
+    async def unrunnable(*, agent_runs: bool) -> list[str]:
         async with db_session_factory() as session:
             return await list_unrunnable_timers(
                 session,
                 tenant_id=tenant.id,
                 agent_id="agent-1",
                 agent_runs=agent_runs,
-                channel_backends=channel_backends,
             )
 
     assert await unrunnable(agent_runs=False) == ["t-room"], "no channel setting: the agent's"
     async with db_session_factory.begin() as session:
         await set_channel_backend(session, channel, BackendConfig())  # Managed Agents
     assert await unrunnable(agent_runs=False) == [], "the channel runs it though the agent won't"
-    assert await unrunnable(agent_runs=False, channel_backends=False) == ["t-room"]
     async with db_session_factory.begin() as session:
         await set_channel_backend(session, channel, BackendConfig(backend="openai", model="gpt-5"))
     assert await unrunnable(agent_runs=True) == ["t-room"], "the channel's other backend wins"

@@ -112,6 +112,7 @@ async def test_people_who_already_have_a_private_conversation_still_get_theirs_a
                 memory_read_only=False,
                 history=[],
                 recent_message_ids=[],
+                claimed_at=None,
             ),
         )
     export = CarryOverExport.model_validate(body())

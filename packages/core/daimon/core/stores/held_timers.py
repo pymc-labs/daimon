@@ -241,7 +241,6 @@ async def list_unrunnable_timers(
     tenant_id: uuid.UUID,
     agent_id: str,
     agent_runs: bool,
-    channel_backends: bool,
 ) -> list[str]:
     """Source ids of the agent's open DM and channel timers that would never fire.
 
@@ -256,7 +255,7 @@ async def list_unrunnable_timers(
     unrunnable: list[str] = []
     for source_id, place_type, channel_id in timers:
         runs = agent_runs
-        if place_type == "channel" and channel_backends:
+        if place_type == "channel":
             channel = ChannelRef(
                 tenant_id=str(tenant_id), platform="discord", channel_id=channel_id
             )
