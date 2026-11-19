@@ -1275,7 +1275,9 @@ async def _watch_fence(deps: TurnDeps, fence: OwnerDmFence, stop: asyncio.Timeou
             try:
                 async with asyncio.timeout(_FENCE_CHECK_S):
                     await fence.db.execute(text("SELECT 1"))
-            except (SQLAlchemyError, OSError, TimeoutError) as err:
+            except Exception as err:
+                # Boundary: a driver reports a dropped connection in many types; any failure
+                # of the ping means the fence connection, and so the hold, is unusable.
                 _log.warning("dm.owner_fence_ping_failed", error_type=type(err).__name__)
                 fence.lost.set()
                 stop.reschedule(asyncio.get_running_loop().time())

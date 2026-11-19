@@ -1501,7 +1501,7 @@ async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
             tenant_id=_TENANT_ID,
             platform="discord",
             key="unattended_time_limit",
-            value="90",
+            value="30",
             account_id=None,
             surface="cli",
         )
@@ -1524,4 +1524,4 @@ async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
         rules_channel_id="C1",
     )
     assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
-    assert read == [90 * 60.0], "the worker reads the tenant's unattended run limit"
+    assert read == [30 * 60.0], "the worker reads the tenant's unattended run limit"
