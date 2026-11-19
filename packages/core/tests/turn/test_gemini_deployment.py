@@ -16,6 +16,7 @@ import httpx
 import pytest
 from daimon.core import pricing
 from daimon.core.channel_backend import check_backend
+from daimon.core.provider_key_gate import ProviderKey
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
@@ -30,6 +31,7 @@ from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import Artifact
+from mux.drivers.clients import key_digest
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord
@@ -531,6 +533,9 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             reuse_existing=True,
         )
         assert prepared.runtime is not None and isinstance(prepared.runtime.journal, GeminiJournal)
+        assert prepared.runtime.provider_key() == ProviderKey(
+            "gemini", key_digest("offline-selected-key")
+        ), "the turn runs on a keyed, gated provider key"
         deployment = prepared.runtime.journal.deployment
         assert deployment is not None and deployment.agent.model.id == model
         if session_id is not None:
@@ -559,7 +564,9 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
 
         assert extract_final_response(outcome.state.content) == "answer"
         assert outcome.state.usage_totals.output_tokens == 11
-    assert len(posts) == 2 and calls and len(clients) == 2 * len(calls)
+    # One sync and one async client serve every turn of the process, closed at shutdown.
+    assert len(posts) == 2 and calls and len(clients) == 2
+    await deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
     assert (tmp_path / "records.sqlite").exists() and (tmp_path / "holds.sqlite").exists()
     # Inline reuse has no infrastructure charge, so its measured usage settles at once:
@@ -761,6 +768,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     wire.expected_spend_limit = None
     clients = clients_for(monkeypatch, wire.handle)
     runtime = build_channel_runtime(application)
+    assert runtime.provider_key() == ProviderKey("openai", key_digest("offline"))
     config = application.admission.backend_revision
     assert config is not None
     assert runtime.price is pricing.provider_prices(config.profile)[("openai", config.model)]
@@ -778,6 +786,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     body = json.loads(request.content)
     assert body["agent"]["model"] == config.model
     assert "service_tier" not in body and "service_tier" not in body["agent"]
+    await application.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 
@@ -918,7 +927,7 @@ async def test_a_used_up_daily_model_cap_refuses_before_google_is_called(
     tmp_path: Path,
     db_clean: None,
 ) -> None:
-    """Gemini usage reaches no ledger debit; the daily model cap stops the turn first."""
+    """The daily model cap stops a Gemini turn before anything is created."""
     import httpx
 
     from .test_gemini_runtime_transport import clients_for

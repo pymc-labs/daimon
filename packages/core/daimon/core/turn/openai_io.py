@@ -45,7 +45,9 @@ from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
-_PAGE_BOUND = 50
+# The journal keeps 100,000 events (`openai_state`); a page is the largest allowed.
+_HISTORY_PAGE = 1000
+_PAGE_BOUND = 100
 _BUFFER_BOUND = 1000
 # Usage pages read, newest first, before the root turn counts as missing (500 turns).
 _USAGE_PAGE_SIZE, _USAGE_PAGES = 10, 50
@@ -245,7 +247,7 @@ class OpenAITurnIO:
                 self._backend.events.list(
                     self._scope,
                     self._session,
-                    page=PageRequest(cursor=cursor, order="asc", limit=100),
+                    page=PageRequest(cursor=cursor, order="asc", limit=_HISTORY_PAGE),
                 )
             )
             for event in page.data:

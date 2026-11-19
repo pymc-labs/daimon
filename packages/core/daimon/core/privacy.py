@@ -24,6 +24,7 @@ scope and erases those rows.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from typing import Final
 
 from daimon.core.stores import accounts as accounts_store
@@ -61,6 +62,8 @@ from daimon.core.stores import web_people as web_people_store
 from daimon.core.stores import web_roles as web_roles_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
+from daimon.core.turn.notices import provider_name
+from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -213,30 +216,68 @@ DELETE_PAUSED: Final[str] = (
 )
 
 
-def privacy_lines(display_name: str) -> tuple[str, str]:
-    """The privacy panel's two lines: what the deployment keeps, what Anthropic keeps.
+#: The other providers that store what an agent running on them is sent.
+_OPENAI: Final[str] = PERSISTENT_WORKSPACE.provider
+_GEMINI: Final[str] = INLINE_REUSE.provider
+_OTHER_PROVIDERS: Final[tuple[str, ...]] = (_OPENAI, _GEMINI)
 
-    The categories behind them are the privacy policy's, one button away.
+
+def _other_providers_text(providers: Iterable[str]) -> str | None:
+    """The enabled other providers as "OpenAI and Gemini"; None when there are none."""
+    chosen = set(providers)
+    named = [provider_name(key) for key in _OTHER_PROVIDERS if key in chosen]
+    return " and ".join(named) if named else None
+
+
+async def account_other_providers(
+    sm: async_sessionmaker[AsyncSession], *, account_id: uuid.UUID
+) -> tuple[str, ...]:
+    """The providers besides Anthropic the account's tenant admin turned on."""
+    from daimon.core.stores.access_policy import load_access_policy
+
+    async with sm() as session:
+        account = await accounts_store.get_account(session, account_id)
+        if account is None:
+            return ()
+        policy = await load_access_policy(session, tenant_id=account.tenant_id)
+    return tuple(p for p in _OTHER_PROVIDERS if p in policy.enabled_backends)
+
+
+def privacy_lines(display_name: str, providers: Iterable[str] = ()) -> tuple[str, str]:
+    """The privacy panel's two lines: what the deployment keeps, what the providers keep.
+
+    `providers` are the other providers an admin turned on; each is named, since an
+    agent that runs on one sends it the conversation. The categories behind the lines
+    are the privacy policy's, one button away.
     """
+    others = _other_providers_text(providers)
     return (
         f"{display_name} stores your linked accounts, routines and settings. "
         "Saved GitHub keys are encrypted.",
-        "Anthropic stores your agents and their conversations.",
+        "Anthropic stores your agents and their conversations."
+        + (f" {others} also stores them for agents that run there." if others else ""),
     )
 
 
-def delete_scope_lines(display_name: str) -> tuple[str, str]:
+def delete_scope_lines(display_name: str, providers: Iterable[str] = ()) -> tuple[str, str]:
     """What Delete removes and what it leaves, true to `purge_account`.
 
     The purge deletes the deployment's own rows about the account and, upstream,
     tries to delete every Managed Agents session tagged with it (the
     conversations it started); that upstream delete can fail, so the confirm
-    promises only the attempt. Shared agents and their memory stores stay; see
-    the carve-outs in `daimon.core.purge`.
+    promises only the attempt. OpenAI sessions get the same attempt; Gemini keeps
+    its stored interactions for its own retention. Shared agents and their memory stay;
+    see the carve-outs in `daimon.core.purge`.
     """
+    chosen = set(providers)
+    elsewhere = ""
+    if _OPENAI in chosen:
+        elsewhere += " It tries the same at OpenAI."
+    if _GEMINI in chosen:
+        elsewhere += " Gemini conversations stay with Google for its own retention period."
     return (
         f"This deletes {display_name}'s records about you and tries to delete your "
-        "conversations stored at Anthropic.",
+        "conversations stored at Anthropic." + elsewhere,
         "Shared agents and their memory stay, and other people may keep using them.",
     )
 

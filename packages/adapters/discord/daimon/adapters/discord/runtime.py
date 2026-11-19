@@ -308,6 +308,7 @@ async def build_runtime(
                 pass
             finally:
                 await turn_deps.context_providers.aclose()
+                await turn_deps.provider_clients.aclose()
                 await drain_outcomes()
                 await drain_budget_notices()
                 await owner_engine.dispose()

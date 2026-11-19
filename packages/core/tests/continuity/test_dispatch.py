@@ -187,6 +187,18 @@ async def test_run_failures_settle(
     assert await _status(db_session_factory, key) == ("skipped", reason)
 
 
+async def test_a_wake_refused_by_a_cooling_provider_is_offered_again(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    key = await _queue(
+        db_session_factory, caller, "w", reason="timer", available_at=datetime.now(UTC)
+    )
+    cooling = AdmissionDenied(reason="backend_unsupported", cause="provider_cooling")
+    await _dispatch(db_session_factory, caller, run=cooling)
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.attempts) == ("pending", 0), "a cooling provider must not drop the wake"
+
+
 async def test_a_busy_handoff_is_released_for_the_next_turn_tail(
     db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
 ) -> None:

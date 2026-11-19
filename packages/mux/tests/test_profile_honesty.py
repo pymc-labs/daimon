@@ -535,7 +535,13 @@ class GeminiStorage:
         self.records = Records()
 
     @asynccontextmanager
-    async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Any]:
+    async def transaction(
+        self, keys: Any = None, *, after_dispatch: bool = False
+    ) -> AsyncIterator[Any]:
+        yield self.records
+
+    @asynccontextmanager
+    async def read(self, keys: Any = None) -> AsyncIterator[Any]:
         yield self.records
 
 

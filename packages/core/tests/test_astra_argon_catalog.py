@@ -97,18 +97,23 @@ def usage(**changes: object) -> UsageObservation:
     return UsageObservation.model_validate(fields | changes)
 
 
-def test_astra_usage_is_priced_at_its_rate_and_conservatively_above_272k() -> None:
+def test_astra_usage_is_priced_at_its_rate_and_per_request_above_272k() -> None:
     price = provider_prices(PERSISTENT_WORKSPACE.profile_id)[("openai", ASTRA)]
     # 80k uncached at $10 + 20k cached at $1 + 10k output at $50, per million.
     assert provider_cost_of(usage(), price, infrastructure_usd=Decimal(0)) == Decimal("1.32")
-    # Above 272k input OpenAI doubles input/cache and charges 1.5x output. The whole
-    # aggregate is priced at those rates (an upper bound), never at the base rate:
+    # Above 272k input OpenAI doubles input/cache and charges 1.5x output, per request:
     # 272,001 uncached at $20 + 10k output at $75, per million.
+    assert provider_cost_of(
+        usage(input_tokens=272_001, input_cached_tokens=0, grain="model_request"),
+        price,
+        infrastructure_usd=Decimal(0),
+    ) == Decimal("6.19002")
+    # A session total may sum many short requests, so it keeps the base rate.
     assert provider_cost_of(
         usage(input_tokens=272_001, input_cached_tokens=0),
         price,
         infrastructure_usd=Decimal(0),
-    ) == Decimal("6.19002")
+    ) == Decimal("3.22001")
     # At exactly the threshold, the base rate.
     assert provider_cost_of(
         usage(input_tokens=272_000, input_cached_tokens=0),

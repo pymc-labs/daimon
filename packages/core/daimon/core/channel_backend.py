@@ -134,6 +134,35 @@ async def is_selfhosted_channel(
     return revision is not None and revision.backend == "selfhosted"
 
 
+async def channel_provider(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> Provider | None:
+    """The provider a channel is pinned to, or None when nobody configured it."""
+    revision = await current_backend(session, channel_ref(tenant_id, platform, channel_id))
+    return revision.backend if revision is not None else None
+
+
+async def agent_native_provider(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str, agent_name: str
+) -> Provider | None:
+    """The non-Anthropic provider an agent's preference puts it on, else None.
+
+    Looked up by the saved id, then by name, since a routine's saved id can predate
+    a recreate; a friendly name only ever refuses here, it never authorizes.
+    """
+    preference = await agent_backends.current(
+        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
+    )
+    if preference is not None:
+        return preference.backend if preference.backend != DEFAULT_BACKEND else None
+    for provider in PROVIDERS:
+        if provider != DEFAULT_BACKEND and await agent_backends.has_backend_preference_by_name(
+            session, tenant_id=tenant_id, agent_name=agent_name, backend=provider
+        ):
+            return provider
+    return None
+
+
 async def effective_thread_backend(
     session: AsyncSession,
     *,

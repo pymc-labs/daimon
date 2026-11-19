@@ -62,7 +62,7 @@ export type Access = {
 export type Providers = {
   offered: { id: string; label: string }[]
   allowed: string[]
-  /** Whether the list follows the deployment's keyed providers. */
+  /** Whether the list follows the deployment default (Anthropic). */
   followed: boolean
 }
 

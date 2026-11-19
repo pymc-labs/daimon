@@ -218,7 +218,7 @@ async def test_default_environment_when_switched_to_openai_then_its_turn_install
     request, quote, wire, _ = openai_template
     assert not SANDBOX & set(quote.declared_drops), quote.declared_drops
     environments = SetupEnvironments()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda _key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     monkeypatch.setattr(openai_deployment, "_deployment_id", _deployment)
     await openai_turn(request, 0)
     await openai_turn(request, 1)
@@ -245,7 +245,7 @@ async def test_openai_thread_when_made_on_the_bare_environment_then_it_moves_onc
 
     request, _, wire, _ = openai_template
     environments, carried = SetupEnvironments(), [False]
-    monkeypatch.setattr(openai_deployment, "_environments", lambda _key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda _key, _clients: environments)
     monkeypatch.setattr(openai_deployment, "_deployment_id", _deployment)
     original = openai_environment.tenant_environment
 

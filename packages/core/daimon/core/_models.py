@@ -303,7 +303,7 @@ class TenantAccessPolicyRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # False: an admin never chose; the tenant follows the deployment's keyed providers
+    # False: an admin never chose; the tenant follows the deployment default (Anthropic)
     # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
     enabled_backends_explicit: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
@@ -4867,6 +4867,8 @@ class UsageObservation(Base):
         PrimaryKeyConstraint("binding_id", "observation_id", "revision"),
         # The OpenAI daily model cap reads one tenant's observations per turn.
         Index("ix_usage_observation_tenant_id", "tenant_id"),
+        # The provider daily ceiling reads today's observations of one provider.
+        Index("ix_usage_observation_provider_observed_at", "provider", "observed_at"),
     )
 
     # No foreign key to the slot: erasing a private slot must leave these rows
@@ -4877,6 +4879,9 @@ class UsageObservation(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.AppliedUsage` as JSON.
     applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Copied from `applied` for the daily reads; NULL on a row older code wrote.
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AccountingOutbox(Base):
@@ -4901,6 +4906,9 @@ class AccountingOutbox(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
     row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Who asked and the budget channel, as recorded: a row settled later debits them.
+    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -5049,6 +5057,39 @@ class DiscordGatewayLease(Base):
     holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ProviderKeyCooldown(Base):
+    """When a provider key may be used again for one model, after a rate limit.
+
+    Keyed by a digest of the key, never the key itself. Private to
+    `daimon.core.stores.provider_key_gate`.
+    """
+
+    __tablename__ = "provider_key_cooldowns"
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    key_digest: Mapped[str] = mapped_column(Text, primary_key=True)
+    model: Mapped[str] = mapped_column(Text, primary_key=True)
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderKeyLease(Base):
+    """One running turn on a provider key; it expires if the turn never releases it."""
+
+    __tablename__ = "provider_key_leases"
+    __table_args__ = (Index("ix_provider_key_leases_key", "provider", "key_digest", "tenant_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_provider_key_leases_tenants"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    key_digest: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class SessionSettleState(Base):
@@ -5209,6 +5250,42 @@ class GeminiRuntimeState(Base):
     project: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class GeminiRecord(Base):
+    """One Gemini driver record row: an account's operation log, a session, a resource.
+
+    Split from the one `gemini_runtime_state` blob per account, so a turn locks and
+    rewrites only its own session. `version` and `touched_at` change on every write.
+    """
+
+    __tablename__ = "gemini_records"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "account_id", "project", "kind", "id"),
+        CheckConstraint(
+            "kind IN ('account', 'session', 'agent', 'environment', 'skill', 'artifact')",
+            name="ck_gemini_records_kind",
+        ),
+        Index("ix_gemini_records_kind_touched_at", "kind", "touched_at"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = _tenant_fk()
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    project: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    touched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # A session's binding; an artifact's session (workspace snapshot files).
+    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A session's `kind:id` refs: its agent, environment, pinned skills and files.
+    refs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
 
 
 class Watch(Base):

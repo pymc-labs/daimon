@@ -45,7 +45,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import compile_environment
-from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
+from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -57,10 +57,16 @@ SETUP_REF = "environment_setup"
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
+    from daimon.core.turn.provider_gate import gated_turn
+
     try:
-        return await _prepare_gemini_turn(request)
+        return await gated_turn(request, _prepare_gemini_turn)
     except UnsupportedCapability as err:
         raise AdmissionDenied(reason="backend_unsupported") from err
+    except ContinuityLost as err:
+        # Retention pruned the conversation or its workspace expired: a retry fails
+        # the same way, so the person is told to start a new thread.
+        raise AdmissionDenied(reason="backend_unsupported", cause="session_lost") from err
 
 
 async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -103,9 +109,9 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_durable_runtime",), PROFILE)
     journal, usage = runtime.journal, runtime.usage_store
-    # Gemini usage reaches no ledger debit, and a root interaction has no token
-    # envelope: the daily model cap refuses plainly here, before anything is
-    # created. A fallback of the first request is checked too (`CappedFlashAccounting`).
+    # Gemini usage is debited only after it is measured, and a root interaction has
+    # no token envelope: the daily model cap refuses plainly here, before anything
+    # is created. A fallback of the first request is checked too (`CappedFlashAccounting`).
     from daimon.core.turn.daily_model_cap import check_daily_model_cap
 
     await check_daily_model_cap(
@@ -115,6 +121,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         price=usage.prices.get(config.model) if config.model is not None else None,
         cap=request.deps.gemini_daily_model_cap_usd,
     )
+    if request.gate is not None:
+        await request.gate.enter(runtime.provider_key)
     deployment = journal.deployment
     # A template's or a channel's own deployment installs channel skills per session.
     installs_skills = admission.backend_revision_origin != "agent"

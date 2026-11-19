@@ -7,6 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Late GPT usage survives a restart.** OpenAI can report a turn's usage long
+  after the turn ends. Daimon re-read it only for about an hour, in the process
+  that ran the turn, so a restart or a later answer left the turn unbilled. The
+  scheduler now re-reads such turns from their pending usage for a day, then
+  logs that it gave up.
+
+- **Refusals on GPT and Gemini say what actually happened.** A spent daily
+  Gemini quota no longer says to try again in a minute; it says the quota
+  refills daily and to use another model. A provider that can't run a
+  conversation no longer claims to be "unavailable right now".
+- **A channel's tool limits are no longer ignored on GPT and Gemini.** A tool
+  switched off for a channel or thread still ran there when the agent was on
+  GPT or Gemini. The reply is now refused, saying those providers can't apply
+  the limit, until the tool is turned back on or the agent is on Claude.
+- **Failure alerts name the provider.** `turn.user_failure` carries a
+  `provider` field, and its `backend` is set as soon as admission reads the
+  channel's or agent's choice, so a turn that fails while being admitted no
+  longer logs `unknown`.
+- **Images work in Gemini conversations.** A message with a picture failed
+  with no reason given. The picture now goes to Gemini with the message.
+- **Routines no longer run on Claude when their agent or channel is on GPT or
+  Gemini.** The scheduler quietly ran them on Claude. A routine whose agent,
+  channel or thread is on another provider now stops with a message saying
+  routines run only on Anthropic.
+- **A provider key no longer turns that provider on for every server.** A
+  server that never chose its allowed providers now uses Anthropic only, even
+  when the deployment holds an OpenAI or Gemini key. An admin opts in with
+  the allowed-providers setting in chat, on the web or from the CLI, and the
+  card says that the provider then receives the server's conversations and
+  the connector data they use. A server that already saved a list keeps it. The
+  web admin page still offers every keyed provider. Connector relay to another
+  provider (`mcp_connector_relay`) is now off until an operator turns it on.
+- **Moving an agent or a conversation to another provider asks first.**
+  Prompt text can no longer switch an agent, the server's default agent for
+  everyone, or one conversation's model to OpenAI or Gemini on its own. The
+  first request returns a preview that changes nothing, the second posts a
+  card in the thread naming the provider and who it moves, and the move runs
+  only when the person approves it. Everyone in the thread sees the card. A
+  model change within the same provider applies at once, as before.
+- **Privacy names every provider that stores your conversations, and Delete
+  reaches OpenAI.** The privacy panel on Discord, Slack and Teams, the web
+  Delete dialog and the privacy policy name OpenAI and Google (Gemini) on
+  servers where an admin enabled them. Deleting your account now also asks OpenAI to delete the
+  conversations stored there, and logs any it could not. Google offers no
+  delete for stored Gemini conversations, so the policy says Google keeps
+  them for its own retention period.
+- **Each Gemini reply has a spend limit.** The daily model cap is checked only
+  as a turn starts, so one long Gemini reply could spend without bound. A
+  Gemini runtime row now takes `spend_limit_usd_cents`, enforced as for OpenAI:
+  the reply is stopped once its priced usage passes the limit, and the agent is
+  told next time. Built-in rows set 50 cents.
+
+- **A daily spend ceiling per provider for the whole install.** Each tenant's
+  daily model cap bounded one tenant, but tenants are free to create, so
+  nothing bounded what the install spent on OpenAI or Gemini in a day. GPT and
+  Gemini turns are now refused once every tenant together has spent the
+  provider's ceiling today, at list price: $200 each by default, set with
+  `DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and `__GEMINI`. It
+  resets at midnight UTC. The web app says so in the same words as chat, for
+  this ceiling and for a workspace's daily model cap.
+
+- **Usage settled late counts against the person and the right channel.** Usage
+  that stayed pending and was settled later by the scheduler named no person
+  and fell back to the thread's channel, so it never counted against the
+  asker's spend allowance or the turn's budget channel. Each usage row now
+  keeps both from when it was recorded; rows recorded before this settle as
+  before.
+
+- **Gemini never runs a model it can't price.** When Gemini 3.8 Flash was busy
+  partway through a reply, the next request could fall back to the
+  `gemini-flash-latest` alias, which has no tariff, so its tokens were neither
+  billed nor counted against the daily model cap. A model with no current tariff
+  now never runs on any request: a busy Flash skips the alias and falls back to
+  Flash-Lite.
+
+- **GPT spend counts against the right channel budget.** A GPT reply was debited
+  to the channel it ran in, not the channel whose budget the turn counts
+  against, so a direct message or an agent with its own budget channel charged
+  the wrong one. It now uses the same budget channel as a Claude reply.
+
+- **GPT replies are charged.** Usage of an OpenAI persistent workspace waited
+  for a container cost no meter reports, so it stayed pending and never reached
+  the ledger, and signup credit never ran down. It now settles at its token cost
+  with no container charge, and usage already pending is drained on the
+  scheduler's next passes, each row once.
+
+- **Long GPT-6 Luna replies are billed.** A Luna reply whose prompt passed 272k
+  input tokens had no price, so it never reached the ledger. OpenAI reports a
+  reply as the total of its requests, so a reply past 272k now settles at the
+  base rates; only a single request known to pass 272k takes the long-context
+  rates. GPT-6 Astra and GPT-6.2 Astra and Sol replies are no longer billed
+  wholly at long-context rates once their total passes 272k.
+
+- **A busy or rate-limited provider key now says so and recovers.** One GPT or
+  Gemini API key serves at most 16 turns at once across every replica and 4 per
+  workspace (`DAIMON_PROVIDER_LIMITS__KEY_TURNS`, `__TENANT_TURNS`). A turn past
+  a cap waits up to 20 seconds (`__WAIT_S`) for a slot, then is refused as busy
+  instead of piling more requests on the key. When a provider answers 429 with a
+  wait (the `Retry-After` header, or Gemini's retry delay), that key and model
+  rest for that long, defaulting to 30 seconds and at most ten minutes. Turns on
+  it are refused at once with a "try again shortly" message that names the
+  provider, so a rate limit no longer turns into a retry storm. A timer, watch
+  report or follow-up that meets either refusal is offered again shortly
+  instead of being dropped. Requires the new `provider_key_cooldowns` and
+  `provider_key_leases` tables.
+- **GPT and Gemini calls share one connection per key, and long GPT histories
+  load.** Each process now builds one provider client per key and reuses its
+  connections, instead of opening and closing a client, with its own TLS
+  context, for every call. Reading a GPT conversation's history from OpenAI
+  happens once per read rather than once per page, in pages of a thousand
+  events, so a conversation past 5,000 events no longer fails to resume.
+- **Idle Gemini conversations are pruned.** After 30 days without activity
+  (`DAIMON_GEMINI__RECORDS_RETENTION_DAYS`), the scheduler removes a Gemini
+  conversation's stored history; a thread that comes back is told to start a
+  new thread, in the same words on every platform.
+- **Busy Gemini threads no longer slow the others in an account.** Each
+  conversation, agent, environment, skill and file is saved as its own row,
+  and a turn saves only what changed. The first start moves stored state over;
+  older releases refuse it after that, so roll forward rather than back.
+- **Gemini and vault-cleanup work stall other turns less.** Reading and saving
+  a Gemini conversation's stored state now runs on a small worker pool, which
+  roughly halves the longest event-loop pause on a 9 MB state. The scheduler's
+  idle relay vault sweep reads only session vault ids and waits ten minutes
+  after a restart before its first run.
 - **The built-in agent is named `default`.** It was `daimon`; its prompt, bot
   name and picture stay, and its reader variant is `default-reader`. On upgrade,
   `daimon defaults apply` renames each workspace's seeded agent and its managed

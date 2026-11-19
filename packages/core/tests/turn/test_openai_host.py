@@ -446,10 +446,12 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     from daimon.core.turn.prepare import bind_session_impl
     from daimon.core.turn.run import run_prepared_turn
 
+    # The thread's channel differs from the one whose budget its spend counts against.
+    budgeted = replace(request.admission, budget_channel_id="C-budget")
     for index in (1, 2):
         prepared = await bind_session_impl(
             request.deps,
-            request.admission,
+            budgeted,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",
@@ -486,6 +488,7 @@ async def test_two_host_turns_persist_usage_and_root_isolation(composed):
     assert {x["observation"].turn_id for x in observations} == {"turn-1", "turn-2"}
     assert all(x["infrastructure_usd"] is None for x in observations)
     assert all(x["model_id"] == "gpt-6-luna" for x in observations)
+    assert {x["channel_id"] for x in observations} == {"C-budget"}, "debits the budget channel"
     rows = await store.read_events(SESSION_ID)
     assert sum(e.type == "session.turn_ended" for e in rows) == 2
     assert sum(r.method == "POST" and r.url.path.endswith("/events") for r in wire.requests) == 2

@@ -668,6 +668,7 @@ async def full(switched_request, source_mcp, monkeypatch, tmp_path, request):
         )
     finally:
         await binding.close()
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed for client in clients)
 
 

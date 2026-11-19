@@ -300,8 +300,12 @@ async def test_spend_reads_match_the_ledger(sessions):
     assert -await balance(sessions) > 3 * real.web_search.usd
 
 
-async def test_spend_reads_when_tokens_are_unpriced_then_keep_paid_searches(sessions):
+async def test_spend_reads_when_tokens_are_unpriced_then_keep_paid_searches(sessions, monkeypatch):
     """A long prompt with no long-context tariff prices no tokens, but its searches still cost."""
+    luna = usage_events.provider_price_on("gpt-6-luna", date.today())
+    assert luna is not None, "Luna has a current tariff"
+    unpriced = dataclasses.replace(luna, long_context_multipliers=None)
+    monkeypatch.setattr(usage_events, "provider_price_on", lambda model, on: unpriced)
     tokens = UsageTokens(300_000, 10, 0, 0)
     async with sessions() as session, session.begin():
         assert await usage_events.record(

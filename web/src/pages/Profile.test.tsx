@@ -25,7 +25,7 @@ const accounts: ConnectedAccount[] = [
   { id: "a1", provider: "discord", provider_label: "Discord", label: "maya.l", last_used: "2026-11-04T08:00:00Z", current: true },
   { id: "a2", provider: "slack", provider_label: "Slack", label: "maya@northwind", last_used: "2026-11-01T08:00:00Z", current: false },
 ]
-const preview: DeletePreview = { enabled: true, held: ["2 routines"], kept: ["3 conversations shared with other people"] }
+const preview: DeletePreview = { enabled: true, scope: ["It tries the same at OpenAI."], held: ["2 routines"], kept: ["3 conversations shared with other people"] }
 
 const view = () => {
   vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/profile" ? data : path === "/api/me" ? { workspace: { name: "Fernhill" }, capabilities: [], accounts } : preview) as never)
@@ -71,6 +71,7 @@ describe("Profile", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Delete my data" }))
     expect(await screen.findByText("2 routines")).toBeInTheDocument()
     expect(screen.getByText("3 conversations shared with other people")).toBeInTheDocument()
+    expect(screen.getByText("It tries the same at OpenAI.")).toBeInTheDocument()
     const go = screen.getByRole("button", { name: "Delete" })
     expect(go).toBeDisabled()
     await userEvent.type(screen.getByLabelText(/Type Maya Lindqvist/), "maya lindqvist")

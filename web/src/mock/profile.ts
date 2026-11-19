@@ -33,6 +33,10 @@ const state: Profile = {
 
 const preview: DeletePreview = {
   enabled: true,
+  scope: [
+    "This deletes Daimon's records about you and tries to delete your conversations stored at Anthropic. It tries the same at OpenAI.",
+    "Shared agents and their memory stay, and other people may keep using them.",
+  ],
   held: ["1 linked account", "2 routines", "saved settings", "1 saved Microsoft account", "14 saved conversations"],
   kept: ["3 conversations shared with other people"],
 }

@@ -477,6 +477,9 @@ def scenario_tape(
 ) -> ProviderTape:
     """Compose exact port-level turns with Gemini's real history GET requests.
 
+    A Gemini reconcile fetches only open interactions, so a settled earlier turn
+    is read once, as the next turn's `previous`, and never polled again.
+
     Preparation/resource/accounting requests are deliberately not guessed. N9
     can append explicitly scripted replies for those owned host boundaries.
     Blocked invocations have no reply; attempting to dispatch one is a violation.
@@ -505,19 +508,6 @@ def scenario_tape(
             after = tuple(prefix + name for name in reply.after)
             if fixture.backend == "gemini" and prior and reply.id == "send":
                 after += (prefix + "previous",)
-            # Gemini reconcile walks all interactions retained by this session.
-            if fixture.backend == "gemini" and reply.id == "saved":
-                for old in prior:
-                    replies.append(
-                        WireReply(
-                            id=prefix + f"history.{old.turn}",
-                            method="GET",
-                            path=f"/v1beta/interactions/{old.root_id}",
-                            headers=(("api-revision", "2026-05-20"),),
-                            response_json=old.snapshot,
-                            after=(prefix + "send",),
-                        )
-                    )
             replies.append(reply.model_copy(update={"id": prefix + reply.id, "after": after}))
         prior.append(turn)
     return ProviderTape(

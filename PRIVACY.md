@@ -50,7 +50,12 @@ shared token and offer a context tool. Discord messages queued while the agent
 was busy go together, each with its author's display name when there are several.
 Their answers go into the message the agent receives, like a tool result.
 
-Conversation content lives in Anthropic's Managed Agents service. When an admin
+Conversation content lives in Anthropic's Managed Agents service. A server admin
+can also turn on agents that run on OpenAI or Google (Gemini); only then do those
+providers receive that server's conversations and the connector data they use,
+and store them under their own terms. Until an admin does, only Anthropic does.
+Connector data goes to another provider only when an operator allows it and the
+server has turned that provider on. When an admin
 enables DM conversations, daimon also stores the selected workspace, an
 excerpt from the conversation (up to 12 messages / 16,000 characters), and the
 most recent 12 private user/agent messages (up to 16,000 characters). This
@@ -65,7 +70,8 @@ On Discord, run `/privacy` in a server where your account is linked. On Slack,
 run `/privacy` to open the privacy panel. On Teams, send `privacy`; the bot
 replies in your private chat. These controls let you:
 
-- **View** who stores what about you: Daimon or Anthropic.
+- **View** who stores what about you: Daimon, Anthropic and any other provider an
+  admin turned on.
 - **Export** shows a summary on Slack and Teams. Export is not yet available on
   Discord.
 - **Delete** your account and its linked personal records ("delete me").
@@ -73,8 +79,10 @@ replies in your private chat. These controls let you:
 Account deletion covers every server, workspace and organisation linked to your
 account in this copy of Daimon. Daimon also tries to delete conversations
 linked to your account from Anthropic. The shared agents and their memory stay.
-Chat transcript deletion at Anthropic can fail. If Daimon reports a failure,
-ask the person who runs it to check and help remove the remaining transcripts.
+Daimon makes the same attempt at OpenAI for conversations stored there. Google
+offers no delete for stored Gemini conversations, so Google keeps them for its own
+retention period. Chat transcript deletion at a provider can fail. If Daimon
+reports a failure, ask the person who runs it to check and help remove the remaining transcripts.
 
 Account deletion also removes Daimon's own copy of your private conversations
 (Daimon keeps these on its provider-neutral turn path, which runs agents on other

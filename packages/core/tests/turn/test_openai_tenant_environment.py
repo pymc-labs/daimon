@@ -177,7 +177,7 @@ def provisioning(switched_request, monkeypatch, tmp_path):
         deps=replace(request.deps, state_store=PostgresStateStore(request.deps.sessionmaker)),
     )
     environments = FakeEnvironments()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda key, clients: environments)
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "offline-key")
     monkeypatch.setattr(openai_deployment, "_deployment_id", AsyncMock(return_value=DEPLOYMENT))
     manifest = tmp_path / "runtime.json"
@@ -430,8 +430,9 @@ async def fresh_tenant(switched_request, monkeypatch, tmp_path):
             return made.model_copy(update={"ref": ref})
 
     environments = NativeTemplate()
-    monkeypatch.setattr(openai_deployment, "_environments", lambda key: environments)
+    monkeypatch.setattr(openai_deployment, "_environments", lambda key, clients: environments)
     yield request, wire, environments
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 

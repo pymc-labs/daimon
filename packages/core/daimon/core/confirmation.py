@@ -562,6 +562,10 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_agent_backend_switch" and own_server:
+        return _backend_switch_prompt(data, requester_platform_user_id, now + timeout)
+    if call.tool_name == "set_thread_model" and own_server:
+        return _thread_move_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "approve_reach" and own_server:
         return _reach_prompt(data, requester_platform_user_id, now + timeout)
     if call.tool_name == "create_notebook_upload_url" and publishing:
@@ -780,6 +784,53 @@ def reach_title(data: Mapping[str, object]) -> str:
     # The same validation approve_reach stores, so the card never understates it.
     plan = ReachPlan.from_args(data)
     return _one_line(card_title(plan, _one_line(str(data.get("where") or ""), limit=60)), limit=200)
+
+
+def _backend_switch_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    """The card for moving an agent to another provider; everyone in the thread sees it."""
+    from daimon.core.turn.notices import provider_name
+
+    agent = _one_line(data.get("agent_name") or "the agent", limit=64)
+    provider = provider_name(str(data.get("target_backend") or ""))
+    scope = (
+        f"{agent} answers everyone here, so this moves everyone to {provider}."
+        if data.get("for_everyone") is True
+        else f"New conversations with {agent} use {provider}, and each person's own "
+        "conversation with it follows on their next message."
+    )
+    return ConfirmationPrompt(
+        title=f"Move {agent} to {provider}?",
+        consequence=f"{scope} {provider} receives those conversations and the connector data "
+        "they use.",
+        action=f"Move {agent} to {provider}",
+        denied_action=f"{agent} not moved",
+        detail_lines=(f"Agent: {agent}", f"Provider: {provider}"),
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
+
+
+def _thread_move_prompt(
+    data: Mapping[str, object], requester_platform_user_id: str, expires_at: datetime
+) -> ConfirmationPrompt:
+    """The card for moving one conversation to another provider's model."""
+    from daimon.core.thread_model_switch import pick_value
+    from daimon.core.turn.notices import provider_name
+
+    value = pick_value(str(data.get("model") or ""))
+    provider = provider_name(value.partition(":")[0] if ":" in value else None)
+    return ConfirmationPrompt(
+        title=f"Move this conversation to {provider}?",
+        consequence=f"Its next replies use {provider}. {provider} receives this conversation "
+        "and the connector data it uses.",
+        action=f"Move to {provider}",
+        denied_action="Conversation not moved",
+        detail_lines=(f"Model: {_one_line(value, limit=64)}", f"Provider: {provider}"),
+        requester_platform_user_id=requester_platform_user_id,
+        expires_at=expires_at,
+    )
 
 
 def _reach_prompt(
@@ -1062,8 +1113,8 @@ def backend_switch_callbacks(
                 action = "Change allowed providers"
                 details = (
                     "Allowed providers: " + (", ".join(reference.providers) or "none"),
-                    "Applies to this server. Saving makes this list the server's own choice: "
-                    "it stops following the providers this Daimon install has keys for.",
+                    "Applies to this server. Any provider other than Anthropic receives this "
+                    "server's conversations and the connector data they use.",
                 )
         except AgentBackendRefused as exc:
             if exc.reason in ("stale_preview", "stale_revision"):

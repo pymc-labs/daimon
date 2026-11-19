@@ -227,7 +227,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
     "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
-        "This agent's model provider isn't available here right now.",
+        "This agent's model provider can't run this conversation here.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
     "provider_hold_cap_reached": _Copy(
@@ -245,6 +245,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "provider_daily_cap_reached": _Copy(
         "Today's {model} budget for this {scope} is used up.",
         "It resets at midnight UTC; use another model until then.",
+    ),
+    "provider_daily_ceiling_reached": _Copy(
+        "Today's {provider} budget for this Daimon install is used up.",
+        "It resets at midnight UTC; use another provider until then.",
     ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
@@ -279,10 +283,27 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "This channel is pinned to {provider}, which isn't set up for it yet.",
         'Ask whoever runs Daimon to set it up, or ask {who} to say "clear this channel\'s pin".',
     ),
+    "provider_busy": _Copy(
+        "{Provider} is busy with other conversations right now.",
+        "Try again in a minute.",
+    ),
+    "provider_cooling": _Copy(
+        "{Provider} asked Daimon to slow down.",
+        "Try again in a few minutes, or ask {who} to switch {agent_mid} to {default}.",
+    ),
     "anthropic_unconfigured": _Copy(
         "{agent} runs on Anthropic, which isn't set up on this Daimon install.",
         "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
         " Daimon to add the Anthropic key.",
+    ),
+    # The provider no longer holds this thread's conversation or files (idle too long).
+    "session_lost": _Copy(
+        "This conversation can't be continued.",
+        "Start a new thread to keep going.",
+    ),
+    "tool_limits": _Copy(
+        "This {scope} limits the agent's tools, and {provider} can't apply that limit.",
+        'Ask {who} to turn those tools back on, or to say "switch {agent_mid} to {default}".',
     ),
 }
 _PROVIDER_NAMES = {
@@ -384,7 +405,31 @@ def admission_refusal_text(
     cause: BackendRefusalCause | None = None,
     provider: str | None = None,
 ) -> str:
-    """Two approved lines for an admission refusal.
+    """Two approved lines for an admission refusal, as one text."""
+    return "\n\n".join(
+        admission_refusal_lines(
+            reason,
+            nouns,
+            bot_name=bot_name,
+            agent_name=agent_name,
+            in_dm=in_dm,
+            cause=cause,
+            provider=provider,
+        )
+    )
+
+
+def admission_refusal_lines(
+    reason: AdmissionDenialReason,
+    nouns: RefusalNouns,
+    *,
+    bot_name: str | None = None,
+    agent_name: str | None = None,
+    in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
+) -> tuple[str, str]:
+    """The two approved lines for an admission refusal: what happened, what to do.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
@@ -417,7 +462,7 @@ def admission_refusal_text(
         "who": nouns.who,
         "Who": _capitalised(nouns.who),
     }
-    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
+    return copy.title.format(**words), copy.next_step.format(**words)
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,13 +612,18 @@ def provider_quota_copy(error: BaseException | None) -> tuple[str, str] | None:
     """
     for cause in _error_chain(error):
         if isinstance(cause, ProviderError) and cause.category == "rate_limited":
-            if cause.native_code not in ("quota_zero", "quota_exhausted"):
+            if cause.native_code not in ("quota_zero", "quota_daily", "quota_exhausted"):
                 continue
             model = _model_words(cause.native_param)
             if cause.native_code == "quota_zero":
                 return (
                     f"{_capitalised(model)} isn't available on this server's Google plan.",
                     "Pick another model or ask an admin to upgrade it.",
+                )
+            if cause.native_code == "quota_daily":
+                return (
+                    f"Today's Google quota for {model} is used up.",
+                    "It refills daily; use another model until then, or ask an admin to raise it.",
                 )
             return (
                 f"Google is rate-limiting {model} right now.",

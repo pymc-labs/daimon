@@ -27,7 +27,7 @@ export type Profile = {
   chat_accounts: { platform: string; name: string | null }[]
   keys: { id: string; agent: AgentRef | null; client: string | null; created_at: string; expires_at: string | null; bound: boolean }[]
 }
-export type DeletePreview = { enabled: boolean; held: string[]; kept: string[] }
+export type DeletePreview = { enabled: boolean; scope: string[]; held: string[]; kept: string[] }
 
 const KEY = ["profile"]
 
@@ -182,6 +182,7 @@ function DeleteDialog({ name, onClose }: { name: string; onClose: () => void }) 
         <DialogHeader><DialogTitle>Delete my data</DialogTitle></DialogHeader>
         <QueryState query={preview}>{(d) => (
           <div className="space-y-4 text-sm">
+            {d.scope.map((line) => <p key={line}>{line}</p>)}
             <div>
               <div className="mb-1 font-medium">Deleted</div>
               <ul className="list-disc space-y-0.5 pl-5">{d.held.length ? d.held.map((h) => <li key={h}>{h}</li>) : <li>Nothing listed</li>}</ul>

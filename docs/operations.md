@@ -235,18 +235,19 @@ These events carry identifiers, counts and durations, never message text:
 | `runtime.started` | info | `process`, `release`; once per process start |
 | `runtime.health` | info | `process` and the window's measurements, every [`DAIMON_OBSERVABILITY__HEALTH_INTERVAL_S`](configuration.md#daimon_observability__health_interval_s) seconds |
 | `scheduler.tick_completed` | info | `duration_ms`; at most once a minute |
-| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `release`, `turn_id`, `tenant_id`; once for a turn that ended without an answer |
+| `turn.user_failure` | warning | `platform`, `reason`, `error_class`, `origin`, `backend`, `provider`, `release`, `turn_id`, `tenant_id`; once for a turn that ended without an answer |
 | `turn.would_stall` | warning | `step_s`, `silent_s`, `frame_silent_s`, `tool_open`, `last_status`, `session_id`; once per step (5, 10, 15, 30 minutes) since the turn's provider last sent an event; usage-only frames do not count. Measurement only: it never ends a turn. `tool_open` false does not rule out an OpenAI provider-side tool, whose previews Daimon never sees; `last_status` is the last status Daimon read while the turn was quiet, not the current one |
 
 `turn.user_failure` covers upstream errors, lost connections, the turn
 ceiling, failed recovery and queue-full shedding. Its `backend` names the
 backend and profile, such as `gemini/gemini.inline_reuse`, or `unknown`
-before one is chosen, so alerts can split by backend. Lines logged while a
-chat or routine turn's reply is driven and finalized also carry `backend`,
-`profile` and `model`. It is not logged for
-completed turns, stops the user asked for, model refusals, admission refusals
-such as an empty balance, or missing setup. An uncaught exception is logged
-as `process.uncaught_exception` at critical.
+when it fails before one is known. `provider` is its first part (`gemini`),
+the label for a per-provider count or alert. Lines logged while a chat or
+routine turn's reply runs also carry `backend`, `profile` and `model`. It is
+not logged for completed turns, stops the user asked for, model refusals,
+admission refusals such as an empty balance, or missing setup.
+
+An uncaught exception is logged as `process.uncaught_exception` at critical.
 
 `release` is the commit the image was built from, set by the `DAIMON_RELEASE`
 build argument. An image built without it reports the package version.

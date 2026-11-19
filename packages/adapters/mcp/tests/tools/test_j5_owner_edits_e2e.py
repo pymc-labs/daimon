@@ -193,6 +193,7 @@ async def test_j5_the_owner_switches_to_gpt_on_the_first_call(owner):
         agent_name=info.name,
         target_backend="openai",
         origin_context_id=str(owner.origin.id),
+        expected_revision=0,
     )
     assert changed.status == "changed", f"applied: {changed}"
     assert changed.target_backend == "openai", "the switch names its provider"
@@ -216,7 +217,9 @@ async def test_j5_the_owner_switches_to_gpt_and_the_read_back_says_so(owner):
         "target_backend": "openai",
         "origin_context_id": str(owner.origin.id),
     }
-    await _request_agent_backend_switch_impl(owner.runtime, owner.auth, **switch)
+    await _request_agent_backend_switch_impl(
+        owner.runtime, owner.auth, **switch, expected_revision=0
+    )
     seen = await _read(owner, info)
     assert seen.provider == "openai"
     assert seen.active_model == backend_selection("openai").model

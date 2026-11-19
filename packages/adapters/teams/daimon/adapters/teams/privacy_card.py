@@ -55,7 +55,12 @@ def _spaced(*lines: str) -> list[CardElement]:
 
 
 def panel_card(
-    *, bot: str, policy_url: str, delete_enabled: bool = True, microsoft_connected: bool = False
+    *,
+    bot: str,
+    policy_url: str,
+    delete_enabled: bool = True,
+    microsoft_connected: bool = False,
+    providers: tuple[str, ...] = (),
 ) -> AdaptiveCard:
     """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
@@ -68,7 +73,7 @@ def panel_card(
         actions.append(button(VERB, "🗑 Delete…", "delete", style="destructive"))
     body: list[CardElement] = [
         heading(PRIVACY_TITLE),
-        *_spaced(*privacy_lines(bot)),
+        *_spaced(*privacy_lines(bot, providers)),
         ActionSet(actions=actions, spacing="Medium"),
     ]
     return AdaptiveCard(body=body, fallback_text="Privacy")
@@ -131,12 +136,13 @@ def confirm_card(
     name: str,
     bot: str = "daimon",
     error: str | None = None,
+    providers: tuple[str, ...] = (),
 ) -> AdaptiveCard:
     """What deleting removes and keeps, then a typed-name confirmation."""
     body: list[CardElement] = [heading("Confirm delete")]
     if error:
         body.append(error_text(error))
-    body += _spaced(*delete_scope_lines(bot))
+    body += _spaced(*delete_scope_lines(bot, providers))
     body += _spaced("⚡ **What will happen**")
     body += text_lines(*_will_happen(preview))
     body += _spaced(*_KEPT)

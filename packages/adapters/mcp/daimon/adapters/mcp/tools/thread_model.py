@@ -10,8 +10,10 @@ verified origin, and that origin must be attended. Routines, wakes and
 agent-chat callers have no attended origin, so they can never change the model
 a conversation's people chose.
 
-Every pick is kept at once (`daimon.core.thread_model_switch.pick_thread`); its note says
-what is off on the new provider.
+A pick within the conversation's provider is kept at once
+(`daimon.core.thread_model_switch.pick_thread`); its note says what is off on the new
+provider. A pick that moves it to another provider previews first and applies on the
+person's card (`provider_move_applies`).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from functools import partial
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._card import provider_move_applies, provider_move_line
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
 from daimon.core import channel_backend
@@ -33,7 +36,12 @@ from daimon.core.model_switch import SwitchRefusal
 from daimon.core.models_catalog import catalog_model
 from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import TurnOriginRow
-from daimon.core.thread_model_switch import ThreadPick, pick_thread
+from daimon.core.thread_model_switch import (
+    ThreadPick,
+    moves_conversation,
+    pick_thread,
+    preview_thread_pick,
+)
 from daimon.core.thread_models import (
     EFFORT_NOT_CLAUDE,
     EFFORT_OFF_CLAUDE,
@@ -44,6 +52,7 @@ from daimon.core.thread_models import (
     model_label,
     resolve_effort,
 )
+from daimon.core.turn.notices import uses_phrase
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
@@ -65,6 +74,8 @@ class ThreadModelResult:
     """What changed, and what is off on the new provider; report it back to the person."""
     effort: str | None = None
     """The effort now chosen, None for the agent's own."""
+    revision: int | None = None
+    """Set when nothing changed yet: pass it back to move to another provider on the card."""
 
 
 async def _set_thread_model_impl(
@@ -74,6 +85,7 @@ async def _set_thread_model_impl(
     origin_context_id: str,
     model: str | None = None,
     effort: str | None = None,
+    revision: int | None = None,
 ) -> ThreadModelResult:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
@@ -99,8 +111,8 @@ async def _set_thread_model_impl(
     ):
         # Refuse before the model is saved: a refusal changes nothing.
         raise ToolError(f"{model_label(model_id)} doesn't take an effort. Nothing changed.")
-    result = await _set_model(runtime, auth, origin, model)
-    if not wants_effort:
+    result = await _set_model(runtime, auth, origin, model, revision)
+    if not wants_effort or result.revision is not None:
         return result
     if ":" in result.model and not result.model.startswith(f"{DEFAULT_BACKEND}:"):
         return _with_note(result, EFFORT_NOT_CLAUDE)
@@ -119,6 +131,7 @@ async def _set_model(
     auth: AuthIdentity,
     origin: TurnOriginRow,
     model: str,
+    revision: int | None,
 ) -> ThreadModelResult:
     word = model.strip().lower()
     if word == "default":
@@ -131,7 +144,41 @@ async def _set_model(
         return await _choose_claude(runtime, auth, origin, _word_of(picked.id, said=model))
     pick = await _pick(runtime, auth, origin)
     admin = auth.admin_for(DelegatedAction.AGENT_SETTINGS)
-    done = await pick_thread(pick, value, thread_id=origin.thread_id, admin=admin)
+    moves = await moves_conversation(pick, picked.provider, thread_id=origin.thread_id)
+    named = f"{picked.provider}:{picked.id}"
+    if not await provider_move_applies(
+        runtime,
+        auth,
+        origin,
+        tool_name="set_thread_model",
+        moves=moves,
+        confirming=revision is not None,
+    ):
+        shown = await preview_thread_pick(pick, value, admin=admin)
+        if isinstance(shown, SwitchRefusal):
+            raise ToolError(f"{shown.line} Nothing changed.")
+        assert shown.preview is not None  # a move always previews on its provider
+        line = provider_move_line(
+            "this conversation",
+            uses_phrase(picked.provider, picked.id),
+            sends="its messages",
+            field="revision",
+        )
+        return ThreadModelResult(
+            model=named,
+            note=" ".join((line, f'Pass model "{named}".', *shown.lines())),
+            revision=shown.preview.setting_revision,
+        )
+    if moves and value.strip() != named:
+        # The card names the provider from the call's own model.
+        raise ToolError(f'Call again with model "{named}". Nothing changed.')
+    done = await pick_thread(
+        pick,
+        value,
+        thread_id=origin.thread_id,
+        admin=admin,
+        expected_revision=revision if moves else None,
+    )
     if isinstance(done, SwitchRefusal):
         raise ToolError(f"{done.line} Nothing changed.")
     return ThreadModelResult(model=done.model_id or "default", note=done.note)
@@ -240,8 +287,8 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         model: str | None = None,
         effort: str | None = None,
-        digest: str | None = None,  # Ignored: from before every pick applied at once.
-        revision: int | None = None,  # Ignored, as `digest`.
+        digest: str | None = None,  # Ignored: from an older confirm.
+        revision: int | None = None,
     ) -> ThreadModelResult:
         """Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder".
 
@@ -257,8 +304,11 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.
 
-        A pick applies at once. What the new provider can't carry is off
-        there; the note says what.
+        A pick within the conversation's provider applies at once. A pick on
+        another provider changes nothing yet and returns a ``revision``: call
+        again with the same arguments and that ``revision``, and the person
+        confirms on a card that names the provider. What the new provider can't
+        carry is off there; the note says what.
 
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
@@ -270,4 +320,5 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id=origin_context_id,
             model=model,
             effort=effort,
+            revision=revision,
         )

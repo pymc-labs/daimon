@@ -382,8 +382,10 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     runtime = runtime_for(
         request.deps.turn_runtimes.get(revision.profile) if revision is not None else None, revision
     )
+    from daimon.core.turn.provider_gate import gated_turn
+
     try:
-        return await _prepare_with_runtime(request, runtime)
+        return await gated_turn(request, lambda gated: _prepare_with_runtime(gated, runtime))
     except BaseException:
         # A per-turn MCP credential minted before the turn existed (a template's
         # session create) is revoked now, not left to its TTL.
@@ -429,6 +431,8 @@ async def _prepare_with_runtime(
         )
     request = replace(request, admission=current)
     await _check_daily_model_cap(request, runtime, revision)
+    if request.gate is not None:
+        await request.gate.enter(runtime.provider_key)
     # Resolve a host-authorized native plan before creating a private transport.
     spec = await runtime.session_plan(request)
     _check_spec(spec, runtime, request.scope, revision)
@@ -651,9 +655,10 @@ async def _prepare_with_runtime(
 
     scope, tenant_id, binding_id = request.scope, request.tenant_id, binding.id
     sessionmaker, markup = request.deps.sessionmaker, request.deps.markup
+    # Debited to the channel whose budget the turn counts against, as on Anthropic.
     user_id, channel_id, agent_id = (
         request.external_user_id,
-        revision.channel.channel_id,
+        current.budget_channel_id,
         current.agent.id,
     )
     late, read_timeout_s = runtime.late_usage, runtime.late_read_timeout_s

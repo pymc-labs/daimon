@@ -9,6 +9,7 @@ from mux.contracts.ports import Models
 from mux.contracts.profile import Profile
 from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini.catalog import MODE as CATALOG_MODE
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.completions import GeminiCompletions
@@ -24,6 +25,7 @@ from mux.drivers.gemini.core import (
     page_values,
 )
 from mux.drivers.gemini.deployment import (
+    GeminiClients,
     configured_catalog_transport,
     configured_completions,
     configured_transport,
@@ -46,7 +48,7 @@ from mux.drivers.gemini.skill_deployment import (
     SkillBundlePublisher,
     verify_retained_deployments,
 )
-from mux.drivers.gemini.storage import Records, Storage, read_records
+from mux.drivers.gemini.storage import Records, Storage, session_keys
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -64,18 +66,15 @@ class GeminiUsage(Base):
         return await self.retrying(lambda: self._reconcile(scope, session))
 
     async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
-        # Provider reads first, holding no lock; then a short write to apply them.
-        fetched = await self._fetch_interactions(scope, session)
-        async with self._storage.transaction() as records:
-            record = self._record(records, scope, session)
-            self._apply_fetched(record, fetched)
-            return tuple(record.observation_history.values())
+        # Provider reads first, holding no lock; then a short write only on a change.
+        record = await self._reconciled(scope, session)
+        return tuple(record.observation_history.values())
 
     async def list(
         self, scope: Scope, session: ResourceRef, *, page: PageRequest
     ) -> Page[UsageObservation]:
         # A committed snapshot: listing usage never waits behind the account's writers.
-        async with read_records(self._storage) as records:
+        async with self._storage.read(session_keys(session.id)) as records:
             record = self._record(records, scope, session)
             return page_values(tuple(record.observation_history.values()), page)
 
@@ -185,6 +184,7 @@ __all__ = [
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
+    "CATALOG_MODE",
     "AgentCatalogTransport",
     "FLASH_MODELS",
     "FLASH_PRIMARY",
@@ -214,6 +214,7 @@ __all__ = [
     "compile_environment",
     "inline_bytes",
     "package_sources",
+    "GeminiClients",
     "configured_catalog_transport",
     "configured_completions",
     "configured_transport",
