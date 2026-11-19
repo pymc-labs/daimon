@@ -84,7 +84,8 @@ daily cap per model (`DAIMON_BILLING__OPENAI_DAILY_MODEL_CAP_USD` and
 `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, $20 each), and the install's
 daily ceiling per provider across every tenant
 (`DAIMON_PROVIDER_DAILY_CEILING_USD__OPENAI` and
-`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each).
+`DAIMON_PROVIDER_DAILY_CEILING_USD__GEMINI`, $200 each). While a reply runs,
+its row's `spend_limit_usd_cents` stops it once passed: 50 cents on built-in rows.
 
 A denial aborts the turn with a plain notice, such as "Your team's Daimon
 credit has run out." The turn never falls back to a cheaper model. MCP tools that start a turn,

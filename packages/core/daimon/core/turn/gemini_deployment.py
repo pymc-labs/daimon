@@ -44,6 +44,7 @@ from daimon.core.turn.gemini_state import (
     SQLiteFlashAccounting,
     SQLiteGeminiStorage,
 )
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
 from daimon.core.turn.io import register_turn_codec
 from daimon.core.turn.prepare import ProviderPreparationRequest, register_turn_preparation
 from daimon.core.turn.runtime_manifest import (
@@ -120,6 +121,10 @@ class GeminiPlan(BaseModel):
     holds_path: Path | None = Field(default=None, exclude_if=lambda value: value is None)
     hold_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
     cap_usd: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+    # Most one turn may spend, enforced host-side while it streams (`host_spend_cap`).
+    spend_limit_usd_cents: Annotated[int, Field(gt=0, strict=True)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     agent_name: Nonblank
     system: str | None = None
     # REQUIRED: [] means no tools. Never use the provider's implicit paid tools.
@@ -691,7 +696,19 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         ),
         # Inline reuse runs no sandbox or container: its usage settles at infrastructure
         # $0 (infrastructure_cost.ZERO_INFRASTRUCTURE_PROFILES), never pending forever.
-        usage_store=GeminiUsageRuntime(accounting, prices, known_infrastructure_usd(PROFILE)),
+        usage_store=GeminiUsageRuntime(
+            accounting,
+            prices,
+            known_infrastructure_usd(PROFILE),
+            spend_guard=None
+            if plan.spend_limit_usd_cents is None or (price := prices.get(revision.model)) is None
+            else SpendGuard(
+                limit_cents=plan.spend_limit_usd_cents,
+                price=price,
+                notify=spend_cap_notifier(request),
+                provider=INLINE_REUSE.provider,
+            ),
+        ),
     )
 
     return runtime

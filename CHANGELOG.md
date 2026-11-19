@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **Each Gemini reply has a spend limit.** The daily model cap is checked only
+  as a turn starts, so one long Gemini reply could spend without bound. A
+  Gemini runtime row now takes `spend_limit_usd_cents`, enforced as for OpenAI:
+  the reply is stopped once its priced usage passes the limit, and the agent is
+  told next time. Built-in rows set 50 cents.
+
 - **A daily spend ceiling per provider for the whole install.** Each tenant's
   daily model cap bounded one tenant, but tenants are free to create, so
   nothing bounded what the install spent on OpenAI or Gemini in a day. GPT and

@@ -28,7 +28,7 @@ from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
+from daimon.core.turn.host_spend_cap import SpendGuard, spend_cap_notifier
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
@@ -595,22 +595,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     async def known_infrastructure(observation: UsageObservation) -> Decimal | None:
         return infrastructure_usd
 
-    async def notify_spend_cap() -> None:
-        from daimon.core.stores.agent_notices import record_agent_notices
-
-        async with request.deps.sessionmaker.begin() as db:
-            await record_agent_notices(
-                db,
-                tenant_id=request.tenant_id,
-                platform=request.platform,
-                thread_id=request.thread_id,
-                agent_id=request.admission.agent.id,
-                texts=(HOST_SPEND_CAP_NOTICE,),
-            )
-
     guard = None
     if spend_limit is not None and not native_cap and price is not None:
-        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=notify_spend_cap)
+        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=spend_cap_notifier(request))
     # A shared thread on a channel's own deployment has no caller to mint for; an
     # agent's own copy mints each asker's credential, which hides personal sign-ins.
     shared = (

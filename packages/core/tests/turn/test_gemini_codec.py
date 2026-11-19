@@ -3,13 +3,16 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.mux_backend import TurnBackendRequest
+from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
@@ -239,6 +242,35 @@ async def test_eof_without_root_outcome_is_a_replayable_connection_loss(harness:
         e.native is not None and e.native.type == "session.status_idle"
         for e in await io.replay_turn_events()
     )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_over_the_spend_limit_is_cancelled_and_told(harness: Harness) -> None:
+    from itertools import count
+
+    from daimon.core.turn.driver import InterruptedDuringRecovery
+
+    told: list[str] = []
+
+    async def notify() -> None:
+        told.append("notified")
+
+    # 64 input and 11 output tokens at $1000/M is 7.5 cents, past a 1 cent limit.
+    price = ProviderPrice(
+        "gemini", "gemini-3.8-flash", date(2020, 1, 1), Decimal(1000), Decimal(1000), Decimal(1)
+    )
+    ticks = count(step=10)
+    guard = SpendGuard(
+        limit_cents=1, price=price, notify=notify, provider="gemini", clock=lambda: next(ticks)
+    )
+    harness.transport.responses.append(interaction("costly"))
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session, spend_guard=guard)
+    stream = await io.open_stream(read_timeout_s=1)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    with pytest.raises(InterruptedDuringRecovery):
+        async for _ in stream:
+            pass
+    assert told == ["notified"]
 
 
 @pytest.mark.asyncio

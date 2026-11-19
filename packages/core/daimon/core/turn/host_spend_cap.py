@@ -1,8 +1,8 @@
 """The host-side spend cap of a turn, for a profile with no native session spend control.
 
-OpenAI answers `spend_control` with HTTP 400 on this project, so the limit a row
-carries (`spend_limit_usd_cents`) is enforced here: the turn's priced usage is polled
-while it streams and the turn is cancelled once it passes the limit.
+OpenAI answers `spend_control` with HTTP 400 on this project and Gemini has none, so
+the limit a row carries (`spend_limit_usd_cents`) is enforced here: the turn's priced
+usage is polled while it streams and the turn is cancelled once it passes the limit.
 
 Usage is priced at the tariff without cache writes: the meter reports none, so such a
 turn counts as writing nothing to the cache (`pricing.unreported_cache_writes`, an
@@ -19,6 +19,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 import structlog
 from daimon.core.pricing import ProviderPrice, provider_cost_of
@@ -26,7 +27,10 @@ from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.usage import UsageObservation
 from mux.profiles.openai import PERSISTENT_WORKSPACE
 
-__all__ = ["HOST_SPEND_CAP_NOTICE", "SpendGuard", "priced_cents"]
+if TYPE_CHECKING:
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+
+__all__ = ["HOST_SPEND_CAP_NOTICE", "SpendGuard", "priced_cents", "spend_cap_notifier"]
 
 log = structlog.get_logger(__name__)
 
@@ -91,22 +95,24 @@ class SpendGuard:
         limit_cents: int,
         price: ProviderPrice,
         notify: Callable[[], Awaitable[None]],
+        provider: Provider = PERSISTENT_WORKSPACE.provider,
         clock: Callable[[], float] = time.monotonic,
         interval_s: float = POLL_INTERVAL_S,
     ) -> None:
         if limit_cents <= 0:
             raise ValueError("a spend limit must be positive")
         self._limit, self._price, self.notify = Decimal(limit_cents), price, notify
+        self._provider: Provider = provider
         self._clock, self._interval = clock, interval_s
         self._next = float("-inf")
         self._spent, self._misses = Decimal(0), 0
 
-    async def exceeded(self, read: Callable[[], Awaitable[tuple[UsageObservation, ...]]]) -> bool:
+    async def exceeded(self, read: Callable[[], Awaitable[Iterable[UsageObservation]]]) -> bool:
         now = self._clock()
         if now < self._next:
             return False
         self._next = now + self._interval
-        spent = priced_cents(await read(), self._price)
+        spent = priced_cents(await read(), self._price, self._provider)
         if spent is None:
             return self._missed("unpriced")
         self._spent, self._misses = max(self._spent, spent), 0
@@ -125,3 +131,22 @@ class SpendGuard:
             spent_cents=str(self._spent),
         )
         return self._spent > self._limit
+
+
+def spend_cap_notifier(request: ProviderPreparationRequest) -> Callable[[], Awaitable[None]]:
+    """Queues `HOST_SPEND_CAP_NOTICE` for the agent's next turn in this thread."""
+
+    async def notify() -> None:
+        from daimon.core.stores.agent_notices import record_agent_notices
+
+        async with request.deps.sessionmaker.begin() as db:
+            await record_agent_notices(
+                db,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                thread_id=request.thread_id,
+                agent_id=request.admission.agent.id,
+                texts=(HOST_SPEND_CAP_NOTICE,),
+            )
+
+    return notify

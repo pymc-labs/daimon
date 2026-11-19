@@ -16,7 +16,7 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_defaults import (
     DEFAULT_PROJECT,
-    OPENAI_SPEND_LIMIT_CENTS,
+    SPEND_LIMIT_CENTS,
     default_rows,
 )
 from daimon.core.turn.runtime_manifest import select_runtime_manifest
@@ -81,6 +81,7 @@ def test_a_gemini_agent_turn_runs_from_the_code_template(
     assert plan.tenant_id == str(TENANT) and plan.channel_id == "never-set-up"
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools"
     assert (plan.hold_usd, plan.cap_usd) == (Decimal("0.25"), Decimal("1.75"))
+    assert plan.spend_limit_usd_cents == SPEND_LIMIT_CENTS
 
 
 def test_an_openai_agent_turn_waits_for_its_tenants_environment(
@@ -99,7 +100,7 @@ def test_an_openai_agent_turn_waits_for_its_tenants_environment(
     )
 
     assert plan.root_materialization and plan.environment_id == "envtmpl_1"
-    assert plan.spend_limit_usd_cents == OPENAI_SPEND_LIMIT_CENTS
+    assert plan.spend_limit_usd_cents == SPEND_LIMIT_CENTS
     assert plan.project_header is False
     assert plan.template_capabilities == "mcp", "the agent keeps its Daimon tools (J6)"
 
