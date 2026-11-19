@@ -6,14 +6,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequen
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
 from daimon.core._models import Account, GeminiRecord, GeminiRuntimeState
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from daimon.core.shared_threads import shared_owner, shared_slot
 from mux.contracts.ids import Scope
-from mux.drivers.gemini.storage import ACCOUNT, Keys
 from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import ColumnElement, case, delete, func, or_, select, text, tuple_, update
@@ -22,6 +21,10 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    # `turn.run` imports this module, so an Anthropic-only install must not need Gemini.
+    from mux.drivers.gemini.storage import Keys
 
 PRE_DISPATCH_BUSY_BOUND_S = 5.0
 """How long a pre-dispatch transaction waits for a busy Records row before it
@@ -355,7 +358,7 @@ class PostgresRecordsDatabase:
         ]
 
     async def _load(
-        self, session: AsyncSession, keys: Keys, *, locking: bool
+        self, session: AsyncSession, keys: "Keys", *, locking: bool
     ) -> tuple[dict[RowId, GeminiRecordRow], tuple[RowId, ...]]:
         rows: dict[RowId, GeminiRecordRow] = {}
         if keys.everything:
@@ -449,9 +452,10 @@ class PostgresRecordsDatabase:
 
     @asynccontextmanager
     async def transaction(
-        self, keys: Keys, *, after_dispatch: bool = False
+        self, keys: "Keys", *, after_dispatch: bool = False
     ) -> AsyncIterator[LoadedRows]:
         from daimon.core.turn.ceiling import TURN_CEILING_S
+        from mux.drivers.gemini.storage import ACCOUNT
 
         deadline = asyncio.get_running_loop().time() + (
             TURN_CEILING_S if after_dispatch else PRE_DISPATCH_BUSY_BOUND_S
@@ -492,7 +496,7 @@ class PostgresRecordsDatabase:
         finally:
             await complete(stack.aclose())
 
-    async def read(self, keys: Keys) -> LoadedRows:
+    async def read(self, keys: "Keys") -> LoadedRows:
         """The last committed rows, for a pure read: no lock; the connection is
         released before the caller decodes."""
         deadline = asyncio.get_running_loop().time() + PRE_DISPATCH_BUSY_BOUND_S
