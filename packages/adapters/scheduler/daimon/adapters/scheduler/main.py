@@ -185,7 +185,6 @@ from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refre
 from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.gemini_retention import prune_idle_records
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -1303,6 +1302,11 @@ async def _prune_gemini_records(
     if last is not None and current - last < _GEMINI_RETENTION_INTERVAL:
         return
     _last_gemini_retention["started"] = current
+    # Lazy: the sweep pulls the Gemini SDK, which an Anthropic-only install lacks.
+    try:
+        from daimon.core.turn.gemini_retention import prune_idle_records
+    except ImportError:
+        return
     try:
         counts = await prune_idle_records(sm, now=current, window=timedelta(days=retention_days))
     except SQLAlchemyError:
