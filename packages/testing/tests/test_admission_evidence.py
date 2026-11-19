@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -462,10 +462,7 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
     attempts: list[object] = []
     for engine in (owned_engine, foreign_engine):
         event.listen(engine.sync_engine, "do_connect", lambda *args, **kwargs: attempts.append(1))
-    deps = replace(
-        deps_for(None, async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine})),
-        turn_path=None,
-    )
+    deps = deps_for(None, async_sessionmaker(owned_engine, binds={AsyncSession: foreign_engine}))
     invoke = AsyncMock()
     try:
         with pytest.raises(ValueError, match="owned local"):
@@ -516,7 +513,7 @@ async def test_foreign_routed_bind_is_refused_before_connection_or_callback() ->
 async def test_capture_gaps_and_invalid_evidence_never_become_certification(case: str) -> None:
     engine = create_async_engine("postgresql+asyncpg://localhost/daimon_test_nc_N5")
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    deps = replace(deps_for(None, async_sessionmaker(engine)), turn_path=None)
+    deps = deps_for(None, async_sessionmaker(engine))
     scope = Scope(
         tenant_id=str(tenant), account_id=str(account), principal_id="p", authorization_id="auth"
     )

@@ -38,7 +38,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None, membership_resolver=None),
+        turn_deps=replace(deps_for(), membership_resolver=None),
     )
 
 

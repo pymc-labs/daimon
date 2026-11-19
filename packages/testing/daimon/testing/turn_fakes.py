@@ -18,7 +18,7 @@ raises.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -41,7 +41,7 @@ from daimon.core.turn import run_turn
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
-from daimon.testing.turn_leg import MUX_LEG, leg_scope, turn_leg
+from daimon.testing.turn_leg import LEG_SCOPE, MUX_LEG, turn_leg
 from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -204,8 +204,8 @@ class FakeEventsResource:
 
     def list(
         self,
-        *,
         session_id: str,
+        *,
         types: list[str] | None = None,
         order: str = "asc",
         limit: int | None = None,
@@ -266,8 +266,20 @@ class _FakeEventStream:
 
 
 class _FakeEventList:
+    """Iterates every event, or awaits to one page holding them all (the SDK's two uses)."""
+
+    next_page = None
+
     def __init__(self, events: list[Any]) -> None:
         self._events = events
+        self.data = events
+
+    def __await__(self) -> Generator[Any, None, _FakeEventList]:
+        yield from asyncio.sleep(0).__await__()
+        return self
+
+    def has_next_page(self) -> bool:
+        return False
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._aiter()
@@ -372,10 +384,9 @@ class FakeAnthropic:
 
 
 async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
-    """`run_turn` with the selected leg's path and authorized scope, for direct driver tests."""
+    """`run_turn` with the test's authorized scope, for direct driver tests."""
 
-    kwargs.setdefault("path", turn_leg().path)
-    kwargs.setdefault("scope", leg_scope())
+    kwargs.setdefault("scope", LEG_SCOPE)
     return await run_turn(**kwargs)
 
 
@@ -463,9 +474,9 @@ def deps_for(
 ) -> TurnDeps:
     """Build the real turn bundle; tests replace only dependencies they exercise.
 
-    The turn path and backend flags come from `leg`, by default the leg the
-    run selected through the environment (`daimon.testing.turn_leg`). A test
-    that needs one path passes `leg=MUX_LEG` or `leg=LEGACY_LEG`.
+    The backend flags come from `leg`, by default the leg the run selected
+    through the environment (`daimon.testing.turn_leg`). A test that needs the
+    backends on passes `leg=MUX_LEG`.
     """
     selected = leg if leg is not None else turn_leg()
 
@@ -484,7 +495,6 @@ def deps_for(
         github_app_private_key=None,
         public_url=None,
         tool_safety=OPEN_TOOL_SAFETY,
-        turn_path=selected.path,
         channel_backends=selected.channel_backends,
         agent_backends=selected.agent_backends,
     )

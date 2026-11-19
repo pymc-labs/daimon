@@ -181,7 +181,7 @@ async def ingress(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         discord=DiscordSettings(bot_token=SecretStr("offline"), thread_open_notice_after_s=0),
         thread_naming=ThreadNamingSettings(),
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     cache = new_resolver_cache()
     default = DeploymentDefault()

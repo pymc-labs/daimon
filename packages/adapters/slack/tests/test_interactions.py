@@ -12,7 +12,6 @@ testing stores against real DB schemas.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -49,7 +48,7 @@ async def test_resolve_web_client_returns_none_for_unknown_team_id(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
     result = await resolve_web_client(runtime, team_id="T_UNKNOWN")
@@ -83,7 +82,7 @@ async def test_resolve_web_client_returns_async_web_client_with_decrypted_token(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
     result = await resolve_web_client(runtime, team_id="T_INTERACTIONS")
@@ -126,7 +125,7 @@ async def test_resolve_web_client_registers_rate_limit_retry_handler(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
     client = await resolve_web_client(runtime, team_id="T_RETRY")

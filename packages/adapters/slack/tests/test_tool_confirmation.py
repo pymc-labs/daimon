@@ -721,7 +721,7 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     client = _client()
     client.users_info = AsyncMock(
         return_value={
@@ -934,7 +934,7 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
 
     tenant, account = uuid4(), uuid4()
     runtime = MagicMock()
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
 

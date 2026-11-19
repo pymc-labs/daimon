@@ -461,7 +461,6 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         deps_for(None, None),
         tool_safety=OPEN_TOOL_SAFETY,
         public_url="https://example.test",
-        turn_path="legacy",
         backend=None,
     )
 

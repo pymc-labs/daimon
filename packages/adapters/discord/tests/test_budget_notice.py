@@ -36,11 +36,7 @@ def _required(cls: Any, **given: object) -> dict[str, object]:
 def _runtime(policies: dict[uuid.UUID, DirectMessagePolicy]) -> DiscordRuntime:
     settings = MagicMock()
     settings.direct_message_policies = policies
-    return DiscordRuntime(
-        **_required(
-            DiscordRuntime, settings=settings, turn_deps=replace(deps_for(), turn_path=None)
-        )
-    )
+    return DiscordRuntime(**_required(DiscordRuntime, settings=settings, turn_deps=deps_for()))
 
 
 def _notice() -> BudgetNotice:

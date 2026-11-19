@@ -334,7 +334,7 @@ async def test_unknown_hold_commits_before_native_dispatch_and_survives_crash(
         await restart.before_attempt(model=model, attempt=1)
 
 
-@pytest.mark.parametrize("selection", ["unset", "anthropic", "legacy", "disabled"])
+@pytest.mark.parametrize("selection", ["unset", "anthropic", "disabled"])
 async def test_unconfigured_gemini_never_reads_manifest_or_any_key(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,17 +369,7 @@ async def test_unconfigured_gemini_never_reads_manifest_or_any_key(
             ),
         )
     else:
-        request = replace(
-            request,
-            deps=replace(
-                request.deps,
-                **(
-                    {"turn_path": "legacy"}
-                    if selection == "legacy"
-                    else {"channel_backends": False}
-                ),
-            ),
-        )
+        request = replace(request, deps=replace(request.deps, channel_backends=False))
     with pytest.raises(AdmissionDenied):
         build_channel_runtime(request)
 

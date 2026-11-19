@@ -21,7 +21,6 @@ from daimon.adapters.teams import app as platform_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.channel_backend import channel_ref, set_channel_backend
-from daimon.core.config import load_turn_settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.domain import ThreadSessionRow
@@ -232,17 +231,13 @@ async def test_changed_current_config_refusal_remains_visible_without_native_wri
             )
             await session.commit()
         assert changed.local == revision_of(first).local + 1
-        # The mux turn path pins a thread to the revision it started on
-        # (`turn/admission.py` retained_revision): a channel change reaches new
-        # threads only, so the existing thread keeps running on its own revision.
-        # The legacy path has no per-thread pin and refuses every thread.
-        on_mux = (app.runtime.turn_deps.turn_path or load_turn_settings().path) == "mux"
-        if on_mux:
-            retained = await dispatch(THREAD, USER)
-            assert retained.reused and retained.ma_session_id == first.ma_session_id
-            assert revision_of(retained).local == revision_of(first).local
-            assert revision_of(retained).profile == "anthropic.managed_agents"
-        refused_threads = (NEW_THREAD,) if on_mux else (THREAD, NEW_THREAD)
+        # A thread is pinned to the revision it started on (`turn/admission.py`
+        # retained_revision): a channel change reaches new threads only.
+        retained = await dispatch(THREAD, USER)
+        assert retained.reused and retained.ma_session_id == first.ma_session_id
+        assert revision_of(retained).local == revision_of(first).local
+        assert revision_of(retained).profile == "anthropic.managed_agents"
+        refused_threads = (NEW_THREAD,)
         for thread in refused_threads:
             before = len(wire.requests)
             with pytest.raises(AdmissionDenied) as denied:
@@ -413,9 +408,6 @@ async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfh
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    app.runtime = dataclasses.replace(
-        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
-    )
     try:
         first = await dispatch(THREAD, USER)
         async with db_session_factory.begin() as session:

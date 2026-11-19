@@ -14,7 +14,7 @@ from mux.testing.drivers.anthropic.ma import MARouter
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from .turn_path_support import TurnIOSpy, TurnPath
+from .turn_io_support import TurnIOSpy
 
 
 @pytest.fixture
@@ -381,7 +381,6 @@ async def test_claimed_queue_stays_bounded_across_ticks(
 async def test_dispatch_timeout_through_headless_records_ceiling(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
     stalls_in: str,
 ) -> None:
@@ -450,7 +449,6 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
                 account_id=account.id,
                 session_factory=db_session_factory,
                 tool_safety=OPEN_TOOL_SAFETY,
-                turn_path=turn_path,
             )
 
         dispatcher = await run_one_tick(
@@ -473,6 +471,6 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
     assert rows[0].error_class == "TimeoutError"
     assert saved is not None and saved.last_error is not None and "timeout" in saved.last_error
     if stalls_in == "drain":
-        turn_io_used.assert_ran(turn_path)
+        turn_io_used.assert_ran()
     else:
         assert turn_io_used.classes == [], "a stall in session assembly never reaches the turn I/O"

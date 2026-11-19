@@ -904,7 +904,6 @@ async def test_real_driver_resume_replays_without_another_user_message():
                 account_id=str(uuid.uuid4()),
                 authorization_id="worker replay regression",
             ),
-            path="legacy",
             user_message="must never be sent",
             resume_existing=True,
             lifecycle=RecordingLifecycle(),

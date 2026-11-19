@@ -354,7 +354,7 @@ async def _sealed(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
         mcp=_MCP,  # pyright: ignore[reportArgumentType]
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
         tool_safety={"enabled": True, "agent_rules": True},  # pyright: ignore[reportArgumentType]
     )
     # An environment SEAL and OPEN both pick (so the isolation view shows it), and one only OPEN picks.

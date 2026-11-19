@@ -64,7 +64,7 @@ async def application(
     settings = Settings(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     native = ScriptedTransport()
     async with native.client() as client:
@@ -117,7 +117,7 @@ def manifest(monkeypatch: pytest.MonkeyPatch, path: Path, rows: list[dict[str, J
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
 
 
-@pytest.mark.parametrize("selection", ["unset", "anthropic", "legacy", "disabled", "gemini"])
+@pytest.mark.parametrize("selection", ["unset", "anthropic", "disabled", "gemini"])
 async def test_unconfigured_application_never_discovers_provider_credentials(
     application: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,8 +142,6 @@ async def test_unconfigured_application_never_discovers_provider_credentials(
                 REVISION.channel, 1, resolve_default(BackendConfig())
             ),
         )
-    elif selection == "legacy":
-        deps = replace(deps, turn_path="legacy")
     elif selection == "disabled":
         deps = replace(deps, channel_backends=False)
     else:

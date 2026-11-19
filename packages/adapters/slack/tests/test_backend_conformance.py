@@ -164,7 +164,7 @@ async def setup(
         # The legacy path these conformance cases were written for. On mux an
         # existing thread keeps its bound backend after a channel change; that is
         # test_retained_anthropic_thread_replies_after_channel_switches_to_selfhosted.
-        turn=TurnSettings(path="legacy", channel_backends=True, agent_backends=False),
+        turn=TurnSettings(channel_backends=True, agent_backends=False),
     )
     runtime = build_slack_runtime(key, db_session_factory, anthropic=client)
     resolver_cache = new_resolver_cache()
@@ -283,7 +283,11 @@ async def test_changed_current_config_refusal_remains_visible_without_native_wri
             )
             await session.commit()
         assert changed.local == revision_of(first).local + 1
-        for thread in (THREAD, NEW_THREAD):
+        # A thread keeps the revision it started on; the change reaches new threads.
+        retained = await dispatch(THREAD, USER)
+        assert retained.reused and retained.ma_session_id == first.ma_session_id
+        assert revision_of(retained).local == revision_of(first).local
+        for thread in (NEW_THREAD,):
             before = len(wire.requests)
             with pytest.raises(AdmissionDenied) as denied:
                 await dispatch(thread, USER)
@@ -461,9 +465,6 @@ async def test_retained_anthropic_thread_replies_after_channel_switches_to_selfh
     fake_slack_web_client: FakeSlackWebClient,
 ) -> None:
     app, dispatch, wire = await setup(db_session, db_session_factory)
-    app.runtime = dataclasses.replace(
-        app.runtime, turn_deps=dataclasses.replace(app.runtime.turn_deps, turn_path="mux")
-    )
     try:
         first = await dispatch(THREAD, USER)
         async with db_session_factory.begin() as session:

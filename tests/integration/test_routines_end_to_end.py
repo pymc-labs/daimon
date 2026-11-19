@@ -52,12 +52,12 @@ from daimon.adapters.scheduler.main import (
     _acquire_advisory_lock,  # pyright: ignore[reportPrivateUsage]  # named test seam for advisory-lock contention
 )
 from daimon.adapters.scheduler.main import run as scheduler_run
-from daimon.core.config import Settings, load_turn_settings
+from daimon.core.config import Settings
 from daimon.core.db import build_engine
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.turn import driver as turn_driver
-from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO, TurnIO
+from daimon.core.turn.io import MuxTurnIO, TurnIO
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import (
@@ -104,15 +104,9 @@ def turn_io_spy(monkeypatch: pytest.MonkeyPatch) -> list[TurnIO]:
 
 
 def _assert_ran_on_configured_path(built: list[TurnIO], *, fires: int) -> None:
-    """Each fire built one turn I/O of the configured path's kind, and no other."""
-    path = load_turn_settings().path
-    assert path == os.environ.get("DAIMON_TURN__PATH", "legacy"), "settings must follow the env leg"
+    """Each fire built exactly one mux turn I/O."""
     assert len(built) == fires, f"expected {fires} turn I/O for {fires} fire(s), got {built!r}"
-    for io in built:
-        if path == "mux":
-            assert type(io) is MuxTurnIO, f"mux leg ran {type(io).__name__}"
-        else:
-            assert isinstance(io, LegacyTurnIO), f"legacy leg ran {type(io).__name__}"
+    assert all(type(io) is MuxTurnIO for io in built), built
 
 
 _NOW = dt.datetime(2026, 5, 8, 12, 0, 0, tzinfo=dt.UTC)

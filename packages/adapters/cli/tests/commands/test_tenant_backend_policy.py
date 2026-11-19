@@ -46,7 +46,7 @@ async def policy_cli(db_preflight, db_nullpool_engine, db_clean, tmp_path):
         )
     settings = SimpleNamespace(
         discord=DiscordSettings(bot_token=SecretStr("offline-discord-token")),
-        turn=TurnSettings(path="mux", agent_backends=True, channel_backends=True),
+        turn=TurnSettings(agent_backends=True, channel_backends=True),
     )
     rt = build_cli_runtime(sm, settings=settings)
     facts = {

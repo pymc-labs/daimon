@@ -214,7 +214,7 @@ async def test_settings_name_the_agents_they_mention_and_a_missing_one_is_null(
 _PINNING = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
 )
 
 

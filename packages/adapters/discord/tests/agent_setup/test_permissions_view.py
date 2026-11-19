@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -47,7 +46,7 @@ def _runtime(sessionmaker: object, state: FakeMAState | None = None) -> DiscordR
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name="daimon"),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
     )
 
 

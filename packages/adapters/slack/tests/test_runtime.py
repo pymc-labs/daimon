@@ -8,7 +8,6 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -66,7 +65,7 @@ class TestSlackRuntime:
             billing_config=None,
             http_client=MagicMock(),  # pyright: ignore[reportArgumentType]
             resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]
-            turn_deps=replace(deps_for(), turn_path=None),
+            turn_deps=deps_for(),
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             rt.settings = MagicMock()  # type: ignore[misc]  # intentionally testing frozen

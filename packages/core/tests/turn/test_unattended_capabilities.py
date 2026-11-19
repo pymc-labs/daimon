@@ -43,6 +43,7 @@ from daimon.core.turn.unattended_capabilities import (
 from daimon.testing import ma_agent
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
@@ -283,7 +284,7 @@ async def _drive(
                 lifecycle=RecordingLifecycle(),
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="cli-operator-run"),
-                path="legacy",
+                scope=LEG_SCOPE,
                 tool_confirmation=unattended_posture(
                     policy,
                     session=snapshot,

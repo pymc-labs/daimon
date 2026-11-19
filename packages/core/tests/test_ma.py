@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,7 +16,6 @@ from anthropic.types.beta import (
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsSessionEndTurn,
-    BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSessionRequiresAction,
     BetaManagedAgentsSessionRetriesExhausted,
     BetaManagedAgentsSessionStatusIdleEvent,
@@ -29,17 +26,13 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_WORKSPACE,
     MA_METADATA_VALUE_WORKSPACE_DISPOSABLE,
 )
-from daimon.core.errors import DaimonError, TurnError
+from daimon.core.errors import DaimonError
 from daimon.core.ma import (
-    _INTERRUPT_TERMINAL,
-    _TERMINAL_STOP_REASONS,
     WORKSPACE_SENTINEL_AGENT_NAME,
     delete_entire_workspace_for_testing,
     delete_sessions_for_account,
     find_workspace_disposable_sentinel,
     interrupt_orphaned_session,
-    replay_events,
-    send_interrupt_and_wait,
     terminal_stop_reason,
     update_agent_with_version_retry,
 )
@@ -50,7 +43,6 @@ from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     build_no_retry_anthropic,
     list_response,
-    sse_response,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_session
 
@@ -92,250 +84,6 @@ def _idle(event_id: str, stop: str = "end_turn") -> BetaManagedAgentsSessionStat
         type="session.status_idle",
         processed_at=datetime(2026, 4, 21, tzinfo=UTC),
         stop_reason=stop_reason,
-    )
-
-
-def _make_list_client(events: Sequence[BetaManagedAgentsSessionEvent]) -> Any:
-    """Build a transport-level client for list (paginator) tests."""
-    router = MARouter()
-    event_dicts = [e.model_dump(mode="json") for e in events]
-
-    def handle_list(request: httpx.Request, match: Any) -> httpx.Response:
-        return list_response(event_dicts)
-
-    router.add("GET", r"/v1/sessions/[^/]+/events", handle_list)
-    return build_fake_anthropic(router.dispatch)
-
-
-async def test_replay_events_returns_all_events_in_order_when_paginator_yields_multiple() -> None:
-    events = [
-        _user_message("sevt_1", "hi"),
-        _agent_message("sevt_2", "hello"),
-        _idle("sevt_3"),
-    ]
-    client = _make_list_client(events)
-
-    result = await replay_events(client, session_id="sesn_test")
-
-    assert [e.id for e in result] == ["sevt_1", "sevt_2", "sevt_3"], (
-        "replay must preserve SDK paginator order end-to-end"
-    )
-
-
-async def test_replay_events_requests_max_page_size() -> None:
-    """Reconnect replay asks MA for 100-event pages, not the SDK default."""
-    router = MARouter()
-    limits: list[str | None] = []
-
-    def handle_list(request: httpx.Request, match: Any) -> httpx.Response:
-        limits.append(request.url.params.get("limit"))
-        return list_response([_idle("sevt_1").model_dump(mode="json")])
-
-    router.add("GET", r"/v1/sessions/[^/]+/events", handle_list)
-
-    await replay_events(build_fake_anthropic(router.dispatch), session_id="sesn_test")
-
-    assert limits == ["100"], f"replay must request the maximum page size, got {limits}"
-
-
-async def test_replay_events_returns_empty_list_when_session_has_no_events() -> None:
-    client = _make_list_client([])
-
-    result = await replay_events(client, session_id="sesn_empty")
-
-    assert result == [], "empty session should yield an empty history"
-
-
-async def test_replay_events_raises_turn_error_when_paginator_stalls_past_timeout() -> None:
-    """A stalled upstream paginator must not wedge a reconnecting turn forever.
-    `timeout_s` bounds the walk; on timeout the helper raises
-    TurnError(kind="upstream") with the TimeoutError preserved as __cause__."""
-
-    async def handle_list_stall(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(10)
-        return list_response([])
-
-    client = build_fake_anthropic(handle_list_stall)
-
-    with pytest.raises(TurnError) as exc_info:
-        await replay_events(client, session_id="sesn_test", timeout_s=0.05)
-
-    assert exc_info.value.kind == "upstream"
-    assert "0.05" in exc_info.value.message
-    assert isinstance(exc_info.value.__cause__, TimeoutError), (
-        "the original asyncio TimeoutError must be preserved as __cause__"
-    )
-
-
-async def test_replay_events_honours_a_budget_longer_than_the_default_read_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mux.drivers.anthropic import transport
-
-    monkeypatch.setattr(transport, "READ_TIMEOUT_S", 0.05)
-
-    async def handle_list_slowly(request: httpx.Request) -> httpx.Response:
-        await asyncio.sleep(0.1)
-        return list_response([_idle("sevt_1").model_dump(mode="json")])
-
-    client = build_fake_anthropic(handle_list_slowly)
-
-    result = await replay_events(client, session_id="sesn_test", timeout_s=5.0)
-
-    assert [e.id for e in result] == ["sevt_1"]
-
-
-async def test_send_interrupt_and_wait_sends_user_interrupt_when_invoked() -> None:
-    sent_events: list[dict[str, Any]] = []
-
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        body: dict[str, Any] = json.loads(request.content)
-        sent_events.extend(body.get("events", []))
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        idle = _idle("sevt_1", stop="end_turn")
-        return sse_response([idle.model_dump(mode="json")])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-
-    client = build_fake_anthropic(router.dispatch)
-
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-    assert len(sent_events) == 1, "must have sent exactly one event"
-    assert sent_events[0] == {"type": "user.interrupt"}, (
-        "SDK body carries a single `user.interrupt` event param"
-    )
-
-
-async def test_send_interrupt_and_wait_returns_when_terminal_idle_arrives() -> None:
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        events = [
-            _user_message("sevt_a", "hi"),  # not a terminal
-            _idle("sevt_b", stop="end_turn"),  # terminal
-        ]
-        return sse_response([e.model_dump(mode="json") for e in events])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
-
-    # Should not raise — idle arrives before timeout.
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-
-async def test_send_interrupt_and_wait_treats_requires_action_as_terminal() -> None:
-    """`requires_action` means the session is idle (paused on tool approval) —
-    for interrupt purposes, this IS terminal. The cancel is complete: the turn
-    was running, user hit cancel, and MA confirmed idle (paused on a tool call
-    it will never execute now). Helper must return normally, not time out."""
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        idle = _idle("sevt_a", stop="requires_action")
-        return sse_response([idle.model_dump(mode="json")])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
-
-    # Should not raise — requires_action is now terminal for interrupt acks.
-    await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=1.0)
-
-
-@pytest.mark.parametrize("stop", ["end_turn", "retries_exhausted", "requires_action"])
-async def test_send_interrupt_and_wait_observes_idle_emitted_during_send(stop: str) -> None:
-    """SSE only delivers idle when the interrupt is sent after subscription."""
-    subscribed = False
-    received: asyncio.Queue[bytes] = asyncio.Queue()
-
-    class LiveStream(httpx.AsyncByteStream):
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            yield await received.get()
-
-    def handle_request(request: httpx.Request) -> httpx.Response:
-        nonlocal subscribed
-        if request.method == "GET":
-            assert request.url.path == "/v1/sessions/sesn_test/events/stream"
-            subscribed = True
-            return httpx.Response(
-                200, headers={"content-type": "text/event-stream"}, stream=LiveStream()
-            )
-        assert request.method == "POST"
-        assert request.url.path == "/v1/sessions/sesn_test/events"
-        assert json.loads(request.content)["events"] == [{"type": "user.interrupt"}]
-        if subscribed:
-            event = _idle("sevt_instant", stop=stop).model_dump_json()
-            received.put_nowait(f"event: session.status_idle\ndata: {event}\n\n".encode())
-        return httpx.Response(200, json={"data": None})
-
-    async with build_fake_anthropic(handle_request) as client:
-        await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=0.1)
-
-
-def test_send_interrupt_and_wait_interrupt_terminal_is_superset_of_terminal_stop_reasons() -> None:
-    """_INTERRUPT_TERMINAL must be a strict superset of _TERMINAL_STOP_REASONS.
-
-    _TERMINAL_STOP_REASONS lists only the variants
-    `send_interrupt_and_wait` treats as terminal. `terminal_stop_reason()` (the
-    driver's broader helper) treats ANY status_idle, including requires_action,
-    as stream-terminal -- the driver has no approval/resume loop; it finalizes
-    requires_action as an actionable failure. _INTERRUPT_TERMINAL extends
-    _TERMINAL_STOP_REASONS with requires_action for the cancel-button path
-    only. This structural test ensures no one collapses the two constants
-    together.
-    """
-    assert _TERMINAL_STOP_REASONS < _INTERRUPT_TERMINAL, (
-        "_TERMINAL_STOP_REASONS must be a strict subset of _INTERRUPT_TERMINAL"
-    )
-    assert "requires_action" in _INTERRUPT_TERMINAL, (
-        "_INTERRUPT_TERMINAL must include requires_action for interrupt acks"
-    )
-    assert "requires_action" not in _TERMINAL_STOP_REASONS, (
-        "_TERMINAL_STOP_REASONS must NOT include requires_action (driver approval loop)"
-    )
-
-
-async def test_send_interrupt_and_wait_raises_turn_error_when_timeout_fires() -> None:
-    # Stream yields only non-terminal events, then ends; helper must time out.
-    # Transport-level: response body ends after yielding non-terminal events.
-    # The SDK's stream parser closes the iterator when the body ends.
-    # Since run_turn breaks on status_idle before reaching end, but here we
-    # only yield non-terminals, the stream closes without a terminal idle —
-    # the asyncio.wait_for fires.
-    router = MARouter()
-
-    def handle_send(request: httpx.Request, match: Any) -> httpx.Response:
-        return httpx.Response(200, json={"data": None})
-
-    def handle_stream(request: httpx.Request, match: Any) -> httpx.Response:
-        non_terminal = _user_message("sevt_a", "still going")
-        return sse_response([non_terminal.model_dump(mode="json")])
-
-    router.add("POST", r"/v1/sessions/[^/]+/events", handle_send)
-    router.add("GET", r"/v1/sessions/[^/]+/events/stream", handle_stream)
-    client = build_fake_anthropic(router.dispatch)
-
-    with pytest.raises(TurnError) as exc_info:
-        await send_interrupt_and_wait(client, session_id="sesn_test", timeout_s=0.05)
-
-    assert exc_info.value.kind == "interrupt_timeout", (
-        "timeout path must surface as TurnError(kind='interrupt_timeout')"
-    )
-    assert "0.05" in exc_info.value.message or "timeout" in exc_info.value.message.lower(), (
-        "message should indicate timeout duration for operator log context"
     )
 
 

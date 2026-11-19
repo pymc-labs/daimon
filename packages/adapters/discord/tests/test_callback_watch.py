@@ -158,7 +158,6 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     deps = replace(
         runtime.turn_deps,
         anthropic=fake_client,
-        turn_path="mux",
         tool_safety=ToolSafetyPolicy(enabled=True),
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)

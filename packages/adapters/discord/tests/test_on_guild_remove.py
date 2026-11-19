@@ -6,7 +6,6 @@ Tenant row (RESEARCH Anti-Pattern 3 / PITFALLS #7).
 
 from __future__ import annotations
 
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -35,7 +34,7 @@ def _make_runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRunt
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),  # on_guild_remove never runs a turn
+        turn_deps=deps_for(),  # on_guild_remove never runs a turn
     )
 
 

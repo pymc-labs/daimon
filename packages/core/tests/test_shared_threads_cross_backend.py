@@ -176,7 +176,6 @@ def _deps(sessionmaker: async_sessionmaker[AsyncSession]) -> TurnDeps:
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
-        turn_path="mux",
         channel_backends=True,
         tool_safety=OPEN_TOOL_SAFETY,
     )

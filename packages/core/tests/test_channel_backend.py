@@ -19,7 +19,7 @@ from daimon.core.channel_backend import (
     current_backend,
     set_channel_backend,
 )
-from daimon.core.config import McpSettings, TurnSettings, load_turn_settings
+from daimon.core.config import McpSettings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
@@ -329,13 +329,8 @@ async def test_with_the_flag_on_a_cleared_pin_is_admitted_as_unconfigured_only_o
 
     admission = await _admit(on, tenant)
 
-    if (on.turn_path or load_turn_settings().path) == "mux":
-        assert admission.backend_revision is None
-        assert admission.backend is None
-    else:
-        assert admission.backend_revision is not None
-        assert admission.backend_revision.digest == _DEFAULT_DIGEST
-        assert admission.backend is not None
+    assert admission.backend_revision is None
+    assert admission.backend is None
 
 
 @pytest.mark.parametrize("provider_enabled", [True, False])
@@ -361,11 +356,9 @@ async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_an
         await _admit(on, tenant)
 
     assert raised.value.reason == "backend_unsupported"
-    # The refusal names the real cause (#1319). The workspace's provider
-    # allowlist is read only when backend selection is on (mux plus the flag),
-    # and then it comes before the pin; otherwise only the pin is in play.
-    selection = (on.turn_path or load_turn_settings().path) == "mux"
-    expected = "provider_not_allowed" if selection and not provider_enabled else "channel_pin"
+    # The refusal names the real cause (#1319): the workspace's provider
+    # allowlist comes before the pin.
+    expected = "channel_pin" if provider_enabled else "provider_not_allowed"
     assert raised.value.cause == expected
     assert raised.value.provider == _UNRUNNABLE.backend
     assert calls == []

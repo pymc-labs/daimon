@@ -86,7 +86,7 @@ def _fully_configured_settings() -> Settings:
         _env_file=None,  # pyright: ignore[reportCallIssue]
         repo_memory=RepoMemorySettings(enabled=True),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
-        turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
+        turn=TurnSettings(channel_backends=True, agent_backends=True),
         anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
         mcp=McpSettings(
             jwt_secret=SecretStr("a" * 32),

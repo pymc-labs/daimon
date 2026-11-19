@@ -596,7 +596,7 @@ async def test_callback_mcp_oauth_kind_spends_the_request_and_sends_a_private_si
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
         ),
-        turn_deps=replace(deps_for(None, None), fernet=make_fernet(), turn_path=None),
+        turn_deps=replace(deps_for(None, None), fernet=make_fernet()),
     )
     bot = SimpleNamespace(runtime=runtime)
     interaction = _interaction(user_id=_REQUESTER_ID, client=bot)
@@ -653,7 +653,7 @@ async def test_callback_mcp_oauth_kind_refuses_the_click_when_the_deployment_has
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://d.example", jwt_secret=SecretStr("s" * 32))
         ),
-        turn_deps=replace(deps_for(None, None), fernet=None, turn_path=None),
+        turn_deps=replace(deps_for(None, None), fernet=None),
     )
     interaction = _interaction(user_id=_REQUESTER_ID, client=SimpleNamespace(runtime=runtime))
     interaction.response.defer = AsyncMock()

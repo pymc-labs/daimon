@@ -19,7 +19,7 @@ from daimon.core.turn import io as io_module
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn import runtimes as runtime_module
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.io import LegacyTurnIO, TurnCodecRequest, TurnIO, turn_io
+from daimon.core.turn.io import TurnCodecRequest, TurnIO, turn_io
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
@@ -121,7 +121,7 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
         asyncio.Event(),
     )
     async with transport.client() as client:
-        marker = LegacyTurnIO(client, "unused")
+        marker = cast(TurnIO, object())
 
         def factory(request: TurnBackendRequest) -> TurnBackend:
             factories.append(request)
@@ -139,7 +139,6 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
         selected = turn_io(
             client,
             SESSION.id,
-            path="mux",
             scope=SCOPE,
             profile=PROFILE,
             backend_request=request,
@@ -168,9 +167,8 @@ async def test_factory_and_codec_receive_model_native_identity_and_runtime(
     assert not transport.requests
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_unregistered_selection_never_uses_anthropic(
-    path: str, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delitem(io_module._TURN_CODECS, PROFILE, raising=False)
     monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
@@ -180,7 +178,6 @@ async def test_unregistered_selection_never_uses_anthropic(
             turn_io(
                 client,
                 SESSION.id,
-                path=cast(Literal["legacy", "mux"], path),
                 scope=SCOPE,
                 profile=PROFILE,
             )
@@ -254,18 +251,14 @@ async def test_preparation_dispatches_before_any_anthropic_binding(
     assert not transport.requests
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
 async def test_missing_preparation_fails_before_native_binding(
-    path: str, db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delitem(preparation._PROVIDER_PREPARATIONS, PROFILE, raising=False)
     monkeypatch.setattr(runtime_module, "entry_points", lambda **kwargs: ())
     transport = ScriptedTransport()
     async with transport.client() as client:
-        deps = replace(
-            deps_for_pinned_mux(client, db_session_factory),
-            turn_path=cast(Literal["legacy", "mux"], path),
-        )
+        deps = deps_for_pinned_mux(client, db_session_factory)
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
             await bind_session_impl(
                 deps,
@@ -369,9 +362,7 @@ async def test_missing_codec_does_not_construct_a_registered_backend(
     transport = ScriptedTransport()
     async with transport.client() as client:
         with pytest.raises(UnsupportedCapability):
-            turn_io(
-                client, SESSION.id, path="mux", scope=SCOPE, profile=PROFILE, session_ref=SESSION
-            )
+            turn_io(client, SESSION.id, scope=SCOPE, profile=PROFILE, session_ref=SESSION)
     assert not transport.requests
 
 
@@ -448,7 +439,7 @@ async def test_injected_backend_preserves_the_admitted_runtime(
     seen: list[TurnCodecRequest] = []
     transport = ScriptedTransport()
     async with transport.client() as client:
-        marker = LegacyTurnIO(client, "unused")
+        marker = cast(TurnIO, object())
 
         def codec(request: TurnCodecRequest) -> TurnIO:
             seen.append(request)
@@ -465,7 +456,6 @@ async def test_injected_backend_preserves_the_admitted_runtime(
             turn_io(
                 client,
                 SESSION.id,
-                path="mux",
                 scope=SCOPE,
                 profile=PROFILE,
                 backend=openai_backend,
@@ -479,7 +469,6 @@ async def test_injected_backend_preserves_the_admitted_runtime(
             turn_io(
                 client,
                 SESSION.id,
-                path="mux",
                 scope=SCOPE,
                 profile=PROFILE,
                 backend=openai_backend,
@@ -551,7 +540,7 @@ async def test_application_runtime_is_lazy_scoped_and_carried_into_execution(
     settings = Settings(
         anthropic=AnthropicSettings(api_key=SecretStr("offline")),
         database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://offline/unused")),
-        turn=TurnSettings(path="mux", channel_backends=True),
+        turn=TurnSettings(channel_backends=True),
     )
     transport = ScriptedTransport()
     async with transport.client() as client:
@@ -624,9 +613,7 @@ async def test_missing_runtime_constructor_refuses_without_provider_or_key_acces
     assert not transport.requests
 
 
-@pytest.mark.parametrize(
-    "invalid", ["no-config", "anthropic", "disabled", "legacy", "tenant", "model"]
-)
+@pytest.mark.parametrize("invalid", ["no-config", "anthropic", "disabled", "tenant", "model"])
 async def test_channel_runtime_refuses_invalid_admission_before_constructor(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -654,8 +641,6 @@ async def test_channel_runtime_refuses_invalid_admission_before_constructor(
             )
         elif invalid == "disabled":
             deps = replace(deps, channel_backends=False)
-        elif invalid == "legacy":
-            deps = replace(deps, turn_path="legacy")
         elif invalid == "tenant":
             scope = SCOPE.model_copy(update={"tenant_id": "foreign"})
         else:

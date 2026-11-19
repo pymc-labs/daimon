@@ -2,7 +2,6 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -59,7 +58,7 @@ def _deps(
         trace.append("publish")
 
     monkeypatch.setattr(prepare, "record_session_seals", publish)
-    return replace(deps_for(client, SimpleNamespace(begin=begin)), turn_path=None)
+    return deps_for(client, SimpleNamespace(begin=begin))
 
 
 @pytest.mark.parametrize(

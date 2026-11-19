@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from secrets import randbits
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -300,7 +299,7 @@ def _runtime(lease: GatewayLease) -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
         gateway_lease=lease,
     )
 

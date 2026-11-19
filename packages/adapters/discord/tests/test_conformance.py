@@ -71,7 +71,7 @@ async def bot(db_engine: AsyncEngine, db_clean: None) -> DaimonBot:
         billing_config=None,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
     )
     return make_bot(runtime)
 

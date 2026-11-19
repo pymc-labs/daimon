@@ -1,10 +1,10 @@
-"""The opt-in CLI bridge uses the resolved operator identity, without legacy I/O."""
+"""`daimon run` drives its turn with the resolved operator identity."""
 
 import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from io import StringIO
-from typing import Literal, cast
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -12,7 +12,7 @@ from daimon.adapters.cli import main as main_mod
 from daimon.adapters.cli.run import command
 from daimon.adapters.cli.run.command import SessionTenantMismatch
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import Settings, TurnSettings
+from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import AccountRow, CliPrincipalRow, Role
@@ -92,7 +92,7 @@ def runtime(transport: ScriptedTransport, sm: Sessionmaker) -> CliRuntime:
     )
 
 
-async def test_cli_mux_scope_drives_real_turn_with_identical_legacy_requests(
+async def test_cli_scope_drives_a_real_turn(
     monkeypatch: pytest.MonkeyPatch,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -100,49 +100,40 @@ async def test_cli_mux_scope_drives_real_turn_with_identical_legacy_requests(
 
     install_identity(monkeypatch)
     monkeypatch.setattr(uuid, "uuid4", lambda: UUID(int=1))
-    recordings: list[ScriptedTransport] = []
-    outputs: list[str] = []
     deadline = datetime.now(UTC) + timedelta(seconds=30)
-    paths: tuple[Literal["legacy", "mux"], ...] = ("legacy", "mux")
-    for path in paths:
-        transport = ScriptedTransport()
-        transport.queue(
-            ScriptedReply.stream(
-                "/v1/sessions/session1/events/stream",
-                [
-                    {
-                        "id": "evt_idle",
-                        "type": "session.status_idle",
-                        "processed_at": NOW.isoformat(),
-                        "stop_reason": {"type": "end_turn"},
-                    }
-                ],
-            ),
-            ScriptedReply("POST", "/v1/sessions/session1/events", send_events_response()),
-        )
-        sm = Sessionmaker(db_session_factory)
-        rt = runtime(transport, sm)
-        output = StringIO()
-        monkeypatch.setattr(sys, "stdout", output)
-        async with rt.anthropic:
-            with capture_logs() as logs:
-                result = await command.run_conversation_observed(
-                    rt=rt,
-                    session_id="session1",
-                    user_message="hello",
-                    path=path,
-                    deadline=deadline,
-                )
-        assert result == 0
-        assert [entry["reason"] for entry in logs if entry["event"] == "turn.billing_exempt"] == [
-            "cli-operator-run"
-        ]
-        assert sm.calls == (1 if path == "mux" else 0)
-        transport.assert_consumed()
-        recordings.append(transport)
-        outputs.append(output.getvalue())
-    assert recordings[0].requests == recordings[1].requests
-    assert outputs[0] == outputs[1]
+    transport = ScriptedTransport()
+    transport.queue(
+        ScriptedReply.stream(
+            "/v1/sessions/session1/events/stream",
+            [
+                {
+                    "id": "evt_idle",
+                    "type": "session.status_idle",
+                    "processed_at": NOW.isoformat(),
+                    "stop_reason": {"type": "end_turn"},
+                }
+            ],
+        ),
+        ScriptedReply("POST", "/v1/sessions/session1/events", send_events_response()),
+    )
+    sm = Sessionmaker(db_session_factory)
+    rt = runtime(transport, sm)
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    async with rt.anthropic:
+        with capture_logs() as logs:
+            result = await command.run_conversation_observed(
+                rt=rt,
+                session_id="session1",
+                user_message="hello",
+                deadline=deadline,
+            )
+    assert result == 0
+    assert [entry["reason"] for entry in logs if entry["event"] == "turn.billing_exempt"] == [
+        "cli-operator-run"
+    ]
+    assert sm.calls == 1
+    transport.assert_consumed()
 
 
 @pytest.mark.parametrize("failure", ["missing", "principal", "account"])
@@ -157,7 +148,7 @@ async def test_cli_mux_wrong_or_missing_identity_fails_before_provider_io(
     async with rt.anthropic:
         with pytest.raises(ScopeViolation):
             await command.run_conversation_observed(
-                rt=rt, session_id="session1", user_message="hello", path="mux"
+                rt=rt, session_id="session1", user_message="hello"
             )
     assert transport.requests == []
 
@@ -180,7 +171,7 @@ async def test_cli_mux_threads_the_real_scope_deadline_and_exempt_billing(
     async with rt.anthropic:
         assert (
             await command.run_conversation_observed(
-                rt=rt, session_id="session1", user_message="hello", path="mux", deadline=deadline
+                rt=rt, session_id="session1", user_message="hello", deadline=deadline
             )
             == 0
         )
@@ -196,10 +187,9 @@ async def test_cli_mux_threads_the_real_scope_deadline_and_exempt_billing(
     assert transport.requests == []
 
 
-# Decision D2: on the mux path `daimon run` acts only inside the CLI's own tenant.
-# A session another tenant owns is refused before any principal is minted; legacy
-# keeps its raw-session behaviour; a session nothing records (what
-# `daimon sessions create` makes) is allowed.
+# Decision D2: `daimon run` acts only inside the CLI's own tenant. A session
+# another tenant owns is refused before any principal is minted; a session nothing
+# records (what `daimon sessions create` makes) is allowed.
 
 FOREIGN_WORKSPACE = "guild-foreign"
 
@@ -266,7 +256,7 @@ async def test_cli_mux_refuses_a_session_another_tenant_owns_pinned_mux(
     async with rt.anthropic:
         with pytest.raises(SessionTenantMismatch) as refused:
             await command.run_conversation_observed(
-                rt=rt, session_id="session-foreign", user_message="hello", path="mux"
+                rt=rt, session_id="session-foreign", user_message="hello"
             )
     message = str(refused.value)
     assert message == (
@@ -277,30 +267,6 @@ async def test_cli_mux_refuses_a_session_another_tenant_owns_pinned_mux(
     assert transport.requests == [], "refused before any provider I/O"
     assert sm.calls == 1
     # No CLI identity was minted anywhere, least of all in the other tenant.
-    assert await cli_principal_count(db_session) == 0
-
-
-@pytest.mark.parametrize("record", [foreign_thread_session, foreign_journal_session])
-async def test_cli_legacy_still_runs_a_session_another_tenant_owns_pinned_legacy(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    record: object,
-) -> None:
-    await record(db_session, "session-foreign")  # type: ignore[operator]
-    transport = idle_transport("session-foreign")
-    sm = Sessionmaker(db_session_factory)
-    rt = runtime(transport, sm)
-    async with rt.anthropic:
-        result = await command.run_conversation_observed(
-            rt=rt,
-            session_id="session-foreign",
-            user_message="hello",
-            path="legacy",
-            deadline=datetime.now(UTC) + timedelta(seconds=30),
-        )
-    assert result == 0
-    transport.assert_consumed()
-    assert sm.calls == 0, "legacy never opens the database for the identity check"
     assert await cli_principal_count(db_session) == 0
 
 
@@ -317,7 +283,6 @@ async def test_cli_mux_runs_a_session_nothing_records_pinned_mux(
             rt=rt,
             session_id="session-fresh",
             user_message="hello",
-            path="mux",
             deadline=datetime.now(UTC) + timedelta(seconds=30),
         )
     assert result == 0
@@ -344,18 +309,16 @@ async def test_cli_mux_runs_a_session_the_local_tenant_owns_pinned_mux(
             rt=rt,
             session_id="s-local",
             user_message="hello",
-            path="mux",
             deadline=datetime.now(UTC) + timedelta(seconds=30),
         )
     assert result == 0
     transport.assert_consumed()
 
 
-def test_command_resolves_the_path_once_and_reports_a_refusal_cleanly(
+def test_command_reports_a_refusal_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The edge (`run_command`) reads the turn path from settings and hands it down;
-    a tenant refusal exits 1 with the named message, not a traceback.
+    """A tenant refusal exits 1 with the named message, not a traceback.
 
     The conversation itself runs on its own event loop here, so it is faked; the
     refusal it raises is proven against Postgres by the tests above.
@@ -363,14 +326,12 @@ def test_command_resolves_the_path_once_and_reports_a_refusal_cleanly(
     from contextlib import asynccontextmanager
 
     owner = UUID(int=99)
-    seen: list[str] = []
 
     @asynccontextmanager
     async def build_runtime(_settings: Settings):  # type: ignore[no-untyped-def]
         yield None
 
-    async def conversation(_settings, _session, _message, **kwargs: object) -> int:
-        seen.append(str(kwargs["path"]))
+    async def conversation(_settings, _session, _message) -> int:
         raise SessionTenantMismatch("session-foreign", owner)
 
     settings = Settings.model_validate(
@@ -380,13 +341,11 @@ def test_command_resolves_the_path_once_and_reports_a_refusal_cleanly(
         }
     )
     monkeypatch.setattr(command, "load_settings", lambda: settings)
-    monkeypatch.setattr(command, "load_turn_settings", lambda: TurnSettings(path="mux"))
     monkeypatch.setattr(command, "build_runtime", build_runtime)
     monkeypatch.setattr(command, "_run_with_defaults", conversation)
 
     result = CliRunner().invoke(main_mod.app, ["run", "hi", "--session", "session-foreign"])
 
-    assert seen == ["mux"]
     assert result.exit_code == 1
     assert f"session session-foreign belongs to tenant {owner}" in result.stderr
     assert "Traceback" not in result.stderr

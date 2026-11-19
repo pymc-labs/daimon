@@ -41,7 +41,7 @@ from daimon.adapters.mcp.tools._ctx import _admission_recheck
 from daimon.adapters.mcp.tools.agent_chat import _continue_turn_impl
 from daimon.core._models import TenantLedger, UsageEvent
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, load_turn_settings
+from daimon.core.config import McpSettings
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import set_workspace_feature
@@ -530,14 +530,10 @@ class _SendGates:
         if len(self.arrived) >= self.threshold:
             self.reached.set()
 
-    def assert_turn_path(self, deps: TurnDeps, *, prepared_entry: bool) -> None:
-        """A prepared turn took the lease exactly when the mux path ran it."""
+    def assert_turn_path(self, *, prepared_entry: bool) -> None:
+        """A prepared turn took the binding lease."""
         if prepared_entry:
-            on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
-            assert bool(self.lease_tasks) == on_mux, (
-                f"turn path {deps.turn_path or load_turn_settings().path!r}: "
-                f"{len(self.lease_tasks)} sends took the binding lease"
-            )
+            assert self.lease_tasks, "no send took the binding lease"
 
 
 def _observe_send_gates(monkeypatch: pytest.MonkeyPatch, *, threshold: int) -> _SendGates:
@@ -3501,7 +3497,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
         assert all(isinstance(r, PreparedTurn) for r in results[15:]), results[15:]
         assert transport.state.sessions[first.ma_session_id].archived_at is not None
         assert any(e["type"] == "user.message" for e in transport.state.events[first.ma_session_id])
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         release.set()
         for task in tasks:
@@ -3672,7 +3668,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             release.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks), 5)
         assert all(isinstance(result, PreparedTurn) for result in results)
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -3887,7 +3883,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         from daimon.core.session_mutation import SessionRetired
 
         assert all(isinstance(result, SessionRetired) for result in retired), retired
-        gates.assert_turn_path(deps, prepared_entry=entry == "prepared")
+        gates.assert_turn_path(prepared_entry=entry == "prepared")
     finally:
         checkpoint_release.set()
         create_release.set()
@@ -4487,11 +4483,8 @@ async def test_prepared_turn_cannot_resume_retired_session(
             render_interval_s=0.001,
         )
     assert len(transport.state.events.get(first.ma_session_id, [])) == before
-    # Which path refused it: the mux binding check answers before the turn
-    # takes its lease or reaches the fence; the legacy turn is refused at the
-    # session-mutation fence (`require_writable_session`) and never leases.
-    on_mux = (deps.turn_path or load_turn_settings().path) == "mux"
-    assert (len(gates.lease_tasks), len(gates.arrived)) == ((0, 0) if on_mux else (0, 1))
+    # The binding check answers before the turn takes its lease or reaches the fence.
+    assert (len(gates.lease_tasks), len(gates.arrived)) == (0, 0)
     async with factory() as db:
         live = await get_live_thread_session(
             db,

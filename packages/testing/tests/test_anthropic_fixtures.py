@@ -17,6 +17,7 @@ import pytest
 from anthropic import APIConnectionError
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.turn.driver import run_turn
+from daimon.core.turn.io import turn_io
 from daimon.core.turn.posture import BillingExempt
 from daimon.testing.anthropic_fixtures import (
     AnthropicEntry,
@@ -32,7 +33,7 @@ from daimon.testing.anthropic_fixtures import (
 from daimon.testing.provider_fixtures import FixturePack, load_provider_fixtures
 from daimon.testing.provider_replay import Object, SourcePin, WireFrame, WireReplay
 from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.drivers.anthropic.transport import LegacyTurnTransport
+from daimon.testing.turn_leg import LEG_SCOPE
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -68,17 +69,17 @@ async def test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn() -
     assert tape.replies[:-1] == original.replies
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
         identity = entry.bindings[0].session_id
-        edge = LegacyTurnTransport(replay.client, identity)
+        edge = turn_io(replay.client, identity, scope=LEG_SCOPE)
         assert await edge.status() == "idle"
         lifecycle = RecordingLifecycle()
         state = await run_turn(
             anthropic=replay.client,
+            scope=LEG_SCOPE,
             session_id=identity,
             user_message=turn.request_text,
             lifecycle=lifecycle,
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="headless-unrecorded"),
-            path="legacy",
             render_interval_s=3600,
         )
         assert state.error is None and lifecycle.terminal_success
@@ -211,7 +212,7 @@ async def test_sdk_copies_refuse_settings_introduced_after_admission(
 @pytest.mark.parametrize(
     ("entry", "scenario", "turn"), CASES, ids=[f"{s.scenario_id}:{t.turn}" for _, s, t in CASES]
 )
-async def test_each_turn_drives_real_anthropic_sdk_and_legacy_host(
+async def test_each_turn_drives_real_anthropic_sdk_and_host(
     entry: AnthropicEntry,
     scenario: AnthropicScenario,
     turn: AnthropicTurn,
@@ -219,7 +220,7 @@ async def test_each_turn_drives_real_anthropic_sdk_and_legacy_host(
     tape = anthropic_turn_tape(entry, scenario, turn, codec=PACK.index.codec)
     binding = next(b for b in entry.bindings if b.turn == turn.turn)
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
-        edge = LegacyTurnTransport(replay.client, binding.session_id)
+        edge = turn_io(replay.client, binding.session_id, scope=LEG_SCOPE)
         assert await edge.status() == "idle"
         lifecycle = RecordingLifecycle()
         # An authored tool-finish gate is a decoder control, not real elapsed time.
@@ -228,12 +229,12 @@ async def test_each_turn_drives_real_anthropic_sdk_and_legacy_host(
         state = await asyncio.wait_for(
             run_turn(
                 anthropic=replay.client,
+                scope=LEG_SCOPE,
                 session_id=binding.session_id,
                 user_message=turn.request_text,
                 lifecycle=lifecycle,
                 cancel=asyncio.Event(),
                 billing=BillingExempt(reason="headless-unrecorded"),
-                path="legacy",
                 render_interval_s=3600,
                 stream_read_timeout_s=5,
             ),
@@ -510,7 +511,7 @@ async def test_unexpected_sdk_request_cannot_fall_back_to_network_or_hide_violat
     tape = anthropic_turn_tape(entry, row, turn, codec=PACK.index.codec)
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
         with pytest.raises(APIConnectionError):
-            await LegacyTurnTransport(replay.client, "foreign-session").status()
+            await turn_io(replay.client, "foreign-session", scope=LEG_SCOPE).status()
         assert replay.wire.violations == ["unscripted, mismatched or premature provider request"]
         with pytest.raises(AssertionError):
             replay.wire.assert_consumed()
@@ -670,18 +671,18 @@ async def test_followup_uses_one_retained_sdk_client_and_native_session() -> Non
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
         seen: list[str] = []
         for turn, binding in zip(row.turns, entry.bindings, strict=True):
-            edge = LegacyTurnTransport(replay.client, binding.session_id)
+            edge = turn_io(replay.client, binding.session_id, scope=LEG_SCOPE)
             assert await edge.status() == "idle"
             lifecycle = RecordingLifecycle()
             state = await asyncio.wait_for(
                 run_turn(
                     anthropic=replay.client,
+                    scope=LEG_SCOPE,
                     session_id=binding.session_id,
                     user_message=turn.request_text,
                     lifecycle=lifecycle,
                     cancel=asyncio.Event(),
                     billing=BillingExempt(reason="headless-unrecorded"),
-                    path="legacy",
                     render_interval_s=3600,
                     stream_read_timeout_s=5,
                 ),
@@ -707,7 +708,7 @@ async def test_event_named_stream_cannot_deliver_a_root_before_post_acceptance()
     tape = anthropic_turn_tape(entry, row, turn, codec=PACK.index.codec)
     binding = entry.bindings[0]
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
-        edge = LegacyTurnTransport(replay.client, binding.session_id)
+        edge = turn_io(replay.client, binding.session_id, scope=LEG_SCOPE)
         assert await edge.status() == "idle"
         stream = await edge.open_stream(read_timeout_s=5)
         first = asyncio.create_task(anext(stream))
@@ -719,9 +720,9 @@ async def test_event_named_stream_cannot_deliver_a_root_before_post_acceptance()
         await edge.send(
             [{"type": "user.message", "content": [{"type": "text", "text": turn.request_text}]}]
         )
-        root = await first
-        assert root.model_dump(mode="json")["id"] == binding.root_id
-        records = [root, *[e async for e in stream]]
+        root = (await first).native
+        assert root is not None and root.model_dump(mode="json")["id"] == binding.root_id
+        records = [root, *[e.native async for e in stream if e.native is not None]]
         await stream.close()
         replay.wire.assert_consumed()
         assert [e.model_dump(mode="json")["id"] for e in records] == [e["id"] for e in turn.events]
@@ -734,7 +735,7 @@ async def test_usage_span_preserves_the_actual_tool_start_before_completion_gate
     assert binding.completion_gate is not None
     tape = anthropic_turn_tape(entry, row, turn, codec=PACK.index.codec)
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
-        edge = LegacyTurnTransport(replay.client, binding.session_id)
+        edge = turn_io(replay.client, binding.session_id, scope=LEG_SCOPE)
         assert await edge.status() == "idle"
         await edge.send(
             [{"type": "user.message", "content": [{"type": "text", "text": turn.request_text}]}]
@@ -745,8 +746,10 @@ async def test_usage_span_preserves_the_actual_tool_start_before_completion_gate
 
         async def collect() -> None:
             async for record in stream:
-                seen.append(str(record.type))
-                if record.type == "agent.tool_use":
+                if record.native is None:
+                    continue
+                seen.append(str(record.native.type))
+                if record.native.type == "agent.tool_use":
                     prefix_ready.set()
 
         task = asyncio.create_task(collect())
@@ -781,7 +784,7 @@ async def test_codec_provenance_is_inert_but_actual_sdk_payloads_still_match() -
     )
     async with anthropic_replay(tape, source_root=DIRECTORY, codec_root=ROOT) as replay:
         identity = entry.bindings[0].session_id
-        status = await LegacyTurnTransport(replay.client, identity).status()
+        status = await turn_io(replay.client, identity, scope=LEG_SCOPE).status()
         assert status == "idle"
         assert replay.wire.requests[0].method == "GET"
         assert replay.wire.requests[0].path == tape.replies[0].path

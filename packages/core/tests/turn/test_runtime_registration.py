@@ -30,7 +30,7 @@ def registry(monkeypatch):
 def selected_request(**changes):
     return SimpleNamespace(
         admission=admission(),
-        deps=SimpleNamespace(turn_path="mux", channel_backends=True),
+        deps=SimpleNamespace(channel_backends=True),
         scope=SCOPE,
         platform="slack",
         tenant_id=REVISION.channel.tenant_id,
@@ -172,16 +172,14 @@ def test_unavailable_or_ambiguous_installation_refuses_without_a_provider_call(
 
 
 @pytest.mark.parametrize(
-    "invalid", ["legacy", "disabled", "foreign_scope", "foreign_provider", "missing_model"]
+    "invalid", ["disabled", "foreign_scope", "foreign_provider", "missing_model"]
 )
 def test_invalid_turn_refuses_before_package_discovery(registry, monkeypatch, invalid):
     def forbidden(**kwargs):
         raise AssertionError("invalid request reached provider installation")
 
     request = selected_request()
-    if invalid == "legacy":
-        request.deps.turn_path = "legacy"
-    elif invalid == "disabled":
+    if invalid == "disabled":
         request.deps.channel_backends = False
     elif invalid == "foreign_scope":
         request.scope = SCOPE.model_copy(update={"tenant_id": "foreign"})
@@ -316,7 +314,7 @@ scope = Scope(tenant_id="tenant", account_id="account", principal_id="caller", a
 revision = ConfigRevision.create(ChannelRef(tenant_id="tenant", platform="slack", channel_id="channel"), 1,
     resolve_default(BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna")))
 request = SimpleNamespace(admission=SimpleNamespace(backend_revision=revision, shared_owner=None),
-    deps=SimpleNamespace(turn_path="mux", channel_backends=True), scope=scope,
+    deps=SimpleNamespace(channel_backends=True), scope=scope,
     platform="slack", tenant_id="tenant", session_account_id="account", thread_id="thread")
 try:
     runtimes.build_channel_runtime(request)

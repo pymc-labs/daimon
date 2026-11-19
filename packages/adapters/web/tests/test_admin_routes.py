@@ -91,7 +91,7 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
 _SETTINGS = Settings(
     _env_file=None,  # pyright: ignore[reportCallIssue]
     database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
-    turn=TurnSettings(path="mux", channel_backends=True),
+    turn=TurnSettings(channel_backends=True),
 )
 
 

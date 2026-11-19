@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -50,7 +49,7 @@ def _runtime() -> DiscordRuntime:
         billing_config=None,
         deployment_default=DeploymentDefault(agent_name=None),
         resolver_cache=new_resolver_cache(),
-        turn_deps=replace(deps_for(), turn_path=None),
+        turn_deps=deps_for(),
     )
 
 

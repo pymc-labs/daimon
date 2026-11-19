@@ -28,12 +28,7 @@ from daimon.testing.db import (  # noqa: F401
     db_session_factory,
 )
 
-from .turn_path_support import (  # noqa: F401
-    env_turn_path,
-    headless_identity,
-    turn_io_used,
-    turn_path,
-)
+from .turn_io_support import headless_identity, turn_io_used  # noqa: F401
 
 
 @pytest.fixture(autouse=True)

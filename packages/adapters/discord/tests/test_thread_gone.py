@@ -14,7 +14,7 @@ import asyncio
 import types
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -649,7 +649,7 @@ async def test_thread_delete_event_with_no_turn_running_still_retires_the_sessio
             billing_config=None,
             deployment_default=DeploymentDefault(),
             resolver_cache=new_resolver_cache(),
-            turn_deps=replace(deps_for(), turn_path=None),
+            turn_deps=deps_for(),
         )
     )
     payload = types.SimpleNamespace(thread_id=_THREAD_ID, parent_id=_PARENT_ID, guild_id=_GUILD_ID)

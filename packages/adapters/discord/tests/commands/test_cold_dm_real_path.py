@@ -149,7 +149,6 @@ async def real_dm(db_engine, db_clean):
     bot.runtime.turn_deps = replace(
         deps_for(provider.client, factory),
         membership_resolver=CachedMembershipResolver(fetch),
-        turn_path="legacy",
     )
     bot.get_guild.side_effect = lambda guild_id: SimpleNamespace(name=f"Server {guild_id}")
     bot.turn_queue = TurnQueue(

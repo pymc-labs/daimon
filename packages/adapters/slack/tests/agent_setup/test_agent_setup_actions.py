@@ -11,7 +11,6 @@ FakeSlackWebClient from conftest (no AsyncMock on client.* methods).
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -70,7 +69,7 @@ def _build_runtime(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
 
 

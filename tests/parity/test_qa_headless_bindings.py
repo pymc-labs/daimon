@@ -136,7 +136,6 @@ async def test_new27_a_rejected_token_through_the_real_modal(
         assert deps.sessionmaker is runtime.sessionmaker is db_session_factory
         assert isinstance(deps.fernet, MultiFernet)
         assert deps.fernet.decrypt(deps.fernet.encrypt(b"credential")) == b"credential"
-        assert deps.turn_path is None
         assert deps.defaults_root == Path("/unused")
         assert isinstance(deps.running_turns, RunningTurns)
         observed.append(deps)

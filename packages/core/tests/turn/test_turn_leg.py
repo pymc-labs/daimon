@@ -1,15 +1,12 @@
-"""The turn leg is a real input to the fixtures, and each leg changes what runs.
+"""The turn leg is a real input to the fixtures, and its backend flags change what runs.
 
-`deps_for` takes its path and backend flags from `daimon.testing.turn_leg`, which
-reads `DAIMON_TURN__PATH` / `DAIMON_TURN__CHANNEL_BACKENDS` through the product
-loader. These tests assert the seams those flags reach:
+`deps_for` takes its backend flags from `daimon.testing.turn_leg`, which reads
+`DAIMON_TURN__CHANNEL_BACKENDS` / `DAIMON_TURN__AGENT_BACKENDS` through the
+product loader. These tests assert the seams those flags reach:
 
-* `run._turn_port_kwargs`: which I/O path a turn is dispatched on;
+* `run._turn_port_kwargs`: which profile a turn is dispatched on;
 * `runtimes.build_channel_runtime`: whether a non-Anthropic channel backend is
-  admitted past the path/backend gate or refused as `backend_unsupported`.
-
-Tests named `*_both_legs` pin each leg themselves and run on every CI leg; the
-`*_selected_leg` tests follow the leg the run chose.
+  admitted past the backend gate or refused as `backend_unsupported`.
 """
 
 from __future__ import annotations
@@ -25,63 +22,53 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
 from daimon.testing.turn_fakes import deps_for
-from daimon.testing.turn_leg import LEGACY_LEG, MUX_LEG, turn_leg
+from daimon.testing.turn_leg import MUX_LEG, turn_leg
 
 from .test_provider_dispatch import ACCOUNT, SCOPE, SESSION, TENANT, admission
 
-LEGS = [pytest.param(LEGACY_LEG, id="legacy"), pytest.param(MUX_LEG, id="mux")]
-
-
-def _set_leg(monkeypatch: pytest.MonkeyPatch, leg: TurnSettings) -> None:
-    monkeypatch.setenv("DAIMON_TURN__PATH", leg.path)
-    monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", str(leg.channel_backends).lower())
+OFF_LEG = TurnSettings(channel_backends=False, agent_backends=False)
+LEGS = [pytest.param(OFF_LEG, id="off"), pytest.param(MUX_LEG, id="on")]
 
 
 @pytest.mark.parametrize("leg", LEGS)
-def test_deps_for_follows_the_environment_both_legs(
+def test_deps_for_follows_the_environment(
     monkeypatch: pytest.MonkeyPatch, leg: TurnSettings
 ) -> None:
-    _set_leg(monkeypatch, leg)
+    monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", str(leg.channel_backends).lower())
 
-    deps = deps_for()
-
-    assert (deps.turn_path, deps.channel_backends) == (leg.path, leg.channel_backends)
+    assert deps_for().channel_backends == leg.channel_backends
 
 
 def test_deps_for_follows_the_product_default_without_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("DAIMON_TURN__PATH", raising=False)
     monkeypatch.delenv("DAIMON_TURN__CHANNEL_BACKENDS", raising=False)
     monkeypatch.delenv("DAIMON_TURN__AGENT_BACKENDS", raising=False)
 
     deps = deps_for()
 
-    assert (deps.turn_path, deps.channel_backends, deps.agent_backends) == ("mux", True, True)
+    assert (deps.channel_backends, deps.agent_backends) == (True, True)
 
 
 def test_explicit_leg_overrides_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_leg(monkeypatch, LEGACY_LEG)
+    monkeypatch.setenv("DAIMON_TURN__CHANNEL_BACKENDS", "false")
 
-    assert deps_for(leg=MUX_LEG).turn_path == "mux"
+    assert deps_for(leg=MUX_LEG).channel_backends is True
 
 
-@pytest.mark.parametrize("leg", LEGS)
-def test_turn_dispatch_path_for_an_anthropic_turn_both_legs(leg: TurnSettings) -> None:
+def test_an_anthropic_turn_names_no_profile() -> None:
     anthropic = replace(admission(), backend_revision=None)
 
     kwargs = _turn_port_kwargs(
-        deps_for(leg=leg), anthropic, "session", tenant_id=TENANT, provider_scope=SCOPE
+        deps_for(), anthropic, "session", tenant_id=TENANT, provider_scope=SCOPE
     )
 
-    # The legacy answer omits `path` (run_turn's default); mux names itself.
-    assert kwargs.get("path", "legacy") == leg.path
+    assert "profile" not in kwargs
 
 
-@pytest.mark.parametrize("leg", LEGS)
-def test_turn_dispatch_names_the_profile_of_a_native_turn_both_legs(leg: TurnSettings) -> None:
+def test_turn_dispatch_names_the_profile_of_a_native_turn() -> None:
     kwargs = _turn_port_kwargs(
-        deps_for(leg=leg),
+        deps_for(),
         admission(),
         "session",
         tenant_id=TENANT,
@@ -89,7 +76,6 @@ def test_turn_dispatch_names_the_profile_of_a_native_turn_both_legs(leg: TurnSet
         provider_scope=SCOPE,
     )
 
-    assert kwargs["path"] == leg.path
     assert kwargs["profile"] == admission().backend_revision.profile
 
 
@@ -111,11 +97,15 @@ def _request(leg: TurnSettings) -> ProviderPreparationRequest:
     )
 
 
-@pytest.mark.parametrize("leg", LEGS)
-def test_channel_backend_admission_gate_both_legs(
-    monkeypatch: pytest.MonkeyPatch, leg: TurnSettings
+@pytest.mark.parametrize("leg", [*LEGS, None])
+def test_channel_backend_admission_gate(
+    monkeypatch: pytest.MonkeyPatch, leg: TurnSettings | None
 ) -> None:
-    """Legacy refuses at the gate; mux passes it and reaches the profile's runtime."""
+    """Off refuses at the gate; on passes it and reaches the profile's runtime.
+
+    `None` follows the leg the run selected.
+    """
+    selected = leg if leg is not None else turn_leg()
     reached_runtime_lookup: list[str] = []
 
     def runtime_unavailable(profile: str, **_: object) -> bool:
@@ -125,28 +115,7 @@ def test_channel_backend_admission_gate_both_legs(
     monkeypatch.setattr(runtime_module, "ensure_channel_runtime", runtime_unavailable)
 
     with pytest.raises(AdmissionDenied) as refused:
-        runtime_module.build_channel_runtime(_request(leg))
+        runtime_module.build_channel_runtime(_request(selected))
 
     assert refused.value.reason == "backend_unsupported"
-    assert bool(reached_runtime_lookup) == (leg.path == "mux" and leg.channel_backends)
-
-
-def test_channel_backend_admission_follows_the_selected_leg(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    selected = turn_leg()
-    seen: list[ProviderPreparationRequest] = []
-
-    def runtime_unavailable(profile: str, **_: object) -> bool:
-        seen.append(request)
-        return False
-
-    request = _request(selected)
-    monkeypatch.setattr(runtime_module, "ensure_channel_runtime", runtime_unavailable)
-
-    with pytest.raises(AdmissionDenied):
-        runtime_module.build_channel_runtime(request)
-
-    assert request.deps.turn_path == selected.path
-    assert request.deps.channel_backends == selected.channel_backends
-    assert bool(seen) == (selected.path == "mux" and selected.channel_backends)
+    assert bool(reached_runtime_lookup) == selected.channel_backends

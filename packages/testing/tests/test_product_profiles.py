@@ -69,7 +69,7 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     monkeypatch.setattr(Core, "__init__", constructor)
     monkeypatch.setattr(Host, "__init__", constructor)
     enabled = profiles.OPT_IN_PRODUCT_PROFILE.apply(base, service="core")
-    assert enabled.turn.path == base.turn.path == "legacy"
+    assert enabled.turn == base.turn
     assert enabled.mcp.require_routine_destination is True
     assert enabled.discord is not None and enabled.discord.credential_form_expiry is True
     assert enabled.discord.table_rendering is False and enabled.backend == base.backend

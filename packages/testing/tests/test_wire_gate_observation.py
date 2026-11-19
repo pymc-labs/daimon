@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from daimon.core.turn.io import turn_io
 from daimon.testing.anthropic_fixtures import (
     anthropic_replay,
     anthropic_turn_tape,
@@ -29,7 +30,7 @@ from daimon.testing.provider_replay import (
     WireReply,
     provider_replay,
 )
-from mux.drivers.anthropic.transport import LegacyTurnTransport
+from daimon.testing.turn_leg import LEG_SCOPE
 from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
 from mux.drivers.gemini.transport import close_iterator
 from mux.drivers.openai.transport import SDKTransport as OpenAITransport
@@ -348,7 +349,7 @@ async def test_owned_anthropic_sdk_gate_retains_tool_start_and_blocks_result(
         source_root=DATA / "anthropic",
         codec_root=ROOT,
     ) as replay:
-        edge = LegacyTurnTransport(replay.client, binding.session_id)
+        edge = turn_io(replay.client, binding.session_id, scope=LEG_SCOPE)
         await edge.status()
         await edge.send(
             [{"type": "user.message", "content": [{"type": "text", "text": turn.request_text}]}]
@@ -358,7 +359,7 @@ async def test_owned_anthropic_sdk_gate_retains_tool_start_and_blocks_result(
 
         async def collect() -> None:
             async for frame in stream:
-                seen.append(str(frame.type))
+                seen.append(str(frame.native.type))
 
         task = asyncio.create_task(collect())
         try:

@@ -97,7 +97,7 @@ async def test_fly_child_stamp_is_sealed_by_the_provider_credential(monkeypatch,
         SimpleNamespace(type="user.tool_confirmation", result="allow", tool_use_id="tool-call"),
     ]
     monkeypatch.setattr(
-        fly, "LegacyTurnIO", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
 
     _, metadata = await fly._approved(

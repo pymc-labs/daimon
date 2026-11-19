@@ -570,7 +570,7 @@ async def test_turn_admin_cards_read_no_agent_source(
         commands={},
         bot_token=bot_token,
     )
-    teams.runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    teams.runtime.settings.turn = TurnSettings(channel_backends=True)
 
     services: list[Any] = []
     real_callbacks = confirmation.backend_switch_callbacks

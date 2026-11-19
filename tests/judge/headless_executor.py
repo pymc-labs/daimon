@@ -728,7 +728,6 @@ async def _run_turn(
                         lifecycle=clocked,
                         cancel=asyncio.Event(),
                         billing=BillingExempt(reason="headless-unrecorded"),
-                        path="mux",
                         scope=scope,
                         session_ref=session,
                         profile=channel.revision.profile,

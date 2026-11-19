@@ -160,7 +160,6 @@ async def run_host(monkeypatch, event, persistence=None, *, io_factory=OfflineIO
             lifecycle=RecordingLifecycle(),
             cancel=asyncio.Event(),
             billing=BillingExempt(reason="headless-unrecorded"),
-            path="mux",
             scope=SCOPE,
             render_interval_s=3600,
         )

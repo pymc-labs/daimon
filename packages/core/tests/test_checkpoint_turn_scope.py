@@ -3,7 +3,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
@@ -14,7 +14,6 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core import workspace_transfer
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import load_turn_settings
 from daimon.core.errors import TurnError
 from daimon.core.session_snapshot import SessionSnapshot, snapshot_from_retrieved_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -39,20 +38,11 @@ def factory() -> async_sessionmaker[AsyncSession]:
     return cast(async_sessionmaker[AsyncSession], MagicMock())
 
 
-def set_path(monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]) -> None:
-    monkeypatch.setenv("DAIMON_TURN__PATH", path)
-    assert load_turn_settings().path == path
-
-
-@pytest.mark.parametrize(
-    "path,account_id", [("legacy", ACCOUNT), ("mux", ACCOUNT), ("legacy", None), ("mux", None)]
-)
+@pytest.mark.parametrize("account_id", [ACCOUNT, None])
 async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
-    path: Literal["legacy", "mux"],
     account_id: uuid.UUID | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    set_path(monkeypatch, path)
     monkeypatch.setattr(
         "daimon.core.stores.access_policy.load_access_policy",
         AsyncMock(return_value=TenantAccessPolicy()),
@@ -61,8 +51,6 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
         return_value=TurnState(error=TurnError(kind="upstream", message="test failure"))
     )
     monkeypatch.setattr(workspace_transfer, "run_turn", turn)
-    replay = AsyncMock(wraps=workspace_transfer.replay_events)
-    monkeypatch.setattr(workspace_transfer, "replay_events", replay)
     before_send = AsyncMock()
     event = BetaManagedAgentsAgentMessageEvent(
         id="event_work",
@@ -135,9 +123,6 @@ async def test_checkpoint_passes_real_scope_and_preserves_the_existing_read(
     await turn.await_args.kwargs["before_send"]()
     before_send.assert_awaited_once()
     assert isinstance(turn.await_args.kwargs["tool_confirmation"], PolicyApproval)
-    replay.assert_awaited_once()
-    assert replay.await_args is not None
-    assert replay.await_args.kwargs.get("scope") == scope
 
 
 async def test_runner_carries_the_authorized_account_to_transfer_and_restore(

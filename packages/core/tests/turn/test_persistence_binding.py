@@ -56,7 +56,6 @@ def deps(factory: async_sessionmaker[AsyncSession]) -> TurnDeps:
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
-        turn_path="mux",
         tool_safety=OPEN_TOOL_SAFETY,
     )
 
@@ -358,14 +357,11 @@ async def test_missing_shared_binding_is_not_claimed_by_the_turn(
         await dependencies.anthropic.close()
 
 
-@pytest.mark.parametrize("path", ("legacy", "mux"))
-async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_key(
+async def test_prepared_driver_wires_state_and_reuses_explicit_root_key(
     db_engine: AsyncEngine,
     db_clean: None,
-    path: str,
 ) -> None:
     import asyncio
-    from typing import Literal, cast
 
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.run import run_prepared_turn
@@ -411,9 +407,7 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
         ),
     )
     async with transport.client() as client:
-        dependencies = replace(
-            deps(factory), anthropic=client, turn_path=cast(Literal["legacy", "mux"], path)
-        )
+        dependencies = replace(deps(factory), anthropic=client)
         admitted = admission(account.id, tenant.id)
 
         async def record(event: object) -> None:
@@ -455,28 +449,24 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
             account_id=str(account.id),
         )
         binding = await store.get_binding(slot)
-        if path == "legacy":
-            assert binding is None
-            assert not await store.read_events("session")
-        else:
-            assert binding is not None and binding.native_refs["session"] == "session"
-            assert len(await store.read_events("session")) == 2
-            operation = await store.get_operation(
-                (
-                    await prepared_persistence(
-                        dependencies,
-                        admitted,
-                        tenant_id=tenant.id,
-                        platform="slack",
-                        thread_id="thread",
-                        session_id="session",
-                        mapping_id=mapped.id,
-                        operation_key="platform-message",
-                    )
-                ).scope,
-                "turn:session:platform-message:send:0",
-            )
-            assert operation is not None and operation.operation.status == "accepted"
+        assert binding is not None and binding.native_refs["session"] == "session"
+        assert len(await store.read_events("session")) == 2
+        operation = await store.get_operation(
+            (
+                await prepared_persistence(
+                    dependencies,
+                    admitted,
+                    tenant_id=tenant.id,
+                    platform="slack",
+                    thread_id="thread",
+                    session_id="session",
+                    mapping_id=mapped.id,
+                    operation_key="platform-message",
+                )
+            ).scope,
+            "turn:session:platform-message:send:0",
+        )
+        assert operation is not None and operation.operation.status == "accepted"
     transport.assert_consumed()
     assert [(request.method, request.path) for request in transport.requests] == [
         ("GET", "/v1/sessions/session/events/stream"),

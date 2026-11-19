@@ -19,7 +19,6 @@ import pathlib
 import re
 import uuid
 from collections.abc import Coroutine
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -352,7 +351,7 @@ def _make_app(
         billing_config=None,
         http_client=MagicMock(spec=httpx.AsyncClient),
         resolver_cache=MagicMock(),  # pyright: ignore[reportArgumentType]  # stub, turn path not exercised
-        turn_deps=replace(deps_for(), turn_path=None),  # stub, turn path not exercised
+        turn_deps=deps_for(),
     )
     return SlackApp(runtime=runtime)
 

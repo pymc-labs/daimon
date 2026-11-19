@@ -19,7 +19,6 @@ from .test_j2_gemini_root_e2e import fresh_chat as fresh_chat
 
 #: Every flag an operator may set to stop a feature (the stop leg sets the turn ones).
 FLAGS = (
-    "DAIMON_TURN__PATH",
     "DAIMON_TURN__CHANNEL_BACKENDS",
     "DAIMON_TURN__AGENT_BACKENDS",
 )
@@ -42,7 +41,6 @@ def _settings(**changes: object) -> Settings:
 
 def test_j9_every_feature_default_is_on(no_flags):
     settings = _settings()
-    assert settings.turn.path == "mux"
     assert settings.turn.channel_backends and settings.turn.agent_backends
     assert backend_selection_enabled(settings.turn), "switch tools are offered by default"
 
@@ -50,7 +48,7 @@ def test_j9_every_feature_default_is_on(no_flags):
 @pytest.mark.parametrize(
     ("flag", "stopped"),
     [
-        ("path", {"turn": TurnSettings(path="legacy")}),
+        ("path", {"turn": TurnSettings()}),
         ("channel_backends", {"turn": TurnSettings(channel_backends=False)}),
     ],
 )

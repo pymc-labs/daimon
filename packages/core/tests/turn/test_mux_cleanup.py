@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
@@ -16,8 +16,7 @@ from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.testing.drivers.anthropic.ma import session_response
-from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)
@@ -57,20 +56,13 @@ async def test_mux_orphan_cleanup_archives_through_the_bound_port() -> None:
     assert transport.requests == []
 
 
-@pytest.mark.parametrize("path", ["legacy", "mux"])
-async def test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux(
-    monkeypatch: pytest.MonkeyPatch, path: Literal["legacy", "mux"]
+async def test_sealed_dm_retirement_uses_conversation_owner_scope(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     maker = MagicMock()
     quarantine = AsyncMock(return_value=[SESSION.id])
     monkeypatch.setattr(direct_messages, "quarantine_conversation", quarantine)
     transport = ScriptedTransport()
-    if path == "legacy":
-        transport.queue(
-            ScriptedReply(
-                "POST", "/v1/sessions/session/archive", session_response(session_id=SESSION.id)
-            )
-        )
     archive = AsyncMock(return_value=object())
     backend = cast(
         ManagedAgents,
@@ -80,33 +72,14 @@ async def test_sealed_dm_retirement_uses_conversation_owner_scope_only_on_mux(
     )
     resolver = MagicMock(return_value=SESSION)
     async with transport.client() as client:
-        deps = replace(
-            deps_for(client, maker), turn_path=path, backend=backend, backend_session_ref=resolver
-        )
+        deps = replace(deps_for(client, maker), backend=backend, backend_session_ref=resolver)
         conversation = cast(DirectMessageRow, SimpleNamespace(tenant_id=TENANT, account_id=ACCOUNT))
         with pytest.raises(DaimonError, match="This DM was closed because its channel"):
             await direct_messages._quarantine(deps, conversation)  # pyright: ignore[reportPrivateUsage]
     transport.assert_consumed()
     quarantine.assert_awaited_once()
-    if path == "mux":
-        resolver.assert_called_once_with(SESSION.id, SCOPE)
-        archive.assert_awaited_once()
-        assert archive.await_args is not None
-        assert archive.await_args.args == (SCOPE, SESSION)
-        assert transport.requests == []
-    else:
-        resolver.assert_not_called()
-        archive.assert_not_called()
-        assert len(transport.requests) == 1
-        request = transport.requests[0]
-        assert request.method == "POST" and request.path == "/v1/sessions/session/archive"
-        original = ScriptedTransport()
-        original.queue(
-            ScriptedReply(
-                "POST", "/v1/sessions/session/archive", session_response(session_id=SESSION.id)
-            )
-        )
-        async with original.client() as unchanged_client:
-            await unchanged_client.beta.sessions.archive(SESSION.id)
-        original.assert_consumed()
-        assert request.to_dict() == original.requests[0].to_dict()
+    resolver.assert_called_once_with(SESSION.id, SCOPE)
+    archive.assert_awaited_once()
+    assert archive.await_args is not None
+    assert archive.await_args.args == (SCOPE, SESSION)
+    assert transport.requests == []

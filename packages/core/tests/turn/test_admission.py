@@ -2538,7 +2538,7 @@ async def test_start_dm_refuses_a_sealed_source_admission() -> None:
         config=MagicMock(),
         source_sealed=True,
     )
-    deps = replace(deps_for(None, MagicMock()), turn_path=None)
+    deps = deps_for(None, MagicMock())
     with pytest.raises(DaimonError, match="Only conversations inside this channel can read it"):
         await start_dm(
             deps,

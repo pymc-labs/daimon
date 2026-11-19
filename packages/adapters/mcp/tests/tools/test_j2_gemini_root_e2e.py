@@ -243,7 +243,7 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
         settings = Settings(
             database={"url": "postgresql+asyncpg://fixture:fixture@localhost/fixture"},
             anthropic={"api_key": "test-fixture-key"},
-            turn=TurnSettings(path="mux", channel_backends=True, agent_backends=True),
+            turn=TurnSettings(channel_backends=True, agent_backends=True),
             mcp=McpSettings(
                 public_url="https://mcp.invalid", jwt_secret="j2-offline-secret-0123456789abcdef"
             ),

@@ -855,7 +855,7 @@ async def test_mention_turn_admin_settings_card_reads_no_agent_source(
     mock_resolve_env.return_value = "env_test"
 
     runtime = _make_runtime(db_session_factory)
-    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.turn = TurnSettings(channel_backends=True)
     bot = make_bot(runtime)
     message = _make_thread_message(guild_id=int(guild_id))
     account_id = uuid.uuid4()

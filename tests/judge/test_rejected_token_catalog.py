@@ -8,7 +8,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -150,7 +150,7 @@ async def owned_submit(
                 billing_config=None,
                 deployment_default=DeploymentDefault(),
                 resolver_cache=new_resolver_cache(),
-                turn_deps=replace(deps_for(client, db_session_factory), turn_path=None),
+                turn_deps=deps_for(client, db_session_factory),
                 mcp_token_probe=probe,
             )
             yield OwnedSubmit(runtime, row, probe, interaction, requests)

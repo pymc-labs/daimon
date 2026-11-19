@@ -19,6 +19,7 @@ from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.platform_surface import PlatformSurfaceCapture
 from daimon.testing.slack_surface import SlackSurfaceHarness
 from daimon.testing.teams_surface import TeamsSurfaceHarness
+from daimon.testing.turn_leg import LEG_SCOPE
 from daimon.testing.turn_router import build_turn_router
 from microsoft_teams.api import MessageActivityInput
 from mux.testing.isolated_sdk import (
@@ -462,8 +463,8 @@ async def test_actual_host_driver_pumps_scripted_provider_into_real_platform_pos
                 user_message="qa input",
                 lifecycle=lc,
                 cancel=asyncio.Event(),
-                path="legacy",
                 billing=BillingExempt(reason="cli-operator-run"),
+                scope=LEG_SCOPE,
             )
 
         capture = await h.run(invoke)

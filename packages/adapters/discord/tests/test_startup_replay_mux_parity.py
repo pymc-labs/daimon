@@ -1,11 +1,8 @@
-"""Main's completed-orphan reader and the scoped port use identical SDK requests."""
+"""The completed-orphan reader recovers through the scoped port with read-only SDK requests."""
 
 from __future__ import annotations
 
-import hashlib
-import importlib.util
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -19,12 +16,6 @@ from mux.drivers.anthropic import AnthropicManagedAgents
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
-FIXTURE = Path(__file__).parent / "fixtures/startup_replay_main.py"
-SPEC = importlib.util.spec_from_file_location("startup_replay_main_oracle", FIXTURE)
-assert SPEC is not None and SPEC.loader is not None
-LEGACY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(LEGACY)
-SOURCE_SHA256 = "16d89820c180808b186832dccc906149af1a2d5dd537c580aa56ed3f7cee5b1a"
 NOW = datetime(2026, 10, 11, 8, tzinfo=UTC)
 TENANT = UUID(int=7)
 ACCOUNT = UUID(int=8)
@@ -109,12 +100,8 @@ def replies(
     return result
 
 
-def test_native_oracle_is_pinned_and_deadlines_are_unchanged() -> None:
-    header, hash_line, original = FIXTURE.read_bytes().split(b"\n", 2)
-    assert b"d4e41a5635002505b560a7a93a690e6f8d97bb80" in header
-    assert hashlib.sha256(original).hexdigest() == SOURCE_SHA256
-    assert hash_line == b"# Original SHA256: " + SOURCE_SHA256.encode()
-    assert LEGACY.ORPHAN_RESULT_READ_TIMEOUT_S == startup_replay.ORPHAN_RESULT_READ_TIMEOUT_S == 5.0
+def test_the_read_deadline_is_unchanged() -> None:
+    assert startup_replay.ORPHAN_RESULT_READ_TIMEOUT_S == 5.0
 
 
 @pytest.mark.parametrize(
@@ -149,31 +136,23 @@ def test_native_oracle_is_pinned_and_deadlines_are_unchanged() -> None:
 async def test_status_only_read_and_recovery_match_main(
     payload: dict[str, object], scenario: str, expected: str | None
 ) -> None:
-    before, after = ScriptedTransport(), ScriptedTransport()
-    for transport in (before, after):
-        transport.queue(*replies(payload, scenario=scenario))
+    after = ScriptedTransport()
+    after.queue(*replies(payload, scenario=scenario))
     mapping = row(marker=None if scenario == "no-marker" else NOW)
-    async with before.client() as old, after.client() as new:
-        assert await LEGACY.completed_orphan_text(old, mapping) == expected
+    async with after.client() as new:
         assert await startup_replay.completed_orphan_text(new, mapping) == expected
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert after.requests == before.requests  # Includes raw body, query/order and protocol headers.
+    after.assert_consumed()
     assert all(request.method == "GET" for request in after.requests)
 
 
 @pytest.mark.parametrize("code", [401, 404, 429, 500])
 async def test_api_error_is_still_handled_without_an_event_read(code: int) -> None:
     payload = {"error": {"type": "api_error", "message": "provider rejected read"}}
-    before, after = ScriptedTransport(), ScriptedTransport()
-    for transport in (before, after):
-        transport.queue(*replies(payload, scenario="current", code=code))
-    async with before.client() as old, after.client() as new:
-        assert await LEGACY.completed_orphan_text(old, row()) is None
+    after = ScriptedTransport()
+    after.queue(*replies(payload, scenario="current", code=code))
+    async with after.client() as new:
         assert await startup_replay.completed_orphan_text(new, row()) is None
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert after.requests == before.requests
+    after.assert_consumed()
     assert len(after.requests) == 1
 
 
@@ -181,28 +160,20 @@ async def test_api_error_is_still_handled_without_an_event_read(code: int) -> No
 async def test_missing_consumed_status_keeps_the_sdk_none_default(
     payload: dict[str, object],
 ) -> None:
-    before, after = ScriptedTransport(), ScriptedTransport()
-    for transport in (before, after):
-        transport.queue(*replies(payload, scenario="current"))
-    async with before.client() as old, after.client() as new:
-        assert await LEGACY.completed_orphan_text(old, row()) is None
+    after = ScriptedTransport()
+    after.queue(*replies(payload, scenario="current"))
+    async with after.client() as new:
         assert await startup_replay.completed_orphan_text(new, row()) is None
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert after.requests == before.requests
+    after.assert_consumed()
 
 
 async def test_sdk_read_retries_and_then_replays_without_mutating_client_policy() -> None:
-    before, after = ScriptedTransport(), ScriptedTransport()
-    for transport in (before, after):
-        transport.queue(*replies({"status": "idle"}, scenario="current", retry=True))
-    async with before.client(max_retries=1) as old, after.client(max_retries=1) as new:
-        assert await LEGACY.completed_orphan_text(old, row()) == "Recovered answer"
+    after = ScriptedTransport()
+    after.queue(*replies({"status": "idle"}, scenario="current", retry=True))
+    async with after.client(max_retries=1) as new:
         assert await startup_replay.completed_orphan_text(new, row()) == "Recovered answer"
-        assert old.max_retries == new.max_retries == 1
-    for transport in (before, after):
-        transport.assert_consumed()
-    assert after.requests == before.requests
+        assert new.max_retries == 1
+    after.assert_consumed()
     assert [request.path for request in after.requests] == [
         "/v1/sessions/session-N7",
         "/v1/sessions/session-N7",
