@@ -8,6 +8,7 @@ Managed Agents. With a key, every caller keeps creating Managed Agents records.
 from __future__ import annotations
 
 import uuid
+from typing import cast
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -32,6 +33,7 @@ from mux.contracts.resources import AgentSpec as RecordAgentSpec
 from mux.contracts.resources import EnvironmentSpec as RecordEnvironmentSpec
 from mux.errors import ProviderError
 from mux.profiles import selectable_models
+from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -263,4 +265,40 @@ async def reconcile_owned_environment(
     created = await create_owned_environment(None, record, scope=scope, records=sessions)
     return ResourceOutcome(
         kind="environment", name=spec.name, action=Action.CREATED, anthropic_id=created.id
+    )
+
+
+def host_tools_spec(spec: RecordAgentSpec, public_url: str) -> RecordAgentSpec:
+    """A record as its provider host runs it: with the seeded Claude default agent's tools.
+
+    That is the base agent toolset, plus Daimon's MCP toolset when the record lists
+    Daimon's server, as Managed Agents stores them (every tool enabled, always
+    allowed), and Daimon's server at this deployment's URL: what a Claude default
+    agent switched to the provider is represented with. The record's own tools,
+    servers and toolset extension (`owned_agent_spec` drops most) never widen it.
+    """
+    from daimon.core.defaults.mcp_merge import merge_default_mcp_toolset
+    from daimon.core.specs import merge_default_agent_toolset
+    from daimon.core.tool_safety import DAIMON_SERVER_NAME
+    from mux.contracts.extensions import ExtensionConfig
+    from mux.contracts.resources import MCPConnection
+    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE
+
+    listed = any(s.name == DAIMON_SERVER_NAME for s in spec.mcp_servers or ())
+    servers = (MCPConnection(name=DAIMON_SERVER_NAME, url=public_url),) if listed else ()
+    tools = merge_default_agent_toolset(None)
+    if servers:
+        tools = merge_default_mcp_toolset(tools, public_url) or tools
+    stored: dict[str, JsonValue] = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    readback: list[JsonValue] = []
+    for tool in tools:
+        entry: dict[str, JsonValue] = {**cast(dict[str, JsonValue], tool), "default_config": stored}
+        if "configs" in tool:
+            configs = cast(list[dict[str, JsonValue]], tool["configs"])
+            entry["configs"] = [{**config, **stored} for config in configs]
+        readback.append(entry)
+    toolset = ExtensionConfig(namespace=AGENT_TOOLS_NAMESPACE, version=1, value={"tools": readback})
+    others = tuple(e for e in spec.extensions or () if e.namespace != AGENT_TOOLS_NAMESPACE)
+    return spec.model_copy(
+        update={"tools": None, "mcp_servers": servers, "extensions": (*others, toolset)}
     )
