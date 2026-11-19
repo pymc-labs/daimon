@@ -1,5 +1,6 @@
 """Pending ordinary provider usage settles exactly once when its cost is known."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -127,7 +128,9 @@ async def test_pending_openai_workspace_usage_drains_at_zero_infrastructure(sm):
     assert await _pending(sm) == 0 and await _debited(sm) == -usd, "exactly once"
 
 
-async def _reread(sm, monkeypatch, *, seen_ago: timedelta) -> tuple[int, list[str]]:
+async def _reread(
+    sm, monkeypatch, *, seen_ago: timedelta, budget_s: float = 10.0, stall: bool = False
+) -> tuple[int, list[str]]:
     """One durable re-read pass over an unknown OpenAI turn, answered as measured."""
     from daimon.core.turn import openai_deployment
     from daimon.core.turn.openai_late_usage import DurableRereads
@@ -137,6 +140,8 @@ async def _reread(sm, monkeypatch, *, seen_ago: timedelta) -> tuple[int, list[st
 
     async def reconcile_turn(self, scope, session, turn_id):
         read.append(turn_id)
+        if stall:
+            await asyncio.Event().wait()
         return (pending.model_copy(update=measured),)
 
     monkeypatch.setattr(openai_deployment, "usage_transport", lambda *_: object())
@@ -149,7 +154,9 @@ async def _reread(sm, monkeypatch, *, seen_ago: timedelta) -> tuple[int, list[st
     pending = row.observation
     measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
     measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
-    reads = await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC))
+    reads = await DurableRereads(budget_s=budget_s).run(
+        sm, markup=Decimal(1), now=datetime.now(UTC)
+    )
     return reads, read
 
 
@@ -161,6 +168,14 @@ async def test_unknown_openai_usage_is_reread_from_the_scheduler_and_debited(sm,
     # The scheduler's drain, next in the same step, closes the unknown revision.
     await drain_pending_usage(sm, markup=Decimal(1))
     assert await _pending(sm) == 0 and await _debited(sm) == debited
+
+
+async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch):
+    reads, read = await _reread(
+        sm, monkeypatch, seen_ago=timedelta(hours=3), budget_s=0.05, stall=True
+    )
+    assert reads == 1 and read == ["turn"]
+    assert await _pending(sm) == 1 and await _debited(sm) == 0
 
 
 async def test_unknown_openai_usage_is_given_up_a_day_after_it_was_seen(sm, monkeypatch):

@@ -103,13 +103,17 @@ GIVE_UP_AFTER = timedelta(days=1)
 #: Most re-reads one scheduler pass makes, and pending rows it looks at.
 PASS_READS, PASS_ROWS = 4, 200
 
+#: Longest one pass reads for, so the tick's routines and sweeps after it are not held.
+PASS_BUDGET_S = 10.0
+
 
 class DurableRereads:
     """Re-reads ended OpenAI turns whose pending usage is not final, from the scheduler.
 
     Rows are durable, so a restart only resets the backoff: each turn is read again
     after `delays_s` (the last repeating) until its usage is final, the thread moved,
-    or `give_up_after` passed since the usage was seen.
+    or `give_up_after` passed since the usage was seen. A pass stops at `budget_s`; the
+    read it cuts off is retried next pass without backing off.
     """
 
     def __init__(
@@ -118,8 +122,10 @@ class DurableRereads:
         delays_s: Sequence[float] = DELAYS_S,
         give_up_after: timedelta = GIVE_UP_AFTER,
         reads: int = PASS_READS,
+        budget_s: float = PASS_BUDGET_S,
     ) -> None:
         self._delays, self._give_up_after, self._reads = tuple(delays_s), give_up_after, reads
+        self._budget_s = budget_s
         self._due: dict[tuple[str, str], tuple[int, datetime]] = {}
         self._given_up: set[tuple[str, str]] = set()
         self._cursor: tuple[str, str, int] | None = None
@@ -141,6 +147,7 @@ class DurableRereads:
         )
         seen: set[tuple[str, str]] = set()
         reads = 0
+        deadline = asyncio.get_running_loop().time() + self._budget_s
         for settlement in rows:
             row, observation = settlement.row, settlement.row.observation
             key = (row.binding_id, row.observation_id)
@@ -157,9 +164,13 @@ class DurableRereads:
             if due > now or reads >= self._reads:
                 continue
             reads += 1
+            budget = asyncio.timeout_at(deadline)
             try:
-                done = await _reread(sessionmaker, settlement, markup=markup, now=now)
+                async with budget:
+                    done = await _reread(sessionmaker, settlement, markup=markup, now=now)
             except Exception as error:  # a busy thread or failed read: retry later
+                if budget.expired():
+                    break
                 log.info(
                     "openai_late_usage.retry",
                     causes=backend_refusal_causes(error),
