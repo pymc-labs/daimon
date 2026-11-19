@@ -41,7 +41,7 @@ from daimon.core.stores.domain import (
     UnattendedRequester,
 )
 from daimon.core.stores.security_audit import append_event
-from sqlalchemy import and_, delete, false, func, or_, select, true, update
+from sqlalchemy import and_, delete, false, func, or_, select, text, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1316,3 +1316,40 @@ async def skip_slots_during_fire(
         skipped_until=finished_at,
         reason="in_flight",
     )
+
+
+SANDBOX_SETTER_ERASED: Final = "erased"
+
+
+async def erase_sandbox_setter(
+    session: AsyncSession,
+    *,
+    ids: Collection[str],
+    platform_users: Collection[tuple[_uuid.UUID, str]] = (),
+) -> None:
+    """Privacy erasure: replace a purged person's id in the old sandbox opt-in columns.
+
+    Migration 0208 keeps `routines.sandbox_tools_set_by` and `routine_sandbox_history` unmapped
+    for the release still running during a deploy, so they are reached by name, and only where
+    they exist (a schema built from the models has neither). `set_by` holds an account id, a CLI
+    principal id or, for a panel edit, a platform user id. `ids` match anywhere; each
+    `platform_users` pair only within its tenant. Drop this with the columns.
+    """
+    kept = (
+        await session.execute(
+            text(
+                "SELECT table_name, column_name FROM information_schema.columns"
+                " WHERE table_schema = current_schema() AND (table_name, column_name) IN"
+                " (('routine_sandbox_history', 'set_by'), ('routines', 'sandbox_tools_set_by'))"
+            )
+        )
+    ).all()
+    for tenant_id, setter in [(None, i) for i in ids] + [(t, u) for t, u in platform_users]:
+        for table, column in kept:
+            await session.execute(
+                text(
+                    f"UPDATE {table} SET {column} = :erased WHERE {column} = :setter"
+                    " AND (CAST(:tenant AS uuid) IS NULL OR tenant_id = CAST(:tenant AS uuid))"
+                ),
+                {"erased": SANDBOX_SETTER_ERASED, "setter": setter, "tenant": tenant_id},
+            )

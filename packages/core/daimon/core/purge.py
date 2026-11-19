@@ -641,6 +641,12 @@ async def _purge_account_transaction(
 
     report = PurgeReport()
     github_account_link = await github_links_store.get_account_link(session, account_id=account_id)
+    # Who set a routine's sandbox opt-in in the old columns: keep the change, drop the person.
+    await routines_store.erase_sandbox_setter(
+        session,
+        ids=[str(account_id), *(str(principal.id) for principal in cli_list)],
+        platform_users=[(pp.tenant_id, pp.external_id) for pp in pp_list],
+    )
     for principal in (*cli_list, *pp_list):
         sub = await _purge_principal_in_session(session, principal=principal)
         report = report.merge(sub)

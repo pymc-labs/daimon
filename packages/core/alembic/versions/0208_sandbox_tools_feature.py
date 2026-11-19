@@ -7,8 +7,10 @@ environment revision at the routine tier. Each routine opt-in moves to a routine
 with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
 theirs are dropped. A routine row's `channel_id` holds its routine id, so
 `uq_feature_values_place` keeps the predicate older releases upsert against. The routine
-columns and `routine_sandbox_history` stay, unmapped and with setters erased, for the release
-still running during a deploy; a later release drops them. `system` joins both surface checks
+columns and `routine_sandbox_history` stay, unmapped, for the release still running during a
+deploy; a later release drops them. The routine opt-ins are switched off there so that release
+(or an image rollback) runs without built-ins, and an account setter is kept as `set_by` and
+`actor_account_id` on the moved rows (account erasure clears it). `system` joins both surface checks
 for changes Daimon makes itself. A `routine_sandbox_tools` On must carry its pin.
 Downgrading restores routine opt-ins and their history and drops agent opt-ins, routine Offs
 and every change Daimon made itself (`system`).
@@ -93,27 +95,33 @@ def upgrade() -> None:
     )
     op.execute(
         "INSERT INTO feature_values (tenant_id, tier, channel_id, routine_id, key, value, pin,"
-        f" surface, set_at) SELECT tenant_id, 'routine', id::text, id, '{_KEY}', 'on',"
-        f" {_PIN_JSON.format(p='sandbox_')}, 'migration', coalesce(sandbox_tools_set_at, now())"
-        f" FROM routines WHERE {opted_in}"
+        " set_by, surface, set_at) SELECT tenant_id, 'routine', id::text, id,"
+        f" '{_KEY}', 'on', {_PIN_JSON.format(p='sandbox_')},"
+        " (SELECT a.id FROM accounts a WHERE a.id::text = sandbox_tools_set_by), 'migration',"
+        f" coalesce(sandbox_tools_set_at, now()) FROM routines WHERE {opted_in}"
     )
     # The old Off meant no opt-in, which is the new inherited value: a null side.
     op.execute(
         "INSERT INTO channel_changes (tenant_id, platform, channel_id, setting, before, after,"
-        " surface, at)"
+        " actor_account_id, surface, at)"
         f" SELECT h.tenant_id, t.platform, '*', '{_KEY}',"
         " CASE WHEN h.before_enabled THEN jsonb_build_object('routine', h.routine_id::text,"
         " 'value', 'on') END,"
         " CASE WHEN h.after_enabled THEN jsonb_build_object('routine', h.routine_id::text,"
         f" 'value', 'on', 'pin', {_PIN_JSON.format(p='h.')}) END,"
+        " (SELECT a.id FROM accounts a WHERE a.id::text = h.set_by),"
         " CASE h.via WHEN 'cli' THEN 'cli' WHEN 'mcp' THEN 'chat' ELSE 'system' END, h.set_at"
         " FROM routine_sandbox_history h JOIN tenants t ON t.id = h.tenant_id"
     )
-    # Account erasure no longer reaches the kept columns, so their setters go now.
+    # The opt-ins now live in the routine tier. A release that still reads the old columns
+    # (a pod mid-deploy, an image rollback) must find no opt-in, so it fails closed.
     op.execute(
-        "UPDATE routines SET sandbox_tools_set_by = 'erased' WHERE sandbox_tools_set_by IS NOT NULL"
+        "UPDATE routines SET sandbox_tools_enabled = false, sandbox_agent_id = NULL,"
+        " sandbox_agent_version = NULL, sandbox_environment_id = NULL,"
+        " sandbox_environment_updated_at = NULL WHERE sandbox_tools_enabled OR num_nonnulls("
+        "sandbox_agent_id, sandbox_agent_version, sandbox_environment_id,"
+        " sandbox_environment_updated_at) > 0"
     )
-    op.execute("UPDATE routine_sandbox_history SET set_by = 'erased'")
 
 
 def downgrade() -> None:
