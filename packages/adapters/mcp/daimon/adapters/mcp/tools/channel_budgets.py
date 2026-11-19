@@ -386,7 +386,7 @@ async def _require_alert_channel_postable(
     async with runtime.session_factory() as session:
         tenant = await get_tenant(session, auth.tenant_id)
     if tenant is None:
-        raise ToolError("No such workspace. Nothing was saved.")
+        raise ToolError("Daimon isn't set up here. Nothing was saved.")
     async with httpx.AsyncClient(timeout=10.0) as http:
         problem = await alert_channel_problem(
             http,
