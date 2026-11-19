@@ -420,7 +420,7 @@ class MuxTurnIO:
         """
         _, deliver = self._cancel()
         try:
-            await _native_error_edge(
+            receipt = await _native_error_edge(
                 deliver(str(uuid4()))
                 if self._persistence is None
                 else self._persistence.mutate(
@@ -436,6 +436,8 @@ class MuxTurnIO:
             )
         except UncertainSend as error:
             raise TurnConnectionLost(str(error)) from error
+        if receipt.status == "outcome_unknown":
+            raise TurnConnectionLost("the recovery interrupt was not acknowledged")
 
     async def latest_idle_is_settled(self) -> bool:
         """Whether the latest idle exists and is not a `requires_action` pause.
