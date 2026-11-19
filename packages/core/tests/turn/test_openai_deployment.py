@@ -465,7 +465,9 @@ async def test_real_application_prepares_and_runs_using_builtin_runtime(
         sum(req.method == "POST" and req.url.path.endswith("/events") for req in wire.requests) == 1
     )
     assert all(source.closed for source in wire.sources)
-    assert clients and all(client.is_closed() for client in clients)
+    assert clients and not any(client.is_closed() for client in clients), "one shared client"
+    await application.deps.provider_clients.aclose()
+    assert all(client.is_closed() for client in clients)
     assert not await store.pending_outbox()  # settled at $0 infrastructure, none left pending
 
 

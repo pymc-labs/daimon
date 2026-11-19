@@ -490,6 +490,7 @@ async def full_openai(switched_request, source_mcp, monkeypatch, tmp_path, reque
         )
     finally:
         await binding.close()
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 

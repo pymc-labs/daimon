@@ -49,6 +49,7 @@ from daimon.core.ma_resolver import ResolverCache
 from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
+from daimon.core.provider_clients import ProviderClients
 from daimon.core.scope import DeploymentDefault
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
@@ -150,6 +151,8 @@ class TurnDeps:
     # read, and the ones the provider refused (`create_ma_session`).
     platform_skill_memory: PlatformSkillMemory = field(default_factory=PlatformSkillMemory)
     context_providers: ContextProviders = field(default_factory=ContextProviders)
+    # One SDK client per provider and key for the process; closed with the runtime.
+    provider_clients: ProviderClients = field(default_factory=ProviderClients)
 
     def start_context_providers(self) -> None:
         """Schedule pre-connect/config refresh on the runtime's event loop."""

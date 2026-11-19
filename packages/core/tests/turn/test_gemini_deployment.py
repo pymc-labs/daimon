@@ -778,6 +778,7 @@ async def test_openai_selected_tariff_matches_real_default_direct_session_reques
     body = json.loads(request.content)
     assert body["agent"]["model"] == config.model
     assert "service_tier" not in body and "service_tier" not in body["agent"]
+    await application.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 

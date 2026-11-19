@@ -577,11 +577,12 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise AdmissionDenied(reason="backend_unsupported")
         from mux.drivers.gemini import configured_catalog_transport, configured_transport
 
+        clients = request.deps.provider_clients.gemini
         return GeminiTransportRuntime(
-            configured_transport(api_key=secret, protect_storage_credentials=True)
+            configured_transport(api_key=secret, protect_storage_credentials=True, clients=clients)
             if plan.source_capabilities is not None
-            else configured_transport(api_key=secret),
-            configured_catalog_transport(api_key=secret)
+            else configured_transport(api_key=secret, clients=clients),
+            configured_catalog_transport(api_key=secret, clients=clients)
             if request.admission.backend_revision_origin == "agent"
             else None,
             # A shared thread has no caller to mint for: its session carries no MCP.

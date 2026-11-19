@@ -276,6 +276,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
         manifest.write_text(json.dumps([row]))  # this deploy: the template keeps MCP
     wire.requests.clear()
     yield request, quote, wire, consent
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 

@@ -77,6 +77,7 @@ async def template(switched_request, monkeypatch, tmp_path):
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     monkeypatch.setenv(KEY, "offline")
     yield request, wire, manifest
+    await request.deps.provider_clients.aclose()
     assert all(client.is_closed() for client in clients)
 
 

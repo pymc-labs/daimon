@@ -204,6 +204,7 @@ async def build_runtime(settings: Settings) -> AsyncIterator[TeamsRuntime]:
             )
         finally:
             await turn_deps.context_providers.aclose()
+            await turn_deps.provider_clients.aclose()
             await drain_outcomes()
             await drain_budget_notices()
             await engine.dispose()

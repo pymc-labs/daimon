@@ -2161,6 +2161,7 @@ async def run(
         await long_jobs.close()
         await dispatcher.close()
         await dm_turn_deps.context_providers.aclose()
+        await dm_turn_deps.provider_clients.aclose()
         health_server.close()
         await health_server.wait_closed()
         try:

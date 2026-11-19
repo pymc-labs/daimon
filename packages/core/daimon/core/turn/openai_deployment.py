@@ -55,7 +55,7 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.drivers.openai import SessionControls, Transport
+from mux.drivers.openai import OpenAIClients, SessionControls, Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile, selectable_models
 from mux.profiles.openai import NATIVE_MODELS
@@ -466,7 +466,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         from mux.drivers.openai import configured_transport
 
         return configured_transport(
-            api_key=secret, project=deployment.project if deployment.project_header else None
+            api_key=secret,
+            project=deployment.project if deployment.project_header else None,
+            clients=request.deps.provider_clients.openai,
         )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
@@ -667,7 +669,7 @@ def usage_transport(tenant_id: str, profile: str, account_scope_id: str) -> Tran
     return configured_transport(api_key=secret, project=account_scope_id if header else None)
 
 
-def _environments(key: str) -> EnvironmentPort:
+def _environments(key: str, clients: OpenAIClients) -> EnvironmentPort:
     """The environment port on the install's OpenAI key (no I/O yet).
 
     Like the code-default rows (`runtime_defaults`): no `OpenAI-Project` header, so
@@ -677,7 +679,7 @@ def _environments(key: str) -> EnvironmentPort:
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT
     from mux.drivers.openai import Context, OpenAIEnvironments, configured_transport
 
-    transport = configured_transport(api_key=key, project=None)
+    transport = configured_transport(api_key=key, project=None, clients=clients)
     return OpenAIEnvironments(Context(transport, DEFAULT_PROJECT, PROFILE, None))
 
 
@@ -730,7 +732,7 @@ async def prepare_tenant_environment(
     )
     environment_id = await tenant_environment(
         store,
-        _environments(key),
+        _environments(key, request.deps.provider_clients.openai),
         tenant_id=request.scope.tenant_id,
         project=DEFAULT_PROJECT,
         deployment=deployment,
