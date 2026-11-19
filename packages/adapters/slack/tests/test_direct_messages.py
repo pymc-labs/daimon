@@ -6,6 +6,7 @@ Admission, the live role lookup and the DM store are patched on the module.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -27,6 +28,10 @@ from .conftest import shown_text
 
 _TEAM = "T_DM_BUDGET"
 _CHANNEL = "C_SOURCE"
+
+_dm_conversation = partial(
+    make_dm_conversation, external_user_id="U1", workspace_id=_TEAM, source_channel_id=_CHANNEL
+)
 
 
 @pytest.mark.parametrize(
@@ -65,14 +70,8 @@ async def test_reply_in_dm_thread_stays_in_that_thread(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D_THREAD",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D_THREAD"
         )
     client = MagicMock()
     client.reactions_add = client.reactions_remove = AsyncMock()
@@ -111,14 +110,8 @@ async def test_error_in_dm_thread_stays_in_that_thread(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D_THREAD_ERROR",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D_THREAD_ERROR"
         )
     client = MagicMock()
     client.reactions_add = client.reactions_remove = AsyncMock()
@@ -204,14 +197,8 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D1",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D1"
         )
     client = MagicMock()
     client.reactions_add = client.reactions_remove = AsyncMock()
@@ -243,14 +230,8 @@ async def test_excluded_workspace_dm_skips_agent_identity_lookup(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D2",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D2"
         )
     client = MagicMock()
     client.reactions_add = client.reactions_remove = AsyncMock()
@@ -294,14 +275,8 @@ async def test_a_failed_dm_turn_never_shows_the_provider_text(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D_PROVIDER_ERROR",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D_PROVIDER_ERROR"
         )
     leak = "see https://api.internal.example/v1?access_token=sk-ant-private-0000"
     provider_error = anthropic.APIStatusError(
@@ -354,14 +329,8 @@ async def _burst_setup(
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="slack")
         account = await make_account(session, tenant=tenant)
-        await make_dm_conversation(
-            session,
-            tenant=tenant,
-            account_id=account.id,
-            route_key=f"{_TEAM}:D_BURST",
-            external_user_id="U1",
-            workspace_id=_TEAM,
-            source_channel_id=_CHANNEL,
+        await _dm_conversation(
+            session, tenant=tenant, account_id=account.id, route_key=f"{_TEAM}:D_BURST"
         )
     client = MagicMock()
     client.reactions_add = AsyncMock()
