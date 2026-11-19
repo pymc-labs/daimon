@@ -184,12 +184,22 @@ class OpenAIAPI(StrictFake):
         self.shape("POST", base + "/events", EventsSend)
         self.route("GET", base + "/events", self._stream)
         self.route("POST", base + "/events", self._send)
-        self.route("GET", base + "/turns", lambda r, m: self._page(self.sessions[m[1]].turns, r))
+        self.route(
+            "GET",
+            base + "/turns",
+            lambda r, m: self._missing(m[1]) or self._page(self.sessions[m[1]].turns, r),
+        )
         self.route("GET", base + "/turns/([^/]+)", self._turn)
         self.route("GET", base + "/turns/([^/]+)/items", self._turn_items)
-        self.route("GET", base + "/items", lambda r, m: self._page(self.sessions[m[1]].items, r))
+        self.route(
+            "GET",
+            base + "/items",
+            lambda r, m: self._missing(m[1]) or self._page(self.sessions[m[1]].items, r),
+        )
         self.route("POST", "/v1/agents/sessions", self._create_session)
-        self.route("GET", base, lambda r, m: self._json(self.sessions[m[1]].raw))
+        self.route(
+            "GET", base, lambda r, m: self._missing(m[1]) or self._json(self.sessions[m[1]].raw)
+        )
         self.route("DELETE", base, self._delete_session)
         self.route("GET", "/v1/agents/sessions", lambda r, m: self._page(self._raws(), r))
         for kind, path in (
@@ -219,6 +229,16 @@ class OpenAIAPI(StrictFake):
         return httpx.Response(status, json={"error": error})
 
     # resources
+
+    def _missing(self, session_id: str) -> httpx.Response | None:
+        """The API's 404 for a session that is gone, as a deleted one answers."""
+        if session_id in self.sessions:
+            return None
+        return self.refuse(404, f"No such session: '{session_id}'")
+
+    def _listed(self, session_id: str, kind: str, request: httpx.Request) -> httpx.Response:
+        found = self._missing(session_id)
+        return found or self._page(getattr(self.sessions[session_id], kind), request)
 
     def _id(self, kind: str) -> str:
         return f"{kind}_{next(self._ids):04d}"

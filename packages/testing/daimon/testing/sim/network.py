@@ -1,16 +1,21 @@
 """The simulated network: provider hosts answer from strict fakes; nothing else leaves.
 
 Production builds its SDK clients itself (base URLs, TLS, retries, pools). Only the
-socket layer is replaced: `httpx.AsyncHTTPTransport` / `httpx.HTTPTransport` hand a
+httpx transports are replaced: `httpx.AsyncHTTPTransport` / `httpx.HTTPTransport` hand a
 provider host's request to its fake, pass loopback through, and refuse every other
-host, so an unexpected outbound call fails the test instead of reaching the internet.
+host. A client that is not httpx still meets a guarded `socket.connect`, which refuses
+every address but loopback and unix paths. Either way an unexpected outbound call fails
+the test instead of reaching the internet, and `assert_clean` runs when the world exits,
+so traffic from background tasks that outlive the test body is checked too.
 """
 
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import json
 import re
+import socket
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -23,6 +28,17 @@ type Handler = Callable[[httpx.Request, re.Match[str]], httpx.Response | Awaitab
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 # Hosts production probes that are unreachable off their cloud: refused quietly.
 _OFF_CLOUD = frozenset({"metadata.google.internal"})
+
+
+def _remote_host(address: object) -> str | None:
+    """The host of an internet address; unix paths and loopback are the machine itself."""
+    if not isinstance(address, tuple) or not address:
+        return None
+    host = str(address[0])  # pyright: ignore[reportUnknownArgumentType]
+    try:
+        return None if ipaddress.ip_address(host.split("%")[0]).is_loopback else host
+    except ValueError:
+        return None if host in _LOOPBACK else host
 
 
 @dataclass
@@ -132,13 +148,26 @@ class ProviderNetwork:
             network.refused.append(f"{request.method} {request.url.host} (sync)")
             raise httpx.ConnectError(f"simulated network: no route to {request.url.host}")
 
+        real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+        def guard(sock: socket.socket, address: object, real: Callable[..., int | None]):
+            if (host := _remote_host(address)) is not None:
+                network.refused.append(f"connect {host} (socket)")
+                raise ConnectionRefusedError(f"simulated network: no route to {host}")
+            return real(sock, address)
+
         httpx.AsyncHTTPTransport.handle_async_request = handle_async  # type: ignore[method-assign]
         httpx.HTTPTransport.handle_request = handle_sync  # type: ignore[method-assign]
+        socket.socket.connect = lambda sock, address: guard(sock, address, real_connect)  # type: ignore[method-assign]
+        socket.socket.connect_ex = lambda sock, address: guard(sock, address, real_connect_ex)  # type: ignore[method-assign]
         try:
             yield self
         finally:
             httpx.AsyncHTTPTransport.handle_async_request = real_async  # type: ignore[method-assign]
             httpx.HTTPTransport.handle_request = real_sync  # type: ignore[method-assign]
+            socket.socket.connect = real_connect  # type: ignore[method-assign]
+            socket.socket.connect_ex = real_connect_ex  # type: ignore[method-assign]
+        self.assert_clean()
 
 
 def sse(events: list[dict[str, Any]], *, named: bool = False) -> httpx.Response:
