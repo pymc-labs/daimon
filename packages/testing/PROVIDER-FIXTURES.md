@@ -171,7 +171,7 @@ Extend this frozen pack without consulting the moving external catalog:
 
 ```sh
 uv run python -m scripts.qa_provider_mcp_fixtures
-uv run pytest -q -n 2 packages/testing/tests/test_provider_mcp_fixtures.py packages/testing/tests/test_provider_replay.py
+uv run pytest -q -n 2 packages/testing/tests/test_provider_replay.py
 ```
 
 For a reproducibility check use `--index` pointing at this pack and `--output`

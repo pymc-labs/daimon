@@ -832,7 +832,7 @@ absent, preserving existing consumer bytes. Authored native replay proves
 host behavior only; it does not certify model behavior or remote execution.
 
 I3 native bindings are exercised by
-`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+`packages/core/tests/mux_native/test_i3_native_replay.py`. Anthropic and
 OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
 explicit `code_execution` tape. All three run the real host turn and Discord
 serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined
@@ -923,7 +923,7 @@ absent, preserving existing consumer bytes. Authored native replay proves
 host behavior only; it does not certify model behavior or remote execution.
 
 I3 native bindings are exercised by
-`packages/mux/tests/drivers/gemini/test_i3_native_replay.py`. Anthropic and
+`packages/core/tests/mux_native/test_i3_native_replay.py`. Anthropic and
 OpenAI consume unchanged recorded fixture bytes; Gemini consumes an owned
 explicit `code_execution` tape. All three run the real host turn and Discord
 serializer. OpenAI's empty HTTP 202 receipt is retained unchanged and joined
