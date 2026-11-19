@@ -4773,6 +4773,9 @@ class AccountingOutbox(Base):
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
     row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Who asked and the budget channel, as recorded: a row settled later debits them.
+    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

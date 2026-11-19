@@ -78,7 +78,7 @@ async def drain_pending_usage(
                     db,
                     row,
                     tenant_id=tenant_id,
-                    platform_user_id=None,
+                    platform_user_id=settlement.platform_user_id,
                     pricing=None,
                     provider_price=price,
                     infrastructure_usd=infrastructure,

@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **Usage settled late counts against the person and the right channel.** Usage
+  that stayed pending and was settled later by the scheduler named no person
+  and fell back to the thread's channel, so it never counted against the
+  asker's spend allowance or the turn's budget channel. Each usage row now
+  keeps both from when it was recorded; rows recorded before this settle as
+  before.
+
 - **Gemini never runs a model it can't price.** When Gemini 3.8 Flash was busy
   partway through a reply, the next request could fall back to the
   `gemini-flash-latest` alias, which has no tariff, so its tokens were neither

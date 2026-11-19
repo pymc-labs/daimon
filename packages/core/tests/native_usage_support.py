@@ -53,7 +53,7 @@ async def seed_binding(sm, *, provider="gemini", tenant_id=None):
         return binding
 
 
-async def pending_usage(sm, *, provider="gemini", outputs=100):
+async def pending_usage(sm, *, provider="gemini", outputs=100, channel_id="channel"):
     binding = await seed_binding(sm, provider=provider)
     model = "gemini-3.8-flash" if provider == "gemini" else "gpt-6-luna"
     observation = UsageObservation(
@@ -90,7 +90,7 @@ async def pending_usage(sm, *, provider="gemini", outputs=100):
             provider_price=provider_prices(binding.profile)[(provider, model)],
             infrastructure_usd=None,
             billing_grain="turn",
-            channel_id="channel",
+            channel_id=channel_id,
         )
     return binding
 

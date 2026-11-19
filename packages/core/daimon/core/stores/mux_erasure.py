@@ -140,7 +140,10 @@ TABLE_DISPOSITIONS: dict[str, str] = {
         "counted); synthetic billing operations are not matched"
     ),
     "usage_observation": "retained financial evidence, detached from the slot",
-    "accounting_outbox": "retained financial evidence, detached from the slot",
+    "accounting_outbox": (
+        "retained financial evidence, detached from the slot; its platform user id is "
+        "billing attribution, retained like usage_events"
+    ),
     "accounting_binding_context": "the profile and channel settlement reads; no personal data",
     "erased_account": "the fence; a bare account id",
     "erased_principal": "the fence for operations keyed by principal; bare ids",

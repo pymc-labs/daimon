@@ -72,13 +72,17 @@ async def _seat_agent(sm, binding, agent_id, *, owner=None):
 
 
 async def test_drained_usage_shows_as_spent_on_the_agent_of_its_thread(sm):
-    """The drain records no person; the workspace and per-agent spend still count the row,
-    on the agent whose thread produced it, priced at the dated tariff its debit used."""
-    binding = await pending_usage(sm)
+    """A drained row keeps the person and budget channel it was recorded with, so their
+    allowance and budget count it; the workspace and per-agent spend count it too, on
+    the agent whose thread produced it, priced at the dated tariff its debit used."""
+    binding = await pending_usage(sm, channel_id="C-budget")
     await _seat_agent(sm, binding, "ag_drained")
     _, usd = await drain_pending_usage(sm, markup=Decimal(1))
     rows, total, by_agent = await _spend(sm, binding)
-    assert [r.platform_user_id for r in rows] == [None], "a drained row has no person"
+    assert [r.platform_user_id for r in rows] == ["tester"], "the person who asked"
+    async with sm() as db:
+        channels = (await db.execute(text("SELECT channel_id FROM tenant_ledger"))).scalars()
+        assert set(channels) == {"C-budget"}, "debited to the recorded budget channel"
     assert usd > 0 and total == pytest.approx(float(usd)), "spent equals the debit"
     assert by_agent == {"ag_drained": pytest.approx(float(usd))}, (
         "the agent card counts the drained row"
