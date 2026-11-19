@@ -297,13 +297,11 @@ async def start(
     return harness
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 @pytest.mark.parametrize(
     "scenario", ["QA-I6-BARE-MENTION-THREAD-TITLE", "QA-NEW9-NO-INTERNAL-PLUMBING"]
 )
-async def test_source_ingress_and_title(
-    owned: OwnedIngress, backend: Provider, scenario: str
-) -> None:
+async def test_source_ingress_and_title(owned: OwnedIngress, scenario: str) -> None:
+    backend: Provider = "anthropic"  # other backends' turns: tests/simulated
     harness = await start(owned, backend)
     context: dict[str, Any] | None = None
     try:
@@ -1011,14 +1009,12 @@ def post_text(checkpoint: ConcurrentCheckpoint, thread_id: str) -> str:
     )
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 async def test_busy_native_root_queues_then_continues_same_actual_session(
-    owned: OwnedIngress, backend: Provider
+    owned: OwnedIngress,
 ) -> None:
     from daimon.testing.discord_ingress import DiscordConcurrentDriver
 
-    if backend != "anthropic":
-        pytest.skip("PENDING: explicit owned alternate-provider native capture binding")
+    backend: Provider = "anthropic"
     clock = InterleavingClock()
     harness = await start(owned, backend, utc_clock=clock.utc)
     wire = BusyWire(owned, ["FIRST-DONE", "SECOND-DONE"])
@@ -1122,15 +1118,11 @@ async def test_busy_native_root_queues_then_continues_same_actual_session(
         await harness.close()
 
 
-@pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
-async def test_real_cap_admin_three_admissions_wait_then_release(
-    owned: OwnedIngress, backend: Provider
-) -> None:
+async def test_real_cap_admin_three_admissions_wait_then_release(owned: OwnedIngress) -> None:
     from daimon.testing.admin_bindings import AdminBindings
     from daimon.testing.discord_ingress import DiscordConcurrentDriver
 
-    if backend != "anthropic":
-        pytest.skip("PENDING: explicit owned alternate-provider native capture binding")
+    backend: Provider = "anthropic"
     discord_settings = owned.runtime.settings.discord
     assert discord_settings is not None
     clock = InterleavingClock()
