@@ -10,10 +10,16 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+def test_no_time_limit_choice_passes_the_longest_turn_ceiling() -> None:
+    for key in ("turn_time_limit", "unattended_time_limit"):
+        longest = max(int(minutes) for minutes in FEATURES[key].values)
+        assert longest * 60.0 <= LONGEST_TURN_CEILING_S, f"{key} offers more than 45 minutes"
+
+
 def test_both_time_limits_offer_the_same_choices() -> None:
     chat, unattended = FEATURES["turn_time_limit"], FEATURES["unattended_time_limit"]
     assert dict(chat.values) == dict(unattended.values), "the two limits stay in step"
-    assert set(chat.values) == {"15", "20", "30", "45", "90", "180"}, "the offered minutes"
+    assert set(chat.values) == {"15", "20", "30", "45"}, "the offered minutes"
     assert (chat.default, unattended.default) == ("45", "45"), "the standard stays 45 minutes"
     assert (chat.tiers, unattended.tiers) == (("workspace", "agent"),) * 2, "same tiers"
 
@@ -39,7 +45,7 @@ async def test_a_headless_run_reads_the_unattended_limit(
     assert await ceiling() == TURN_CEILING_S, "the default stays 45 minutes"
     for key, value, expected in (
         ("turn_time_limit", "15", TURN_CEILING_S),
-        ("unattended_time_limit", "180", LONGEST_TURN_CEILING_S),
+        ("unattended_time_limit", "45", LONGEST_TURN_CEILING_S),
         ("unattended_time_limit", "30", 30 * 60.0),
     ):
         await set_workspace_feature(

@@ -454,8 +454,6 @@ _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 # Long jobs spend money in the background: server admins only, no delegation, no owners.
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
 _TIME_LIMITS: Final[Mapping[str, str]] = {
-    "180": "180 minutes",
-    "90": "90 minutes",
     "45": "45 minutes",
     "30": "30 minutes",
     "20": "20 minutes",

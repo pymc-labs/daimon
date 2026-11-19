@@ -692,24 +692,6 @@ async def test_admission_limits_follow_their_settings(
         now=_NOW, ceiling_s=shortened, authority_deadline=_NOW + timedelta(minutes=10)
     )
     assert capped == _NOW + timedelta(minutes=10), "retained authority still caps the limit"
-    for minutes in ("90", "180"):
-        await set_workspace_feature(
-            db_session,
-            None,
-            tenant_id=tenant.id,
-            platform="discord",
-            key="turn_time_limit",
-            value=minutes,
-            account_id=None,
-            surface="cli",
-        )
-        await db_session.commit()
-        longer = (await admitted()).turn_ceiling_s
-        assert longer == int(minutes) * 60.0, f"a setting of {minutes} minutes lengthens the turn"
-        assert turn_deadline(now=_NOW, ceiling_s=longer) == _NOW + timedelta(seconds=longer)
-        assert turn_deadline(
-            now=_NOW, ceiling_s=longer, authority_deadline=_NOW + timedelta(minutes=10)
-        ) == _NOW + timedelta(minutes=10), "retained authority still caps the longer limit"
 
 
 async def test_unattended_turns_read_their_own_time_limit(

@@ -212,7 +212,7 @@ files. Failure notices never carry files.
 
 | Bound | Default |
 | --- | --- |
-| Per-turn ceiling | 45 minutes, or the `unattended_time_limit` feature (15 minutes to 3 hours) |
+| Per-turn ceiling | 45 minutes, or the `unattended_time_limit` feature (15 to 45 minutes) |
 | `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S` | longest ceiling plus 300 s |
 | `DAIMON_SCHEDULER__TICK_INTERVAL_S` | 30 s |
 | `DAIMON_SCHEDULER__MAX_AGE_S` | 900 s |

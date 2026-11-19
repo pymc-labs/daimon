@@ -8,8 +8,8 @@ the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
-(`daimon.core.turn.ceiling`: 45 minutes, or the unattended run limit set at the run's
-place, up to 3 hours): one shared deadline covers BOTH
+(`daimon.core.turn.ceiling`: 45 minutes, or a shorter unattended run limit set at the run's
+place): one shared deadline covers BOTH
 session assembly (the `agent`/`environment` retrieve calls plus
 `create_session`) and the delegated drain, mirroring how the chat path
 splits its own ceiling coverage between `bind_session` and

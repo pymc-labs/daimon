@@ -887,7 +887,7 @@ The longest one answer may take before it is stopped when someone is talking to 
 | | |
 | --- | --- |
 | Key | `turn_time_limit` |
-| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
+| Values | `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
 | Default | `45` |
 | Levels | Workspace, Agent |
 | Combines | Lowest wins |
@@ -899,7 +899,7 @@ The longest a run nobody is watching may take before it is stopped: a routine, a
 | | |
 | --- | --- |
 | Key | `unattended_time_limit` |
-| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
+| Values | `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
 | Default | `45` |
 | Levels | Workspace, Agent |
 | Combines | Lowest wins |

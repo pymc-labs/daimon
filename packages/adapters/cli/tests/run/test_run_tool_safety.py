@@ -553,7 +553,7 @@ async def test_an_operator_run_reads_the_unattended_run_limit(
             tenant_id=await discover_tenant(db),
             platform="cli",
             key="unattended_time_limit",
-            value="90",
+            value="30",
             account_id=None,
             surface="cli",
         )
@@ -576,5 +576,5 @@ async def test_an_operator_run_reads_the_unattended_run_limit(
     )
     (deadline,) = deadlines
     assert deadline is not None, "the run passes its own deadline"
-    window = timedelta(minutes=90)
-    assert before + window <= deadline <= datetime.now(UTC) + window, "the tenant's 90 minutes"
+    window = timedelta(minutes=30)
+    assert before + window <= deadline <= datetime.now(UTC) + window, "the tenant's 30 minutes"

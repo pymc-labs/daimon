@@ -11,9 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by server admins, limit how long one turn may run: `turn_time_limit` for a person's
   message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
   nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
-  Each takes 15, 20, 30, 45, 90 or 180 minutes, 45 by default, and the smallest setting wins.
-  A turn allowed past 45 minutes stays live until its own deadline, and one whose worker
-  stopped no longer holds its thread or direct message.
+  Each takes 15, 20, 30 or 45 minutes, 45 by default, and the smallest setting wins.
 - **Hide the server name on tool lines.** A new workspace or agent setting,
   `tool_server_names`, drops the connected server's name from the working card's tool lines.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts
