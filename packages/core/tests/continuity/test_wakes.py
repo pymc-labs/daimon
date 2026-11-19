@@ -29,6 +29,7 @@ from daimon.core.continuity.wakes import (
     cancel_wake,
     claim_wake,
     enqueue_wake,
+    keep_wake,
     list_due_wake_threads,
     poll_wakes_once,
     release_wake,
@@ -150,6 +151,59 @@ async def test_an_expired_unstarted_claim_is_retried_and_a_started_one_is_not(
     assert [row.idempotency_key for row in abandoned] == [started.idempotency_key]
     row = await _read(db_session_factory, started.idempotency_key)
     assert row.status == "skipped" and row.skip_reason == "interrupted"
+
+
+async def test_a_running_turn_renews_its_lease_and_a_dead_one_settles_within_it(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A turn may run its whole time limit; a process that stops renewing loses the row."""
+    from daimon.core.continuity import wakes
+
+    monkeypatch.setattr(wakes, "WAKE_RENEW_INTERVAL", timedelta(milliseconds=20))
+    tenant_id = await _tenant(db_session_factory)
+    request = _request(tenant_id)
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None, "the due wake is claimed"
+    assert await start_wake(db_session_factory, claim, now=_NOW), "the fence commits"
+    clock = [_NOW]
+    async with keep_wake(db_session_factory, claim, now=lambda: clock[0]):
+        # Three hours into the turn, well past one lease.
+        clock[0] = _NOW + timedelta(hours=3)
+        await asyncio.sleep(0.2)
+        assert not await abandon_interrupted_wakes(
+            db_session_factory, platform="discord", now=clock[0] + WAKE_RUN_LEASE / 2
+        ), "a renewed lease keeps a long turn's row"
+    # The renewals stop, as when the process dies mid-turn.
+    late = clock[0] + WAKE_RUN_LEASE + timedelta(seconds=1)
+    abandoned = await abandon_interrupted_wakes(db_session_factory, platform="discord", now=late)
+    assert [row.idempotency_key for row in abandoned] == [request.idempotency_key], (
+        "an unrenewed row settles within one lease"
+    )
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert (row.status, row.skip_reason) == ("skipped", "interrupted"), "never run again"
+
+
+async def test_a_lost_row_stops_the_renewals(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Once the row is settled elsewhere, the running turn renews nothing."""
+    from daimon.core.continuity import wakes
+
+    monkeypatch.setattr(wakes, "WAKE_RENEW_INTERVAL", timedelta(milliseconds=20))
+    tenant_id = await _tenant(db_session_factory)
+    request = _request(tenant_id)
+    await enqueue_wake(db_session_factory, request, available_at=_NOW)
+    claim = await claim_wake(db_session_factory, idempotency_key=request.idempotency_key, now=_NOW)
+    assert claim is not None, "the due wake is claimed"
+    assert await start_wake(db_session_factory, claim, now=_NOW), "the fence commits"
+    async with keep_wake(db_session_factory, claim, now=lambda: _NOW + timedelta(hours=1)):
+        await abandon_interrupted_wakes(
+            db_session_factory, platform="discord", now=_NOW + WAKE_RUN_LEASE * 2
+        )
+        await asyncio.sleep(0.1)
+    row = await _read(db_session_factory, request.idempotency_key)
+    assert (row.status, row.lease_expires_at) == ("skipped", None), "the settled row stays settled"
 
 
 async def test_a_release_refunds_its_claim_so_waiting_never_exhausts_the_row(

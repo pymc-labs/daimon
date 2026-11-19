@@ -46,6 +46,15 @@ def _args(mock: AsyncMock) -> tuple[object, ...]:
     return mock.await_args.args
 
 
+PAGED = PanelScreen(
+    "Progress plans",
+    ("In effect: On.",),
+    (PanelSelect("Change for an agent, page 2 of 3", (PanelOption("open:chat:progress_plans@a1~1", "Alpha"),)),),
+    PanelOption("open:chat", "Back"),
+    (PanelOption("open:chat:progress_plans", "Previous"), PanelOption("open:chat:progress_plans~2", "Next")),
+)  # fmt: skip
+
+
 def _view() -> cog.SettingsView:
     return cog.SettingsView(MagicMock(), PLACE, SCREEN)
 
@@ -58,6 +67,19 @@ def test_guild_only_and_a_select_per_control_with_a_back_button() -> None:
         ("Hidden", "cost_footer:channel:hidden")
     ]
     assert back.label == "Back"
+
+
+def test_a_long_list_adds_previous_and_next_buttons_after_back() -> None:
+    """The panel's paging options are buttons that press the ops they name."""
+    view = cog.SettingsView(MagicMock(), PLACE, PAGED)
+    buttons = [c for c in view.children if isinstance(c, discord.ui.Button)]
+    assert [b.label for b in buttons] == ["Back", "Previous", "Next"]
+
+
+async def test_next_opens_the_page_it_names(press: AsyncMock) -> None:
+    interaction = _interaction("")
+    await cog.SettingsView(MagicMock(), PLACE, PAGED).children[3].callback(interaction)  # type: ignore[call-arg]
+    assert _args(press)[3] == "open:chat:progress_plans~2"
 
 
 def test_the_embed_carries_the_lines_and_a_refusal_is_red() -> None:

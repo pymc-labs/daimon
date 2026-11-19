@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
@@ -264,22 +265,24 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
-    # The provider is set up; the stored switch consent is stale. Never say the
-    # provider is missing (J6g): a fresh preview and Confirm is the fix. Only a
-    # conversation already on the provider gets this; a new one runs on Anthropic.
-    "re_confirm": _Copy(
-        "{agent}'s model-provider switch needs to be confirmed again.",
-        "In a new conversation, ask {agent_mid} to switch to {provider} again, then Confirm.",
-    ),
-    # Nothing is missing: say so, and that the same message works shortly.
+    # Nothing is missing (a blip, or a change mid-read): the same message works shortly.
     "preparation_busy": _Copy(
-        "Daimon is busy right now and couldn't get {agent} ready on {provider}.",
+        "Daimon couldn't get {agent} ready on {provider} just now.",
         "Try again in a minute.",
     ),
     # The cause is unknown, so never claim the provider isn't set up.
     "preparation_failed": _Copy(
         "Daimon couldn't get {agent} ready on {provider}.",
         "Try again; if it keeps happening, give {who} the reference.",
+    ),
+    "channel_row_missing": _Copy(
+        "This channel is pinned to {provider}, which isn't set up for it yet.",
+        'Ask whoever runs Daimon to set it up, or ask {who} to say "clear this channel\'s pin".',
+    ),
+    "anthropic_unconfigured": _Copy(
+        "{agent} runs on Anthropic, which isn't set up on this Daimon install.",
+        "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
+        " Daimon to add the Anthropic key.",
     ),
 }
 _PROVIDER_NAMES = {
@@ -307,6 +310,21 @@ def _model_label(model: str | None) -> str:
 def provider_name(provider: str | None) -> str:
     """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
+def uses_phrase(provider: str | None, model: str | None) -> str:
+    """What an agent runs on, as a person says it: "Gemini 4 Argon", else the provider.
+
+    A self-hosted model keeps its id, which has no everyday name.
+    """
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef, Provider
+
+    if not model:
+        return provider_name(provider)
+    if provider is None or provider == LOOP.provider:
+        return f"{provider_name(provider)} ({model})"
+    return model_name(ModelRef(provider=cast("Provider", provider), id=model))
 
 
 def conversations_follow_line(

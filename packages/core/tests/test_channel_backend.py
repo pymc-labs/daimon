@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -42,6 +42,7 @@ from mux.contracts.config import (
 )
 from mux.contracts.ids import ChannelRef
 from mux.errors import InvalidConfig
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -63,6 +64,7 @@ def test_an_unconfigured_channel_resolves_to_anthropic_managed_agents_unchanged(
         "model": None,
         "requires": {},
         "thread_mode": "per_caller",
+        "effort": None,
     }
     assert resolved.content_digest() == _DEFAULT_DIGEST
     assert resolve_default(BackendConfig()).content_digest() == _DEFAULT_DIGEST
@@ -137,7 +139,8 @@ async def test_set_and_clear_write_immutable_revisions(db_session: AsyncSession)
         )
 
 
-_ARGON = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
+def _opt_in(model: str) -> BackendConfig:
+    return BackendConfig(backend="gemini", profile="gemini.inline_reuse", model=model)
 
 
 def _pricing_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
@@ -151,16 +154,50 @@ def _pricing_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     monkeypatch.setattr(pricing, "datetime", Clock)
 
 
-def test_argon_is_admitted_for_channels_only_inside_its_price_window(
-    monkeypatch: pytest.MonkeyPatch,
+def _lapsing_price(monkeypatch: pytest.MonkeyPatch, model: str) -> None:
+    """Give `model` one synthetic tariff that ends 2026-12-01, with no successor."""
+    from daimon.core import pricing
+    from daimon.core.pricing import ProviderPrice
+
+    rows = {
+        profile: tuple(price for price in prices if price.model != model)
+        for profile, prices in pricing._PROVIDER_PRICING.items()
+    }
+    lapsing = ProviderPrice(
+        "gemini",
+        model,
+        date(2026, 10, 22),
+        Decimal("2"),
+        Decimal("10"),
+        Decimal("0.1"),
+        valid_before=date(2026, 12, 1),
+    )
+    monkeypatch.setattr(
+        pricing,
+        "_PROVIDER_PRICING",
+        {**rows, "gemini.inline_reuse": (*rows["gemini.inline_reuse"], lapsing)},
+    )
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_an_opt_in_model_is_admitted_for_channels_before_and_after_a_tariff_change(
+    monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
+    for day in (datetime(2026, 11, 30, tzinfo=UTC), datetime(2026, 12, 1, tzinfo=UTC)):
+        _pricing_clock(monkeypatch, day)
+        check_backend(_revision(_opt_in(model)))
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_a_tariff_gated_model_is_admitted_for_channels_only_inside_its_price_window(
+    monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    _lapsing_price(monkeypatch, model)
     _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
-    check_backend(_revision(_ARGON))
+    check_backend(_revision(_opt_in(model)))
     _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
-    with pytest.raises(
-        BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
-    ):
-        check_backend(_revision(_ARGON))
+    with pytest.raises(BackendUnsupported, match=f"{model}'s price window ended on 2026-11-30"):
+        check_backend(_revision(_opt_in(model)))
 
 
 def _deps(
@@ -388,18 +425,20 @@ def test_selfhosted_admission_enabled_refuses_missing_usage_capability(monkeypat
         )
 
 
-async def test_argon_cannot_be_configured_after_its_price_window(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+async def test_a_tariff_gated_model_cannot_be_configured_after_its_price_window(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     tenant = await make_tenant(db_session)
-    channel = channel_ref(tenant.id, "discord", "chan-argon")
+    channel = channel_ref(tenant.id, "discord", f"chan-{model}")
+    _lapsing_price(monkeypatch, model)
     _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
     with pytest.raises(BackendUnsupported, match="price window ended on 2026-11-30"):
-        await set_channel_backend(db_session, channel, _ARGON)
+        await set_channel_backend(db_session, channel, _opt_in(model))
     assert await current_backend(db_session, channel) is None
     _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
-    written = await set_channel_backend(db_session, channel, _ARGON)
-    assert (written.local, written.model) == (1, "gemini-4-argon")
+    written = await set_channel_backend(db_session, channel, _opt_in(model))
+    assert (written.local, written.model) == (1, model)
 
 
 async def _tenant(session: AsyncSession) -> TenantRow:

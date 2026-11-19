@@ -11,18 +11,21 @@ from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
+from mux.drivers.gemini.completions import GeminiCompletions
 from mux.drivers.gemini.core import (
     Base,
     GeminiAgents,
     GeminiEnvironments,
     GeminiEvents,
     GeminiSessions,
+    SkillFiles,
     compile_agent,
     compile_environment,
     page_values,
 )
 from mux.drivers.gemini.deployment import (
     configured_catalog_transport,
+    configured_completions,
     configured_transport,
     downscoped_storage_token,
 )
@@ -34,7 +37,8 @@ from mux.drivers.gemini.flash import (
     FlashAttempt,
     FlashTransport,
 )
-from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
+from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver, native_server_name
+from mux.drivers.gemini.packages import inline_bytes, package_sources
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
@@ -43,7 +47,13 @@ from mux.drivers.gemini.skill_deployment import (
     verify_retained_deployments,
 )
 from mux.drivers.gemini.storage import Records, Storage, read_records
-from mux.drivers.gemini.transport import NO_TOOLS_FUNCTION, NO_TOOLS_TOOL, SDKTransport, Transport
+from mux.drivers.gemini.transport import (
+    NO_TOOLS_FUNCTION,
+    NO_TOOLS_TOOL,
+    EnvironmentTransport,
+    SDKTransport,
+    Transport,
+)
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.store import StateStore
@@ -93,10 +103,14 @@ class GeminiManagedAgents:
         resource_catalog_transport: AgentCatalogTransport | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
+        skill_files: SkillFiles | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
-        if max_output_tokens is not None and (native_agent is not None or resource_catalog_enabled):
+        if (max_output_tokens is not None or thinking_level is not None) and (
+            native_agent is not None or resource_catalog_enabled
+        ):
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE.profile_id)
         self.catalog_adapter: GeminiCatalogAdapter | None = None
         if resource_catalog_enabled:
@@ -124,6 +138,8 @@ class GeminiManagedAgents:
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
+            skill_files=skill_files,
         )
         self.events = GeminiEvents(
             transport,
@@ -135,11 +151,16 @@ class GeminiManagedAgents:
             gcs_secrets=gcs_secrets,
             mcp_secrets=mcp_secrets,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
         self.skills = GeminiSkills(
-            transport, storage, account_scope_id, publisher=skill_bundle_publisher
+            transport,
+            storage,
+            account_scope_id,
+            publisher=skill_bundle_publisher,
+            uploads=skill_files is not None,
         )
 
     @property
@@ -159,6 +180,8 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "EnvironmentTransport",
+    "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
@@ -183,13 +206,18 @@ __all__ = [
     "Records",
     "RetainedSkillDeployments",
     "SkillBundlePublisher",
+    "SkillFiles",
     "Storage",
     "SDKTransport",
     "Transport",
     "compile_agent",
     "compile_environment",
+    "inline_bytes",
+    "package_sources",
     "configured_catalog_transport",
+    "configured_completions",
     "configured_transport",
     "downscoped_storage_token",
+    "native_server_name",
     "verify_retained_deployments",
 ]

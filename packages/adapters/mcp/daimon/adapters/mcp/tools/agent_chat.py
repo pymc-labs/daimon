@@ -121,7 +121,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_SOURCE_RELEASE_URL,
     MA_METADATA_KEY_SPEC_HASH,
 )
-from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
@@ -134,7 +134,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import archive_session_record
-from daimon.core.session_seal import seal_ids
+from daimon.core.session_seal import child_seal_ids, seal_ids
 from daimon.core.session_snapshot import (
     canonical_json,
 )
@@ -147,6 +147,8 @@ from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended_capabilities import capability_policy
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -189,7 +191,9 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     return sent.data[0].id
 
 
-async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, scope: Scope) -> str:
+async def _send_billed(
+    runtime: McpRuntime, session: BetaManagedAgentsSession, message: str, *, scope: Scope
+) -> str:
     """Send a headless turn's message with its settle request written first.
 
     Nothing meters a headless turn live, so its calls are billed by
@@ -201,7 +205,16 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
     accepted send (a timeout, a 5xx) it stays. Naming the accepted message is
     best effort: an unnamed request waits on the first message processed after
     it was written. Returns the message's event id (the turn boundary).
+
+    The sources rule goes in front as on the routine runner: the agent chat
+    gate turns built-ins, search included, off (`capability_policy`), so it
+    is empty unless that policy changes.
     """
+    session_id = session.id
+    searches = capability_policy("mcp_chat").allow_builtins and claude_searches(
+        [tool.model_dump(mode="json") for tool in session.agent.tools]
+    )
+    text = sources_prefix(on=searches) + message
     async with runtime.session_factory.begin() as db:
         previous, requested_at = await session_settle_state.request_settle(
             db, managed_session_id=session_id
@@ -212,7 +225,7 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
             single_attempt(runtime),
             session_id,
             scope=scope,
-            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+            events=[{"type": "user.message", "content": [{"type": "text", "text": text}]}],
         )
         turn_event_id = _turn_boundary(sent)
     except (ToolError, anthropic.APIStatusError) as err:
@@ -420,15 +433,18 @@ async def _bound_posture(
     Memory is read-only under the seal unless the agent is the isolated
     channel's own (`memory_writable`), as at chat admission.
     """
+    # A provider turn's seals ride its credential (`child_seal_ids`); they
+    # keep memory read-only like a channel seal does.
+    carried = child_seal_ids(None, auth.seal_ids)
     channel_id = token_channel_id(auth)
     if channel_id is None:
-        return frozenset(), False
+        return carried, bool(carried)
     policy = await load_channel_policy(runtime, auth)
     here = channel_permissions(policy, channel_id=channel_id)
     if here.readers == "any":
-        return frozenset(), False
+        return carried, bool(carried)
     agent = agent_permissions(policy, agent_names)
-    return frozenset({channel_id}), not memory_writable(agent, here)
+    return carried | {channel_id}, bool(carried) or not memory_writable(agent, here)
 
 
 async def _budget_channel(
@@ -519,7 +535,11 @@ async def _resolve_ma_agent(
     if auth.agent_id is None:
         raise ToolError("agent not found")
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=auth.agent_id,
+        records=runtime.session_factory,
     )
     if agent is None:
         raise ToolError("agent not found")
@@ -664,11 +684,17 @@ async def _refuse_a_changed_agent(
     An unedited agent costs one agent read.
     """
     scope = mcp_scope(auth)
-    agent = await retrieve_agent(runtime.client, session.agent.id, scope=scope)
+    agent = await retrieve_agent(
+        runtime.client, session.agent.id, scope=scope, records=runtime.session_factory
+    )
     if agent.version == session.agent.version:
         return
     started = await retrieve_agent_version(
-        runtime.client, agent.id, session.agent.version, scope=scope
+        runtime.client,
+        agent.id,
+        session.agent.version,
+        scope=scope,
+        records=runtime.session_factory,
     )
     if _session_setup(started) != _session_setup(agent):
         log.info(
@@ -795,7 +821,7 @@ async def _start_turn_impl(
         raise ToolError("environment not found")
 
     environment: BetaEnvironment | None = await find_environment_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=env_name
+        runtime.client, tenant_id=auth.tenant_id, name=env_name, records=runtime.session_factory
     )
     if environment is None:
         raise ToolError("environment not found")
@@ -883,6 +909,7 @@ async def _start_turn_impl(
                 backend=MANAGED_AGENTS.provider,
             ),
             ma_agent,
+            server_setup=True,
         )
         session = await create_session(
             runtime.client,
@@ -926,7 +953,7 @@ async def _start_turn_impl(
         await recheck()
     await gate(runtime, auth, session)
     turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
+    turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
     channel = rules_channel(auth, session)
     await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
@@ -1065,7 +1092,7 @@ async def _continue_turn_impl(
             raise ToolError(_MESSAGE_REQUIRED_MSG)
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
-        turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
+        turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
         channel = rules_channel(auth, current)
         await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
@@ -1273,14 +1300,6 @@ async def _get_turn_cost_impl(
     }
 
 
-async def _images_embedded(runtime: McpRuntime, auth: AuthIdentity) -> bool:
-    """Whether the workspace lets chart images ride along with an answer (`artifact_images`)."""
-    place = FeaturePlace(auth.tenant_id, auth.platform or "mcp")
-    return (
-        await place_feature(runtime.session_factory, runtime.settings, place, "artifact_images")
-    ).on
-
-
 async def _require_live_result_access(runtime: McpRuntime, auth: AuthIdentity) -> None:
     """A private Discord result requires current membership, even after a long turn."""
     if auth.platform == "discord" and auth.platform_user_id is not None:
@@ -1420,7 +1439,6 @@ async def _deliver_turn_charts_impl(
         turn_started_at=turn_started_at,
         message=final_text,
         store=runtime.artifact_store,
-        embed_images=await _images_embedded(runtime, auth),
     )
     result = AskResult(
         handle=handle,
@@ -1541,7 +1559,6 @@ async def _ask_impl(
                     turn_started_at=turn_started_at,
                     message=final_text,
                     store=runtime.artifact_store,
-                    embed_images=await _images_embedded(runtime, auth),
                 )
                 if (observation := current_outcome.get()) is not None:
                     observation.finish(reason=TerminationReason.COMPLETED)

@@ -33,7 +33,7 @@ _ADMIN_REQUIRED = "requires an admin"
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
@@ -237,7 +237,7 @@ def _runtime_with_default(
 ) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(agent_name=agent_name),
     )
@@ -326,7 +326,7 @@ async def test_explain_says_so_when_nothing_resolves(
     tenant_id, _ = await _seed(committing_sessionmaker)
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=MagicMock(spec=AsyncAnthropic, api_key="sk-test"),  # type: ignore[arg-type]
         settings=MagicMock(),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
     )
@@ -520,7 +520,9 @@ async def test_set_agent_default_says_the_agents_repos_come_too(
 
     tenant_id, account_id = await _seed(committing_sessionmaker)
 
-    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+    async def find(
+        _client: object, *, tenant_id: uuid.UUID, name: str, records: object = None
+    ) -> object:
         return SimpleNamespace(id="ag_writer", metadata={})
 
     async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:

@@ -806,7 +806,7 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
     monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
     prepared = MagicMock()
     prepared.admission.hold = None
-    text, session_id = await _run_admitted_dm_turn(
+    done = await _run_admitted_dm_turn(
         MagicMock(),
         prepared,
         tenant_id=row.tenant_id,
@@ -821,7 +821,9 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
         origin="routine",
         watch_row=row,
     )
-    assert (text, session_id) == ("report", "sess_dm")
+    assert (done.text, done.session_id) == ("report", "sess_dm"), (
+        "the turn should return its reply and session"
+    )
     kwargs = run.await_args.kwargs
     assert kwargs["watch_row"] is row and kwargs["attended"] is False
 
@@ -979,3 +981,39 @@ async def test_new_thread_report_sends_only_in_the_thread_its_firing_made(
     else:
         with pytest.raises(AdmissionDenied):
             await send
+
+
+async def test_a_dm_routine_runs_to_the_unattended_limit(db_session_factory, monkeypatch):
+    """A DM routine's deadline is its admission's ceiling, not the standard 45 minutes."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core import direct_messages
+    from daimon.core.direct_messages import run_dm_routine
+    from daimon.testing.turn_fakes import deps_for
+
+    class _Bound(Exception):
+        pass
+
+    admission = MagicMock(backend_revision=None, turn_ceiling_s=90 * 60.0)
+    bind = AsyncMock(side_effect=_Bound)
+    monkeypatch.setattr(direct_messages, "dm_enabled", AsyncMock(return_value=True))
+    monkeypatch.setattr(direct_messages, "get_tenant", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(direct_messages, "tenant_ready", lambda *_a, **_k: True)
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(direct_messages, "replace", lambda value, **_changes: value)
+    monkeypatch.setattr(direct_messages, "bind_session", bind)
+    before = datetime.now(UTC)
+    with pytest.raises(_Bound):
+        await run_dm_routine(
+            deps_for(None, db_session_factory),
+            tenant_id=uuid.uuid4(),
+            owner_user_id="555",
+            agent_name="daimon",
+            prompt="seed",
+            source=None,
+            budget_channel_id=None,
+        )
+    deadline = bind.await_args.kwargs["deadline"]
+    assert (
+        before + timedelta(minutes=90) <= deadline <= datetime.now(UTC) + timedelta(minutes=90)
+    ), "the fire runs to the unattended run limit its admission read"

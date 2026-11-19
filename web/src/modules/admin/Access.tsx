@@ -13,7 +13,7 @@ const sw = (label: string, checked: boolean, on: (v: boolean) => void, extra?: {
   <Switch aria-label={label} checked={checked} onCheckedChange={on} {...extra} />
 )
 
-/** Who may start turns, and how people reach the agents in chat. */
+/** Who may start turns. */
 export function Access({ access, save }: { access: AccessState; save: Save }) {
   const listed = access.people
   const ids = (listed ?? []).map((p) => p.id)
@@ -40,9 +40,6 @@ export function Access({ access, save }: { access: AccessState; save: Save }) {
       </>
     ),
   }]
-  if (access.dm_enabled !== null) rows.push({ label: "Direct messages", control: sw("Direct messages", access.dm_enabled, (v) => save({ dm_enabled: v })) })
-  if (access.dm_memory_read_only !== null) rows.push({ label: "Read-only memory in direct messages", control: sw("Read-only memory in direct messages", access.dm_memory_read_only, (v) => save({ dm_memory_read_only: v })) })
-  if (access.plain_text_mentions !== null) rows.push({ label: "Typed mentions", control: sw("Typed mentions", access.plain_text_mentions, (v) => save({ plain_text_mentions: v })) })
   return <SettingsList title="Access" rows={rows} />
 }
 

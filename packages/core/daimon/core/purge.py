@@ -16,7 +16,7 @@ principal_links -> principal row -> platform_user_names (platform only,
 platform-user-scoped, after the principal row on purpose: see the call) ->
 teams_messages and microsoft_user_tokens (Teams principals only, keyed by (tenant,
 Entra user)).
-Account-level deletes (mcp_tokens, GitHub connect requests and click intents,
+Account-level deletes (mcp_tokens, connector_tokens, GitHub connect requests and click intents,
 message_feedback, tag_opt_outs, user_configs, accounts)
 run in `purge_account` after all principal rows are gone; mcp_tokens and
 message_feedback are keyed by account_id and are deleted before delete_account
@@ -91,6 +91,9 @@ Deliberate carve-outs:
   erasure only nulls its `added_by_account_id`, through ON DELETE SET NULL.
 - A skill mirrored from a skills server stays with the tenant; erasure nulls its
   `added_by_account_id` (ON DELETE SET NULL) and the mirror stops updating.
+- A conversation's chosen model (`thread_model_settings`) and each agent's consent to it
+  (`thread_model_consents`) belong to the tenant. They name no person, only the thread and
+  agent, so account erasure leaves them and they go when the install does (ON DELETE CASCADE).
 - `workspace_members` rows are kept: they mirror who the chat platform lists as a
   member (platform user id and admin flag, no content), and the next reload would
   restore a deleted row. They go when the install ends.
@@ -132,11 +135,14 @@ import random
 import uuid
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
+from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
@@ -146,13 +152,18 @@ from daimon.core.memory_resource import (
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import dm_access as dm_access_store
+from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
+from daimon.core.stores import held_timers as held_timers_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -166,6 +177,7 @@ from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
@@ -203,16 +215,27 @@ class PurgeReport(BaseModel):
     github_connect_click_intents: int = 0
     github_user_links: int = 0
     mcp_tokens: int = 0
+    connector_tokens: int = 0
     gemini_records: int = 0
     selfhosted_operations: int = 0
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
+    dm_carry_overs: int = 0
+    held_timers: int = 0
     tag_opt_outs: int = 0
+    dm_picks: int = 0
+    dm_rules: int = 0
+    dm_grant_users: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    # Plan rows keep their charge with the person erased (decision 7).
+    support_requests_anonymized: int = 0
+    support_person_limits: int = 0
+    # Requests the person settled as staff: who settled is cleared, the charge kept.
+    support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
@@ -229,6 +252,7 @@ class PurgeReport(BaseModel):
     mux_leases: int = 0
     mux_release_requests: int = 0
     mux_operations: int = 0
+    host_call_cards: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -247,6 +271,7 @@ class PurgeReport(BaseModel):
             ),
             github_user_links=self.github_user_links + other.github_user_links,
             mcp_tokens=self.mcp_tokens + other.mcp_tokens,
+            connector_tokens=self.connector_tokens + other.connector_tokens,
             gemini_records=self.gemini_records + other.gemini_records,
             selfhosted_operations=self.selfhosted_operations + other.selfhosted_operations,
             slack_user_tokens=self.slack_user_tokens + other.slack_user_tokens,
@@ -254,11 +279,21 @@ class PurgeReport(BaseModel):
             direct_message_conversations=(
                 self.direct_message_conversations + other.direct_message_conversations
             ),
+            dm_carry_overs=self.dm_carry_overs + other.dm_carry_overs,
+            held_timers=self.held_timers + other.held_timers,
             tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
+            dm_picks=self.dm_picks + other.dm_picks,
+            dm_rules=self.dm_rules + other.dm_rules,
+            dm_grant_users=self.dm_grant_users + other.dm_grant_users,
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            support_requests_anonymized=(
+                self.support_requests_anonymized + other.support_requests_anonymized
+            ),
+            support_person_limits=self.support_person_limits + other.support_person_limits,
+            support_settlers_cleared=self.support_settlers_cleared + other.support_settlers_cleared,
             daimon_admins=self.daimon_admins + other.daimon_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
@@ -273,6 +308,7 @@ class PurgeReport(BaseModel):
             mux_leases=self.mux_leases + other.mux_leases,
             mux_release_requests=self.mux_release_requests + other.mux_release_requests,
             mux_operations=self.mux_operations + other.mux_operations,
+            host_call_cards=self.host_call_cards + other.host_call_cards,
         )
 
 
@@ -306,6 +342,7 @@ async def _purge_principal_in_session(
     teams_messages_count = 0
     microsoft_user_tokens_count = 0
     lead_intakes_count = 0
+    host_call_cards_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         lead_intakes_count = await lead_intake_store.erase_actor(
             session, principal.tenant_id, principal.external_id
@@ -347,6 +384,14 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # An imported earlier conversation is keyed by this same platform user.
+        dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
+            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
+        )
+        # An imported timer is keyed by the same platform user, and keeps who it was for.
+        held_timers_count = await held_timers_store.delete_for_users(
+            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
+        )
         # support_escalations carries the SAME (tenant, platform-user) key and
         # the same account_id = NULL hazard: somebody can ask for help without
         # ever having taken a turn, so an account-keyed pass alone would leave
@@ -359,6 +404,21 @@ async def _purge_principal_in_session(
                 tenant_id=principal.tenant_id,
                 platform_user_id=principal.external_id,
             )
+        )
+        # A limit row is the shared ledger too: the person leaves it, the charge stays.
+        support_anonymized_count = (
+            await support_escalation_store.anonymize_limit_requests_for_platform_user(
+                session,
+                tenant_id=principal.tenant_id,
+                platform_user_id=principal.external_id,
+            )
+        )
+        support_person_limits_count = await support_store.delete_person_limits_for_people(
+            session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
+        )
+        # A support post may sit in another tenant, so a settler matches in any.
+        support_settlers_count = await support_escalation_store.clear_settler(
+            session, settler_keys=[(principal.platform, principal.external_id)]
         )
         # A channel admin grant names the person by platform user id; the row
         # itself is the tenant's, so only their id leaves it.
@@ -380,6 +440,14 @@ async def _purge_principal_in_session(
         # A turn's posts and an auto-opened thread name who asked; the posts
         # are the agent's, so only the person's id leaves them.
         agent_post_requesters_count = await agent_posts_store.clear_requester(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
+        # A gated call's card holds the args the person asked for; account erasure
+        # cascades, so this path covers a principal purged on its own.
+        host_call_cards_count = await host_call_cards_store.delete_for_platform_user(
             session,
             tenant_id=principal.tenant_id,
             platform=principal.platform,
@@ -411,11 +479,14 @@ async def _purge_principal_in_session(
         # no symmetric call here: os_user is not a reaction identity, and
         # running one would risk deleting an unrelated platform user's rows
         # that happen to share the string.
+        dm_carry_overs_count = 0
+        held_timers_count = 0
         message_feedback_count = 0
         # Escalation is a reaction-then-modal path in a guild, so a CLI
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        support_anonymized_count = support_person_limits_count = support_settlers_count = 0
         daimon_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
@@ -477,12 +548,18 @@ async def _purge_principal_in_session(
         credential_requests=credential_requests_count,
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
+        dm_carry_overs=dm_carry_overs_count,
+        held_timers=held_timers_count,
         support_escalations=support_escalations_count,
+        support_requests_anonymized=support_anonymized_count,
+        support_person_limits=support_person_limits_count,
+        support_settlers_cleared=support_settlers_count,
         daimon_admins=daimon_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
         teams_messages=teams_messages_count,
         microsoft_user_tokens=microsoft_user_tokens_count,
+        host_call_cards=host_call_cards_count,
     )
 
 
@@ -525,8 +602,9 @@ async def purge_principal(
     # DB transaction committed. Upstream deletion is best-effort — a single
     # call, since one principal belongs to exactly one tenant/account.
     # Deliberate boundary catch mirroring purge_account: the DB purge has
-    # already committed, so an upstream APIError must NOT propagate.
-    if anthropic is not None:
+    # already committed, so an upstream APIError must NOT propagate. With no
+    # Anthropic key there are no Managed Agents sessions to delete.
+    if anthropic is not None and anthropic_configured(anthropic):
         try:
             sessions_report = await delete_sessions_for_account(
                 anthropic, tenant_id=tenant_id, account_id=account_id
@@ -538,6 +616,7 @@ async def purge_principal(
                 tenant_id=str(tenant_id),
                 account_id=str(account_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             return PrincipalPurgeResult(
                 db=db_report, sessions=SessionDeletionReport(upstream_error=True)
@@ -617,6 +696,9 @@ async def _purge_account_transaction(
     gemini_records_count = await gemini_state_store.delete_records_for_account(
         session, account_id=account_id
     )
+    connector_tokens_count = await connector_tokens_store.delete_connector_tokens_for_account(
+        session, account_id=account_id
+    )
     selfhosted_operations_count = await selfhosted_store.delete_operations_for_account(
         session, account_id=account_id
     )
@@ -653,6 +735,12 @@ async def _purge_account_transaction(
             session, account_id=account_id, platform_user_keys=platform_user_keys
         )
     )
+    support_anonymized_count = await support_escalation_store.anonymize_limit_requests_for_account(
+        session, account_id=account_id, platform_user_keys=platform_user_keys
+    )
+    support_settlers_count = await support_escalation_store.clear_settler(
+        session, account_id=account_id
+    )
 
     # slack_turn_contexts: keyed by (tenant_id, account_id), not
     # principal_id. Loop every tenant the account's principals belong to —
@@ -670,7 +758,23 @@ async def _purge_account_transaction(
     direct_message_count = await direct_messages_store.delete_conversations_for_account(
         session, account_id=account_id
     )
+    # Imported before the person had an account, so keyed by platform user, not account.
+    dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
+        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+    )
+    held_timers_count = await held_timers_store.delete_for_users(
+        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+    )
     tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
+    # The person's agent picks, personal routing rules and listed-grant entries.
+    dm_now = datetime.now(UTC)
+    dm_picks_count = await dm_access_store.delete_picks_for_account(session, account_id=account_id)
+    dm_rules_count = await dm_access_store.delete_user_rules(
+        session, keys=platform_user_keys, now=dm_now
+    )
+    dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
+        session, keys=platform_user_keys, now=dm_now
+    )
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
@@ -703,18 +807,26 @@ async def _purge_account_transaction(
             mux_release_requests=mux_erased.release_requests,
             mux_operations=mux_erased.operations,
             mcp_tokens=mcp_tokens_count,
+            connector_tokens=connector_tokens_count,
             gemini_records=gemini_records_count,
             selfhosted_operations=selfhosted_operations_count,
             github_connect_requests=github_connect_requests_count,
             github_connect_click_intents=github_connect_click_intents_count,
             message_feedback=message_feedback_count,
             support_escalations=support_escalations_count,
+            support_requests_anonymized=support_anonymized_count,
+            support_settlers_cleared=support_settlers_count,
             user_configs=user_cfg_count,
             accounts=account_count,
             github_user_links=github_user_links_count,
             slack_turn_contexts=slack_turn_contexts_count,
             direct_message_conversations=direct_message_count,
+            dm_carry_overs=dm_carry_overs_count,
+            held_timers=held_timers_count,
             tag_opt_outs=tag_opt_outs_count,
+            dm_picks=dm_picks_count,
+            dm_rules=dm_rules_count,
+            dm_grant_users=dm_grant_users_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,
         )
@@ -793,8 +905,9 @@ async def purge_account(
     # upstream APIError must NOT propagate — the caller would misreport a
     # completed, irreversible erasure as failed. Fold the failure into the
     # sessions report instead (upstream_error=True) and log for the operator;
-    # a failure in one tenant does not skip the remaining tenants.
-    if anthropic is not None:
+    # a failure in one tenant does not skip the remaining tenants. With no
+    # Anthropic key the work item stays queued for an install that adds one.
+    if anthropic is not None and anthropic_configured(anthropic):
         sessions = await retry_account_session_delete(anthropic, sm, account_id=account_id)
         # The person's own memory stores, archived ones included: deleted
         # upstream, then unbound. Independent of the session work item, which
@@ -865,6 +978,7 @@ async def _retry_account_session_delete_locked(
                 account_id=str(account_id),
                 tenant_id=str(tenant_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             upstream_error = True
             continue
@@ -886,15 +1000,19 @@ async def sweep_privacy_session_deletes(
 
     Also finishes the personal memory stores of every account already erased
     (`sweep_erased_personal_memory`), whether or not a session work item is
-    left for it.
+    left for it. With no Anthropic key the queued work waits for one.
     """
-    try:
-        await sweep_erased_personal_memory(anthropic, sm)
-    except Exception:
-        log.exception("purge.personal_memory_sweep_failed")
+    configured = anthropic_configured(anthropic)
+    if configured:
+        try:
+            await sweep_erased_personal_memory(anthropic, sm)
+        except Exception:
+            log.exception("purge.personal_memory_sweep_failed")
     async with sm() as session:
         work = await privacy_deletes_store.list_work(session)
     for item in work:
+        if not configured and item.tenant_ids:
+            continue
         try:
             await retry_account_session_delete(anthropic, sm, account_id=item.account_id)
         except Exception:

@@ -1,6 +1,6 @@
 // Pure helpers shared by the agents module.
 import { channelLabel } from "@/lib/format"
-import type { Effect, Place, ToolRule } from "./types"
+import type { Backend, Effect, Place, ToolRule } from "./types"
 
 /** `label` is the chip; `count` follows a number in the draft bar; `fact` is the tooltip. */
 export const EFFECT: Record<Effect, { label: string; count: string; fact: string; cls: string }> = {
@@ -9,8 +9,10 @@ export const EFFECT: Record<Effect, { label: string; count: string; fact: string
     label: "Applies now, restarts context", count: "restart context",
     fact: "The next message starts the thread with fresh context, billed once for the handoff", cls: "bg-warning/10 text-warning",
   },
-  threads: { label: "Applies to new threads", count: "new threads only", fact: "Existing threads keep the current version", cls: "bg-foreground/[0.07] text-foreground" },
+  threads: { label: "Applies per thread", count: "per thread", fact: "Threads switch on their next message.", cls: "bg-foreground/[0.07] text-foreground" },
 }
+
+export const PROVIDER: Record<Backend, string> = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", selfhosted: "Self-hosted" }
 
 export const EFFORT_LABEL = { low: "Low", medium: "Medium", high: "High", xhigh: "X-high", max: "Max" } as const
 

@@ -20,6 +20,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Copy for the surfaces that open or describe a setup conversation. It lives
 # here so the Discord panel, the Slack panel and the MCP outcome cannot drift:
@@ -70,12 +71,16 @@ class BoundAgentUnavailable(UserFacingError):
 
 
 async def get_setup_agent(
-    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     """Retrieve the exact live identity; never substitute an agent with the same name."""
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     try:
-        agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope)
+        agent = await retrieve_agent(anthropic, ma_agent_id, scope=backend_scope, records=records)
     except APIStatusError as error:
         if error.status_code in (400, 404):
             raise BoundAgentUnavailable(
@@ -94,10 +99,16 @@ async def get_setup_agent(
 
 
 async def get_setup_responder(
-    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     try:
-        responder = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+        responder = await get_setup_agent(
+            anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id, records=records
+        )
     except DaimonError as error:
         raise UserFacingError(
             "This setup conversation's Daimon agent is missing. "
@@ -119,9 +130,10 @@ async def resolve_setup_agents(
     *,
     tenant_id: uuid.UUID,
     target_ma_agent_id: str | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
     responders = route_builtin_agent(
-        await list_agents_by_tenant(anthropic, tenant_id=tenant_id),
+        await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records),
         tenant_id=tenant_id,
         surface="setup_conversation",
     )
@@ -132,7 +144,7 @@ async def resolve_setup_agents(
     target = None
     if target_ma_agent_id is not None:
         target = await get_setup_agent(
-            anthropic, tenant_id=tenant_id, ma_agent_id=target_ma_agent_id
+            anthropic, tenant_id=tenant_id, ma_agent_id=target_ma_agent_id, records=records
         )
     return responders[0], target
 

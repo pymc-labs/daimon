@@ -748,7 +748,7 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     )
     kwargs = factory.call_args.kwargs
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     assert await check("U1") is True
     client.users_info.return_value = {
         "ok": True,
@@ -774,7 +774,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -785,6 +785,20 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     rendered = _attachment(card, prompt)[0]["blocks"]
     texts = [block["text"]["text"] for block in rendered if block["type"] == "section"]
     assert any(losses in text for text in texts) == (state in {"pending", "approved"})
+
+
+def test_an_admin_card_without_details_posts_no_empty_section():
+    """Slack refuses a section with empty text, so an admin card with no details has none."""
+    from daimon.adapters.slack.tool_confirmation import _attachment
+    from daimon.core.posted_controls.confirmation import build_confirmation_card
+
+    prompt = _prompt().model_copy(
+        update={"admin": True, "consequence": "Stops working: memory", "detail_lines": ()}
+    )
+    card = build_confirmation_card(prompt, state="pending", token="abcdefgh")
+    blocks = _attachment(card, prompt)[0]["blocks"]
+    texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
+    assert all(texts), f"every section has text: {texts}"
 
 
 async def test_blocked_always_save_does_not_block_retirement(
@@ -965,3 +979,53 @@ async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -
             ),
         }
     ], "the mention stays in text so it notifies; the words ride a neutral card"
+
+
+@pytest.mark.parametrize(("where", "inside"), [("C_SEAL", True), ("D1", False)])
+async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, where: str, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from a DM."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    cards = SlackConfirmationCards()
+    token, _future = cards._controls.pending.open()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards._controls.cards[token] = confirmation_module._PostedCard(
+        prompt,
+        _client(),
+        "C_SEAL",
+        "1700.1",
+        "1699.9",
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2")),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    click = _click(f"dcf:{token}:always", "U2") | {"channel": {"id": where}}
+    await cards.handle_click(click)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=("C_SEAL",))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(decision) is inside, decision.reason

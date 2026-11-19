@@ -23,6 +23,7 @@ from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CHANNEL, THREAD, AGENT = "chan-1", "thr-1", "ag_1"
@@ -123,3 +124,45 @@ async def test_a_locked_workspace_and_the_agent_tier_hold_on_the_runtime_paths(
     await db_session.commit()
     CACHE.clear()
     assert await plans() == "", "Off at the agent tier beats an unlocked workspace On"
+
+
+async def test_reach_limits_follow_the_reach_check_through_the_real_readers(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A limit's dependency resolves before it, whatever the registry order, in a read of
+    every feature, of the limits alone and of the settings panel's views. Only the
+    deployment can turn the reach check Off."""
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+    from daimon.core.features.registry import FEATURES
+    from daimon.core.features.service import read_features
+    from daimon.core.features.snapshot import FeaturePlace, resolve_features
+
+    limits = ("outbound_threads", "outbound_places", "outbound_people")
+    assert all(FEATURES[key].depends_on == ("reach_budget",) for key in limits), (
+        "the limits this test covers depend on the reach check"
+    )
+    settings = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "features": {"reach_budget": "off"},
+        }
+    )
+    tenant = await make_tenant(db_session)
+    CACHE.clear()
+    place = FeaturePlace(tenant.id, "discord", channel_id=CHANNEL)
+
+    every = await resolve_features(db_session_factory, settings, place)
+    alone = await resolve_features(db_session_factory, settings, place, keys=limits)
+    settings_views = {
+        view.spec.key: view.resolved
+        for view in await read_features(db_session_factory, settings, place, keys=limits)
+    }
+    for name, found in (
+        ("all", every.features),
+        ("alone", alone.features),
+        ("views", settings_views),
+    ):
+        for key in limits:
+            assert found[key].unavailable == "depends_on", f"{key} read as {name}"
+    assert set(alone.features) == set(limits), "a read returns only the keys asked for"

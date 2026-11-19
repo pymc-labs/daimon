@@ -228,12 +228,12 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                     app_configured=runtime.settings.github_app.app_id is not None
                     and runtime.settings.github_app.private_key is not None,
                 ),
-                gate_overrides_active=runtime.settings.tool_safety.gate_overrides_active,
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None
                 else None,
                 is_admin=is_admin,
                 web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+                settings=runtime.settings,
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id
@@ -241,6 +241,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 visible_channel_ids=visible_ids,
                 bot_can_view=bot_view,
                 caller_can_view=caller_view,
+                records=runtime.sessionmaker,
             )
         card = card.model_copy(
             update={

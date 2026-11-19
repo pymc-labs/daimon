@@ -13,6 +13,7 @@ from daimon.core._models import (
     PrincipalLink,
 )
 from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
     CliPrincipalRow,
     PlatformPrincipalRow,
 )
@@ -236,6 +237,21 @@ async def list_platform_principals_for_account(
     stmt = select(PlatformPrincipal).where(PlatformPrincipal.account_id == account_id)
     rows = (await session.execute(stmt)).scalars().all()
     return [PlatformPrincipalRow.model_validate(r) for r in rows]
+
+
+async def list_tenant_chat_platforms(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> tuple[str, ...]:
+    """The chat platforms the tenant has people on, sorted: where its agents answer."""
+    stmt = (
+        select(PlatformPrincipal.platform)
+        .where(
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform.in_(CHAT_PLATFORMS),
+        )
+        .distinct()
+    )
+    return tuple(sorted((await session.execute(stmt)).scalars()))
 
 
 async def list_platform_principals_for_accounts(

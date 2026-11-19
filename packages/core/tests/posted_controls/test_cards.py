@@ -551,6 +551,11 @@ def test_a_primary_button_without_a_custom_id_is_rejected() -> None:
         CardButton(label="🔐 Enter it privately", style="primary")
 
 
+def test_a_secondary_button_when_given_a_url_then_is_rejected() -> None:
+    with pytest.raises(ValueError, match="custom_id"):
+        CardButton(label="Cancel", style="secondary", url="https://example.com/x")
+
+
 def test_a_link_button_without_a_url_is_rejected() -> None:
     with pytest.raises(ValueError, match="url"):
         CardButton(label="Connect GitHub", style="link", custom_id="ztc:abc")

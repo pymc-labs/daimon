@@ -33,7 +33,6 @@ from daimon.core.message_split import split_fenced
 from daimon.core.pricing import MODEL_PRICING, cost_of, format_cost
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
 from daimon.core.turn.status_lines import format_summary
 from daimon.core.turn.termination import TerminationReason
@@ -1041,6 +1040,17 @@ async def test_the_answer_stays_text_and_its_controls_follow_in_a_card(ask_human
     assert edit.text and not _rated(edit) and not edit.attachments, "an edit stays text"
 
 
+@pytest.mark.parametrize("ask_human", [True, False])
+async def test_vote_buttons_off_leaves_no_votes_under_the_answer(ask_human: bool) -> None:
+    """`message_feedback` Off: the controls card has no 👍/👎; Ask a human follows its own switch."""
+    sender = FakeSender()
+    lifecycle = await _posted(sender, ask_human=ask_human, vote_buttons=False)
+    await lifecycle.on_terminal_success(_answer("hello"))
+
+    assert not any(_rated(a) for a in sender.activities), "no vote buttons anywhere"
+    assert _asks(sender, -1) is ask_human, "Ask a human only when support is on"
+
+
 async def test_a_lost_controls_card_leaves_the_answer_as_delivered() -> None:
     """The answer landed: controls that fail to post are no cut-short answer."""
     sender = FakeSender(fail_on={2})
@@ -1446,30 +1456,3 @@ async def test_watch_posts_controls_before_its_output_grant_closes():
     guard.close()
     await lifecycle.release_controls()
     assert len(sender.activities) == count
-
-
-async def test_nothing_posted_names_another_app() -> None:
-    sender, clock = FakeSender(), Clock()
-    inner = await _posted(sender, clock)
-    lc = OtherAppsScrubbedLifecycle(inner, "teams")
-    await lc.on_sse_event(
-        BetaManagedAgentsAgentMessageEvent(
-            id="e1",
-            type="agent.message",
-            content=[BetaManagedAgentsTextBlock(type="text", text="Looking in Discord or Slack")],
-            processed_at=datetime(2026, 1, 1, tzinfo=UTC),
-        )
-    )
-    tool = ToolUseBlock(
-        kind="tool_use", id="t1", type="agent.tool_use", name="discord_read_messages", input={}
-    )
-    clock.now += 10
-    await lc.on_render(TurnState(content=[tool]))
-    live = _card_json(sender, -1)
-    assert "Looking in another app" in live
-    assert "Discord" not in live and "Slack" not in live
-
-    reply = "Teams is right here. Never upload customer data to Discord or Slack."
-    await lc.on_terminal_success(_answer(reply))
-    answer = sender.activities[-2].text
-    assert answer == "Teams is right here. Never upload customer data to another app."

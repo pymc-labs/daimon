@@ -79,7 +79,6 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import (
     McpServerFailure,
     TextBlock,
@@ -230,6 +229,7 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     ask_human: bool = False,
+    vote_buttons: bool = True,
     identity: AgentIdentity | None = None,
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
@@ -256,6 +256,7 @@ def _make_lifecycle(
 
     lc = SlackTurnLifecycle(
         ask_human=ask_human,
+        vote_buttons=vote_buttons,
         notify_on_completion=notify_on_completion,
         trigger_ts=trigger_ts,
         render_tables=render_tables,
@@ -1809,6 +1810,39 @@ async def test_ask_human_button_rides_with_the_vote_buttons_when_enabled(
     )
 
 
+async def test_vote_buttons_off_drops_the_votes_and_keeps_ask_a_human(
+    fake_slack_web_client: Any,
+) -> None:
+    """`message_feedback` Off removes 👍/👎 from the final answer; Ask a human is its own switch."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, vote_buttons=False, ask_human=True)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert "feedback_vote:up" not in ids and "feedback_vote:down" not in ids, (
+        "votes off must leave no vote buttons"
+    )
+    assert "support_escalate" in ids, "Ask a human stays while support is on"
+
+
+async def test_vote_buttons_off_without_ask_a_human_leaves_no_actions_block(
+    fake_slack_web_client: Any,
+) -> None:
+    """With nothing to offer there is no empty actions block (Slack refuses one)."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, vote_buttons=False)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert not [b for b in blocks if b.get("block_id") == "feedback_vote"], (
+        "no feedback actions block when it would be empty"
+    )
+
+
 async def test_no_ask_human_button_when_support_is_off(fake_slack_web_client: Any) -> None:
     lc, *_ = _make_lifecycle(fake_slack_web_client)
     await lc.post_initial()
@@ -2195,25 +2229,6 @@ async def test_watch_revocation_between_chunks_rechecks_each_slack_write(fake_sl
         )
     assert count() - before == 1
     assert guard.failed
-
-
-async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> None:
-    inner, *_ = _make_lifecycle(fake_slack_web_client)
-    lc = OtherAppsScrubbedLifecycle(inner, "slack")
-    await lc.post_initial()
-    await lc.on_sse_event(_message_event("Looking in Discord and Microsoft Teams"))
-    await lc.on_render(_running_tool_turn("discord_search_messages"))
-    inner._last_flush = 0.0  # pyright: ignore[reportPrivateUsage]
-    await lc.on_render(_running_tool_turn("discord_search_messages"))
-    live = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Looking in other apps" in live
-    assert "Discord" not in live and "Teams" not in live
-
-    reply = "Use Slack, not Discord or Microsoft Teams. See https://discord.gg/abc."
-    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=reply)]))
-    final = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Use Slack, not another app. See another app." in final
-    assert "Discord" not in final and "Teams" not in final
 
 
 @pytest.mark.asyncio

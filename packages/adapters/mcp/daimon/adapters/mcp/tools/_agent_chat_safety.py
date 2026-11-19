@@ -37,6 +37,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
 )
+from daimon.core.headless_runner import unattended_ceiling_s
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
     AnnotationLookup,
@@ -45,7 +46,7 @@ from daimon.core.turn.approvals import (
     pending_confirmation_ids,
     tool_calls_for,
 )
-from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO
 from daimon.core.turn.reducers import apply
@@ -291,13 +292,25 @@ async def _watch(
     answered: set[str] = set()
     annotations_for: AnnotationLookup | None = None
     annotations_bound = False
+    started = asyncio.get_running_loop().time()
     try:
-        async with asyncio.timeout(TURN_CEILING_S):
+        async with asyncio.timeout(LONGEST_TURN_CEILING_S) as limit:
             while True:
                 session = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
                 if not annotations_bound:
                     annotations_for = _annotations_for(runtime, auth, session)
                     annotations_bound = True
+                    # Nobody watches this turn: it runs to the unattended run limit at its place.
+                    ceiling_s = await unattended_ceiling_s(
+                        runtime.session_factory,
+                        runtime.settings,
+                        tenant_id=auth.tenant_id,
+                        agent_id=session.agent.id,
+                        platform=auth.platform,
+                        channel_id=rules_channel_id,
+                        thread_id=None,
+                    )
+                    limit.reschedule(started + ceiling_s)
                 if session.status == "terminated" or session.archived_at is not None:
                     return True
                 if session.status == "idle":

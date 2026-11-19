@@ -19,7 +19,8 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.approval_gate import resolve_approval_gate
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
-from daimon.core.features.surface import OVERRIDES_OFF
+from daimon.core.config import Settings
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import (
@@ -51,9 +52,9 @@ from daimon.core.stores.identity import (
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.thread_agent_bindings import get_binding
-from daimon.core.web_links import TenantLinks
+from daimon.core.web_links import TenantLinks, links_at
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class CredentialStatus(BaseModel):
@@ -481,7 +482,6 @@ async def load_here_card(
     github: GitHubDeploymentFacts,
     public_mcp_url: str | None,
     is_admin: bool,
-    gate_overrides_active: bool = False,
     is_dm: bool = False,
     caller_account_id: uuid.UUID | None,
     resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
@@ -493,8 +493,11 @@ async def load_here_card(
     caller_can_read_history: bool | None = None,
     category_channels_bot_can_view: Sequence[tuple[str, str]] = (),
     web: TenantLinks | None = None,
+    settings: Settings | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> HereCard:
-    """Load the current routing and credential names for one caller's place."""
+    """Load the current routing and credential names for one caller's place. `web` is
+    offered where `web_awareness` is On for the answering agent here (`links_at`)."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
     viewer = await load_rule_viewer(
         session,
@@ -505,6 +508,7 @@ async def load_here_card(
         platform=platform,
         thread_id=thread_id,
         default=default,
+        records=records,
     )
     roster = await load_roster(
         session,
@@ -515,7 +519,12 @@ async def load_here_card(
         thread_id=thread_id,
         default=default,
         viewer=viewer,
+        records=records,
     )
+    if web is not None:
+        answering = roster.answering.ma_agent_id if roster.answering is not None else None
+        place = FeaturePlace.of(tenant_id, platform, channel_id, thread_id, agent_id=answering)
+        web = None if records is None else await links_at(records, settings, place, web)
     resolved = await scoped_config_read.resolve(
         session,
         context=ScopeContext(
@@ -547,7 +556,10 @@ async def load_here_card(
             )
             if anthropic_disabled()
             else await get_setup_agent(
-                anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+                anthropic,
+                tenant_id=tenant_id,
+                ma_agent_id=roster.answering.ma_agent_id,
+                records=records,
             )
         )
         details = await load_agent_details(
@@ -564,6 +576,7 @@ async def load_here_card(
             is_admin=is_admin,
             channel_label=channel_id,
             preloaded_agent=ma_agent,
+            records=records,
         )
         # Keep aliases local to this card; get_agent's response stays unchanged.
         rule_names = agent_pin_names(ma_agent.name, ma_agent.metadata)
@@ -681,8 +694,6 @@ async def load_here_card(
         note = "Approvals: Ask (default)."
     else:
         note = f"Approvals: {shown[gate.value]} (set by the {gate.scope})."
-        if not gate_overrides_active:
-            note += f" {OVERRIDES_OFF}"
     card = card.model_copy(
         update={
             "approval_gate_note": note,

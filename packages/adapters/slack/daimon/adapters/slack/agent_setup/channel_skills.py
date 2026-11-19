@@ -131,6 +131,7 @@ async def run_channel_skills_submission(
                     actor_account_id=actor.account_id,
                     platform_skills=runtime.turn_deps.platform_skills,
                     surface="panel",
+                    records=runtime.sessionmaker,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await audit(outcome="error", reason="skills_unreadable")

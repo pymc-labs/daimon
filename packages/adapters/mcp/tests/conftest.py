@@ -18,6 +18,8 @@ import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
     db_clean,
+    db_committing_engine,
+    db_committing_pool,
     db_engine,
     db_nullpool_engine,
     db_schema,
@@ -56,6 +58,19 @@ def isolate_agent_faces() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def isolate_skill_reads() -> Iterator[None]:
+    """Skill sizes are measured in the background and latest versions are remembered
+    process-wide; neither may carry one test's fakes into the next."""
+    from daimon.core.skills.latest_versions import LATEST_VERSIONS
+    from daimon.core.turn.session_skills import cancel_pending_measures
+
+    LATEST_VERSIONS.clear()
+    yield
+    cancel_pending_measures()
+    LATEST_VERSIONS.clear()
+
+
+@pytest.fixture(autouse=True)
 def reset_environment_chip() -> Iterator[None]:
     """create_mcp_app sets the page shell's environment chip process-wide; an
     app built with a non-empty name must not leak the chip into later pages."""
@@ -88,6 +103,19 @@ async def committing_sessionmaker(
     schema mapping is needed here.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture
+async def pooled_sessionmaker(
+    db_committing_engine: AsyncEngine,  # noqa: F811
+    db_clean: None,  # noqa: F811
+) -> async_sessionmaker[AsyncSession]:
+    """Like `committing_sessionmaker` on the production-sized pool.
+
+    For code that opens a second session while one is open (a records read inside
+    a transaction): the two-connection engine behind `db_session` has no room.
+    """
+    return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)

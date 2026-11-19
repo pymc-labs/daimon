@@ -10,7 +10,12 @@ The channel default and channel environment rows have no guard in the model yet.
 from __future__ import annotations
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import (
+    CHANNEL_SCOPE_PREFIX,
+    AgentRule,
+    ChannelRule,
+    TenantAccessPolicy,
+)
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -33,6 +38,9 @@ OPEN = TenantAccessPolicy()
 
 MEMBER = Subject(is_admin=False, platform_user_id="U_MEM")
 ADMIN = Subject(is_admin=True, platform_user_id="U_ADM")
+ADMIN_INSIDE = Subject(
+    is_admin=True, platform_user_id="U_ADM", origin_channel_ids=frozenset({"C_ACME"})
+)
 BEARER = Subject(is_admin=True, platform_user_id=None)
 TWO_CHANNELS = TenantAccessPolicy(agent_channel_pins={"acme": ("C_ACME", "C_OPS")})
 AGENT_KEY_ADMIN = Subject(is_admin=True, platform_user_id="U_ADM", via_agent_key=True)
@@ -270,10 +278,21 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin mints bound anywhere, as before",
+        "server admin mints bound from inside the channel",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.MINT_CODING_TOKEN,
+            "agent": ACME,
+            "place": INSIDE,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel mints nothing for its agent",
         ACME_SEALED,
         {"subject": ADMIN, "action": Action.MINT_CODING_TOKEN, "agent": ACME, "place": INSIDE},
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel default: nobody binds a pinned agent outside its pin ---
     (
@@ -578,7 +597,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
     ),
     # --- Session reads (G_seal_session_read, admin trust model) ---
     (
-        "admin_trust admin reads another account's sealed channel session from the hub",
+        "admin_trust admin never reads another account's sealed channel session from the hub",
         SEALED,
         {
             "subject": ADMIN,
@@ -586,7 +605,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
         },
-        ALLOW,
+        _deny("not_owner"),
     ),
     (
         "admin_trust admin never reads another member's private DM",
@@ -692,10 +711,19 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "isolation server admin in their own DM",
+        "isolation server admin never runs a home agent in web chat, even with web in its rule",
+        TenantAccessPolicy(
+            channel_rules={"C_ACME": ChannelRule(readers="own", writers="own")},
+            agent_rules={"acme": AgentRule(runs_in=("C_ACME", "web"))},
+        ),
+        {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.WEB, "agent": ACME},
+        _deny("runs_elsewhere"),
+    ),
+    (
+        "isolation server admin never runs a home agent in their own DM",
         ISOLATED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
-        ALLOW,
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation own agent never posts outside",
@@ -1112,7 +1140,18 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "server admin opens the network of a sealed channel",
+        "server admin opens the network of a sealed channel from inside it",
+        ACME_SEALED,
+        {
+            "subject": ADMIN_INSIDE,
+            "action": Action.SET_CHANNEL_ENVIRONMENT,
+            "place": Place(channel_id="C_ACME"),
+            "open_network": True,
+        },
+        ALLOW,
+    ),
+    (
+        "server admin outside a sealed channel cannot open its network",
         ACME_SEALED,
         {
             "subject": ADMIN,
@@ -1120,7 +1159,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "place": Place(channel_id="C_ACME"),
             "open_network": True,
         },
-        ALLOW,
+        Decision(False, "sealed_channel"),
     ),
     # --- channel protection and seals: server admins only ---
     (
@@ -1167,6 +1206,34 @@ def test_place_from_origin_maps_a_dm_scope_to_no_channel() -> None:
     )
     assert Place.from_origin(parent_channel_id="C1", thread_id=None) == Place(
         channel_id="C1", parent_channel_id="C1"
+    )
+
+
+def test_a_channel_timer_scope_is_its_parent_channel_for_every_rule() -> None:
+    """An unattended channel turn's `ch:` scope is a queue key, not a place."""
+    timer = Place.from_origin(parent_channel_id="C_ACME", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc")
+    assert timer == INSIDE
+    for policy, place in (
+        (PINNED, timer),
+        (
+            PROTECTED,
+            Place.from_origin(parent_channel_id="C_PROT", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"),
+        ),
+    ):
+        normal = Place.from_origin(parent_channel_id=place.parent_channel_id, thread_id=None)
+        for action in (Action.RUN_AGENT, Action.START_TURN):
+            assert authorize(
+                policy, subject=MEMBER, action=action, agent=ACME, place=place
+            ) == authorize(policy, subject=MEMBER, action=action, agent=ACME, place=normal)
+    assert authorize(PINNED, subject=MEMBER, action=Action.RUN_AGENT, agent=ACME, place=timer)
+    assert not authorize(
+        PINNED,
+        subject=MEMBER,
+        action=Action.RUN_AGENT,
+        agent=ACME,
+        place=Place.from_origin(
+            parent_channel_id="C_OTHER", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"
+        ),
     )
 
 

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 from uuid import uuid4
 
 from anthropic import AsyncAnthropic
-from daimon.core.anthropic_guard import require_anthropic_allowed
+from daimon.core.anthropic_guard import AnthropicUnconfigured, require_anthropic_allowed
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
@@ -25,8 +25,10 @@ from mux.drivers.anthropic import (
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.agent_record_ports import RecordRoutedManagedAgents
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.deps import TurnDeps
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -170,19 +172,59 @@ def turn_backend(request: TurnBackendRequest) -> TurnBackend:
     return bound
 
 
+@overload
 def managed_agents(
     client: AsyncAnthropic,
     *,
     scope: Scope | None = None,
     resources: frozenset[tuple[str, str]] = frozenset(),
     secrets: SecretResolver | None = None,
+    records: None = None,
+) -> AnthropicManagedAgents: ...
+@overload
+def managed_agents(
+    client: AsyncAnthropic | None,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession],
+) -> RecordRoutedManagedAgents: ...
+@overload
+def managed_agents(
+    client: AsyncAnthropic | None,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession] | None,
+) -> AnthropicManagedAgents: ...
+def managed_agents(
+    client: AsyncAnthropic | None,
+    *,
+    scope: Scope | None = None,
+    resources: frozenset[tuple[str, str]] = frozenset(),
+    secrets: SecretResolver | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AnthropicManagedAgents:
+    """The one Managed Agents constructor for host code.
+
+    With `records`, agent and environment ports serve Daimon-owned records from
+    the database and refuse Anthropic only for calls that reach it; `client` may
+    then be None (a keyless install).
+    """
+    authorization = ResourceAuthorization(scope, resources) if scope is not None else None
+    if records is not None:
+        # The record store imports host modules that import this one.
+        from daimon.core.agent_record_ports import RecordRoutedManagedAgents
+
+        return RecordRoutedManagedAgents(
+            client, records=records, authorization=authorization, secrets=secrets
+        )
     require_anthropic_allowed()
-    return AnthropicManagedAgents(
-        client,
-        authorization=ResourceAuthorization(scope, resources) if scope is not None else None,
-        secrets=secrets,
-    )
+    if client is None:
+        raise AnthropicUnconfigured("No Anthropic key is configured on this Daimon install.")
+    return AnthropicManagedAgents(client, authorization=authorization, secrets=secrets)
 
 
 def resource_ref(
@@ -210,6 +252,15 @@ def resource_scope(
         account_id=account_id,
         principal_id="daimon",
         authorization_id=authorization_id,
+    )
+
+
+def owner_turn_scope(scope: Scope, shared_owner: str | None) -> Scope:
+    """A shared thread's provider state runs as the thread's own owner, not the caller."""
+    if shared_owner is None:
+        return scope
+    return resource_scope(
+        tenant_id=scope.tenant_id, account_id=shared_owner, authorization_id=scope.authorization_id
     )
 
 

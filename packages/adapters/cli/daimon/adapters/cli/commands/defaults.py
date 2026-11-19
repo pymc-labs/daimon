@@ -12,6 +12,7 @@ from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
 from daimon.core.defaults.apply import apply_defaults, rename_selfhosted_defaults
+from daimon.core.defaults.owned import owned_defaults_possible
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -91,15 +92,10 @@ async def defaults_apply(
     defaults_root: Path,
 ) -> None:
     client = None if rt.settings.anthropic.api_key is None else rt.anthropic
-    if client is None:
-        # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
-        # there is no Anthropic-backed default agent/environment/
-        # skill set to reconcile. `daimon openai init` seeds the OpenAI
-        # equivalent separately, once the operator has a project and model.
+    if client is None and not owned_defaults_possible():
         console.print(
-            "defaults apply: no DAIMON_ANTHROPIC__API_KEY configured — skipped the "
-            "Anthropic default agent/environment/skill reconciliation. Run "
-            "`daimon openai init` to provision and seed defaults on OpenAI instead."
+            "defaults apply: no Anthropic, OpenAI or Gemini key is configured, so there is "
+            "nothing to run the default agents on. Set a provider key and run it again."
         )
         # Self-hosted records need only Postgres, so they still move.
         report = await rename_selfhosted_defaults(
@@ -113,7 +109,7 @@ async def defaults_apply(
         # spec checks, so a failure there leaves every self-hosted record untouched.
         report = await apply_defaults(
             rt.sessionmaker,
-            client,
+            rt.anthropic,
             defaults_root,
             dry_run=dry_run,
             public_url=public_url,

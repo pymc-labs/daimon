@@ -90,6 +90,8 @@ TAG_LABELS: dict[str, str] = {
     "admin": "admin only",
     "agent-chat": "agent tokens only",
     "discord": "Discord callers",
+    "host-memory": "OpenAI and Gemini agents",
+    "host-web-fetch": "OpenAI, Gemini and self-hosted agents",
     "scope:agents:archive": "operator tokens with agents:archive",
     "scope:channels:write": "operator tokens with channels:write",
     "scope:promo:create": "operator tokens with promo:create",

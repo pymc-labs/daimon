@@ -212,7 +212,7 @@ async def daimon_rule_tools_for(
     ).tools
 
 
-async def _rule_for(
+async def rule_for(
     policy: ToolSafetyPolicy,
     call: ToolCall,
     rules_for: RuleLookup | None,
@@ -321,7 +321,7 @@ def _proxied_approval_refusal(
     return ToolConfirmationResult(allow=False, deny_message=message)
 
 
-def _read_error_verdict(verdict: ToolVerdict, *, attended: bool) -> ToolVerdict:
+def read_error_verdict(verdict: ToolVerdict, *, attended: bool) -> ToolVerdict:
     if verdict.reason == "denied_by_operator":
         return verdict
     return ToolVerdict(
@@ -544,7 +544,7 @@ def unattended_decider(
         call = unwrap_daimon_call(call, trusted_servers)
         if (refusal := _proxied_approval_refusal(call, sent_as, attended=False)) is not None:
             return refusal
-        rule, read_error = await _rule_for(
+        rule, read_error = await rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
         verdict = await tool_call_verdict(
@@ -557,7 +557,7 @@ def unattended_decider(
             annotations_for=annotations_for,
         )
         if read_error:
-            verdict = _read_error_verdict(verdict, attended=False)
+            verdict = read_error_verdict(verdict, attended=False)
         log.info(
             "tool_safety.decided",
             tool=call.key,
@@ -631,7 +631,7 @@ def interactive_decider(
         call = unwrap_daimon_call(call, trusted_servers)
         if (refusal := _proxied_approval_refusal(call, sent_as, attended=True)) is not None:
             return refusal
-        rule, read_error = await _rule_for(
+        rule, read_error = await rule_for(
             policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
         )
         verdict = await tool_call_verdict(
@@ -644,11 +644,10 @@ def interactive_decider(
             annotations_for=annotations_for,
         )
         if read_error:
-            verdict = _read_error_verdict(verdict, attended=True)
+            verdict = read_error_verdict(verdict, attended=True)
         protected_name = gate_protected_tool(call.tool_name)
         if (
             policy.enabled
-            and policy.allow_gate_overrides
             and not protected_name
             and approval_gate_for is not None
             and call.server_name in (server_urls or {})
@@ -746,7 +745,7 @@ def interactive_decider(
         log.info("tool_safety.answered", tool=call.key, answer=answer)
         if answer == "approved":
             if policy.enabled and policy.agent_rules and rules_for is not None:
-                latest, read_failed = await _rule_for(
+                latest, read_failed = await rule_for(
                     policy,
                     call,
                     rules_for,

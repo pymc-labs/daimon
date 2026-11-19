@@ -33,16 +33,9 @@ class McpFlags(BaseModel):
 
 class DiscordFlags(BaseModel):
     credential_form_expiry: bool = False
-    writers_none_notice: bool = False
-    tenant_cap_waiting_card: bool = False
-
-
-class TurnFlags(BaseModel):
-    native_footer_cost: bool = False
 
 
 class CoreFlags(BaseModel):
-    turn: TurnFlags = TurnFlags()
     mcp: McpFlags = McpFlags()
     discord: DiscordFlags = DiscordFlags()
 
@@ -53,11 +46,8 @@ class HostFlags(BaseModel):
 
 def apply_flags(profile):
     configured = profile.apply(CoreFlags(), service="core")
-    assert configured.turn.native_footer_cost is True
     assert configured.mcp.require_routine_destination is True
     assert configured.discord.credential_form_expiry is True
-    assert configured.discord.writers_none_notice is True
-    assert configured.discord.tenant_cap_waiting_card is True
     for service in ("notebook", "report"):
         host = HostFlags()
         assert profile.apply(host, service=service) is host
@@ -219,7 +209,7 @@ async def test_missing_flags_or_fixture_binding_produce_no_opt_in_dispatch_or_de
 ):
     def available(self):
         if self.name == "opt-in-product" and missing_fields:
-            raise profiles.ProductProfileUnavailable(("core.turn.native_footer_cost",))
+            raise profiles.ProductProfileUnavailable(("core.discord.credential_form_expiry",))
 
     monkeypatch.setattr(profiles.QAProductProfile, "require_available", available)
     opted = AsyncMock(side_effect=AssertionError("must not dispatch"))
@@ -365,11 +355,12 @@ def test_copied_execution_boards_still_validate_the_frozen_matrix(corruption):
         ProductProfileReport(default_board=default, opt_in_board=opted)
 
 
-def test_six_flag_receipt_cannot_certify_the_seven_switch_profile():
+def test_a_receipt_missing_a_flag_cannot_certify_the_opt_in_profile():
+    """An opt-in board that omits a declared flag is refused."""
     opt_in = board(first="PASS", profile="opt-in-product")
     data = opt_in.model_dump(exclude={"scored_counts"})
     data["applied_flags"] = tuple(
-        flag for flag in opt_in.applied_flags if flag != "core.discord.tenant_cap_waiting_card"
+        flag for flag in opt_in.applied_flags if flag != "core.discord.credential_form_expiry"
     )
     for cell in data["cells"]:
         cell.pop("status")

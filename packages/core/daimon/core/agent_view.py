@@ -111,7 +111,8 @@ class ModelChoice(_Doc):
     id: str
     backend: Backend
     speed: Literal["standard", "fast"]
-    effort: Effort
+    #: None runs the model's own default; any level shown was chosen and is stored.
+    effort: Effort | None
 
 
 class BuiltinTool(_Doc):
@@ -291,7 +292,7 @@ def _model(agent: BetaManagedAgentsAgent, backend: AgentBackendRevision | None) 
             id=backend.model or backend_selection(backend.backend).model or "",
             backend=backend.backend,
             speed="standard",
-            effort=_DEFAULT_EFFORT,
+            effort=backend.effort,
         )
     choice = model_choice_id(agent.model)
     effort = (agent.model.model_extra or {}).get("effort")
@@ -1020,7 +1021,10 @@ async def fetch_tenant_agent(
     """The tenant's live agent ``ma_agent_id``; None when it is missing, archived or foreign."""
     try:
         agent = await retrieve_agent(
-            deps.client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            deps.client,
+            ma_agent_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=deps.session_factory,
         )
     except (anthropic.NotFoundError, ScopeViolation):
         return None

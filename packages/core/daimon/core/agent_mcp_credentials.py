@@ -44,6 +44,7 @@ import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_attach import McpServerReplaceRefusedError
 from daimon.core.mcp_personal_servers import hidden_mcp_server_names
@@ -66,6 +67,7 @@ from daimon.core.mux_compat import (
     update_credential,
 )
 from daimon.core.stores import agent_mcp_credentials as cred_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from mux.contracts.ids import Scope
 from sqlalchemy import text
@@ -699,6 +701,7 @@ async def forget_mirrored_mcp_token(
                 "mcp_credentials.copy_delete_failed",
                 vault_id=vault_id,
                 error=type(err).__name__,
+                causes=backend_refusal_causes(err),
             )
             failed.append(vault_id)
     log.info(
@@ -749,8 +752,12 @@ async def resolve_hidden_mcp_server_names(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
     server_urls: Mapping[str, str],
+    daimon_refreshes: bool = False,
 ) -> frozenset[str]:
     """The servers to leave off this caller's session, read from the DB.
+
+    `daimon_refreshes` (a non-MA backend) also reads the caller's connector
+    tokens, so a grant without one reads as not signed in.
 
     The OAuth twin of `mirror_credentials_into_vault`: a token stored HERE
     reaches every caller, so the server stays; a grant somebody drove through
@@ -772,10 +779,18 @@ async def resolve_hidden_mcp_server_names(
         credentials = await cred_store.list_credential_revisions(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
+        token_urls = (
+            await connector_tokens_store.list_connector_token_urls(
+                session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+            )
+            if daimon_refreshes
+            else None
+        )
     return hidden_mcp_server_names(
         grants,
         agent_id=agent_id,
         account_id=account_id,
         shared_server_urls=[url for _, url, _ in credentials],
         server_urls=server_urls,
+        connector_token_urls=token_urls,
     )

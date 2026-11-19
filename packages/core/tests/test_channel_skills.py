@@ -583,8 +583,9 @@ def test_a_channel_skill_named_like_a_built_in_is_left_out() -> None:
 
 
 def test_only_a_server_admin_may_set_a_channels_skills() -> None:
+    policy = TenantAccessPolicy()
     admin = build_subject(is_admin=True, platform_user_id="U1")
     member = build_subject(is_admin=False, platform_user_id="U2")
-    assert may_set_channel_skills(admin, "C1")
-    refused = may_set_channel_skills(member, "C1")
+    assert may_set_channel_skills(policy, admin, "C1")
+    refused = may_set_channel_skills(policy, member, "C1")
     assert not refused and refused.reason == "admin_required"

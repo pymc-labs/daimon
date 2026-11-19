@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from dataclasses import replace
 
 import jwt as pyjwt
 import structlog
@@ -35,6 +36,7 @@ from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.agent_setup.tenant import resolve_tenant_for_panel
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
@@ -121,6 +123,7 @@ async def send_coding_tools_access(
                 runtime.anthropic,
                 tenant_id=tenant_id,
                 ma_agent_id=card_agent.ma_agent_id,
+                records=runtime.sessionmaker,
             )
         except DaimonError:
             await interaction.response.send_message(
@@ -137,6 +140,7 @@ async def send_coding_tools_access(
             runtime.anthropic,
             tenant_id=tenant_id,
             name=selected.name,
+            records=runtime.sessionmaker,
         )
     if ma_agent is None:
         log.info("agent_setup.coding_tools.agent_missing", agent_name=selected.name)
@@ -157,6 +161,8 @@ async def send_coding_tools_access(
                 caller=caller,
                 action=None,
             )
+            # Where the press came from; a sealed channel's own agent is for people inside it.
+            subject = replace(subject, origin_channel_ids=interaction_origin(interaction))
             owned = not subject.is_admin and await owns_agent(
                 session,
                 tenant_id=tenant_id,

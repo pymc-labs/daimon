@@ -23,6 +23,7 @@ from daimon.core.health import start_liveness_responder
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.observability import init_sentry
 from daimon.core.runtime_health import runtime_health
+from daimon.core.turn.runtimes import preload_channel_runtimes
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.web.async_client import AsyncWebClient
@@ -85,6 +86,7 @@ async def main() -> None:
         # 8083 liveness responder co-located on the asyncio loop so a hung
         # loop fails the probe and Fly restarts the process.
         health_server = await start_liveness_responder(settings.slack.health_port)
+        await preload_channel_runtimes()  # before recovery or any listener runs a turn
         log.info("starting_slack_listener", health_port=settings.slack.health_port)
         try:
             # Recovery must take its marker snapshot before any turn can

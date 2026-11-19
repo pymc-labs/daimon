@@ -16,7 +16,7 @@ from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import derive_glyph, panel_rows, routine_for_reader, routine_label
 from daimon.core.stores.routines import list_routines_for_tenant
 from slack_sdk.web.async_client import AsyncWebClient
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["load_routines"]
 
@@ -27,6 +27,7 @@ async def load_routines(
     *,
     tenant_id: uuid.UUID,
     viewer_user_id: str | None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap at 25, and decorate per entry.
 
@@ -50,7 +51,7 @@ async def load_routines(
     if viewer_user_id is not None:
         rows = [row for row in rows if row.created_by_user_id == viewer_user_id]
     rows = [routine_for_reader(row, user_id=viewer_user_id) for row in rows]
-    agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
 
     agent_name_map: dict[str, str] = {}
     for agent in agents:

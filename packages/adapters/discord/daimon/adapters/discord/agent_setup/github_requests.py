@@ -367,7 +367,10 @@ async def handle_request_card(interaction: discord.Interaction, runtime: Discord
         await reply("Only a server admin can approve GitHub requests.")
         return True
     live_agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=request.tenant_id, agent_id=request.agent_id
+        runtime.anthropic,
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        records=runtime.sessionmaker,
     )
     if live_agent is None or live_agent.id != request.ma_agent_id:
         await reply("This agent is unavailable.")

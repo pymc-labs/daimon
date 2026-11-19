@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from daimon.core.access_policy import Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.errors import DaimonError, StaleChannelValue
+from daimon.core.permissions import SEALED_REFUSAL, sealed_outside
 from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_access_policy,
@@ -76,6 +77,7 @@ async def set_approval_gate(
     subject: Subject,
     record: ApprovalChange | None = None,
     expected: Approvals | None = None,
+    note: str | None = None,
 ) -> ApprovalGate:
     """Authorize before I/O, then merge and audit atomically under the policy lock.
 
@@ -83,6 +85,7 @@ async def set_approval_gate(
     ownership of a thread. None targets the server, otherwise an exact rule key.
     With `record`, the change is also written to `channel_changes` in the same
     transaction; with `expected`, a target whose own value differs is refused as stale.
+    `note` (an operator's stated reason) is added to the audit row.
     """
     if not authorize(TenantAccessPolicy(), subject=subject, action=Action.SET_APPROVAL_GATE):
         raise DaimonError("Only a server or workspace admin can change approval settings.")
@@ -94,6 +97,8 @@ async def set_approval_gate(
     async with policy_write_transaction(factory, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
+        if sealed_outside(policy, subject.inside, channel_ids=(target,), operator=subject.operator):
+            raise DaimonError(SEALED_REFUSAL)
         if target is None:
             before = policy.approvals
             changed = policy.model_copy(
@@ -128,7 +133,7 @@ async def set_approval_gate(
             tool_name="approval_gate",
             operation=Action.SET_APPROVAL_GATE,
             outcome="allowed",
-            reason=f"{target or 'server'}:{before}->{value}",
+            reason=f"{target or 'server'}:{before}->{value}" + (f" ({note})" if note else ""),
         )
         if record is not None:
             await _record(

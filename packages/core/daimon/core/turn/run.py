@@ -27,6 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import (
     ConfirmationHook,
@@ -37,6 +38,7 @@ from daimon.core.context_prompt import TurnContext, context_prompt
 from daimon.core.context_provider import ContextHook, ContextRequest, LoadedProvider
 from daimon.core.errors import TurnError
 from daimon.core.features.eval_key import EvalKey
+from daimon.core.features.snapshot import deployment_on
 from daimon.core.handoff_context import (
     render_lost_workspace_framing,
     render_previous_session,
@@ -47,8 +49,13 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
-from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
+from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
+from daimon.core.output_runtime import (
+    AnthropicOutputRuntime,
+    ArtifactOutputRuntime,
+    OutputRuntime,
+)
 from daimon.core.repo_memory import (
     MemoryState,
     record_memory_prefix,
@@ -63,6 +70,11 @@ from daimon.core.session_snapshot import session_mcp_servers
 from daimon.core.stores.agent_notices import record_agent_notices, take_agent_notices
 from daimon.core.stores.domain import TaskContinuationRow, TransferKind
 from daimon.core.stores.gemini_runtime_state import complete
+from daimon.core.stores.pending_carry_overs import (
+    delete_pending_carry_over,
+    get_pending_carry_over,
+    record_pending_carry_over,
+)
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -86,7 +98,6 @@ from daimon.core.turn.agent_notices import (
     LOST_WORKSPACE_NOTICE,
     mcp_failure_notices,
     render_agent_notices,
-    stale_switch_notice,
 )
 from daimon.core.turn.approvals import (
     agent_rule_lookup,
@@ -103,8 +114,15 @@ from daimon.core.turn.ceiling import (
     turn_deadline,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn, unattended_sends
+from daimon.core.turn.driver import (
+    SEND_ATTEMPTED,
+    SEND_CLAIM,
+    SendClaim,
+    run_turn,
+    unattended_sends,
+)
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.invocation import unattended_invocation
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -114,7 +132,6 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
-from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
@@ -142,16 +159,20 @@ from daimon.core.turn.provider_actions import (
     ProviderActionRequester,
 )
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
+    grant_owner_check,
+    is_provider_turn,
+    native_owner_gate,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
+    unattended_provider_origin,
 )
 from daimon.core.turn.unattended_capabilities import (
     ServerTool,
+    UnattendedEntryPoint,
     capability_policy,
     capability_posture,
     constrain_capabilities,
@@ -161,7 +182,8 @@ from daimon.core.turn.unattended_capabilities import (
     send_capabilities,
     unattended_entry_point,
 )
-from daimon.core.turn_origin import current_origin_id, execution_origin
+from daimon.core.turn.web_search_sources import claude_searches, native_searches, sources_prefix
+from daimon.core.turn_origin import ExecutionFlags, current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
@@ -203,7 +225,10 @@ def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> Billing
             )
         return Billed(record=cast(UsageRecorder, prepared._record))  # pyright: ignore[reportPrivateUsage]
     scope = admitted_session_scope(
-        prepared.admission, tenant_id=tenant_id, session_id=prepared.ma_session_id
+        prepared.admission,
+        tenant_id=tenant_id,
+        session_id=prepared.ma_session_id,
+        prepared=prepared._scope,  # pyright: ignore[reportPrivateUsage]
     )
     if ref is None or (
         ref.kind != "session"
@@ -217,7 +242,6 @@ def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> Billing
         raise ScopeViolation(prepared.ma_session_id, "native recorder has no authorized session")
     return ObservationBilled(
         record=cast(ObservationRecorder, prepared._record),  # pyright: ignore[reportPrivateUsage]
-        native_footer_cost=prepared.native_footer_cost,
     )
 
 
@@ -284,6 +308,45 @@ def _turn_port_kwargs(
     return result
 
 
+def _turn_output_runtime(
+    deps: TurnDeps,
+    admission: Admission,
+    session_id: str,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+) -> OutputRuntime | None:
+    """The finished turn's outputs on its own provider, or None when it has none."""
+    try:
+        kwargs = _turn_port_kwargs(
+            deps,
+            admission,
+            session_id,
+            tenant_id=tenant_id,
+            provider_backend=prepared.backend,
+            provider_session=prepared.session_ref,
+            provider_runtime=prepared.runtime,
+            provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+        )
+        scope = kwargs.get("scope")
+        if scope is None:
+            return None
+        if "profile" not in kwargs:
+            return AnthropicOutputRuntime(deps.anthropic, session_id, scope=scope)
+        backend = kwargs.get("backend")
+        session = kwargs.get("session_ref")
+        request = kwargs.get("backend_request")
+        if backend is None and request is not None:
+            bound = turn_backend(request)
+            backend, session = bound.backend, bound.session
+        if backend is None or session is None:
+            return None
+        return ArtifactOutputRuntime(backend.artifacts, session, scope=scope)
+    except (UnsupportedCapability, ScopeViolation):
+        log.info("output_delivery.no_runtime", session_id=session_id)
+        return None
+
+
 log = structlog.get_logger(__name__)
 #: How long a turn waits for its end-of-turn finalizer (credential revocation)
 #: before returning; a slower finalizer keeps running in the background.
@@ -323,12 +386,17 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
             scope=scope,
             record=record,
             deadline=time.monotonic() + SETTLE_BUDGET_S,
+            streamed=True,
         )
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.
         log.info("billing.settle_skipped", managed_session_id=session_id)
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session_id)
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session_id,
+            causes=backend_refusal_causes(error),
+        )
 
 
 __all__ = ["RunOutcome", "run_prepared_turn"]
@@ -358,6 +426,9 @@ class RunOutcome:
     recovered: bool
     continuity: ContinuityOutcome = ContinuityOutcome()
     loss_told: bool = False
+    # Where this turn's output files live; None when its provider has none to
+    # deliver or the turn never reached a provider.
+    outputs: OutputRuntime | None = None
 
     @property
     def termination(self) -> TerminationReason:
@@ -568,12 +639,27 @@ async def _replay_previous_session(
             "turn.recovery_transcript_unavailable",
             session_id=session_id,
             error=str(err)[:200],
+            causes=backend_refusal_causes(err),
         )
         return None
     turns = select_recent_turns(events)
     if not turns:
         return None
     return render_previous_session(turns, from_agent_name=from_agent_name)
+
+
+def _web_search_sources(prepared: PreparedTurn) -> str:
+    """The sources rule when this turn's provider tools include web search."""
+    native = prepared._native_spec  # pyright: ignore[reportPrivateUsage]
+    on = (
+        native_searches(native)
+        if native is not None
+        else claude_searches(
+            [tool.model_dump(mode="json") for tool in prepared.admission.agent.tools],
+            prepared.admission.toolset,
+        )
+    )
+    return sources_prefix(on=on)
 
 
 def _with_prefix(prefix: str, message: str) -> str:
@@ -958,10 +1044,91 @@ async def _with_handoff_summary(
         )
     if taken is None:
         return user_message, None
+    if getattr(prepared.admission, "relay_scoped", False):
+        # A relay turn is handed no summary: it is taken (so it is not kept) and dropped.
+        log.info("turn.handoff_summary_dropped_for_relay", thread_id=thread_id)
+        return user_message, None
     from_name, summary = taken
     log.info("turn.handoff_summary_seeded", thread_id=thread_id, chars=len(summary))
     seeded = f"{render_handoff_summary(summary, from_agent_name=from_name)}\n\n{user_message}"
     return seeded, taken
+
+
+async def _with_pending_carry_over(
+    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
+) -> tuple[PreparedTurn, bool]:
+    """The turn with every replacement framing not yet sent, and whether one waits.
+
+    The framing exists only on the turn that prepared the replacement: a retry reuses
+    the session and prepares none, so it is kept in the database until the first send
+    claims it (`SEND_CLAIM`), on every path. A later replacement takes over its
+    predecessor's unsent framing, and a kept framing goes ahead of a turn's own.
+    """
+    continuity = prepared.continuity
+    replaced = continuity.state in ("replaced", "replaced_after_loss")
+    # Only a replacement's session not yet sent to can hold one.
+    if not replaced and (prepared.watermark is not None or not prepared.reused):
+        return prepared, False
+    session_id = prepared.ma_session_id
+    try:
+        async with deps.sessionmaker.begin() as db:
+            held = continuity.predecessor_session_id if replaced else session_id
+            kept = (
+                await get_pending_carry_over(db, tenant_id=tenant_id, session_id=held)
+                if held is not None
+                else None
+            )
+            merged = continuity
+            if kept is not None:
+                merged = replace(
+                    continuity,
+                    user_prefix="\n\n".join(
+                        text for text in (kept.user_prefix, continuity.user_prefix) if text
+                    ),
+                    system_blocks=(*kept.system_blocks, *continuity.system_blocks),
+                )
+            waits = kept is not None or (
+                replaced and bool(merged.user_prefix or merged.system_blocks)
+            )
+            if replaced and kept is not None and held is not None:
+                await delete_pending_carry_over(db, tenant_id=tenant_id, session_id=held)
+            if replaced and waits:
+                await record_pending_carry_over(
+                    db,
+                    tenant_id=tenant_id,
+                    session_id=session_id,
+                    account_id=prepared.admission.account_id,
+                    user_prefix=merged.user_prefix,
+                    system_blocks=merged.system_blocks,
+                )
+    except SQLAlchemyError as error:  # a lost framing must never block the turn itself
+        log.warning("turn.carry_over_keep_failed", error=type(error).__name__)
+        return prepared, False
+    if kept is not None:
+        log.info("turn.carry_over_restored", session_id=session_id, from_session_id=held)
+    return replace(prepared, continuity=merged), waits
+
+
+def _claim_carry_over(deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> SendClaim:
+    """Drop the kept framing as the first send claims it, so it is never sent twice.
+
+    The send that finds the row already gone (another turn on the session claimed it
+    first) goes without the framing. Only the first send claims: a later one is a
+    retry or a recovery, which carries its own framing.
+    """
+    claimed: list[bool] = []
+
+    async def take() -> bool:
+        if claimed:
+            return True
+        async with deps.sessionmaker.begin() as db:
+            held = await delete_pending_carry_over(
+                db, tenant_id=tenant_id, session_id=prepared.ma_session_id
+            )
+        claimed.append(True)
+        return held
+
+    return SendClaim(take=take, user_prefix=prepared.continuity.user_prefix)
 
 
 async def _restore_handoff_summary(
@@ -1015,12 +1182,9 @@ async def _with_agent_notices(
     """The message and its recovery reseed after what Daimon has to tell the agent.
 
     Queued notices are failures of this agent's earlier turns in the thread; a
-    GitHub key restart and a stale switch are this turn's own. Also returns the
-    queued and restart notices, so a turn that never sent its message can queue
-    them again.
+    GitHub key restart is this turn's own. Also returns the queued and restart
+    notices, so a turn that never sent its message can queue them again.
     """
-    stale = prepared.admission.backend_switch_stale
-    own = [stale_switch_notice(stale)] if stale is not None else []
     try:
         async with deps.sessionmaker.begin() as db:
             taken = await take_agent_notices(
@@ -1040,10 +1204,10 @@ async def _with_agent_notices(
         log.warning("turn.agent_notices_take_failed", error=type(error).__name__)
         taken, restarted = [], False
     notices = [*taken, GITHUB_KEY_RESTART_NOTICE] if restarted else list(taken)
-    if not notices and not own:
+    if not notices:
         return user_message, reseed_user_message, []
-    log.info("turn.agent_notices_sent", count=len(notices) + len(own))
-    block = render_agent_notices([*notices, *own])
+    log.info("turn.agent_notices_sent", count=len(notices))
+    block = render_agent_notices(notices)
 
     async def reseed() -> str:  # a recovered session is told too
         return f"{block}\n\n{await reseed_user_message()}"
@@ -1122,6 +1286,9 @@ async def run_prepared_turn(
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    prepared, carry_over_pending = await _with_pending_carry_over(
+        deps, prepared, tenant_id=tenant_id
+    )
     seeded: tuple[str, str] | None = None
     # Marked by the driver once the message is handed to the provider: a summary
     # goes back only if this turn never sent it (`_restore_handoff_summary`).
@@ -1160,6 +1327,9 @@ async def run_prepared_turn(
         else None
     )
     marking = SEND_ATTEMPTED.set(sent)
+    claiming = SEND_CLAIM.set(
+        _claim_carry_over(deps, prepared, tenant_id=tenant_id) if carry_over_pending else None
+    )
     revision = prepared.admission.backend_revision
     backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
     profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
@@ -1233,6 +1403,7 @@ async def run_prepared_turn(
     finally:
         try:
             SEND_ATTEMPTED.reset(marking)
+            SEND_CLAIM.reset(claiming)
             finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
             if finalize is not None:
                 # Credential revocation must survive a second cancel of this task:
@@ -1429,11 +1600,6 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
-    if origin in _CHAT_RENDERED_ORIGINS:
-        # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
-        # will be sent or run, so a scrubbed card over the original call would misstate it.
-        lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)
-
     if job_row is not None and (job_row.reason != "job_finished" or attended is not False):
         raise ValueError("Job completion turns must be explicitly unattended")
     if job_row is not None and (
@@ -1449,7 +1615,7 @@ async def run_prepared_turn_impl(
     ):
         raise ValueError("Watch turns must be explicitly unattended")
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    unattended = not (attended if attended is not None else origin != "routine")
+    unattended = unattended_invocation(origin, attended)
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1481,6 +1647,9 @@ async def run_prepared_turn_impl(
         platform=platform,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
+    if (observation := current_outcome.get()) is not None:
+        observation.tool_server_names = prepared.admission.shown("tool_server_names", platform)
+    sources = _web_search_sources(prepared)
     memory_state = await _repo_memory_state(
         deps,
         prepared,
@@ -1489,7 +1658,7 @@ async def run_prepared_turn_impl(
         unattended=unattended,
     )
     repo_memory = memory_state.prefix
-    prefix = context + plans + prepared.continuity.user_prefix
+    prefix = context + plans + sources + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
 
@@ -1629,10 +1798,18 @@ async def run_prepared_turn_impl(
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
         origin_id = current_origin_id.get()
+        # Host built-ins follow `ENTRY_POINT_POLICY` when nobody attends; set below.
+        host_builtins = [not unattended]
 
         @contextlib.asynccontextmanager
         async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
-            with execution_origin(origin_id):
+            flags = ExecutionFlags(
+                hold=admission.hold,
+                slack_turn_context_id=admission.slack_turn_context_id,
+                seal_ids=admission.origin_seal_ids,
+                host_builtins=host_builtins[0],
+            )
+            with execution_origin(origin_id, flags):
                 if origin_id is None:
                     yield
                     return
@@ -1689,6 +1866,20 @@ async def run_prepared_turn_impl(
             selected_path = deps.turn_path or load_turn_settings().path
             posture = confirmation
             async with contextlib.AsyncExitStack() as stack:
+                if origin_id is None and unattended and is_provider_turn(admission):
+                    # MCP reads `origin.attended` for every gated call: give this
+                    # provider turn an unattended origin of its own.
+                    origin_id = (
+                        await stack.enter_async_context(
+                            unattended_provider_origin(
+                                deps.sessionmaker,
+                                admission,
+                                tenant_id=tenant_id,
+                                platform=platform,
+                                thread_id=thread_id,
+                            )
+                        )
+                    ).id
                 if unattended:
                     revision = admission.backend_revision
                     managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
@@ -1754,6 +1945,7 @@ async def run_prepared_turn_impl(
                                 tenant_id=tenant_id,
                                 read_session=read_session,
                                 entry_point=unattended_entry_point(origin),
+                                principal_check=grant_owner_check(deps, admission, tenant_id),
                             )
                         else:
                             from daimon.core.continuity.watch_turn import watch_capabilities
@@ -1827,18 +2019,35 @@ async def run_prepared_turn_impl(
                         # read/write and sandbox decider for those inspected actions.
                         if revision is None or revision.profile != SELFHOSTED_LOOP.profile_id:
                             posture = PolicyApproval(decide=refuse_ungated_confirmation)
-                            require_native_unattended_capabilities(
-                                prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
-                                profile_id=revision.profile if revision is not None else "unknown",
+                            native_entry: UnattendedEntryPoint = (
+                                "long_job"
+                                if job_row is not None
+                                else "watch"
+                                if watch_row is not None
+                                else unattended_entry_point(origin)
+                            )
+                            host_builtins[0] = capability_policy(native_entry).allow_builtins
+                            native_profile = revision.profile if revision is not None else "unknown"
+                            native_gated = deps.settings is not None and deployment_on(
+                                deps.settings, "host_call_gate", platform
                             )
 
-                            async def native_gate() -> None:
+                            def native_check() -> None:
                                 require_native_unattended_capabilities(
                                     prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
-                                    profile_id=revision.profile
-                                    if revision is not None
-                                    else "unknown",
+                                    profile_id=native_profile,
+                                    gated=native_gated,
+                                    sandbox=capability_policy(native_entry).allow_builtins,
                                 )
+
+                            native_check()
+
+                            owner_gate = native_owner_gate(deps, admission, tenant_id)
+
+                            async def native_gate() -> None:
+                                native_check()
+                                if native_entry != "mcp_chat":
+                                    await owner_gate()
 
                             stack.enter_context(unattended_sends(native_gate))
                         else:
@@ -2283,7 +2492,10 @@ async def run_prepared_turn_impl(
                     confirmation=tool_confirmation,
                 ) as recovery_confirmation:
                     reseeded_message = _with_prefix(
-                        plans + loss_user_prefix + await briefing(recovery_admission, fresh_cancel),
+                        plans
+                        + sources
+                        + loss_user_prefix
+                        + await briefing(recovery_admission, fresh_cancel),
                         with_memory_prefix(reseed, recovery_memory),
                     )
                     mark = SEND_ATTEMPTED.get()
@@ -2397,16 +2609,8 @@ async def run_prepared_turn_impl(
     # Set for the whole turn, so anything inside it (a card posted mid-turn, in this
     # task or one it starts) reads the deadline and never promises a time past it.
     deadline_token = current_turn_deadline.set(effective_deadline)
-    # The reducers and answer extractors read the status log through the turn's context,
-    # so the value this place resolved reaches them without a parameter on each.
-    status_log = prepared.admission.resolved("status_log")
     try:
-        with (
-            status_log_override(status_log.on)
-            if status_log is not None
-            else contextlib.nullcontext()
-        ):
-            outcome = await _run_within_ceiling()
+        outcome = await _run_within_ceiling()
     finally:
         current_turn_deadline.reset(deadline_token)
     # Turn end: anything this session billed nowhere -- calls MA made while no
@@ -2428,4 +2632,9 @@ async def run_prepared_turn_impl(
             ),
             record=cast(UsageRecorder, active_record_cell[0]),
         )
-    return outcome
+    return replace(
+        outcome,
+        outputs=_turn_output_runtime(
+            deps, active_admission, active_session_id_cell[0], prepared, tenant_id=tenant_id
+        ),
+    )

@@ -11,7 +11,15 @@ from uuid import uuid4
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope, SkillRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Artifact, Skill, SkillUpload, SkillVersion
-from mux.drivers.gemini.bundles import SKILL_SOURCE, owned_skill, relative_path, validate_bundle
+from mux.drivers.gemini.bundles import (
+    SKILL_SOURCE,
+    fits_inline,
+    mounted_files,
+    owned_skill,
+    relative_path,
+    upload_manifest,
+    validate_bundle,
+)
 from mux.drivers.gemini.core import Base, now, page_values, refuse
 from mux.drivers.gemini.skill_deployment import SkillBundlePublisher, validate_deployment
 from mux.drivers.gemini.storage import ArtifactRecord, Records, SkillRecord, Storage, owner
@@ -99,9 +107,18 @@ class GeminiSkills(Base):
         account_scope_id: str,
         *,
         publisher: SkillBundlePublisher | None = None,
+        uploads: bool = False,
     ) -> None:
         super().__init__(transport, storage, account_scope_id)
         self._publisher = publisher
+        # A bundle past the inline limits is uploaded at session start (GeminiSessions).
+        self._uploads = uploads and publisher is None
+
+    def _store(self, record: SkillRecord, version: str, bundle: SkillUpload) -> None:
+        if self._uploads and not fits_inline(bundle):
+            record.uploads[version] = upload_manifest(bundle)
+        else:
+            record.bundles[version] = bundle
 
     async def _deploy(
         self, scope: Scope, record: SkillRecord, version: str, bundle: SkillUpload
@@ -115,7 +132,9 @@ class GeminiSkills(Base):
         record.deployments[version] = deployment
 
     async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
-        version = validate_bundle(bundle, external=self._publisher is not None)
+        version = validate_bundle(
+            bundle, external=self._publisher is not None, upload=self._uploads
+        )
         digest = request_digest({"kind": "skill", "account": self._account, "bundle": version})
         async with self._storage.transaction() as records:
             prior = self._creation(records, scope, key, digest)
@@ -139,13 +158,15 @@ class GeminiSkills(Base):
                 native={
                     "deployment": "gcs_on_interaction"
                     if self._publisher is not None
+                    else "upload_on_session"
+                    if self._uploads and not fits_inline(bundle)
                     else "inline_on_interaction",
                     "provider_upload": False,
                 },
             )
             record = SkillRecord(owner(scope), self._account, skill)
             await self._deploy(scope, record, version, bundle)
-            record.bundles[version] = bundle
+            self._store(record, version, bundle)
             record.versions[version] = SkillVersion(
                 ref=ref, version=version, created_at=skill.created_at
             )
@@ -156,7 +177,9 @@ class GeminiSkills(Base):
     async def publish_version(
         self, scope: Scope, skill_id: str, bundle: SkillUpload, *, key: str
     ) -> SkillVersion:
-        version = validate_bundle(bundle, external=self._publisher is not None)
+        version = validate_bundle(
+            bundle, external=self._publisher is not None, upload=self._uploads
+        )
         digest = request_digest(
             {
                 "kind": "skill_version",
@@ -175,7 +198,8 @@ class GeminiSkills(Base):
                 ref=ref, version=version, created_at=now()
             )
             await self._deploy(scope, record, version, bundle)
-            record.bundles[version], record.versions[version] = bundle, item
+            self._store(record, version, bundle)
+            record.versions[version] = item
             record.skill = record.skill.model_copy(
                 update={
                     "latest_version": ref,
@@ -325,8 +349,14 @@ class GeminiArtifacts(Base):
                     raise ProviderError(
                         "conflict", retryable=False, native_code="snapshot_turn_changed"
                     )
+                # The first snapshot holds every file Daimon mounted (skills, inputs);
+                # those were never the agent's work, so they are never outputs. Nor is
+                # the bytecode Python caches when a skill script imports a sibling.
+                mounted = mounted_files(current.request.get("environment"), records.skills)
                 for path, data in sorted(files.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
+                    if mounted.covers(path, sha) or "__pycache__" in path.split("/"):
+                        continue
                     id_ = request_digest(
                         {
                             "session": session.id,
@@ -336,6 +366,8 @@ class GeminiArtifacts(Base):
                             "sha": sha,
                         }
                     )
+                    if id_ in records.delivered_artifacts:
+                        continue
                     artifact = Artifact(
                         ref=self._ref(scope, id_, "artifact"),
                         filename=path,
@@ -422,7 +454,14 @@ class GeminiArtifacts(Base):
                 return prior
             record = self._artifact(records, scope, ref)
             if record.body is None:
-                refuse("workspace_artifact_delete")
+                # A workspace file cannot be removed: record it as delivered so
+                # later listings leave it out (the host's post-then-delete ledger).
+                if record.artifact.session is None:
+                    refuse("workspace_artifact_delete")
+                records.delivered_artifacts[ref.id] = record.artifact.session.id
+                receipt = DeletionReceipt(operation_id=key, deleted=(ref,))
+                records.deletions[(*owner(scope), key)] = scope.principal_id, digest, receipt
+                return receipt
             if any(
                 source.artifact == ref
                 for env in records.environments.values()

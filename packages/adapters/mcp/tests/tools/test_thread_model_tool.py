@@ -16,10 +16,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.thread_model import (
     _set_thread_model_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
+from daimon.core.thread_models import _MODEL_EFFORTS  # pyright: ignore[reportPrivateUsage]
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -30,13 +31,17 @@ _RESPONDER_ID = "agt_daimon"
 _CHAT_SESSION = "chat-session-1"
 
 
-def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
+def _runtime(
+    sessionmaker: async_sessionmaker[AsyncSession], *, mux: bool = False, **features: str
+) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
         client=AsyncAnthropic(api_key="test"),
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
             anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            turn=TurnSettings(path="mux", channel_backends=True) if mux else TurnSettings(),
+            features=features,
         ),
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
@@ -224,7 +229,199 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
                 runtime,
                 _auth(tenant.id, caller.id),
                 origin_context_id=str(origin.id),
-                model="fable",
+                model="gpt-6",
             )
 
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+
+
+async def _openai_pick(monkeypatch, sessionmaker, tenant_id, account_id, *, admin: bool):
+    """The conversation's agent on Claude, OpenAI allowed; the agent lookup is local."""
+    from daimon.adapters.mcp.tools import thread_model
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendService, BackendActor, BackendAgent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.thread_model_switch import ThreadPick
+
+    service = AgentBackendService(sessionmaker, enabled=True)
+    owner = BackendActor(tenant_id, account_id, Subject(is_admin=True))
+    policy = await service.tenant_policy(tenant_id)
+    await service.set_tenant_allowlist(tenant_id, ("anthropic", "openai"), policy.revision, owner)
+    agent = BackendAgent(
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_RESPONDER_ID),
+        name="daimon",
+        configuration_digest="config",
+    )
+    actor = BackendActor(tenant_id, account_id, Subject(is_admin=admin))
+    pick = ThreadPick(service, sessionmaker, None, agent, actor, _RESPONDER_ID, "discord", "42")
+
+    async def local_pick(runtime, auth, origin):
+        return pick
+
+    monkeypatch.setattr(thread_model, "_pick", local_pick)
+    return thread_model
+
+
+_LIMIT = "Only people here can use it."
+
+
+def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pick's preview here loses something."""
+    from daimon.core.channel_backend import AgentBackendService
+
+    real = AgentBackendService.thread_revision
+
+    async def lossy(self, agent, target, model):
+        run, preview = await real(self, agent, target, model)
+        return run, preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
+
+    monkeypatch.setattr(AgentBackendService, "thread_revision", lossy)
+
+
+@pytest.mark.parametrize("carded", [True, False], ids=["card_surface", "no_card_surface"])
+async def test_another_providers_model_is_kept_at_once_and_says_whats_off(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    carded: bool,
+) -> None:
+    """Like a model change: no card and no second call, even where no card can show."""
+    from dataclasses import replace
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    gate = {} if carded else {"host_call_gate": "off"}
+    runtime = _runtime(committing_sessionmaker, mux=True, **gate)
+    await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True)
+    _with_a_loss(monkeypatch)
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        auth = replace(_auth(tenant.id, caller.id), no_confirmation_surface=not carded)
+        kept = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=str(origin.id), model="openai:gpt-6-luna"
+        )
+    assert kept.model == "gpt-6-luna"
+    assert _LIMIT in kept.note, "the note says what the new provider limits"
+    assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") == "gpt-6-luna"
+
+
+async def test_another_providers_model_needs_the_owner_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, mux=True)
+    await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=False)
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        with pytest.raises(ToolError, match="owner or an admin can do that. Nothing changed."):
+            await _set_thread_model_impl(
+                runtime,
+                _auth(tenant.id, caller.id),
+                origin_context_id=str(origin.id),
+                model="openai:gpt-6-luna",
+            )
+    assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+
+
+async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_conversation(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.stores.thread_models import get_thread_effort
+    from daimon.core.stores.turn_origins import bind_origin_session
+    from daimon.core.turn.invocation import human_invocation
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="D_ROUTE",
+        thread_id="dm:scope-1",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db,
+                origin_id=origin.id,
+                chat_session_id=_CHAT_SESSION,
+                attended=True,
+                human_invocation=human_invocation("chat", True),
+            )
+            await db.commit()
+        auth = _auth(tenant.id, caller.id)
+        origin_id = str(origin.id)
+        alone = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, effort="xhigh"
+        )
+        assert (alone.model, alone.effort) == ("default", "xhigh")
+        both = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, model="fable", effort="low"
+        )
+        assert (both.model, both.effort) == ("claude-fable-5-2", "low")
+        assert both.note == "This conversation runs on Fable 5.2 at low effort from the next reply."
+        with pytest.raises(ToolError, match="isn't an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id, effort="turbo")
+        with pytest.raises(ToolError, match="isn't an effort"):
+            # A bad effort refuses before the model changes.
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="opus", effort="turbo"
+            )
+        with pytest.raises(ToolError, match="Name a model, an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id)
+        # A model that takes no effort refuses the pair before saving the model.
+        monkeypatch.delitem(_MODEL_EFFORTS, "claude-haiku-5-5")
+        with pytest.raises(ToolError, match="Haiku 5.5 doesn't take an effort. Nothing changed."):
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="haiku", effort="low"
+            )
+
+    assert await _stored(committing_sessionmaker, tenant.id, "dm:scope-1") == "claude-fable-5-2"
+    async with committing_sessionmaker() as session:
+        assert (
+            await get_thread_effort(
+                session, tenant_id=tenant.id, platform="discord", thread_id="dm:scope-1"
+            )
+            == "low"
+        )

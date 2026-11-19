@@ -50,6 +50,10 @@ write and cache read. The table holds the provider's list price.
 The prompt counts input, cache reads and cache writes. All cache writes are
 priced as five-minute writes.
 
+Each web search costs its provider's list price: $0.01 on Anthropic and OpenAI,
+$0.014 on Gemini. Gemini's first 5,000 a month are free, shared across the
+deployment's Gemini project.
+
 `DAIMON_BILLING__MARKUP` multiplies the cost before it is debited
 ([configuration.md](configuration.md#daimon_billing__markup)). It applies to
 the ledger and to a finished turn's summary line. Usage panels and
@@ -58,7 +62,7 @@ the ledger and to a finished turn's summary line. Usage panels and
 > **Warning:** An Anthropic model with no pricing row runs free: the debit is
 > zero and Daimon logs `billing.unpriced_model`. OpenAI, Gemini and
 > self-hosted turns on an unpriced model are refused instead. Token rates
-> exclude provider tool, container and storage charges.
+> exclude container and storage charges.
 
 ## The gates
 

@@ -17,6 +17,7 @@ from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
 
+import structlog
 from mux.contracts.usage import UsageObservation
 from mux.profiles import (
     CONVERSATION_ONLY,
@@ -24,6 +25,8 @@ from mux.profiles import (
     PERSISTENT_WORKSPACE,
     meters_cache_writes_for,
 )
+
+_log = structlog.get_logger()
 
 
 class LegacyUsage(Protocol):
@@ -120,6 +123,9 @@ class UsageCounts(Protocol):
 # (`pytest -m contract packages/core/tests/test_pricing.py`) against the page.
 AGENT_PRICING_SOURCE = "https://platform.claude.com/docs/en/about-claude/pricing"
 AGENT_PRICING_CHECKED_ON = "2026-11-10"
+# Server web search, $10 per 1,000 searches with no free allowance; a failed search
+# is not billed. Checked 2026-11-15 against AGENT_PRICING_SOURCE.
+AGENT_WEB_SEARCH_USD = Decimal("0.01")
 AGENT_MODEL_PRICING: dict[str, ModelRates] = {
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     # Local preset/tariff key, resolved before provider I/O.
@@ -271,6 +277,27 @@ def format_cost(amount: float | None) -> str | None:
 
 
 @dataclass(frozen=True)
+class WebSearchPrice:
+    """USD per billed web search, after the provider's free monthly allowance.
+
+    Models naming one `pool` share `free_monthly` searches per provider account and
+    calendar month; zero bills every search.
+    """
+
+    usd: Decimal
+    free_monthly: int = 0
+    pool: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.usd.is_finite() or self.usd < 0:
+            raise ValueError("web search price must be a finite nonnegative Decimal")
+        if type(self.free_monthly) is not int or self.free_monthly < 0:
+            raise ValueError("free web searches require a nonnegative integer")
+        if self.free_monthly and not self.pool:
+            raise ValueError("a free web search allowance needs its pool")
+
+
+@dataclass(frozen=True)
 class ProviderPrice:
     """Dated USD/M rates for an explicitly selected backend.
 
@@ -295,6 +322,8 @@ class ProviderPrice:
     long_context_multipliers: tuple[Decimal, Decimal] | None = None
     valid_before: date | None = None
     admitted_on: date | None = None
+    # None: the tariff prices no web search, so a turn that ran one stays pending.
+    web_search: WebSearchPrice | None = None
 
     def current_on(self, on: date) -> bool:
         """Check the frozen admission date when the host admitted this tariff."""
@@ -379,8 +408,12 @@ def provider_cost_of(
     price: ProviderPrice,
     *,
     infrastructure_usd: Decimal | None,
+    paid_web_searches: int | None = None,
 ) -> Decimal | None:
     """Verified total cost, including actual session/container charges.
+
+    `paid_web_searches` is how many of the usage's searches fall past the free
+    allowance; None bills them all, an upper bound.
 
     Non-measured completeness, missing counts or infrastructure remain
     unverified, never a free turn.
@@ -405,8 +438,12 @@ def provider_cost_of(
         price = _long_context_price(price)
     if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
         raise ValueError("actual infrastructure cost must be finite and nonnegative")
+    searches = web_search_cost(usage, price, paid_web_searches)
+    if searches is None:
+        return None
     with localcontext() as context:
         context.prec = 80
+        infrastructure_usd += searches
         if tokens is None:
             if (
                 usage.input_tokens is None
@@ -421,6 +458,20 @@ def provider_cost_of(
                 1_000_000
             ) + infrastructure_usd
         return _token_cost(tokens, price) + infrastructure_usd
+
+
+def web_search_cost(
+    usage: UsageObservation, price: ProviderPrice, paid: int | None = None
+) -> Decimal | None:
+    """Exact USD of the paid searches (all when `paid` is None); None if unpriced."""
+    paid = usage.web_searches if paid is None else paid
+    if not 0 <= paid <= usage.web_searches:
+        raise ValueError("paid web searches exceed the searches the usage ran")
+    if not usage.web_searches:
+        return Decimal(0)
+    if price.web_search is None:
+        return None
+    return paid * price.web_search.usd
 
 
 def _long_context_price(price: ProviderPrice) -> ProviderPrice:
@@ -594,17 +645,27 @@ def _list_rate_text(rates: ModelRates | ProviderPrice) -> str:
 
 
 # Paid Standard direct-API text rates, verified against these official sources.
-# Agents inference follows the underlying model rates; tool/storage/container
-# charges remain separate. Luna's base row is a floor at either context tier;
-# exact pricing above the threshold requires per-request tier attribution.
+# Agents inference follows the underlying model rates; storage and container
+# charges remain separate. Web search rates were checked on 2026-11-15. Luna's
+# base row is a floor at either context tier; exact pricing above the threshold
+# requires per-request tier attribution.
 PROVIDER_PRICING_CHECKED_ON = date(2026, 10, 14)
 PROVIDER_PRICING_SOURCES = (
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "https://developers.openai.com/api/docs/models/gpt-6.2-astra",
+    "https://developers.openai.com/api/docs/models/gpt-6.2-sol",
     "https://developers.openai.com/api/docs/guides/agents-api/observability",
-    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://aistudio.google.com/docs/pricing",
     "https://ai.google.dev/gemini-api/docs/antigravity-agent",
+    "https://developers.openai.com/api/docs/pricing",
+    "https://developers.openai.com/api/docs/guides/tools-web-search",
 )
+# OpenAI web search: $10 per 1,000 calls, every call billed.
+_OPENAI_SEARCH = WebSearchPrice(Decimal("0.01"))
+# Gemini 3 and newer share 5,000 free Google Search queries a month per project,
+# then $14 per 1,000 queries.
+_GEMINI_SEARCH = WebSearchPrice(Decimal("0.014"), free_monthly=5_000, pool="gemini-3")
 _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
     {
         PERSISTENT_WORKSPACE.profile_id: (
@@ -617,6 +678,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.01"),
                 Decimal("0.125"),
                 max_priced_input_tokens=272_000,
+                web_search=_OPENAI_SEARCH,
             ),
             # Checked 2026-10-22 (official model page). Above 272k input tokens
             # input/cache double and output is 1.5x; an aggregate above it is
@@ -631,6 +693,32 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("12.50"),
                 max_priced_input_tokens=272_000,
                 long_context_multipliers=(Decimal(2), Decimal("1.5")),
+                web_search=_OPENAI_SEARCH,
+            ),
+            # Checked 2026-11-17 (official model pages), with Astra's long-context rule.
+            ProviderPrice(
+                PERSISTENT_WORKSPACE.provider,
+                "gpt-6.2-astra",
+                date(2026, 11, 17),
+                Decimal("8.00"),
+                Decimal("40.00"),
+                Decimal("0.40"),
+                Decimal("10.00"),
+                max_priced_input_tokens=272_000,
+                long_context_multipliers=(Decimal(2), Decimal("1.5")),
+                web_search=_OPENAI_SEARCH,
+            ),
+            ProviderPrice(
+                PERSISTENT_WORKSPACE.provider,
+                "gpt-6.2-sol",
+                date(2026, 11, 17),
+                Decimal("2.00"),
+                Decimal("10.00"),
+                Decimal("0.10"),
+                Decimal("2.50"),
+                max_priced_input_tokens=272_000,
+                long_context_multipliers=(Decimal(2), Decimal("1.5")),
+                web_search=_OPENAI_SEARCH,
             ),
         ),
         INLINE_REUSE.profile_id: (
@@ -641,6 +729,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.30"),
                 Decimal("2.50"),
                 Decimal("0.03"),
+                web_search=_GEMINI_SEARCH,
             ),
             ProviderPrice(
                 INLINE_REUSE.provider,
@@ -650,20 +739,57 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("3.75"),
                 Decimal("0.075"),
                 valid_before=date(2027, 1, 1),
+                web_search=_GEMINI_SEARCH,
             ),
-            # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
-            # price is unpublished here, so from 2026-12-01 Argon is unpriced and
-            # refused at admission until a dated row is added. Cached input: 95% off.
-            # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
-            # cap also refuses every Argon turn (provider_price_unavailable).
+            # No start-date field: a successor row's `checked_on` is its start date,
+            # and a later row wins an overlap. Cached input is implicit caching only.
             ProviderPrice(
                 INLINE_REUSE.provider,
-                "gemini-4-argon",
-                date(2026, 10, 22),
-                Decimal("2.00"),
-                Decimal("10.00"),
-                Decimal("0.10"),
-                valid_before=date(2026, 12, 1),
+                "gemini-3.8-flash",
+                date(2027, 1, 1),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.15"),
+                web_search=_GEMINI_SEARCH,
+            ),
+            # Argon and Carbon share one tariff: intro rates through 2026-11-30,
+            # then the standard rates from 2026-12-01.
+            *(
+                row
+                for model, checked_on in (
+                    ("gemini-4-argon", date(2026, 10, 22)),
+                    ("gemini-4-carbon", date(2026, 11, 15)),
+                )
+                for row in (
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        checked_on,
+                        Decimal("2.00"),
+                        Decimal("10.00"),
+                        Decimal("0.10"),
+                        valid_before=date(2026, 12, 1),
+                        web_search=_GEMINI_SEARCH,
+                    ),
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        date(2026, 12, 1),
+                        Decimal("4.00"),
+                        Decimal("20.00"),
+                        Decimal("0.20"),
+                        web_search=_GEMINI_SEARCH,
+                    ),
+                )
+            ),
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-hydrogen",
+                date(2026, 11, 15),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.075"),
+                web_search=_GEMINI_SEARCH,
             ),
         ),
     }
@@ -708,6 +834,21 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
 
 
+def price_expiries() -> tuple[tuple[str, str, date], ...]:
+    """Every model whose newest tariff lapses: (profile, model, valid_before), soonest first.
+
+    A model with an open-ended successor row never lapses, so it is not listed.
+    """
+    found = [
+        (profile, model, max(price.valid_before for price in rows if price.valid_before))
+        for profile, prices in _PROVIDER_PRICING.items()
+        for model in {price.model for price in prices}
+        if (rows := [price for price in prices if price.model == model])
+        and all(price.valid_before is not None for price in rows)
+    ]
+    return tuple(sorted(found, key=lambda each: each[2]))
+
+
 def provider_price_on(model: str, on: date) -> ProviderPrice | None:
     """The tariff usage of `model` on day `on` settled at, from any profile; None when none.
 
@@ -727,6 +868,33 @@ def _priced_input_limits() -> Mapping[str, int | None]:
                 # Stored rows are bucketed by one limit per model before a tariff is chosen.
                 raise ValueError(f"{price.model} tariffs disagree on the priced input limit")
     return MappingProxyType(limits)
+
+
+def side_call_rates(model: str, prompt_tokens: int = 0) -> ModelRates:
+    """Rates for a side call: the model's table row, else its sourced provider tariff today.
+
+    A prompt over the tariff's priced input limit takes its long-context multipliers,
+    or the base rate as a floor when none is sourced. Raises KeyError when neither
+    prices the model, so a side call never runs unmetered.
+    """
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    price = provider_price_on(model, datetime.now(UTC).date())
+    if price is None:
+        raise KeyError(model)
+    incoming = outgoing = Decimal(1)
+    limit = price.max_priced_input_tokens
+    if limit is not None and prompt_tokens > limit:
+        if price.long_context_multipliers is None:
+            _log.warning("side_call.priced_at_base_rate", model=model, prompt_tokens=prompt_tokens)
+        else:
+            incoming, outgoing = price.long_context_multipliers
+    return ModelRates(
+        input=float(price.input * incoming),
+        output=float(price.output * outgoing),
+        cache_write=float((price.cache_write or 0) * incoming),
+        cache_read=float(price.cache_read * incoming),
+    )
 
 
 #: Every provider-priced model and its tariff's priced input limit (None: no limit).

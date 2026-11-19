@@ -14,20 +14,21 @@ from mux.contracts.ids import ModelRef
 from mux.contracts.resources import Agent
 from mux.drivers.gemini.mcp_auth import model_request
 from mux.drivers.gemini.transport import (
+    EnvironmentTransport,
     Object,
     Transport,
     object_value,
     string,
 )
-from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL
+from mux.errors import ProviderError, UnsupportedCapability
+from mux.profiles.gemini import OPT_IN_MODELS
 
 log = logging.getLogger(__name__)
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
-# Every model an attempt may name. Argon is only ever its own single attempt.
-ATTEMPT_MODELS = (*FLASH_MODELS, ARGON_MODEL)
+# Every model an attempt may name. An opt-in model is only ever its own single attempt.
+ATTEMPT_MODELS = (*FLASH_MODELS, *OPT_IN_MODELS)
 
 
 @dataclass(frozen=True)
@@ -99,8 +100,8 @@ class FlashTransport:
         native_agent: Agent | None = None,
         primary: str = FLASH_PRIMARY,
     ) -> None:
-        if primary not in (FLASH_PRIMARY, ARGON_MODEL):
-            raise ValueError("an explicit Flash or Argon primary is required")
+        if primary not in (FLASH_PRIMARY, *OPT_IN_MODELS):
+            raise ValueError("an explicit Flash or opt-in primary is required")
         self._primary = primary
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
@@ -117,16 +118,16 @@ class FlashTransport:
             self._native_agent.spec.model.id if self._native_agent is not None else self._primary
         )
         if (
-            required not in (FLASH_PRIMARY, ARGON_MODEL)
+            required not in (FLASH_PRIMARY, *OPT_IN_MODELS)
             or (request.get("model") if capped else original.get("model")) != required
         ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = FLASH_MODELS
-        if required == ARGON_MODEL:
-            # A 503 on Argon is the turn's answer, never a silent switch to Flash.
-            models = (ARGON_MODEL,)
+        if required in OPT_IN_MODELS:
+            # A 503 on an opt-in model is the turn's answer, never a silent switch to Flash.
+            models = (required,)
         if self._native_agent is not None:
             if capped:
                 raise ProviderError(
@@ -261,6 +262,27 @@ class FlashTransport:
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await self.source.download_snapshot(environment_id)
+
+    def _environments(self) -> EnvironmentTransport:
+        if not isinstance(self.source, EnvironmentTransport):
+            raise UnsupportedCapability(("environment_upload",), "gemini.inline_reuse")
+        return self.source
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        return await self._environments().create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        await self._environments().upload_archive(
+            environment_id, path, archive, overwrite=overwrite
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        return await self._environments().list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await self._environments().delete_environment(environment_id)
 
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None

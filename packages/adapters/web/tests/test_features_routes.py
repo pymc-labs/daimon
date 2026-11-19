@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
+import pytest
+from daimon.adapters.web import channels as channels_module
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.service import thread_open_to_anyone
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role as AccountRole
 from daimon.core.stores.tenants import get_tenant
@@ -60,13 +64,12 @@ async def test_an_admin_changes_a_channel_and_a_stale_read_is_refused(
     assert (no_channel.status_code, web.status_code) == (422, 422)
 
 
-async def test_a_thread_is_changed_only_by_a_channel_admin_and_only_if_it_is_there(
+async def test_a_thread_is_changed_only_if_it_is_there(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Progress plans are anyone's in a chat thread; on the web a member may not, and a
-    thread the workspace has no session in, or one in another channel, is not found."""
+    """A thread the workspace has no session in, or one in another channel, is not found."""
     body = {"key": "progress_plans", "tier": "thread", "value": "on"}
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
@@ -78,13 +81,52 @@ async def test_a_thread_is_changed_only_by_a_channel_admin_and_only_if_it_is_the
         ok = await admin.client.put("/api/features?channel=c1&thread=t1", json=body)
         nonexistent = await admin.client.put("/api/features?channel=c1&thread=t9", json=body)
         other_channel = await admin.client.put("/api/features?channel=c2&thread=t1", json=body)
-        admin.as_member()
-        member = await admin.client.put("/api/features?channel=c1&thread=t1", json=body)
 
     assert ok.status_code == 200, ok.text
     assert nonexistent.status_code == 404, "a thread with no session is not found"
     assert other_channel.status_code == 404, "a thread of another channel is not found"
-    assert member.status_code in (403, 404), "a member cannot change a thread on the web"
+
+
+@pytest.mark.parametrize(
+    ("key", "locked"),
+    [("progress_plans", False), ("progress_plans", True), ("cost_footer", False)],
+)
+async def test_a_member_sets_a_thread_value_where_the_core_rule_opens_it(
+    key: str,
+    locked: bool,
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As in chat: a member who can read the channel sets a thread value when
+    `thread_open_to_anyone` holds, and is refused for any other feature or a Lock. The core
+    test covers every feature; this checks the route follows it."""
+
+    async def shown(
+        _runtime: object, *, channel_ids: Collection[str], **_: object
+    ) -> frozenset[str]:
+        return frozenset(channel_ids)
+
+    monkeypatch.setattr(channels_module, "readable_channels", shown)
+    value = next(v for v in FEATURES[key].values if v != FEATURES[key].default)
+    body = {"key": key, "tier": "thread", "value": value, "locked": locked}
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            tenant = await get_tenant(db, admin.ws.tenant_id)
+            assert tenant is not None, "the signed-in workspace exists"
+            await make_thread_session(
+                db, tenant=tenant, platform="discord", thread_id="t1", channel_id="c1"
+            )
+        admin.as_member()
+        member = await admin.client.put("/api/features?channel=c1&thread=t1", json=body)
+
+    if thread_open_to_anyone(key, locked=locked):
+        assert member.status_code == 200, f"{key}: the rule opens it to a member: {member.text}"
+    else:
+        assert member.status_code in (400, 403, 409, 422), (
+            f"{key}: a member must be refused, got {member.status_code}: {member.text}"
+        )
 
 
 async def test_members_read_but_cannot_change_the_workspace_or_a_channel(

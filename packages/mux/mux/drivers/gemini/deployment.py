@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import JsonValue
 
+from mux.contracts.completions import CompletionEffort, CompletionResult, Completions
+from mux.contracts.ids import Scope
 from mux.drivers import isolated_ssl_context
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.mcp_auth import RedactedCredential
@@ -83,7 +85,7 @@ class _ConfiguredTransport:
         self._api_key = api_key
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = set()
-        # Interaction id -> digests of mount headers sent (never the token).
+        # Interaction id -> digests of mount and MCP headers sent (never the token).
         self._mount_echoes = MountEchoBook()
         # Shared like the storage tokens: each call gets a fresh SDKTransport, and
         # every later read must scrub a credential an earlier create dispatched.
@@ -170,6 +172,26 @@ class _ConfiguredTransport:
         async with self._client() as client:
             return await self._sdk(client).download_snapshot(environment_id)
 
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        async with self._client() as client:
+            return await self._sdk(client).create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        async with self._client() as client:
+            await self._sdk(client).upload_archive(
+                environment_id, path, archive, overwrite=overwrite
+            )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        async with self._client() as client:
+            return await self._sdk(client).list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        async with self._client() as client:
+            await self._sdk(client).delete_environment(environment_id)
+
     async def open_stream(
         self,
         interaction_id: str,
@@ -204,6 +226,30 @@ class _ConfiguredCatalogTransport(_ConfiguredTransport):
     async def get_agent(self, id_: str) -> Object:
         async with self._client() as client:
             return await SDKAgentCatalogTransport(client).get_agent(id_)
+
+
+class _ConfiguredCompletions(_ConfiguredTransport):
+    async def complete(
+        self,
+        scope: Scope,
+        model: str,
+        system: str,
+        prompt: str,
+        max_tokens: int,
+        effort: CompletionEffort | None = None,
+    ) -> CompletionResult:
+        from mux.drivers.gemini.completions import GeminiCompletions
+
+        async with self._client() as client:
+            completions = GeminiCompletions(client)
+            return await completions.complete(scope, model, system, prompt, max_tokens, effort)
+
+
+def configured_completions(*, api_key: str) -> Completions:
+    """Side-call completions on a deployment key; each call owns its client."""
+    if not api_key.strip():
+        raise ValueError("explicit Gemini credential is required")
+    return _ConfiguredCompletions(api_key)
 
 
 def configured_catalog_transport(*, api_key: str) -> AgentCatalogTransport:

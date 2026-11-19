@@ -85,7 +85,6 @@ async def test_foreign_usage_and_changed_routing_refused_before_connection(provi
     options = admitted(provider)
     binding = D11TurnBinding(**options)
     billing = binding.billing()
-    assert billing.native_footer_cost is None
     original = normalize(provider, options["native_session"], options["admitted_model"])
     for updates in (
         {"turn_id": "foreign-root"},
@@ -109,11 +108,9 @@ def test_profile_and_attempt_cannot_be_reused():
         binding.profile = OPT_IN_PRODUCT_PROFILE
 
 
-def test_opt_in_explicit_context_and_unknown_policy():
-    binding = D11TurnBinding(**{**admitted(), "profile": OPT_IN_PRODUCT_PROFILE})
-    billed = binding.billing()
-    assert billed.native_footer_cost is not None
-    assert billed.native_footer_cost.result.status == "unknown"
+def test_unknown_infrastructure_policies_are_refused():
+    """An inapplicable or unknown infrastructure policy never reaches billing."""
+    binding = D11TurnBinding(**admitted())
     with pytest.raises(ValueError, match="inapplicable infrastructure"):
         replace(binding, infrastructure_policy="not_applicable", infrastructure_usd=Decimal(1))
     with pytest.raises(ValueError, match="unknown infrastructure"):

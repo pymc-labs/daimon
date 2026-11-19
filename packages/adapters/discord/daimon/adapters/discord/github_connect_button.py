@@ -210,6 +210,7 @@ async def _manager_refusal(
         bot.runtime.anthropic,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+        records=bot.runtime.sessionmaker,
     )
     if live is None:
         return "This connection is no longer available."
@@ -265,7 +266,10 @@ async def _clicker_check(
         return _ClickerCheck(None, agent_id)
     if ma_agent_id is not None and agent_id is not None:
         live = await find_agent_by_derived_uuid(
-            bot.runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+            bot.runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            records=bot.runtime.sessionmaker,
         )
         if live is not None:
             async with bot.runtime.sessionmaker() as session:

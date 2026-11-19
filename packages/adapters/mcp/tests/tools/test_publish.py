@@ -385,6 +385,11 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+            # The report tools are offered only where a report host is set up; without one
+            # the negative control below would pass because the tools are hidden for everyone.
+            report_host=ReportHostSettings(
+                host_url=HttpUrl("http://report.test:8002"), admin_secret=SecretStr("test")
+            ),
         ),
         sessionmaker=sessionmaker,
     )

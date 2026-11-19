@@ -250,6 +250,22 @@ async def test_sealed_transcript_is_readable_from_inside_its_channel(world: _Wor
     assert _SEALED_TOPIC in _events_text(page)
 
 
+async def test_a_sealed_provider_turn_reads_inside_its_signed_seals_only(world: _World) -> None:
+    """A provider turn names no origin: its credential's seals are its inside."""
+    await world.seal(_SEALED, "chan-other")
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session("ses_other", daimon_channel="chan-other", daimon_thread="thr-o")
+    sealed = world.auth(seal_ids=frozenset({_SEALED}))
+
+    page = await _list_session_events_impl(world.runtime(), sealed, "ses_acme", None, None, None)
+    assert _SEALED_TOPIC in _events_text(page), "its own seal's conversation is readable"
+    with pytest.raises(ToolError, match="read only from inside"):
+        await _list_session_events_impl(world.runtime(), sealed, "ses_other", None, None, None)
+    with pytest.raises(ToolError, match="read only from inside"):
+        # Without signed seals or an origin (MA's path) nothing sealed is read.
+        await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
+
+
 async def test_list_sessions_hides_sealed_conversations_outside_their_channel(
     world: _World,
 ) -> None:
@@ -1196,5 +1212,53 @@ async def test_long_job_cancel_survives_unavailable_source_proof(world, monkeypa
             assert json.loads(result.content[0].text)["source"] == "source restricted"
             result = await client.call_tool("cancel_long_job", {"job_id": str(job.id)})
             assert set(json.loads(result.content[0].text)) == {"id", "state", "owner_account_id"}
+    finally:
+        await runtime.client.close()
+
+
+@pytest.mark.parametrize(
+    "hold_kind,readable",
+    [("none", True), ("plain", True), ("relay", False)],
+)
+async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
+    world: _World, monkeypatch, hold_kind, readable
+):
+    """`fly_task_result` and `get_long_job` read a stored row through the source check.
+
+    A relay hold reads none, though the row ran in its own channel; a plain hold
+    and an unheld turn read exactly what they did before.
+    """
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from daimon.adapters.mcp.tools import _long_job_access as access_tools
+    from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
+    from daimon.adapters.mcp.tools.fly import _readable  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn_hold import TurnHold
+
+    stamps = dict(daimon_channel=_SEALED, daimon_thread="thread")
+    hold = {
+        "none": None,
+        "plain": TurnHold(world.platform, _SEALED, client=False),
+        "relay": TurnHold(world.platform, _SEALED, client=False, relay=True),
+    }[hold_kind]
+    auth = replace(world.auth(), hold=hold)
+    runtime = world.runtime()
+    monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=False))
+    try:
+        # The stored compute row behind fly_task_result, status and the rest.
+        session = SimpleNamespace(source_metadata=stamps)
+        if readable:
+            await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]
+        else:
+            with pytest.raises(ToolError):
+                await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]
+        # The stored job summary behind get_long_job.
+        job = await _register_long_job(world, **stamps)
+        caller = await LongJobCaller.load(runtime, auth, None)
+        access = await long_job_access(caller, job)
+        assert access.act
+        assert access.read is readable
     finally:
         await runtime.client.close()

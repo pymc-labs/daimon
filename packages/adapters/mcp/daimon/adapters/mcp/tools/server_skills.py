@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -61,9 +61,6 @@ from daimon.core.stores.domain import ServerSkillRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
-
-if TYPE_CHECKING:
-    from daimon.core.turn.deps import TurnDeps
 
 _ACCESS: dict[str, str] = {
     "no_account": "{label} serves only chat accounts here.",
@@ -138,26 +135,11 @@ def _exchange(runtime: McpRuntime) -> NodeExchange:
 
 
 def _sync_deps(runtime: McpRuntime, node: SkillsNode) -> SyncDeps:
-    def turn_deps() -> TurnDeps:
-        from daimon.core.ma_resolver import new_resolver_cache
-        from daimon.core.turn.deps import build_turn_deps
-
-        return build_turn_deps(
-            runtime.settings,
-            runtime.client,
-            runtime.session_factory,
-            deployment_default=runtime.deployment_default,
-            resolver_cache=new_resolver_cache(),
-            billing_config=None,
-        )
-
     return skill_sync_deps(
         node=node,
         exchange=_exchange(runtime),
         shared=None,
         edit=_edit_deps(runtime),
-        turn_settings=runtime.settings.turn,
-        turn_deps=turn_deps,
         now=_now,
     )
 

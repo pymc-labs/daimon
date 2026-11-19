@@ -13,7 +13,6 @@ from typing import Any
 
 import httpx
 import pytest
-from anthropic import BadRequestError
 from anthropic.types import Message, StopReason, TextBlock, Usage
 from daimon.core.thread_naming import (
     _SYSTEM_PROMPT,  # pyright: ignore[reportPrivateUsage]
@@ -26,6 +25,7 @@ from daimon.core.thread_naming import (
     strip_mentions,
     suggest_thread_name,
 )
+from mux.errors import ProviderError
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
 # ---------------------------------------------------------------------------
@@ -269,11 +269,11 @@ async def test_suggest_thread_name_returns_none_name_but_usage_when_model_refuse
     assert suggestion.usage.output_tokens == 9, "a refused call still cost tokens and is metered"
 
 
-async def test_suggest_thread_name_propagates_api_errors() -> None:
+async def test_suggest_thread_name_propagates_provider_errors() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"type": "error", "error": {"message": "bad"}})
 
-    with pytest.raises(BadRequestError):
+    with pytest.raises(ProviderError):
         await suggest_thread_name(
             build_fake_anthropic(handler), message_text="hello there", max_input_chars=2000
         )

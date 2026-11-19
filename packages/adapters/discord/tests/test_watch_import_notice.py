@@ -9,10 +9,18 @@ from unittest.mock import AsyncMock
 
 import discord
 import pytest
+from daimon.adapters.discord import budget_notice
 from daimon.adapters.discord.budget_notice import send_member_notice, send_watch_notice
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE
 from daimon.core.stores.watches import REFUSED, UNCLEAR, NoticeAttempt, SentNotice
+
+TEXT = "Watch 1 expired."
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default agent's grant admits everyone: the stand-in runtime holds no database."""
+    monkeypatch.setattr(budget_notice, "_default_agent_admits", AsyncMock(return_value=True))
 
 
 @pytest.mark.parametrize("closed,allowed", [(False, True), (True, True), (False, False)])
@@ -29,12 +37,12 @@ async def test_import_notice_is_owner_only_dm_with_no_channel_fallback(closed, a
         tenant_id=tenant_id,
         workspace_id="100",
         recipient_id="123",
-        text=UNMAPPED_NOTICE,
+        text=TEXT,
     )
     assert result is (allowed and not closed)
     if result:
         open_dm.assert_awaited_once_with(100, 123)
-        assert dm.send.await_args.kwargs["embed"].description == UNMAPPED_NOTICE
+        assert dm.send.await_args.kwargs["embed"].description == TEXT
         assert dm.send.await_args.kwargs["allowed_mentions"].everyone is False
     else:
         open_dm.assert_not_called()

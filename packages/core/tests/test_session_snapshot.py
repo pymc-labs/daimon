@@ -933,6 +933,29 @@ def test_native_fast_model_is_in_session_identity_and_pricing():
     assert fingerprint_identity(fast) != fingerprint_identity(standard)
 
 
+def test_a_chosen_effort_is_session_identity_and_absent_when_unset() -> None:
+    """A conversation's effort replaces the session; no effort keeps every stored form."""
+    kwargs = dict(
+        hidden_mcp_server_names=frozenset(),
+        environment_id="env",
+        env_sha256=None,
+        repo_url=None,
+        repo_branch=None,
+        memory_store_id=None,
+        vault_id=None,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+    plain = desired_snapshot(_agent(), **kwargs)
+    low = desired_snapshot(_agent(), model_effort="low", **kwargs)
+    high = desired_snapshot(_agent(), model_effort="high", **kwargs)
+    assert "model_effort" not in plain.model_dump(mode="json")
+    assert low.model_dump(mode="json")["model_effort"] == "low"
+    assert identity_change_reasons(plain, low) == ("model",)
+    assert identity_change_reasons(low, high) == ("model",)
+    assert identity_change_reasons(low, low) == ()
+    assert len({fingerprint_identity(s) for s in (plain, low, high)}) == 3
+
+
 def test_a_daimon_rule_changes_the_tools_hash_and_clearing_it_restores_the_hash() -> None:
     """The bind-time drift check sees a rule added or cleared since the session was made."""
     from daimon.core.session_compat import (

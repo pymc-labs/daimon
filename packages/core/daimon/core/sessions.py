@@ -30,6 +30,9 @@ from anthropic.types.beta.beta_managed_agents_agent_with_overrides_params import
 from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import (
     BetaManagedAgentsMemoryStoreResourceParam,
 )
+from anthropic.types.beta.beta_managed_agents_model_config_params import (
+    BetaManagedAgentsModelConfigParams,
+)
 from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
@@ -45,6 +48,7 @@ from daimon.core.caller_resources import (
     CALLER_RESOURCES_ID,
     CALLER_VAULT_PREFIX,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
     github_repo_map_sha256,
@@ -128,6 +132,7 @@ from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_access import MAX_SESSION_VAULT_CREDENTIALS
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
+from daimon.core.thread_models import sent_effort
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -390,14 +395,21 @@ async def project_session_resources(
     private_dm_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     extra_resources: Sequence[Resource] = (),
+    caller_resources_on_credential: bool = False,
 ) -> BackendAgent:
     """Read the existing composer's obligations without resolving or materializing secrets.
 
+    `caller_resources_on_credential`: the target host signs seals, Slack turn context
+    and private DM onto its per-turn credential, so they add no native obligation.
+
     The result describes source intent, never preservation or execution authority.
     Every target mapping remains unproven until the existing preparation seam proves it.
+
+    A ``hold`` names only the held channel's memory store, never the agent-wide
+    one, as MA's held session mounts it (`memory_hold`). The hold itself travels
+    on the provider turn's own Daimon credential, so the caller reference is the
+    ordinary one.
     """
-    if hold is not None:
-        raise ScopeViolation("source-preparation", "a held turn cannot capture an unheld source")
     _check_resource_source(
         source, agent, environment, tenant_id, agent_uuid, account_id, resource_scope
     )
@@ -440,8 +452,18 @@ async def project_session_resources(
             )
             else ()
         )
-        store_id = await agent_memory_stores.get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
+        store_id = (
+            await agent_memory_stores.get_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=agent_uuid
+            )
+            if hold is None
+            else await agent_memory_stores.get_channel_memory_store_id(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                platform=hold.platform,
+                channel_id=hold.channel_id,
+            )
         )
     hidden = frozenset[str]()
     hiding_for = account_id if account_id is not None else hide_personal_for
@@ -504,8 +526,6 @@ async def project_session_resources(
         reference = f"{CALLER_VAULT_PREFIX}{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
             reference += f":slack-turn:{slack_turn_context_id}"
-        if hold is not None:
-            reference += f":hold:{hold_key(hold)}"
         requirements.append(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
@@ -524,40 +544,39 @@ async def project_session_resources(
         requirements.append(
             ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}{tenant_id}:{agent_uuid}", kind="native")
         )
+    carried_natively = not caller_resources_on_credential and (
+        slack_turn_context_id is not None or private_dm_id is not None or bool(origin_seal_ids)
+    )
     if (
         extra_resources
-        or slack_turn_context_id is not None
-        or (hold is not None and caller_vault)
-        or private_dm_id is not None
+        or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or origin_seal_ids
         or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
-    unclassified = ()
-    if source.source is not None:
+
+    def project(payload: Mapping[str, object], skills: Sequence[MaSkill]) -> AgentSpec:
+        spec = agent_spec(payload)
+        if source.source is None:
+            return spec
         # Classify the complete session skill list before neutral projection loses
         # native fields. The driver owns unknown-source detection for both paths.
         session_source = agent_record(
-            agent.model_copy(update={"skills": session_skills(agent, channel_skills)}),
-            source.source.ref.account_scope_id,
-            scope,
+            agent.model_copy(update={"skills": skills}), source.source.ref.account_scope_id, scope
         )
         unclassified = tuple(
             extension
             for extension in session_source.spec.extensions or ()
             if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
         )
-
-    def project(payload: Mapping[str, object]) -> AgentSpec:
-        spec = agent_spec(payload)
         if not unclassified:
             return spec
         return spec.model_copy(update={"extensions": (*(spec.extensions or ()), *unclassified)})
 
-    effective = project(payload)
+    turn_skills = session_skills(agent, channel_skills)
+    effective = project(payload, turn_skills)
     # The consent pin's view: Daimon's own gating (tool safety, asking before
     # publishing) changes with a release or a place, never with the agent.
     ungated_tools = session_tools(
@@ -568,12 +587,35 @@ async def project_session_resources(
         legacy_memory_servers=legacy_memory_servers,
     )
     ungated = project(
-        {**payload, "tools": [t.model_dump(mode="json", exclude_none=True) for t in ungated_tools]}
+        {**payload, "tools": [t.model_dump(mode="json", exclude_none=True) for t in ungated_tools]},
+        turn_skills,
+    )
+    # The pin's view: the owner's setup, the same in every place. A channel's skills
+    # and the servers hidden from one person are that turn's own (checked as losses).
+    owner_tools = session_tools(
+        agent,
+        frozenset(),
+        tool_safety=ToolSafetyPolicy(),
+        public_url=public_url,
+        legacy_memory_servers=legacy_memory_servers,
+    )
+    owner_servers = session_mcp_servers(
+        agent, frozenset(), tool_safety=ToolSafetyPolicy(), public_url=public_url
+    )
+    owner = project(
+        {
+            **payload,
+            "tools": [t.model_dump(mode="json", exclude_none=True) for t in owner_tools],
+            "mcp_servers": [server.model_dump(mode="json") for server in owner_servers],
+            "skills": [skill.model_dump(mode="json") for skill in session_skills(agent)],
+        },
+        session_skills(agent),
     )
     return source.model_copy(
         update={
             "effective_spec": effective,
             "ungated_spec": ungated,
+            "owner_spec": owner,
             "environment": source_environment_record(environment, scope),
             "resource_scope": scope,
             "resource_requirements": tuple(requirements),
@@ -681,8 +723,11 @@ async def create_session(
     on_app_access: Callable[[AppSessionAccess], None] | None = None,
     channel_skills: Sequence[MaSkill] = (),
     model_override: str | None = None,
+    model_effort: str | None = None,
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
+    relay_routine_id: uuid.UUID | None = None,
+    relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
 ) -> BetaManagedAgentsSession:
@@ -728,7 +773,8 @@ async def create_session(
     ``channel_skills`` and ``system_override`` by it (`SessionIdentity`).
 
     ``model_override`` replaces the model for this session through
-    ``agent_with_overrides``. It never changes the stored agent.
+    ``agent_with_overrides``, at ``model_effort`` when given. It never changes the
+    stored agent.
 
     ``agent_chat`` records headless surface provenance at creation. Only those
     sessions may later be continued, cancelled or archived through agent chat.
@@ -739,7 +785,8 @@ async def create_session(
     vault of this session's own for it (`create_relay_vault`), whatever caller.
     ``relay_session_key`` is the `thread_sessions` row a person's chat session will
     be recorded under, which the relay reads to find the turn the session runs;
-    without it (a routine, any headless caller) the relay names no person.
+    without it the relay names no person. ``relay_routine_id`` marks a routine's run and
+    ``relay_owner`` the owner it started for; the relay names that owner, not a live turn.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1013,7 +1060,12 @@ async def create_session(
                 agent_id=agent_uuid,
                 jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
                 relay_urls=relay_urls,
-                relay=RelayBinding(agent_name=agent.name, session_key=relay_session_key),
+                relay=RelayBinding(
+                    agent_name=agent.name,
+                    session_key=relay_session_key,
+                    routine_id=relay_routine_id,
+                    owner=relay_owner,
+                ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,
                 slack_turn_context_id=slack_turn_context_id,
@@ -1096,6 +1148,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=resource_agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
             else:
                 personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
@@ -1117,6 +1170,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
                 if identity.shared_memory:
                     try:
@@ -1138,6 +1192,7 @@ async def create_session(
                             agent_uuid=str(agent_uuid),
                             agent_name=resource_agent.name,
                             error=str(exc),
+                            causes=backend_refusal_causes(exc),
                         )
                 if personal_mount is not None:
                     resources.append(personal_mount)
@@ -1236,8 +1291,25 @@ async def create_session(
                     cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
                 ],
             }
+            carried = (
+                None if model_override is None else sent_effort(agent, model_override, model_effort)
+            )
             if model_override is not None:
-                overrides["model"] = model_override
+                overrides["model"] = (
+                    model_override
+                    if carried is None
+                    # The API takes an effort the SDK's param type doesn't list yet.
+                    else cast(
+                        BetaManagedAgentsModelConfigParams,
+                        {
+                            "id": model_override,
+                            "speed": agent.model.speed
+                            if model_override == agent.model.id
+                            else "standard",
+                            "effort": carried,
+                        },
+                    )
+                )
             if system_override is not None:
                 overrides["system"] = system_override
             if channel_skills or not identity.agent_skills:
@@ -1335,7 +1407,11 @@ async def create_session(
                                 )
                             )
                     except anthropic_pkg.APIError as exc:
-                        _log.warning("git_identity.mount_failed", error=str(exc))
+                        _log.warning(
+                            "git_identity.mount_failed",
+                            error=str(exc),
+                            causes=backend_refusal_causes(exc),
+                        )
                 await add_app_credentials(
                     anthropic, vault_id=vault_id, access=app_access, scope=scope
                 )
@@ -1398,6 +1474,7 @@ async def create_session(
                         mcp_hold=hold_key(hold) if account_id is not None else None,
                         memory_scope=memory_scope(memory_hold),
                         identity_features=identity.stored(),
+                        model_effort=model_effort,
                     )
                     if app_session_unmapped
                     else None

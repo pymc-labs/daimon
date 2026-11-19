@@ -21,9 +21,14 @@ import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
+from daimon.core.anthropic_guard import AnthropicDisabled
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.channel_environments import sealed_pick_refusal
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
+from daimon.core.defaults.owned import AgentNameTaken
+from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import AgentNameCollision, DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
@@ -32,6 +37,7 @@ from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.permissions import without_agent_rules
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
+from daimon.core.stores import connector_tokens, host_call_cards, neutral_catalog, thread_models
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     PolicyBusyError,
@@ -40,6 +46,7 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
+from daimon.core.stores.scoped_config_read import list_channels_picking_agent
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,7 +81,9 @@ async def create_user_agent(
             await stack.enter_async_context(
                 agent_name_lock(sessionmaker, tenant_id=tenant_id, name=spec.name)
             )
-        if await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name=spec.name):
+        if await find_agents_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=spec.name, records=sessionmaker
+        ):
             raise AgentNameCollision(taken_message)
         try:
             outcome = await reconcile_agent(
@@ -207,8 +216,9 @@ async def archive_memory_store_best_effort(
     and the retry path is dead (archived agents are filtered from lookup),
     so a transient memory-store archive failure must not strand the delete
     flow in a failed state — mirrors the mount-side degrade policy in
-    `memory_resource.py`. Catches ONLY `anthropic.APIError`; any other
-    exception propagates.
+    `memory_resource.py`. Catches ONLY `anthropic.APIError` and a missing
+    Anthropic key (a Daimon-owned agent has no Managed Agents store); any
+    other exception propagates.
     """
     try:
         await archive_memory_store_for_agent(
@@ -217,13 +227,49 @@ async def archive_memory_store_best_effort(
             tenant_id=tenant_id,
             agent_id=agent_id,
         )
-    except anthropic_errors.APIError:
+    except (anthropic_errors.APIError, AnthropicDisabled) as error:
         # Best-effort degrade: the caller's own delete flow has already
         # committed (e.g. the MA agent is archived and the retry path is
         # dead), so a transient memory-store archive failure must not
         # strand it in a failed state — mirrors the mount-side policy in
         # memory_resource.py.
-        _log.warning("agent_lifecycle.memory_store_archive_failed", **log_context)
+        _log.warning(
+            "agent_lifecycle.memory_store_archive_failed",
+            **log_context,
+            causes=backend_refusal_causes(error),
+        )
+
+
+def _own_names(name: str, agent: BetaManagedAgentsAgent) -> tuple[str, ...]:
+    own = (name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
+    return tuple(dict.fromkeys(n for n in own if n))
+
+
+async def archive_sealed_refusal(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    agent: BetaManagedAgentsAgent,
+    subject: Subject,
+) -> str | None:
+    """Why `subject` may not archive `agent`, or None when it may.
+
+    Archiving clears every channel pick of the agent's own names
+    (`forget_archived_agent`). A private channel that picks it changes only from
+    inside, so the archive is refused before any write. Call it in every archive path.
+    """
+    channels = await list_channels_picking_agent(
+        session, tenant_id=tenant_id, agent_names=_own_names(name, agent)
+    )
+    return await sealed_pick_refusal(
+        session,
+        tenant_id=tenant_id,
+        channels=channels,
+        subject=subject,
+        picks=f"{name} as its agent",
+        change="its agent",
+    )
 
 
 async def forget_archived_agent(
@@ -246,8 +292,7 @@ async def forget_archived_agent(
     `daimon agents rule set <name> --anywhere`; any other failure raises.
     Returns the names whose rule was dropped.
     """
-    own = (name, agent.name, agent.metadata.get(MA_METADATA_KEY_NAME))
-    names = tuple(dict.fromkeys(n for n in own if n))
+    names = _own_names(name, agent)
     log_fields = {"tenant_id": str(tenant_id), "agent_name": name, "ma_agent_id": agent.id}
     try:
         async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
@@ -256,17 +301,30 @@ async def forget_archived_agent(
             updated = without_agent_rules(policy, names)
             if updated != policy:
                 await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-            await _clear_references(session, tenant_id=tenant_id, names=names)
+            await _clear_references(session, tenant_id=tenant_id, names=names, agent=agent)
         return tuple(n for n in names if n in policy.agent_rules)
     except (AccessPolicyUnreadable, PolicyBusyError):
         _log.warning("agent_lifecycle.agent_rule_kept", exc_info=True, **log_fields)
     async with sessionmaker.begin() as session:
-        await _clear_references(session, tenant_id=tenant_id, names=names)
+        await _clear_references(session, tenant_id=tenant_id, names=names, agent=agent)
     return ()
 
 
 async def _clear_references(
-    session: AsyncSession, *, tenant_id: uuid.UUID, names: tuple[str, ...]
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    names: tuple[str, ...],
+    agent: BetaManagedAgentsAgent,
 ) -> None:
     for each in names:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=each)
+    # No agents table to cascade from: drop the rows keyed by the agent's id.
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    await connector_tokens.delete_connector_tokens_for_agent(session, agent_id=agent_uuid)
+    await thread_models.delete_consents_for_agent(session, agent_id=agent_uuid)
+    await host_call_cards.delete_for_agent(session, agent_id=agent_uuid)
+    # A shared thread's copy of the agent has no account to cascade from either.
+    await neutral_catalog.delete_shared_agent_copies(
+        session, tenant_id=tenant_id, agent_id=agent_uuid
+    )

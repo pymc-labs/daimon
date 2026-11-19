@@ -12,6 +12,7 @@ the (eventual) fire transaction.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -167,11 +168,18 @@ async def test_run_one_tick_dispatches_all_concurrently_up_to_cap(
     peak = 0
     fired: list[uuid.UUID] = []
 
+    all_in = asyncio.Event()
+
     async def counting_fire(r: RoutineRow) -> None:
         nonlocal concurrent, peak
         concurrent += 1
         peak = max(peak, concurrent)
-        await asyncio.sleep(0.05)  # DB-free window — do NOT open a session here
+        if concurrent == 10:
+            all_in.set()
+        # DB-free window — do NOT open a session here. Waiting for all ten, not a fixed
+        # sleep, keeps a slow feature read from ending one fire before the last starts.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(all_in.wait(), timeout=2.0)
         concurrent -= 1
         fired.append(r.id)
 
@@ -616,6 +624,24 @@ async def test_run_one_tick_skips_a_routine_whose_feature_cannot_be_read(
         fetched = await get_routine(s, row.id, tenant_id=row.tenant_id)
     assert fetched is not None
     assert fetched.last_error == "feature_read_failed", "the owner can see why it did not run"
+    assert fetched.next_fire_at == row.next_fire_at, "the slot is given back for the next tick"
+
+    monkeypatch.undo()
+    fired: list[RoutineRow] = []
+
+    async def fire_now(r: RoutineRow) -> None:
+        fired.append(r)
+
+    await run_one_tick(
+        now=now + timedelta(seconds=30),
+        sm=db_session_factory,
+        fire=fire_now,
+        max_age=timedelta(minutes=15),
+        max_concurrent_fires=10,
+        dispatch_timeout_s=5.0,
+        wait_for_completion=True,
+    )
+    assert [r.id for r in fired] == [row.id], "once the feature reads, the lost slot runs"
 
 
 async def test_run_one_tick_skips_an_intake_routine_when_lead_intake_is_off(

@@ -102,29 +102,6 @@ def is_participation_candidate(
     return in_thread and guild_id is not None
 
 
-def is_unmentioned_reply_hint_candidate(
-    *,
-    enabled: bool,
-    author_is_bot: bool,
-    author_is_webhook: bool,
-    bot_mentioned: bool,
-    in_bot_owned_thread: bool,
-    mentions_someone_else: bool,
-    is_plain_message: bool,
-) -> bool:
-    """Pre-DB gate for the hint that an unmentioned reply in daimon's thread is not answered.
-
-    Only a person's plain message in a thread daimon opened qualifies. A
-    message that @mentions someone else (a user, a role, everyone) is people
-    talking to each other, not a missed request, so it gets no hint. No bot
-    gets one, allow-listed QA drivers included: the QA allow-list admits
-    addressed turns, and this hint is not a turn.
-    """
-    if not enabled or bot_mentioned or author_is_webhook or author_is_bot:
-        return False
-    return in_bot_owned_thread and is_plain_message and not mentions_someone_else
-
-
 class HintCooldown:
     """At most one hint per key per `cooldown_s`, kept in memory.
 

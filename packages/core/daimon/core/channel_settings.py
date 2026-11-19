@@ -17,14 +17,25 @@ from typing import Literal
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_RULE, TenantAccessPolicy
-from daimon.core.authz import Action, Place, authorize
-from daimon.core.channel_backend import BackendActor, clear_channel_backend, current_backend
+from daimon.core.agent_model_names import AmbiguousModel
+from daimon.core.authz import Action, Place, authorize, build_agent_ref
+from daimon.core.backend_refusals import refusal_card
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    BackendActor,
+    BackendUnsupported,
+    agent_selection,
+    clear_channel_backend,
+    current_backend,
+    set_channel_backend,
+)
 from daimon.core.channel_changes import (
     NEEDS_ADMIN,
     ChannelActor,
     ChannelChangeRefused,
     Expected,
     after_write,
+    refusal_for,
     refused_binding,
     require_channel_admin,
 )
@@ -38,6 +49,7 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.errors import StaleChannelValue
+from daimon.core.models_catalog import catalog_model
 from daimon.core.permissions import channel_rule, with_channel_rule
 from daimon.core.rule_views import binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
@@ -52,12 +64,13 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change, write_workspace_default
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
-from daimon.core.stores.domain import ChannelSkillRow, FeatureTarget
+from daimon.core.stores.domain import ChannelSkillRow, FeatureTarget, TenantBackendPolicy
 from daimon.core.stores.feature_values import clear_feature_value, list_feature_values
 from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.scoped_config_read import get_scope
-from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ChannelRef
+from mux.contracts.config import DEFAULT_BACKEND, BackendConfig, ConfigRevision
+from mux.contracts.ids import ChannelRef, ModelRef
+from mux.errors import InvalidConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MISSING_ENVIRONMENT = "No environment by that name. Nothing changed."
@@ -109,9 +122,10 @@ async def set_environment(
             channel_id=channel_id,
             environment_name=environment_name,
             default=default,
+            records=sessionmaker,
         )
     if not pick.decision and pick.decision.reason != "not_a_reader":
-        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+        raise refusal_for(pick.decision)
     if environment_name in hidden or pick.missing:
         raise ChannelChangeRefused(_MISSING_ENVIRONMENT, kind="not_found")
     if not pick.decision:
@@ -166,7 +180,7 @@ async def add_skill(
     expected: Expected[Sequence[str]] | None = None,
 ) -> ChannelSkillRow:
     """Add `skill` for the agent answering here. Raises SkillsListTruncatedError when unread."""
-    _require_skill_admin(actor, channel_id)
+    await _require_skill_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         await _compare_skills(session, actor, platform, channel_id, expected)
         added = await add_skill_to_channel(
@@ -180,6 +194,7 @@ async def add_skill(
             actor_account_id=actor.account_id,
             platform_skills=platform_skills,
             surface=actor.surface,
+            records=sessionmaker,
         )
         if isinstance(added, str):
             raise ChannelChangeRefused(REFUSALS[added], kind="invalid", reason=added)
@@ -196,7 +211,7 @@ async def remove_skill(
     skill_id: str,
     expected: Expected[Sequence[str]] | None = None,
 ) -> None:
-    _require_skill_admin(actor, channel_id)
+    await _require_skill_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         await _compare_skills(session, actor, platform, channel_id, expected)
         removed = await remove_channel_skill(
@@ -213,9 +228,16 @@ async def remove_skill(
         await after_write(session, actor, True)
 
 
-def _require_skill_admin(actor: ChannelActor, channel_id: str) -> None:
-    if actor.subject.via_agent_key or not may_set_channel_skills(actor.subject, channel_id):
+async def _require_skill_admin(
+    sessionmaker: async_sessionmaker[AsyncSession], actor: ChannelActor, channel_id: str
+) -> None:
+    if actor.subject.via_agent_key:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    decision = may_set_channel_skills(policy, actor.subject, channel_id)
+    if not decision:
+        raise refusal_for(decision)
 
 
 async def _compare_skills(
@@ -267,13 +289,17 @@ async def set_tool_rule(
     """
     if not tool_safety:
         raise ChannelChangeRefused(_TOOL_SAFETY_OFF, kind="invalid", reason="tool_safety_off")
-    if actor.subject.via_agent_key or not authorize(
-        _OPEN_POLICY,
+    async with sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    decision = authorize(
+        policy,
         subject=actor.subject,
         action=Action.SET_CHANNEL_AGENT_TOOL_RULE,
+        agent=build_agent_ref(agent.name, agent.metadata),
         place=Place(channel_id=channel_id),
-    ):
-        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    )
+    if actor.subject.via_agent_key or not decision:
+        raise refusal_for(decision)
     async with sessionmaker.begin() as session:
         existing = await tool_rules.get_rule(
             session,
@@ -331,6 +357,65 @@ def pin_json(pin: ConfigRevision | None) -> dict[str, object] | None:
     return {"backend": pin.backend, "model": pin.model, "local": pin.local}
 
 
+def pin_target(value: str, policy: TenantBackendPolicy) -> ModelRef:
+    """The catalog model a pin names: one on another provider this workspace allows."""
+    try:
+        model = catalog_model(value, tenant=policy)
+        agent_selection(model.provider, model.id)
+    except (AgentBackendRefused, AmbiguousModel) as exc:
+        line = (
+            refusal_card(exc)[0]
+            if isinstance(exc, AgentBackendRefused)
+            else "That name fits several models. Pick one from the list."
+        )
+        raise ChannelChangeRefused(f"{line} Nothing was changed.", kind="invalid") from exc
+    if model.provider == DEFAULT_BACKEND:
+        raise ChannelChangeRefused(
+            "A pin names a model on another provider. Nothing was changed.", kind="invalid"
+        )
+    return model
+
+
+@dataclass(frozen=True)
+class PinPreview:
+    """What pinning a channel to a model changes, bound to the pin it read."""
+
+    value: str
+    """The catalog model, `provider:id`."""
+    named: str
+    expected_local: int | None
+    """The pin read, None for none: `set_provider_pin`'s `expected_local`."""
+    digest: str
+
+
+async def preview_provider_pin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    value: str,
+    policy: TenantBackendPolicy,
+) -> PinPreview:
+    """The one preview a chat pin and its card both read; refused as `set_provider_pin` is."""
+    from daimon.core.agent_configuration import channel_pin_set_digest
+    from daimon.core.turn.notices import provider_name
+
+    model = pin_target(value, policy)
+    before = await provider_pin(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+    ref = ChannelRef(tenant_id=str(tenant_id), platform=platform, channel_id=channel_id)
+    canonical = f"{model.provider}:{model.id}"
+    local = before.local if before is not None else None
+    return PinPreview(
+        value=canonical,
+        named=f"{provider_name(model.provider)} ({model.id})",
+        expected_local=local,
+        digest=channel_pin_set_digest(ref, local or 0, canonical),
+    )
+
+
 async def clear_provider_pin(
     sessionmaker: async_sessionmaker[AsyncSession],
     actor: ChannelActor,
@@ -340,7 +425,7 @@ async def clear_provider_pin(
     expected_local: int,
 ) -> None:
     """Clear the channel's provider pin; `expected_local` is the pin the actor read."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     if actor.account_id is None:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
     ref = ChannelRef(tenant_id=str(actor.tenant_id), platform=platform, channel_id=channel_id)
@@ -358,6 +443,56 @@ async def clear_provider_pin(
         )
         await _record(session, actor, platform, channel_id, "provider_pin", pin_json(pin), None)
         await after_write(session, actor, True)
+
+
+async def set_provider_pin(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    actor: ChannelActor,
+    *,
+    platform: str,
+    channel_id: str,
+    value: str,
+    policy: TenantBackendPolicy,
+    expected_local: int | None,
+) -> ConfigRevision:
+    """Pin the channel to the catalog model `value` (`provider:id`); `expected_local` is the
+    pin the actor read, None for none. Every agent answers here on it until it is cleared.
+    """
+    await require_channel_admin(sessionmaker, actor, channel_id)
+    if actor.account_id is None:
+        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    model = pin_target(value, policy)
+    selection = agent_selection(model.provider, model.id)
+    ref = ChannelRef(tenant_id=str(actor.tenant_id), platform=platform, channel_id=channel_id)
+    async with sessionmaker.begin() as session:
+        before = await provider_pin(
+            session, tenant_id=actor.tenant_id, platform=platform, channel_id=channel_id
+        )
+        if (before.local if before is not None else None) != expected_local:
+            raise StaleChannelValue("provider_pin", before.local if before is not None else None)
+        try:
+            written = await set_channel_backend(
+                session,
+                ref,
+                BackendConfig(
+                    backend=selection.backend, profile=selection.profile, model=selection.model
+                ),
+            )
+        except (BackendUnsupported, InvalidConfig) as exc:
+            raise ChannelChangeRefused(
+                "That model can't be pinned here. Nothing was changed.", kind="invalid"
+            ) from exc
+        await _record(
+            session,
+            actor,
+            platform,
+            channel_id,
+            "provider_pin",
+            pin_json(before),
+            pin_json(written),
+        )
+        await after_write(session, actor, True)
+    return written
 
 
 # ---------- Channel copy ----------
@@ -378,7 +513,7 @@ async def retire_channel_copy(
 
     The copy must have been made for `channel_id`; another channel's copy is refused.
     """
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     archived = await archive_channel_copy(
         client,
         sessionmaker,
@@ -408,7 +543,7 @@ async def set_workspace_default_agent(
     expected: Expected[str | None] | None = None,
 ) -> ValueChange[str | None]:
     """Set (None: clear) the agent every channel without its own default uses."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, None)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
@@ -504,7 +639,7 @@ async def clear_thread_override(
     kind: ThreadOverrideKind,
 ) -> None:
     """Drop one thread's own setting so it follows its channel again. Admins only."""
-    require_channel_admin(actor)
+    await require_channel_admin(sessionmaker, actor, channel_id)
     async with sessionmaker.begin() as session:
         listed = await list_thread_overrides(
             session, tenant_id=actor.tenant_id, platform=platform, channel_id=channel_id
@@ -578,16 +713,18 @@ async def _record(
     )
 
 
-_OPEN_POLICY = TenantAccessPolicy()
-
 __all__ = [
     "ConfirmNeeded",
     "ThreadOverride",
     "ValueChange",
     "add_skill",
     "clear_provider_pin",
+    "pin_target",
+    "preview_provider_pin",
+    "set_provider_pin",
     "clear_thread_override",
     "list_thread_overrides",
+    "PinPreview",
     "pin_json",
     "provider_pin",
     "remove_skill",

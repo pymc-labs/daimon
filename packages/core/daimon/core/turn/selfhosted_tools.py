@@ -10,12 +10,12 @@ import math
 import re
 import socket
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
@@ -45,6 +45,9 @@ from mux.state.operations import request_digest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    from daimon.core.turn_hold import TurnHold
+
 DAIMON_MCP_SERVER = "daimon-mcp"
 DAIMON_MCP_AUTH_ENV = "DAIMON_MCP_AUTHORIZATION"
 DAIMON_MCP_AUTH_HEADER = "X-Daimon-MCP-Authorization"
@@ -65,6 +68,8 @@ class TurnTools:
     mcp_servers: tuple[MCPServer, ...]
     skills: tuple[InlineSkill, ...]
     skipped: tuple[SkippedSkill, ...] = ()
+    relayed: tuple[str, ...] = ()
+    """Connectors mounted through Daimon's relay; their calls need the turn's session."""
 
 
 @dataclass(frozen=True)
@@ -200,6 +205,7 @@ def build_turn_tools(
     platform_skills: Sequence[SkillRef] = (),
     channel_skills: Sequence[ChannelSkillRow] = (),
     daimon_tools: bool = True,
+    relayed: Collection[str] = (),
 ) -> TurnTools:
     """Pure preparation from authorized records; exact pins never fall back to latest.
 
@@ -208,7 +214,10 @@ def build_turn_tools(
     the shared ownership, mount and count rules. Archive corruption/digest/cap
     failures refuse the turn rather than quietly changing requested content.
     With `daimon_tools` off the Daimon server is left out; its name stays reserved.
+    A `relayed` server is mounted at its relay URL under the turn's own Daimon credential.
     """
+    from daimon.core.connector_relay import relay_url
+
     daimon_mcp_url = _mcp_url(daimon_mcp_url, credential=True)
     servers = [
         MCPServer(
@@ -250,6 +259,11 @@ def build_turn_tools(
                 raise ScopeViolation(connection.name, "MCP credential belongs to another tenant")
             headers["Authorization"] = connection.credential_ref
         names.add(connection.name)
+        if connection.name in relayed:
+            url, headers = (
+                relay_url(daimon_mcp_url, connection.name),
+                {"Authorization": DAIMON_MCP_AUTH_ENV},
+            )
         servers.append(MCPServer(name=connection.name, url=url, headers_env=headers))
 
     skills: list[InlineSkill] = []
@@ -330,6 +344,7 @@ def build_turn_tools(
         tuple(servers),
         tuple(sorted(skills, key=lambda skill: skill.name)),
         tuple(sorted(set(skipped), key=lambda item: (item.name, item.reason))),
+        tuple(sorted(name for name in names if name in relayed)),
     )
 
 
@@ -343,11 +358,28 @@ async def mint_turn_mcp_authorization(
     deadline_s: float,
     now: datetime | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
+    seal_ids: Collection[str] = (),
+    memory_read_only: bool | None = None,
+    bind_session: bool = False,
+    requester_account_id: uuid.UUID | None = None,
+    answering_agent_id: str | None = None,
 ) -> MintedMcpAuthorization:
-    """Register a live agent's token; the host revokes jti in its turn-finally path."""
+    """Register a live agent's token; the host revokes jti in its turn-finally path.
+
+    A `hold` binds it to the held channel as MA's chat credential does; the server
+    then lists only the held allowlist. `seal_ids` signs the turn's seals.
+    `memory_read_only` binds the token to the
+    executing turn's origin, so the server reads that turn's memory as read-only;
+    `bind_session` binds it alone, as the connector relay needs. `requester_account_id`
+    marks a shared thread's credential, so the relay hides personal sign-ins.
+    `answering_agent_id` names the Daimon agent an agent-origin turn answers as: the
+    origin records that agent, so the credential must too, or every origin-bound tool
+    refuses and the agent's own connectors and tool rules never apply."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_auth import CHAT_TOKEN_TTL, mint_chat_mcp_token
+    from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.turn_origin import current_execution_origin_id
 
     if (
         scope.is_platform
@@ -378,7 +410,10 @@ async def mint_turn_mcp_authorization(
         or live.ref.account_scope_id != scope.tenant_id
     ):
         raise ScopeViolation(agent.id, "MCP credential requires a live tenant agent")
+    if memory_read_only and current_execution_origin_id.get() is None:
+        raise ScopeViolation(agent.id, "a read-only turn's credential needs its executing origin")
     tenant_id, account_id = uuid.UUID(scope.tenant_id), uuid.UUID(scope.account_id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=answering_agent_id or agent.id)
     async with sessions() as session, session.begin():
         identity = await get_account_with_tenant(session, account_id=account_id)
         if identity is None or identity.tenant_id != tenant_id:
@@ -386,12 +421,25 @@ async def mint_turn_mcp_authorization(
         token, jti, expires_at = await mint_chat_mcp_token(
             session,
             account_id=account_id,
-            agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+            agent_id=agent_id,
             secret=secret,
             now=now,
             ttl=timedelta(seconds=deadline_s + 60),
             anthropic_disabled=True,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
+            seal_ids=seal_ids,
+        )
+    if memory_read_only or bind_session or requester_account_id is not None:
+        token = await bind_execution_session(
+            sessions,
+            token=token,
+            secret=secret,
+            scope=scope,
+            agent_id=agent_id,
+            now=now,
+            memory_read_only=True if memory_read_only else None,
+            requester_account_id=requester_account_id,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)
 

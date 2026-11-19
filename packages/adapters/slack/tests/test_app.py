@@ -64,6 +64,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -596,6 +597,27 @@ async def test_drain_and_close_flips_draining_and_calls_client_close() -> None:
 
     assert app.draining is True, "drain_and_close must set draining=True"
     assert "close" in fake_client.call_log, "drain_and_close must await client.close()"
+
+
+async def test_drain_and_close_ends_a_waiting_dm_burst_at_once() -> None:
+    """A direct message burst is answered at the drain, not after its whole wait."""
+    app = _make_app()
+    burst = app.runtime.dm_bursts.open(("T1", "D1", "U1"), {"ts": "1.1"})
+    groups: list[list[dict[str, str]]] = []
+
+    async def react(event: dict[str, str], on: bool) -> None:
+        pass
+
+    async def answer(group: list[dict[str, str]]) -> None:
+        groups.append(group)
+
+    answering = asyncio.create_task(burst.answer(5.0, react, answer))
+    await asyncio.sleep(0.05)
+
+    await app.drain_and_close(_FakeSocketClient())  # type: ignore[arg-type]
+
+    await asyncio.wait_for(answering, 1.0)
+    assert groups == [[{"ts": "1.1"}]], "the wait ends at the drain and the burst is answered"
 
 
 async def test_drain_and_close_waits_for_in_flight_tasks_before_closing() -> None:
@@ -1396,7 +1418,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
             await asyncio.sleep(0)
         mock_deliver_outputs.assert_awaited_once()
         delivery_kwargs = mock_deliver_outputs.await_args.kwargs
-        assert delivery_kwargs["session_id"] == "sess-first-001"
+        assert mock_deliver_outputs.await_args.args[0].session_id == "sess-first-001"
         assert delivery_kwargs["channel_id"] == channel
         assert delivery_kwargs["thread_ts"] == thread_ts
         assert delivery_kwargs["requester_user_id"] == event["user"], (
@@ -1458,6 +1480,7 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
@@ -1512,6 +1535,7 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
@@ -1571,6 +1595,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
@@ -1678,6 +1703,7 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"

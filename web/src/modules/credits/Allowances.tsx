@@ -157,7 +157,7 @@ function Detail({ a }: { a: Allowance }) {
 }
 
 /** A group or a person, found by name; the choice is what the allowance is for. */
-function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean }) {
+export function SubjectPicker({ value, onChange, everyoneOnly, peopleOnly }: { value: Subject | null; onChange: (s: Subject) => void; everyoneOnly?: boolean; peopleOnly?: boolean }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState("")
   const [term, setTerm] = useState("")
@@ -167,7 +167,7 @@ function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | nul
   }, [text])
   const groups = useGroups()
   const people = usePeopleSearch(term)
-  const shown = (groups.data ?? []).filter((g) => (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))
+  const shown = (groups.data ?? []).filter((g) => !peopleOnly && (!everyoneOnly || g.id === "everyone") && g.name.toLowerCase().includes(text.trim().toLowerCase()))
   const pick = (s: Subject) => { onChange(s); setOpen(false) }
   const Icon = value ? KIND_ICON[value.kind] : null
   return (
@@ -180,7 +180,7 @@ function SubjectPicker({ value, onChange, everyoneOnly }: { value: Subject | nul
       </PopoverTrigger>
       <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
         <Command shouldFilter={false}>
-          <CommandInput placeholder="Find a group or person" value={text} onValueChange={setText} />
+          <CommandInput placeholder={peopleOnly ? "Find a person" : "Find a group or person"} value={text} onValueChange={setText} />
           <CommandList className="max-h-64">
             {shown.length > 0 && (
               <CommandGroup heading="Groups">

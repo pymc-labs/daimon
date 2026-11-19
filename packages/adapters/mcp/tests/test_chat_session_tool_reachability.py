@@ -44,6 +44,7 @@ from daimon.core.config import (
     Settings,
     TurnSettings,
 )
+from daimon.core.features.tool_gate import gated_tools, server_gate_key
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import (
     REACH_APPROVAL_TOOLS,
@@ -351,7 +352,20 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
     # Compare serialized full schemas, not just tool names or callability.
     import json
 
-    assert json.dumps(chat["result"], sort_keys=True) == json.dumps(plain["result"], sort_keys=True)
+    plain_tools = {tool["name"]: tool for tool in plain["result"]["tools"]}
+    chat_tools = {tool["name"]: tool for tool in chat["result"]["tools"]}
+    # The server hides a capability that is off from every caller but a chat-execution
+    # credential, whose native turn checks its catalogue against its allowlist; that
+    # credential is refused at call time instead. One it isn't set up for leaves both.
+    only_chat = set(chat_tools) - set(plain_tools)
+    assert set(plain_tools) <= set(chat_tools), "the chat credential's list must hold every tool"
+    assert only_chat and all(server_gate_key(name) is not None for name in only_chat), (
+        f"the lists may differ only by tools a capability gates; got {sorted(only_chat)}"
+    )
+    for name, tool in plain_tools.items():
+        assert json.dumps(chat_tools[name], sort_keys=True) == json.dumps(tool, sort_keys=True), (
+            f"{name} must read the same for both credentials"
+        )
     assert {tool["name"] for tool in chat["result"]["tools"]} == {
         "call_tool",
         "search_tools",
@@ -362,12 +376,15 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         # Unregistered here: backend selection and Microsoft accounts are off.
         *(
             APPROVAL_TOOLS
-            - backend_switch_tools(enabled=True)
+            # The thread-model pick is registered with selection off; it asks only cross-provider.
+            - (backend_switch_tools(enabled=True) - {"set_thread_model"})
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
             # Carded tools tagged admin stay hidden from a non-admin credential.
             - _ADMIN_CARDED_TOOLS
             # Posting tools are for platform-bound callers; this token has none.
             - REACH_APPROVAL_TOOLS
+            # This server has no cloud computer, notebook or report host setup.
+            - gated_tools(("compute", "notebooks", "report_publish"))
         ),
     }

@@ -284,9 +284,10 @@ async def test_selfhosted_mismatch_uses_generic_owner_without_anthropic(
     assert not actions
 
 
-async def test_selfhosted_tool_turn_releases_controls_without_output_sweep(
+async def test_selfhosted_tool_turn_when_outputs_then_sweeps_and_holds_controls(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A self-hosted tool turn sweeps its files, then releases the controls."""
     from typing import cast
     from unittest.mock import MagicMock
 
@@ -311,16 +312,23 @@ async def test_selfhosted_tool_turn_releases_controls_without_output_sweep(
         "sh_session_test",
         None,
         False,
+        outputs=MagicMock(session_id="sh_session_test"),
     )
     final = MagicMock(spec=TeamsTurnLifecycle)
     final.release_controls = AsyncMock()
-    with patch.object(teams.outputs, "sweep", side_effect=AssertionError("no Anthropic sweep")):
+    final.outputs_quiet_s.return_value = 0.0
+    swept = asyncio.Event()
+
+    async def sweep(*_: object, **__: object) -> None:
+        swept.set()
+
+    with patch.object(teams.outputs, "sweep", side_effect=sweep):
         await teams._finish_outputs(  # pyright: ignore[reportPrivateUsage]
-            make_inbound(),
-            outcome,
-            cast(TeamsTurnLifecycle, final),
-            selfhosted=True,
+            make_inbound(), outcome, cast(TeamsTurnLifecycle, final)
         )
+        await asyncio.wait_for(swept.wait(), 1)
+        for _ in range(5):
+            await asyncio.sleep(0)
     final.release_controls.assert_awaited_once()
 
 

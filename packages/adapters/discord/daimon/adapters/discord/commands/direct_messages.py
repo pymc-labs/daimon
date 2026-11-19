@@ -3,8 +3,10 @@
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from time import monotonic
 from typing import Any, Literal
 from weakref import WeakValueDictionary
@@ -12,6 +14,7 @@ from weakref import WeakValueDictionary
 import anthropic
 import structlog
 from cachetools import TTLCache
+from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.bot import (
     GLOBAL_CAP_NOTICE,
     DaimonBot,
@@ -24,13 +27,20 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.adapters.discord.context import (
+    compose_queued_content,
+    forwarded_lines,
+    forwarded_names,
+    input_context,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.config import Settings, env_admits, env_dm_policy
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
@@ -49,6 +59,10 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
+from daimon.core.dm_access import decide_dm, list_dm_agents, list_routable_dm_agents
+from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
+from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -62,9 +76,9 @@ from daimon.core.stores.direct_messages import (
     dm_enabled,
     get_conversation,
     get_dm_agent_name,
-    set_dm_agent_name,
 )
 from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
@@ -102,6 +116,9 @@ _DM_FAILURES = (
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 _BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
+_DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
+_EMPTY_NOTICE = "Send a text message to continue this conversation."
+_SEEN_REACTION = "👀"
 
 
 @dataclass(frozen=True)
@@ -112,6 +129,15 @@ class _DmRequest:
     author: discord.User | discord.Member
     channel: discord.DMChannel
     content: str = ""
+
+
+def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
+    """The files a message carries that an agent can use; a voice message is not one."""
+    return [
+        a
+        for a in getattr(message, "attachments", None) or ()
+        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
+    ]
 
 
 @dataclass
@@ -132,6 +158,34 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
     return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
+@dataclass(frozen=True)
+class _Eligibility:
+    """What admitting a DM through one server found.
+
+    `agents` is set when several agents fit and the person must pick; `admission`
+    when exactly one route was settled; `unknown` when membership could not be
+    checked; `failed` when discovery broke and the person was told.
+    """
+
+    admission: Admission | None = None
+    unknown: bool = False
+    failed: bool = False
+    agents: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Choice:
+    """One row of the discovery dropdown: a server, and an agent when it offers several."""
+
+    tenant: TenantRow
+    admission: Admission | None
+    agent: str | None
+
+    @property
+    def value(self) -> str:
+        return str(self.tenant.id) if self.agent is None else f"{self.tenant.id}/{self.agent}"
+
+
 class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
@@ -139,6 +193,7 @@ class DirectMessageCog(commands.Cog):
         self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
+        self._bursts = DmBursts[tuple[int, int], discord.Message](lambda m: m.content)
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
@@ -146,6 +201,7 @@ class DirectMessageCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._unloaded = True
+        self._bursts.stop()
         for view in self._switch_views.values():
             view.stop()
         self._switch_views.clear()
@@ -210,46 +266,85 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         *,
         denied: set[uuid.UUID] | None = None,
-    ) -> tuple[Admission | None, bool, bool]:
+        agent: str | None = None,
+    ) -> _Eligibility:
         """Admit `message` through `tenant`, or say why not.
 
-        Returns (admission, membership unknown, discovery failed). A verified
-        member refused for lack of access is added to `denied`, so discovery can
-        tell them they lack permission rather than give the generic guidance.
+        A verified member refused for lack of access is added to `denied`, so
+        discovery can tell them they lack permission rather than give the generic
+        guidance. `agent` is the one the person picked; it must still be offered.
         """
         runtime = self.bot.runtime
         if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
-            return None, False, False
+            return _Eligibility()
         if not self.bot.allows_tenant(tenant):
             self._suppress(message, "guild_not_allowed")
-            return None, False, False
+            return _Eligibility()
         async with runtime.sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=tenant.id)
-            agent = await get_dm_agent_name(session, tenant_id=tenant.id)
             try:
                 policy = await load_access_policy(session, tenant_id=tenant.id)
             except AccessPolicyUnreadable:
                 self._suppress(message, "policy_unreadable")
-                return None, False, False
-        recipient_policy = runtime.settings.direct_message_policies.get(
-            tenant.id, DirectMessagePolicy()
-        )
-        if not enabled or agent is None or not recipient_policy.allows(str(message.author.id)):
+                return _Eligibility()
+        recipient_policy = env_dm_policy(runtime.settings.direct_message_policies, tenant.id)
+        if not enabled or not recipient_policy.allows(str(message.author.id)):
             self._suppress(message, "dm_policy")
-            return None, False, False
+            return _Eligibility()
         subject = await self._subject(tenant.id, message.author.id)
         if subject.verified_membership is None:
-            return None, True, False
+            return _Eligibility(unknown=True)
         if subject.verified_membership is not True:
             self._suppress(message, "invoker_not_allowed")
-            return None, False, False
+            return _Eligibility()
         if not authorize(policy, subject=subject, action=Action.START_TURN):
             self._suppress(message, "invoker_not_allowed")
             if denied is not None:
                 denied.add(tenant.id)
-            return None, False, False
+            return _Eligibility()
         try:
+            async with runtime.sessionmaker() as session:
+                agents = await list_routable_dm_agents(
+                    session,
+                    tenant_id=tenant.id,
+                    anthropic=runtime.turn_deps.anthropic,
+                    records=runtime.turn_deps.sessionmaker,
+                )
+                principal = await find_platform_principal(
+                    session,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    external_id=str(message.author.id),
+                )
+                decision = await decide_dm(
+                    session,
+                    runtime.settings,
+                    policy,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    agents=agents,
+                    subject=subject,
+                    account_id=None if principal is None else principal.account_id,
+                )
+            route = decision.route
+            if isinstance(route, DmUnchecked):
+                return _Eligibility(unknown=True)
+            if isinstance(route, DmRefused):
+                self._suppress(message, route.reason)
+                named = route.reason in {"locked_unavailable", "default_unavailable"}
+                if named and denied is not None:  # an agent named for them refuses them
+                    denied.add(tenant.id)
+                return _Eligibility()
+            if agent is not None:
+                if not decision.may_use(agent):
+                    self._suppress(message, "agent_unavailable")
+                    return _Eligibility()
+                name = agent
+            elif isinstance(route, DmChoose):
+                return _Eligibility(agents=route.agents)
+            else:
+                name = route.agent
             admission = await admit_cold_dm(
                 runtime.turn_deps,
                 tenant_id=tenant.id,
@@ -258,8 +353,9 @@ class DirectMessageCog(commands.Cog):
                 role=Role.ADMIN if subject.is_admin else Role.USER,
                 role_ids=subject.role_ids,
                 verified_membership=subject.verified_membership,
+                agent_name=name,
             )
-        except (DaimonError, MAResolverMissError) as exc:
+        except (DaimonError, MAResolverMissError, anthropic.APIError) as exc:
             if (isinstance(exc, AdmissionDenied) and exc.reason in _ACCESS_DENIALS) or isinstance(
                 exc,
                 (
@@ -278,15 +374,19 @@ class DirectMessageCog(commands.Cog):
                     and exc.reason == "invoker_not_allowed"
                 ):
                     denied.add(tenant.id)
-                return None, False, False
+                return _Eligibility()
             # Membership and invoker eligibility were established above. Do not
             # disclose which candidate failed, or include exception/resource text.
-            log.warning("discord.dm.discovery_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.discovery_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             await message.channel.send(
                 _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
-            return None, False, True
-        return admission, False, False
+            return _Eligibility(failed=True)
+        return _Eligibility(admission=admission)
 
     async def _discover(
         self,
@@ -297,16 +397,17 @@ class DirectMessageCog(commands.Cog):
         if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
-        candidates: list[tuple[TenantRow, Admission]] = []
+        candidates: list[_Choice] = []
         denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
-            admission, uncertain, failed = await self._eligible(tenant, message, denied=denied)
-            if failed:
+            found = await self._eligible(tenant, message, denied=denied)
+            if found.failed:
                 return None
-            unknown |= uncertain
-            if admission is not None:
-                candidates.append((tenant, admission))
+            unknown |= found.unknown
+            if found.admission is not None:
+                candidates.append(_Choice(tenant, found.admission, None))
+            candidates.extend(_Choice(tenant, None, name) for name in found.agents)
         if self._unloaded:
             return None
         if unknown:
@@ -320,13 +421,33 @@ class DirectMessageCog(commands.Cog):
             await self._explain_no_private_chat(message, dms_on=None, permission=bool(denied))
             return None
         if len(candidates) == 1 and expected_scope_id is None:
-            tenant, admission = candidates[0]
-            return await self._start(message, tenant, admission, expected_scope_id=None)
+            only = candidates[0]
+            if only.admission is not None:
+                return await self._start(
+                    message, only.tenant, only.admission, expected_scope_id=None
+                )
+        await self._offer(message, candidates, expected_scope_id=expected_scope_id)
+        return None
+
+    async def _offer(
+        self,
+        message: discord.Message | _DmRequest,
+        candidates: list[_Choice],
+        *,
+        expected_scope_id: str | None,
+    ) -> None:
+        """Post a selector of servers or agents; a click starts the chosen conversation."""
         key = (message.author.id, message.channel.id)
         pending = _PendingSelection(message, expected_scope_id, monotonic() + SELECTION_SECONDS)
         self._pending[key] = pending
 
         async def choose(interaction: discord.Interaction, selected: str) -> None:
+            try:
+                await pick(interaction, selected)
+            finally:
+                self._bursts.wake(key)  # after the lock: the held burst answers in the pick
+
+        async def pick(interaction: discord.Interaction, selected: str) -> None:
             async with self._lock(key):
                 if (
                     self._pending.get(key) is not pending
@@ -340,7 +461,7 @@ class DirectMessageCog(commands.Cog):
                         "This selector expired. Send a new message.", ephemeral=True
                     )
                     return
-                if selected not in {str(tenant.id) for tenant, _ in candidates}:
+                if selected not in {choice.value for choice in candidates}:
                     await interaction.response.defer()
                     self._suppress(message, "invalid_selection")
                     return
@@ -349,8 +470,10 @@ class DirectMessageCog(commands.Cog):
                 del self._pending[key]
                 view.complete()
                 await interaction.edit_original_response(view=None)
+                tenant_part, _, agent_part = selected.partition("/")
+                agent = agent_part or None
                 async with self.bot.runtime.sessionmaker() as session:
-                    tenant = await get_tenant(session, uuid.UUID(selected))
+                    tenant = await get_tenant(session, uuid.UUID(tenant_part))
                     current = await get_conversation(
                         session,
                         platform="discord",
@@ -363,38 +486,55 @@ class DirectMessageCog(commands.Cog):
                 if tenant is None:
                     self._suppress(message, "tenant_unavailable")
                     return
-                admission, uncertain, failed = await self._eligible(tenant, message)
-                if failed:
+                found = await self._eligible(tenant, message, agent=agent)
+                if found.failed:
                     return
-                if uncertain:
+                if found.unknown:
                     await message.channel.send(
                         "Server membership is temporarily unavailable. Please retry."
                     )
                     return
-                if admission is None:
+                if found.admission is None:
                     return
-                conversation = await self._start(
-                    message, tenant, admission, expected_scope_id=expected_scope_id
+                await self._start(
+                    message,
+                    tenant,
+                    found.admission,
+                    expected_scope_id=expected_scope_id,
+                    remember_pick=agent is not None,
                 )
-                if conversation is not None and expected_scope_id is None:
-                    await self._reply(message, expected_scope_id=conversation.scope_id)
 
+        several = len({choice.tenant.id for choice in candidates}) > 1
+        picking_agent = any(choice.agent is not None for choice in candidates)
         servers: list[tuple[str, str]] = []
-        for tenant, _ in candidates:
-            guild = self.bot.get_guild(int(tenant.external_id))
-            servers.append((str(tenant.id), guild.name if guild else tenant.external_id))
+        for choice in candidates:
+            guild = self.bot.get_guild(int(choice.tenant.external_id))
+            server_name = guild.name if guild else choice.tenant.external_id
+            if choice.agent is None:
+                label = server_name
+            else:
+                label = f"{choice.agent} in {server_name}" if several else choice.agent
+            servers.append((choice.value, label))
 
         def expire() -> None:
             if self._pending.get(key) is pending:
                 del self._pending[key]
+                self._bursts.wake(key)
 
         view = ServerSelector(
-            user_id=key[0], route_id=key[1], servers=servers, choose=choose, expire=expire
+            user_id=key[0],
+            route_id=key[1],
+            servers=servers,
+            choose=choose,
+            expire=expire,
+            placeholder="Choose an agent" if picking_agent else "Choose a server",
         )
         pending.view = view
         try:
             sent = await message.channel.send(
-                "Choose a server for this private conversation.",
+                "Choose who to talk to for this private conversation."
+                if picking_agent
+                else "Choose a server for this private conversation.",
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -404,7 +544,6 @@ class DirectMessageCog(commands.Cog):
             raise
         pending.selector_id = sent.id
         view.message = sent
-        return None
 
     async def _start(
         self,
@@ -413,6 +552,7 @@ class DirectMessageCog(commands.Cog):
         admission: Admission,
         *,
         expected_scope_id: str | None,
+        remember_pick: bool = False,
     ) -> DirectMessageRow | None:
         conversation = await start_cold_dm(
             self.bot.runtime.turn_deps,
@@ -422,6 +562,7 @@ class DirectMessageCog(commands.Cog):
             route_key=str(message.channel.id),
             external_user_id=str(message.author.id),
             expected_scope_id=expected_scope_id,
+            remember_pick=remember_pick,
         )
         if conversation is None:
             return None
@@ -461,8 +602,7 @@ class DirectMessageCog(commands.Cog):
                         "This conversation changed. Use its latest switch control.", ephemeral=True
                     )
                     return
-                pending = self._pending.get(key)
-                if pending is not None and monotonic() < pending.expires_at:
+                if self._open_pick(key) is not None:
                     log.info(
                         "discord.dm.suppressed",
                         user_id=str(user_id),
@@ -534,8 +674,7 @@ class DirectMessageCog(commands.Cog):
                     "This conversation changed. Use its latest controls.", ephemeral=True
                 )
                 return
-            pending = self._pending.get(key)
-            if pending is not None and monotonic() < pending.expires_at:
+            if self._open_pick(key) is not None:
                 await interaction.response.send_message(
                     "Choose a server first, or wait for the selector to expire.", ephemeral=True
                 )
@@ -550,11 +689,16 @@ class DirectMessageCog(commands.Cog):
                     tenant = await get_tenant(session, current.tenant_id)
                 if tenant is None:
                     self._suppress(request, "tenant_unavailable")
-                    admission, uncertain = None, False
+                    found = _Eligibility()
                 else:
-                    admission, uncertain, _ = await self._eligible(tenant, request)
-                if uncertain:
+                    found = await self._eligible(tenant, request)
+                admission = found.admission
+                if found.unknown:
                     text = "Server membership is temporarily unavailable. Please retry."
+                elif tenant is not None and found.agents:
+                    choices = [_Choice(tenant, None, name) for name in found.agents]
+                    await self._offer(request, choices, expected_scope_id=current.scope_id)
+                    text = "Choose who to talk to below."
                 elif tenant is None or admission is None:
                     text = "Couldn't start a new conversation."
                 elif await self._start(
@@ -564,7 +708,11 @@ class DirectMessageCog(commands.Cog):
                 else:
                     text = "This conversation changed. Use its latest controls."
             except _DM_FAILURES as exc:
-                log.warning("discord.dm.restart_failed", error_type=type(exc).__name__)
+                log.warning(
+                    "discord.dm.restart_failed",
+                    causes=backend_refusal_causes(exc),
+                    error_type=type(exc).__name__,
+                )
                 text = _error_text(
                     exc,
                     "Couldn't start a new conversation. Please retry.",
@@ -659,25 +807,42 @@ class DirectMessageCog(commands.Cog):
                         ephemeral=True,
                     )
                     return
-                if action in {"agent", "clear-agent"}:
-                    if action == "agent" and not agent_name:
-                        raise DaimonError("Choose a tenant-owned agent name.")
-                    async with runtime.sessionmaker.begin() as session:
-                        await set_dm_agent_name(
-                            session,
-                            tenant_id=tenant_id,
-                            agent_name=agent_name if action == "agent" else None,
-                        )
-                    await interaction.followup.send("Cold DM agent updated.", ephemeral=True)
-                    return
+                if action == "agent" and not agent_name:
+                    raise DaimonError("Choose a tenant-owned agent name.")
                 async with runtime.sessionmaker.begin() as session:
-                    await set_dms(
+                    principal = await get_or_create_platform_principal(
                         session,
                         tenant_id=tenant_id,
-                        subject=Subject(is_admin=True, platform_user_id=str(member.id)),
                         platform="discord",
-                        enabled=action == "enable",
+                        external_id=str(member.id),
                     )
+                    if action in {"agent", "clear-agent"}:
+                        agents = await list_dm_agents(
+                            session,
+                            tenant_id=tenant_id,
+                            anthropic=runtime.turn_deps.anthropic,
+                            records=runtime.turn_deps.sessionmaker,
+                        )
+                        # The one writer `daimon dm default` and the web app use: the
+                        # name is checked against the server's agents and audited.
+                        await set_default(
+                            session,
+                            DmActor(tenant_id, principal.account_id, datetime.now(UTC)),
+                            agents,
+                            agent_name if action == "agent" else None,
+                        )
+                    else:
+                        await set_dms(
+                            session,
+                            tenant_id=tenant_id,
+                            subject=Subject(is_admin=True, platform_user_id=str(member.id)),
+                            platform="discord",
+                            enabled=action == "enable",
+                            account_id=principal.account_id,
+                        )
+                if action in {"agent", "clear-agent"}:
+                    await interaction.followup.send("DM default agent updated.", ephemeral=True)
+                    return
                 await interaction.followup.send(
                     embed=build_notice_embed(
                         "Daimon DMs are on for this server."
@@ -750,13 +915,22 @@ class DirectMessageCog(commands.Cog):
                 embed=build_notice_embed("Ready in your DMs.", neutral=True), ephemeral=True
             )
         except _DM_FAILURES as exc:
-            log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.move_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             message = _error_text(
                 exc,
                 "Couldn't open the conversation. Check that your DMs are open and retry.",
                 settings=self.bot.runtime.settings,
             )
             await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_drain(self) -> None:
+        """The process is stopping: answer what is held without waiting for more."""
+        self._bursts.stop()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -767,26 +941,128 @@ class DirectMessageCog(commands.Cog):
             or not isinstance(message.channel, discord.DMChannel)
         ):
             return
-        # The whole accepted DM -- slot wait, preparation, the turn and its
+        key = (message.author.id, message.channel.id)
+        if (burst := self._bursts.join(key, message)) is not None:
+            # The turn waiting or running here answers this message too.
+            await burst.mark(message, self._react)
+            return
+        # The whole accepted DM -- slot wait, preparation, the pick, the turn and its
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
-            key = (message.author.id, message.channel.id)
-            async with self._lock(key):
-                pending = self._pending.get(key)
+            burst = self._bursts.open(key, message)
+            try:
+                async with self._lock(key):
+                    found = await self._conversation(message)
+                    fresh = found is None
+                    if fresh and self._open_pick(key) is None:
+                        found = await self._open(message)
+                    pending = self._open_pick(key)
                 if pending is not None:
-                    if monotonic() < pending.expires_at:
-                        self._suppress(message, "selection_pending")
-                        return
-                    del self._pending[key]
-                try:
-                    await self._reply(message)
-                except _DM_FAILURES as exc:
-                    log.warning(
-                        "discord.dm.discovery_failed",
-                        error_type=type(exc).__name__,
-                        user_id=str(message.author.id),
-                        reason="discovery_unavailable",
-                    )
+                    # Outside the lock, which the pick takes: every message waits for it,
+                    # then goes where the pick, or its expiry, left the conversation.
+                    settled = partial(self._settled, key, pending)
+                    await burst.hold(settled, self._react, SELECTION_SECONDS)
+                    if burst.stopped:
+                        return  # what was held is told it was not sent
+                    found = await self._conversation(message)
+                if found is None:
+                    # The refusal, the failed pick or the expired selector speaks for the burst.
+                    await self._bursts.end(key, burst)
+                    return
+                async with self._lock(key):
+                    seconds = 0.0
+                    if not fresh:
+                        seconds = await debounce_seconds(
+                            self.bot.runtime.sessionmaker,
+                            self.bot.runtime.settings,
+                            found.tenant_id,
+                            "discord",
+                        )
+                    scope_id: str | None = found.scope_id
+
+                    async def answer(group: list[discord.Message]) -> None:
+                        nonlocal scope_id
+                        scope_id = await self._answer(group, scope_id)
+
+                    await burst.answer(seconds, self._react, answer)
+            finally:
+                # An error no turn handled, or a cancellation: nothing left goes unheard.
+                if await self._bursts.end(key, burst):
+                    await self._tell_dropped(message.channel)
+
+    async def _open(self, message: discord.Message) -> DirectMessageRow | None:
+        """The conversation a first message starts; None once it offered a pick or said why not."""
+        try:
+            return await self._discover(message)
+        except _DM_FAILURES as exc:
+            log.warning(
+                "discord.dm.discovery_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+                user_id=str(message.author.id),
+                reason="discovery_unavailable",
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            return None
+
+    def _open_pick(self, key: tuple[int, int]) -> _PendingSelection | None:
+        pending = self._pending.get(key)
+        return pending if pending is not None and monotonic() < pending.expires_at else None
+
+    async def _settled(self, key: tuple[int, int], pending: _PendingSelection) -> bool | None:
+        """True once `pending` was picked or expired; None while it is open or its pick runs.
+
+        Only the process holding the gateway lease (`__main__.start_when_leased`) gets DMs,
+        so the selector and the burst it holds live in one process.
+        """
+        return None if self._open_pick(key) is pending or self._lock(key).locked() else True
+
+    async def _conversation(self, message: discord.Message | _DmRequest) -> DirectMessageRow | None:
+        async with self.bot.runtime.sessionmaker() as session:
+            return await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(message.channel.id),
+                external_user_id=str(message.author.id),
+            )
+
+    async def _react(self, message: discord.Message, on: bool) -> None:
+        """Put the mark that says a message is held on, or take it off."""
+        with contextlib.suppress(discord.HTTPException):
+            if on:
+                await message.add_reaction(_SEEN_REACTION)
+            elif self.bot.user is not None:
+                await message.remove_reaction(_SEEN_REACTION, self.bot.user)
+
+    async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
+        """One turn for `group`, sent into `scope_id`; the conversation the next one goes to."""
+        first = group[0]
+        try:
+            return await self._reply(first, expected_scope_id=scope_id, batch=tuple(group))
+        except _DM_FAILURES as exc:
+            log.warning(
+                "discord.dm.reply_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+                user_id=str(first.author.id),
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await first.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            return scope_id
+
+    async def _tell_dropped(self, channel: discord.abc.Messageable) -> None:
+        """Tell the person messages taken in for a turn that will not run were not sent."""
+        log.info("discord.dm.dropped")
+        with contextlib.suppress(discord.HTTPException):
+            await channel.send(
+                embed=build_notice_embed(_DROPPED_NOTICE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def _explain_no_private_chat(
         self,
@@ -826,7 +1102,8 @@ class DirectMessageCog(commands.Cog):
         someone who loses access mid-turn sees no more of it. A failed membership
         lookup proves nothing: the write goes ahead if the previous check (or the
         admission) verified the person, and is refused otherwise, with the next
-        write checking again.
+        write checking again. `conversation` is the claimed one, so a later claim
+        closes the card too.
         """
         runtime = self.bot.runtime
         channel = message.channel
@@ -838,8 +1115,8 @@ class DirectMessageCog(commands.Cog):
 
             async def still_allowed() -> None:
                 nonlocal verified
-                policy = runtime.settings.direct_message_policies.get(
-                    conversation.tenant_id, DirectMessagePolicy()
+                policy = env_dm_policy(
+                    runtime.settings.direct_message_policies, conversation.tenant_id
                 )
                 if grant is None or not policy.allows(person):
                     self._suppress(message, "delivery_recipient_revoked")
@@ -881,6 +1158,7 @@ class DirectMessageCog(commands.Cog):
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
                 budget_channel_id=admission.budget_channel_id,
@@ -900,15 +1178,15 @@ class DirectMessageCog(commands.Cog):
     ) -> None:
         """Send the turn's saved files to the DM, rechecking access before each one."""
         assert isinstance(message.channel, discord.DMChannel)
-        session_id = reply.session_id
-        if session_id is None:
+        outputs = reply.outputs
+        if outputs is None:
             return
         runtime = self.bot.runtime
         person = str(message.author.id)
 
         async def may_post() -> bool:
-            policy = runtime.settings.direct_message_policies.get(
-                reply.conversation.tenant_id, DirectMessagePolicy()
+            policy = env_dm_policy(
+                runtime.settings.direct_message_policies, reply.conversation.tenant_id
             )
             if not policy.allows(person):
                 self._suppress(message, "delivery_recipient_revoked")
@@ -921,39 +1199,46 @@ class DirectMessageCog(commands.Cog):
             return True
 
         self.bot.schedule_dm_output_sweep(
-            message.channel, session_id, may_post=may_post, lifecycle=card
+            message.channel, outputs, may_post=may_post, lifecycle=card
         )
 
     async def _reply(
-        self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None
+        self,
+        message: discord.Message,
+        *,
+        expected_scope_id: str | None,
+        batch: tuple[discord.Message, ...],
+    ) -> str | None:
+        """Answer the held `batch` `message` opens, in one turn, in `expected_scope_id`.
+
+        The conversation it answered in, or that replaced `expected_scope_id`.
+        """
+        conversation = await self._conversation(message)
+        if conversation is None or conversation.scope_id != expected_scope_id:
+            # Messages sent before /dm-me moved the conversation.
+            self._suppress(message, "conversation_moved")
+            await self._tell_dropped(message.channel)
+            return None if conversation is None else conversation.scope_id
+        await self._turn(message, conversation, batch)
+        return conversation.scope_id
+
+    async def _turn(
+        self,
+        message: discord.Message | _DmRequest,
+        conversation: DirectMessageRow,
+        batch: tuple[discord.Message, ...],
     ) -> None:
-        assert isinstance(message.channel, discord.DMChannel)
+        assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
         runtime = self.bot.runtime
         cards: list[DiscordTurnLifecycle] = []
-        async with runtime.sessionmaker() as session:
-            conversation = await get_conversation(
-                session,
-                platform="discord",
-                route_key=str(message.channel.id),
-                external_user_id=str(message.author.id),
-            )
-        if expected_scope_id is not None and (
-            conversation is None or conversation.scope_id != expected_scope_id
-        ):
-            self._suppress(message, "selection_superseded")
-            return
-        if conversation is None:
-            conversation = await self._discover(message)
-            if conversation is None:
-                return
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
                 tenant = await get_tenant(session, conversation.tenant_id)
                 policy = await load_dm_access_policy(session, tenant_id=conversation.tenant_id)
                 enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
-            recipient_policy = runtime.settings.direct_message_policies.get(
-                conversation.tenant_id, DirectMessagePolicy()
+            recipient_policy = env_dm_policy(
+                runtime.settings.direct_message_policies, conversation.tenant_id
             )
             if (
                 not enabled
@@ -966,10 +1251,13 @@ class DirectMessageCog(commands.Cog):
                 self._suppress(message, "active_access_revoked")
                 return
             role = Role.ADMIN if subject.is_admin else Role.USER
-            if not message.content.strip():
-                await message.channel.send(
-                    embed=build_notice_embed("Send a text message to continue this conversation.")
-                )
+            # The stand-in after a server pick has no content, files or snapshots.
+            messages = batch or (() if isinstance(message, _DmRequest) else (message,))
+            text = compose_queued_content(list(messages))
+            files = [a for held in messages for a in _attachments(held)]
+            forwards = forwarded_names(messages)
+            if not (text.strip() or files or forwarded_lines(messages)):
+                await message.channel.send(embed=build_notice_embed(_EMPTY_NOTICE))
                 return
             # A DM has no card: over the cap it waits under the typing
             # indicator. Only the process-wide cap applies, as before; a
@@ -1002,14 +1290,51 @@ class DirectMessageCog(commands.Cog):
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
+                    discord_settings = runtime.settings.discord
+                    prefix, image_blocks = await prepare_attachments(files)
+                    context = await input_context(
+                        message.channel,
+                        messages,
+                        bot_user_id=self.bot.user.id if self.bot.user else None,
+                        bot_display_name=(
+                            discord_settings.bot_display_name if discord_settings else "daimon"
+                        ),
+                    )
+
+                    async def reseed_prefix(
+                        messages: Sequence[discord.Message] = messages,
+                        channel: discord.abc.Messageable = message.channel,
+                        prefix: str = prefix,
+                    ) -> str:
+                        # No link to an oversized image: it may be what ended the session.
+                        again = await input_context(
+                            channel,
+                            messages,
+                            bot_user_id=self.bot.user.id if self.bot.user else None,
+                            bot_display_name=(
+                                discord_settings.bot_display_name if discord_settings else "daimon"
+                            ),
+                            omit_oversized_image_urls=True,
+                        )
+                        return "\n".join(part for part in (again, prefix) if part)
+
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         platform="discord",
                         route_key=str(message.channel.id),
                         external_user_id=str(message.author.id),
                         message_id=str(message.id),
+                        merged_message_ids=tuple(str(held.id) for held in messages[1:]),
                         expected_scope_id=conversation.scope_id,
-                        text=message.content,
+                        text=text,
+                        prefix="\n".join(part for part in (context, prefix) if part),
+                        reseed_prefix=reseed_prefix,
+                        image_blocks=image_blocks,
+                        history_notes=[
+                            *(f"[attachment: {a.filename}]" for a in files),
+                            *(f"[attachment: {name}]" for name in forwards),
+                            *(["[forwarded message]"] if forwarded_lines(messages) else []),
+                        ],
                         role=role,
                         role_ids=subject.role_ids,
                         verified_membership=subject.verified_membership,
@@ -1020,7 +1345,7 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=self._turn_card(message, conversation, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:
@@ -1031,9 +1356,11 @@ class DirectMessageCog(commands.Cog):
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.
                     await require_dm_delivery(runtime.turn_deps, reply)
-                    if not runtime.settings.direct_message_policies.get(
-                        conversation.tenant_id, DirectMessagePolicy()
-                    ).allows(str(message.author.id)):
+                    if not env_admits(
+                        runtime.settings.direct_message_policies,
+                        conversation.tenant_id,
+                        str(message.author.id),
+                    ):
                         self._suppress(message, "delivery_recipient_revoked")
                         return
                     await message.channel.send(
@@ -1049,7 +1376,11 @@ class DirectMessageCog(commands.Cog):
                 path="dm",
                 alert_webhook_url=self.bot.runtime.settings.ops.alert_webhook_url,
             )
-            log.warning("discord.dm.turn_failed", error_type=type(exc).__name__)
+            log.warning(
+                "discord.dm.turn_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+            )
             if isinstance(exc, DirectMessageAccessRevoked):
                 self._suppress(message, exc.reason)
                 return

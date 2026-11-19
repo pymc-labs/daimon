@@ -13,7 +13,7 @@ from daimon.adapters.discord.routines_panel.state import (
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.routines import list_routines_for_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PICKER_CAP = 25
 
@@ -24,6 +24,7 @@ async def load_guild_routines(
     *,
     tenant_id: uuid.UUID,
     viewer_user_id: str | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap, and decorate per entry.
 
@@ -32,7 +33,7 @@ async def load_guild_routines(
     can render fallbacks without a per-row LIST.
     """
     rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
-    agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     agent_name_map: dict[str, str] = {}
     for agent in agents:
         name = agent.metadata.get("daimon_name")

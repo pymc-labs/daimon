@@ -118,7 +118,7 @@ export const serverSkillsHandlers = [
     const key = `${agent}:${skill_id}`
     if (follow) UNFOLLOWED.delete(key)
     else UNFOLLOWED.add(key)
-    // Following again moves the agent at once, unless its backend consent needs the owner.
+    // Following again moves the agent at once; an update held earlier waits for Apply.
     if (follow && !HELD.has(key) && MIRRORS.get(skill_id)?.doc.status === "current") repin(agent, skill_id)
     return new HttpResponse(null, { status: 204 })
   }),

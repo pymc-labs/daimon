@@ -74,9 +74,13 @@ def settings_card(screen: PanelScreen, place: FeaturePlace) -> AdaptiveCard:
         ]
         for start in range(0, len(buttons), _BUTTONS_PER_ROW):
             body.append(ActionSet(actions=buttons[start : start + _BUTTONS_PER_ROW]))
-    if screen.back is not None:
-        back = button(VERB, screen.back.label, screen.back.value, channel=channel, thread=thread)
-        body.append(ActionSet(actions=[back]))
+    options = [*([screen.back] if screen.back else []), *screen.paging]
+    if options:
+        nav: list[Action] = [
+            button(VERB, option.label, option.value, channel=channel, thread=thread)
+            for option in options
+        ]
+        body.append(ActionSet(actions=nav))
     return AdaptiveCard(body=body, fallback_text=screen.title)
 
 
@@ -111,7 +115,9 @@ async def show_settings(context: CommandContext) -> None:
             runtime.settings,
             actor,
             place,
-            agents=tenant_agents(runtime.anthropic, context.tenant_id),
+            agents=tenant_agents(
+                runtime.anthropic, context.tenant_id, records=runtime.sessionmaker
+            ),
         )
     except (DaimonError, SQLAlchemyError) as exc:
         log.warning("teams.settings.failed", exc_info=exc)
@@ -165,7 +171,9 @@ class SettingsActions:
                 await _actor(self.runtime, actor.tenant_id, actor.user_id, actor.admin_for),
                 raw,
                 place,
-                agents=tenant_agents(self.runtime.anthropic, actor.tenant_id),
+                agents=tenant_agents(
+                    self.runtime.anthropic, actor.tenant_id, records=self.runtime.sessionmaker
+                ),
             )
         except (DaimonError, SQLAlchemyError) as exc:
             log.warning("teams.settings.change_failed", exc_info=exc)

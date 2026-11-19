@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -70,7 +71,7 @@ def _runtime(fake: _Fake, sessionmaker: async_sessionmaker[AsyncSession]) -> Mcp
         session_factory=sessionmaker,
         client=MagicMock(),  # type: ignore[arg-type]  # unused by the Teams impls
         # Only the outbound limits are read, by the reach gate every form passes.
-        settings=MagicMock(outbound=OutboundSettings()),  # type: ignore[arg-type]
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),  # type: ignore[arg-type]
         deployment_default=DeploymentDefault(),
         teams_client=client,
     )

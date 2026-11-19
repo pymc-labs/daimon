@@ -8,10 +8,13 @@ from datetime import UTC, datetime
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_admin
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_editing import AgentActor, AgentEditError
 from daimon.core.authz import Subject, Surface
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.stores import agent_helpers
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -111,6 +114,52 @@ async def test_a_non_admin_is_refused(
 
     assert err.value.kind == "forbidden"
     assert await _list(db_session_factory, actor.tenant_id, "ag_daimon") == []
+
+
+async def test_an_admin_outside_a_private_channel_sets_no_helpers_of_its_own_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    actor = await _actor(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=actor.tenant_id,
+        policy=TenantAccessPolicy(
+            channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")},
+            agent_rules={"argon": AgentRule(runs_in=("C_SEAL",))},
+        ),
+    )
+    await db_session.commit()
+    inside = AgentActor(
+        tenant_id=actor.tenant_id,
+        account_id=actor.account_id,
+        subject=Subject(
+            is_admin=True,
+            platform_user_id=actor.subject.platform_user_id,
+            origin_channel_ids=frozenset({"C_SEAL"}),
+        ),
+        surface=Surface.WEB,
+    )
+
+    with pytest.raises(AgentEditError) as err:
+        await agent_admin.set_helpers(
+            db_session_factory,
+            actor=actor,
+            ma_agent_id="ag_argon",
+            helper_ids=["ag_daimon"],
+            roster=_roster(actor.tenant_id),
+        )
+    assert err.value.kind == "forbidden"
+    assert str(err.value) == SEALED_REFUSAL
+    assert await _list(db_session_factory, actor.tenant_id, "ag_argon") == []
+
+    await agent_admin.set_helpers(
+        db_session_factory,
+        actor=inside,
+        ma_agent_id="ag_argon",
+        helper_ids=["ag_daimon"],
+        roster=_roster(actor.tenant_id),
+    )
+    assert await _list(db_session_factory, actor.tenant_id, "ag_argon") == ["ag_daimon"]
 
 
 @pytest.mark.parametrize(

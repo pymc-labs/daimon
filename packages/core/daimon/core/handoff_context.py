@@ -97,20 +97,33 @@ def select_recent_turns(
     alone exceeds `max_chars`.
     """
 
-    selected: list[TranscriptTurn] = []
-    remaining = max_chars
-    for event in reversed(events):
-        if len(selected) >= max_turns or remaining <= 0:
-            break
+    texts: list[tuple[Literal["user", "agent"], str]] = []
+    for event in events:
         if event.type == "user.message":
             role: Literal["user", "agent"] = "user"
         elif event.type == "agent.message":
             role = "agent"
         else:
             continue
-        text = "\n".join(block.text for block in event.content if block.type == "text").strip()
+        texts.append((role, "\n".join(b.text for b in event.content if b.type == "text")))
+    return select_recent_turn_texts(texts, max_turns=max_turns, max_chars=max_chars)
+
+
+def select_recent_turn_texts(
+    texts: Sequence[tuple[Literal["user", "agent"], str]],
+    *,
+    max_turns: int = 12,
+    max_chars: int = 16_000,
+) -> list[TranscriptTurn]:
+    """`select_recent_turns` over provider-neutral (role, text) pairs, oldest first."""
+
+    selected: list[TranscriptTurn] = []
+    remaining = max_chars
+    for role, raw in reversed(texts):
+        if len(selected) >= max_turns or remaining <= 0:
+            break
         # The successor's turn has its own origin; the earlier turn's id is not for it.
-        text = redact_turn_origin_text(text)
+        text = redact_turn_origin_text(raw.strip())
         if not text:
             continue
         if len(text) > remaining:
@@ -235,6 +248,7 @@ def _framing_text(
     requested_work: str | None,
     has_previous_session: bool,
     not_carried: Sequence[str],
+    carried_files: Sequence[str] = (),
 ) -> str:
     parts = ["This conversation continues work started in a different workspace."]
 
@@ -252,6 +266,11 @@ def _framing_text(
             "`handoff/` goes in /, where its shell started. Anything restored "
             "into the outputs directory may be delivered to this thread a second time, which "
             "is expected and not a problem."
+        )
+    elif transfer_kind == "transcript" and carried_files:
+        parts.append(
+            "The previous workspace's saved files were carried over: "
+            f"{', '.join(carried_files)}. Its other working files did not come across."
         )
     elif transfer_kind == "transcript":
         parts.append(
@@ -299,6 +318,7 @@ def render_handoff_framing(
     requested_work: str | None,
     previous_session: str | None,
     not_carried: Sequence[str],
+    carried_files: Sequence[str] = (),
 ) -> HandoffFraming:
     """Split the handoff framing across the two channels the model allows.
 
@@ -314,6 +334,7 @@ def render_handoff_framing(
         requested_work=requested_work,
         has_previous_session=previous_session is not None,
         not_carried=not_carried,
+        carried_files=carried_files,
     )
     if supports_system_message(model_id):
         block: BetaManagedAgentsSystemContentBlockParam = {"type": "text", "text": framing}

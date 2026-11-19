@@ -193,6 +193,14 @@ export function answer(qc: QueryClient, sid: string, cardId: string, a: CardAnsw
   return run(qc, sid, `/api/chat/sessions/${sid}/cards/${cardId}`, { body: async () => a })
 }
 
+/** The refusal card's way back: the agent answers on Claude again; says what changed. */
+export async function switchBack(qc: QueryClient, sid: string) {
+  const { line } = await api.post<{ line: string }>(`/api/chat/sessions/${sid}/switch-back`)
+  await refetchThread(sid).catch(() => undefined)
+  void qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
+  return line
+}
+
 function settle(c: Card, a: CardAnswer): Card {
   if (c.kind === "approval") return { ...c, state: a.answer === "deny" ? "denied" : a.answer === "always" ? "always" : "approved" }
   if (c.kind === "credential") return { ...c, state: a.answer === "skip" ? "skipped" : "saved" }

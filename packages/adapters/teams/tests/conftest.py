@@ -483,7 +483,7 @@ def build_teams_runtime(
     if admins:
         settings.teams = settings.teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     settings.turn_queue = TurnQueueSettings()
-    settings.features = {}
+    settings.features = {"dm_debounce_seconds": "0"}  # a test sets the wait it needs
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()
@@ -666,6 +666,15 @@ def no_delivery_poller() -> Iterator[AsyncMock]:
 
 
 @pytest.fixture(autouse=True)
+def routed_personal_chat() -> Iterator[AsyncMock]:
+    """Personal chats start already routed; `test_personal_chat.py` covers the routing."""
+    with patch(
+        "daimon.adapters.teams.app.route_personal_chat", new_callable=AsyncMock, return_value=True
+    ) as route:
+        yield route
+
+
+@pytest.fixture(autouse=True)
 def no_channel_listing() -> Iterator[AsyncMock]:
     """The channel listing round would share the test connection too."""
     with patch("daimon.adapters.teams.app.run_channel_listing", new_callable=AsyncMock) as loop:
@@ -732,24 +741,6 @@ def isolate_agent_faces() -> Iterator[None]:
 
     yield
     cancel_pending_agent_faces()
-
-
-@pytest.fixture(autouse=True)
-def _status_log_off() -> Iterator[None]:
-    """Pin `turn.status_log` off, so the environment cannot change what a test sees."""
-    from daimon.core.turn.status_log import status_log_override
-
-    with status_log_override(False):
-        yield
-
-
-@pytest.fixture
-def status_log_on(_status_log_off: None) -> Iterator[None]:
-    """Run a test with `turn.status_log` on; every other test runs with it off."""
-    from daimon.core.turn.status_log import status_log_override
-
-    with status_log_override(True):
-        yield
 
 
 @pytest.fixture

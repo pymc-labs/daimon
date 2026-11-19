@@ -272,8 +272,8 @@ def test_a_gemini_refusal_names_the_gemini_model():
 
 
 @pytest.mark.parametrize("count", [0, 2])
-def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
-    """The real usage shape: a list of `{type, count}` per grounding tool."""
+def test_a_gemini_grounding_call_other_than_search_is_logged_as_a_leak(count):
+    """The real usage shape: a list of `{type, count}` per grounding tool; search is metered."""
     import structlog.testing
     from daimon.core.turn.gemini_prepare import _warn_on_grounding
 
@@ -297,8 +297,8 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
         native_meter={
             "total_input_tokens": 10,
             "grounding_tool_count": [
-                {"type": "google_search", "count": count},
-                {"type": "url_context", "count": 0},
+                {"type": "google_search", "count": 3},
+                {"type": "url_context", "count": count},
             ],
         },
         completeness="measured",
@@ -310,7 +310,7 @@ def test_a_gemini_grounding_call_is_logged_as_a_leak(count):
     assert len(leaks) == (1 if count else 0)
     if count:
         assert leaks[0]["grounding_tool_count"] == count and leaks[0]["observation_id"]
-        assert leaks[0]["grounding_types"] == ["google_search", "url_context"]
+        assert leaks[0]["grounding_types"] == ["url_context"]
 
 
 class _Inner:

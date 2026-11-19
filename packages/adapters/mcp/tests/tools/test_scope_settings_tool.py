@@ -20,7 +20,8 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES, Tier
-from daimon.core.features.surface import OVERRIDES_OFF
+from daimon.core.features.service import read_features
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.factories import make_account, make_tenant
@@ -35,13 +36,13 @@ ADMIN, MEMBER = Subject(is_admin=True, platform_user_id="u1"), Subject(platform_
 _SESSIONS: list[async_sessionmaker[AsyncSession]] = []
 
 
-def _runtime(*, overrides: bool = True) -> Any:
+def _runtime() -> Any:
     settings = Settings.model_validate(
         {
             "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
             "anthropic": AnthropicSettings(api_key=SecretStr("test")),
             "discord": DiscordSettings(bot_token=SecretStr("test")),
-            "tool_safety": ToolSafetyPolicy(enabled=True, allow_gate_overrides=overrides),
+            "tool_safety": ToolSafetyPolicy(enabled=True),
         }
     )
     return SimpleNamespace(session_factory=_SESSIONS[0], client=object(), settings=settings)
@@ -158,10 +159,6 @@ async def test_allowed_changes_write_at_the_verified_origin(world: dict[str, Any
     approvals = await _change(_as(world, make_auth()))
     assert world["card"].await_args.kwargs["tool_name"] == "change_setting"
     assert approvals.setting["value"] == "off" and "Allow writes" in approvals.note
-    ignored = await _change(
-        _as(world, make_auth()), "approvals", "channel", "on", runtime=_runtime(overrides=False)
-    )
-    assert ignored.note.endswith(OVERRIDES_OFF), ignored.note
     footer = await _change(_as(world, _granted()), "cost_footer", "workspace", "hidden")
     assert footer.setting["value"] == "hidden", footer.setting
     agent = await _change(_as(world, make_auth()), "progress_plans", "agent", "on")
@@ -187,7 +184,18 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
     world: dict[str, Any],
 ) -> None:
     result = await tool._get_settings_impl(_runtime(), _as(world, make_auth(admin=False)), "ctx")  # pyright: ignore[reportPrivateUsage]
-    assert [s["key"] for s in result.settings] == list(FEATURES), "every registered key"
+    keys = [s["key"] for s in result.settings]
+    hidden = [k for k in FEATURES if k not in keys]
+    assert hidden, "a feature that is not set up here is left out"
+    assert keys == [k for k in FEATURES if k not in hidden], "the rest keep registry order"
+    views = await read_features(
+        _SESSIONS[0],
+        _runtime().settings,
+        FeaturePlace.of(world["ids"]["tenant_id"], "discord", "C1", "T1", agent_id="agent_1"),
+    )
+    assert {v.spec.key for v in views if v.resolved.unavailable is not None} >= set(hidden), (
+        "only unavailable features are hidden"
+    )
     by_key = {s["key"]: [t["tier"] for t in s["tiers"]] for s in result.settings}
     assert by_key["approvals"] == ["workspace", "channel", "thread"]
     assert by_key["progress_plans"] == ["deployment", "workspace", "agent", "channel", "thread"]

@@ -106,7 +106,9 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.direct_messages import (
+    DM_PICK_ACTION_ID,
     handle_direct_message,
+    handle_dm_agent_pick,
     handle_dm_command,
     is_direct_message_event,
 )
@@ -160,6 +162,7 @@ from daimon.adapters.slack.names import (
     remember_payload_names,
 )
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
+from daimon.adapters.slack.own_cards import handle_own_card_click, is_own_card_action
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -188,8 +191,11 @@ from daimon.adapters.slack.runtime import (
     responder_account,
     responder_handle,
 )
-from daimon.adapters.slack.settings import ACTION_ID as SETTINGS_ACTION_ID
-from daimon.adapters.slack.settings import handle_settings_change, handle_settings_command
+from daimon.adapters.slack.settings import (
+    handle_settings_change,
+    handle_settings_command,
+    is_settings_action,
+)
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
 from daimon.adapters.slack.shared_channel import (
     ENVELOPE_EXT_SHARED_KEY,
@@ -199,15 +205,34 @@ from daimon.adapters.slack.shared_channel import (
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
+    evaluate_menu_submission,
     evaluate_support_submission,
     handle_ask_human_click,
+    handle_option_pick,
     run_support_submission,
-    slack_support_enabled,
+)
+from daimon.adapters.slack.support_menu_form import MENU_CALLBACK_ID, OPTION_ACTION_ID
+from daimon.adapters.slack.support_post import SETTLE_DECLINE_ACTION_ID, SETTLE_SET_ACTION_ID
+from daimon.adapters.slack.support_settle import (
+    SETTLE_CALLBACK_ID,
+    evaluate_settle_submission,
+    handle_settle_click,
+    run_settle_submission,
 )
 from daimon.adapters.slack.thread_handoff import (
     HAND_OVER_ACTION_ID,
     build_hand_over_blocks,
     handle_hand_over_click,
+)
+from daimon.adapters.slack.thread_model import (
+    SHORTCUT_CALLBACK_ID as THREAD_MODEL_SHORTCUT_ID,
+)
+from daimon.adapters.slack.thread_model import (
+    THREAD_MODEL_ACTION_IDS,
+    handle_thread_model_cancel,
+    handle_thread_model_confirm,
+    handle_thread_model_pick,
+    handle_thread_model_shortcut,
 )
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
@@ -226,6 +251,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
     check_wake_responder,
@@ -246,6 +272,7 @@ from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -253,6 +280,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -293,6 +321,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
@@ -717,37 +746,37 @@ class SlackApp:
         channel: str,
         thread_id: str,
         team_id: str,
-        selfhosted: bool,
         requester_user_id: str,
     ) -> None:
-        """Serialize the optional Anthropic file sweep after a tool turn."""
+        """Serialize the file sweep after a tool turn."""
 
-        if selfhosted or not any(
+        outputs = outcome.outputs
+        if outputs is None or not any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         # Read the chain link synchronously, before spawning, so it cannot be lost.
-        previous = self._output_sweeps.get(outcome.ma_session_id)
+        previous = self._output_sweeps.get(outputs.session_id)
         task = self._spawn(
             self._sweep_session_outputs(
                 previous,
                 web_client,
-                session_id=outcome.ma_session_id,
+                outputs=outputs,
                 channel_id=channel,
                 thread_ts=thread_id,
                 team_id=team_id,
                 requester_user_id=requester_user_id,
             )
         )
-        self._output_sweeps[outcome.ma_session_id] = task
-        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
+        self._output_sweeps[outputs.session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outputs.session_id))
 
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
         web_client: AsyncWebClient,
         *,
-        session_id: str,
+        outputs: OutputRuntime,
         channel_id: str,
         thread_ts: str,
         team_id: str,
@@ -777,11 +806,11 @@ class SlackApp:
         except Exception:  # named boundary: the files still go out, pinging nobody
             log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
             requester_label = "@someone"
+        session_id = outputs.session_id
         try:
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 web_client,
-                session_id=session_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 notice_keys=self._delivery_notice_keys,
@@ -1248,6 +1277,24 @@ class SlackApp:
                 )
                 if _sup.proceed:
                     self._spawn(run_support_submission(self.runtime, _sup))
+            elif cb_id == MENU_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _menu = evaluate_menu_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_menu.response_payload)
+                )
+                if _menu.proceed:
+                    self._spawn(run_support_submission(self.runtime, _menu))
+            elif cb_id == SETTLE_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _settle = evaluate_settle_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id, payload=_settle.response_payload
+                    )
+                )
+                if _settle.proceed:
+                    self._spawn(run_settle_submission(self.runtime, _settle))
             else:
                 # Unknown view_submission callback_id — log and ack empty.
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
@@ -1399,6 +1446,12 @@ class SlackApp:
                     # Slack did not say whose workspace the clicker is in:
                     # users.info decides before anything runs.
                     self._spawn(self._verify_then_route_block_action(payload, action_id))
+            elif (
+                payload.get("type") == "message_action"
+                and payload.get("callback_id") == THREAD_MODEL_SHORTCUT_ID
+            ):
+                # A shortcut is the host's, like every control but the allowlisted ones.
+                self._spawn(self._gated_shortcut(payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1535,8 +1588,16 @@ class SlackApp:
             or action_id == "routines_create"
         ):
             self._spawn(handle_routine_action(self.runtime, payload))
-        elif action_id == SETTINGS_ACTION_ID:
+        elif is_settings_action(action_id):
             self._spawn(handle_settings_change(self.runtime, payload))
+        elif action_id in THREAD_MODEL_ACTION_IDS:
+            handler = {
+                "thread_model_pick": handle_thread_model_pick,
+                "thread_model_confirm": handle_thread_model_confirm,
+            }.get(action_id, handle_thread_model_cancel)
+            self._spawn(handler(self.runtime, payload))
+        elif action_id == DM_PICK_ACTION_ID:
+            self._spawn(handle_dm_agent_pick(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1577,10 +1638,16 @@ class SlackApp:
             self._spawn(handle_feedback_details_click(self.runtime, payload))
         elif action_id == ASK_HUMAN_ACTION_ID:
             self._spawn(handle_ask_human_click(self.runtime, payload))
+        elif action_id == OPTION_ACTION_ID:
+            self._spawn(handle_option_pick(self.runtime, payload))
+        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
+            self._spawn(handle_settle_click(self.runtime, payload))
         elif action_id.startswith(PROVIDER_ACTION_PREFIX):
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
+        elif is_own_card_action(action_id):
+            self._spawn(handle_own_card_click(self.runtime, payload))
         elif action_id == HAND_OVER_ACTION_ID:
             self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
@@ -1644,6 +1711,17 @@ class SlackApp:
             self._route_block_action(payload, action_id)
             return
         log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
+
+    async def _gated_shortcut(self, payload: dict[str, Any]) -> None:
+        """Run the thread model shortcut for a verified host member; anyone else is refused."""
+        check = await self._submitter_check(payload)
+        if check == "member":
+            await handle_thread_model_shortcut(self.runtime, payload)
+            return
+        log.info("slack.on_request.unverified_shortcut_refused", check=check)
         await self._refuse_external_click(
             payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
         )
@@ -1941,6 +2019,7 @@ class SlackApp:
                 event_ts=event_ts,
                 request_id=request_id,
                 exc_info=exc,
+                causes=backend_refusal_causes(exc),
             )
             capture_exception_with_scope(exc)
             # Before the per-event client exists there is no token to post
@@ -2233,6 +2312,7 @@ class SlackApp:
                     thread_id=thread_id,
                     team_id=team_id,
                     exc_info=exc,
+                    causes=backend_refusal_causes(exc),
                 )
                 with contextlib.suppress(SlackApiError):
                     await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
@@ -2606,7 +2686,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
 
         # Commit the intent before Slack can accept the initial card. If the
         # response is lost or this task is cancelled during the request, a
@@ -2631,8 +2715,8 @@ class SlackApp:
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(admission),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and admission.feature_on("support_escalation"),
+            ask_human=admission.feature_on("support_escalation"),
+            vote_buttons=admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
             render_tables=admission.shown("table_rendering", "slack"),
@@ -2774,7 +2858,9 @@ class SlackApp:
             # run_prepared_turn fail immediately at its first await with a
             # ceiling TurnError. Bounding the interstitial itself is separate,
             # deferred work.
-            turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+            turn_deadline_at = turn_deadline(
+                now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s
+            )
 
             # --- Stage two: bind_session (find-or-create, mapping write,
             # recorder binding) -- bind_session(). As on Discord,
@@ -2843,6 +2929,7 @@ class SlackApp:
                             self.runtime.anthropic,
                             error.source_agent_id,
                             scope=resource_scope(tenant_id=str(tenant_id)),
+                            records=self.runtime.sessionmaker,
                         )
                         owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):
@@ -2905,6 +2992,7 @@ class SlackApp:
                         active_turn_message_id=lifecycle.status_ts,
                         active_turn_channel_id=channel,
                         now=datetime.now(UTC),
+                        deadline=turn_deadline_at,
                     )
                     await _at_session.commit()
                 _marker_mapping_ids.add(prepared.mapping_id)
@@ -3092,8 +3180,8 @@ class SlackApp:
                     sessionmaker=self.runtime.sessionmaker,
                     reply_people_cap=self._reply_people_cap(admission),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                    ask_human=slack_support_enabled(self.runtime.settings.support)
-                    and admission.feature_on("support_escalation"),
+                    ask_human=admission.feature_on("support_escalation"),
+                    vote_buttons=admission.shown("message_feedback", "slack"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
                     render_tables=admission.shown("table_rendering", "slack"),
@@ -3314,10 +3402,6 @@ class SlackApp:
                 thread_id=thread_id,
                 team_id=team_id,
                 requester_user_id=author_id,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister
@@ -3502,7 +3586,9 @@ class SlackApp:
             admitted_name=follow_admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        follow_deadline = turn_deadline(now=datetime.now(UTC))
+        follow_deadline = turn_deadline(
+            now=datetime.now(UTC), ceiling_s=follow_admission.turn_ceiling_s
+        )
         follow_prepared = await bind_session(
             self.runtime.turn_deps,
             follow_admission,
@@ -3543,7 +3629,11 @@ class SlackApp:
                     wait_for_face=True,
                 )
         except (anthropic.APIError, SQLAlchemyError) as exc:
-            log.warning("slack.agent_identity_lookup_failed", error_type=type(exc).__name__)
+            log.warning(
+                "slack.agent_identity_lookup_failed",
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
+            )
         follow_lifecycle = SlackTurnLifecycle(
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(
@@ -3551,8 +3641,8 @@ class SlackApp:
                 attended=row.reason != "watch_fired" and continuation_attended(row),
             ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and follow_admission.feature_on("support_escalation"),
+            ask_human=follow_admission.feature_on("support_escalation"),
+            vote_buttons=follow_admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
             render_tables=follow_admission.shown("table_rendering", "slack"),
@@ -3605,6 +3695,7 @@ class SlackApp:
                     active_turn_message_id=follow_lifecycle.status_ts,
                     active_turn_channel_id=channel,
                     now=datetime.now(UTC),
+                    deadline=follow_deadline,
                 )
                 await _at_session.commit()
 
@@ -3653,8 +3744,8 @@ class SlackApp:
                     attended=row.reason != "watch_fired" and continuation_attended(row),
                 ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                ask_human=slack_support_enabled(self.runtime.settings.support)
-                and follow_admission.feature_on("support_escalation"),
+                ask_human=follow_admission.feature_on("support_escalation"),
+                vote_buttons=follow_admission.shown("message_feedback", "slack"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=follow_admission.shown("table_rendering", "slack"),
@@ -3700,26 +3791,42 @@ class SlackApp:
             return new_lifecycle
 
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                attended=continuation_attended(row),
-                tenant_id=tenant_id,
-                account_id=follow_admission.account_id,
-                platform="slack",
-                parent_channel_id=channel,
-                thread_id=thread_id,
-                responder_ma_agent_id=str(follow_admission.agent.id),
-                responder_name=follow_admission.config.agent_name or follow_admission.agent.name,
-                configuration_target_ma_agent_id=(
-                    follow_admission.config.configuration_target_ma_agent_id
+            async with (
+                turn_origin(
+                    self.runtime.sessionmaker,
+                    attended=continuation_attended(row),
+                    tenant_id=tenant_id,
+                    account_id=follow_admission.account_id,
+                    platform="slack",
+                    parent_channel_id=channel,
+                    thread_id=thread_id,
+                    responder_ma_agent_id=str(follow_admission.agent.id),
+                    responder_name=follow_admission.config.agent_name
+                    or follow_admission.agent.name,
+                    configuration_target_ma_agent_id=(
+                        follow_admission.config.configuration_target_ma_agent_id
+                    ),
+                    configuration_target_name=(follow_admission.config.configuration_target_name),
+                    role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
+                    sender_foreign=follow_admission.hold is not None
+                    and follow_admission.hold.client,
+                    shared_channel=follow_admission.shared_channel,
+                    is_setup=follow_admission.config.thread_binding_kind == "setup",
+                    platform_channel_id=channel,
+                ) as follow_origin,
+                send_prefix(
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        thread_id=thread_id,
+                        target_ma_agent_id=row.target_ma_agent_id,
+                    )
+                    if row.reason == "confirmed_call"
+                    else None
                 ),
-                configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
-                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
-                shared_channel=follow_admission.shared_channel,
-                is_setup=follow_admission.config.thread_binding_kind == "setup",
-                platform_channel_id=channel,
-            ) as follow_origin:
+            ):
                 await run_prepared_turn(
                     self.runtime.turn_deps,
                     follow_prepared,
@@ -3916,12 +4023,14 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, waits for acked
+        Sets draining=True so new mentions are rejected, ends every direct
+        message burst's wait so it is answered now, waits for acked
         mention handlers and ``_processing`` to drain (or the grace window to
         elapse), then closes the WebSocket client. Stays within the
         deployment's 60s kill timeout.
         """
         self.draining = True
+        self.runtime.dm_bursts.stop()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),

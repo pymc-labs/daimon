@@ -23,8 +23,8 @@ def _sha256(text: str) -> str:
 
 
 def sample_controls() -> list[str]:
-    """The turn controls of one fixed sample turn, with every optional part present, at each
-    level a workspace can choose."""
+    """The turn controls of one fixed sample turn, with every optional part present, with and
+    without the web links."""
     from daimon.core.features.resolver import ResolvedFeature
     from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
     from daimon.core.stores.domain import Role, TurnOriginRow
@@ -53,12 +53,8 @@ def sample_controls() -> list[str]:
         expires_at=when,
     )
     rendered: list[str] = []
-    for level, tools in (("full", "on"), ("origin", "on"), ("minimal", "off")):
-        found = {
-            key: ResolvedFeature(key, value, "default")
-            for key, value in (("turn_controls", level), ("daimon_tools", tools))
-        }
-        found["web_awareness"] = ResolvedFeature("web_awareness", "on", "default")
+    for awareness in ("on", "off"):
+        found = {"web_awareness": ResolvedFeature("web_awareness", awareness, "default")}
         rendered.append(
             render_turn_origin(
                 origin,

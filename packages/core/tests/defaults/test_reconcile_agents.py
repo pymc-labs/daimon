@@ -16,6 +16,7 @@ from daimon.core.agent_guidance import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
     tenant_scoped_display_title,
@@ -60,6 +61,7 @@ def _tagged_agent(
     version: int = 1,
     created_at: str = "2026-04-21T00:00:00Z",
     account_id: uuid.UUID | None = None,
+    managed: bool = False,
 ) -> dict[str, Any]:
     metadata: dict[str, str] = {
         MA_METADATA_KEY_TENANT: str(tenant_id),
@@ -67,6 +69,8 @@ def _tagged_agent(
     }
     if account_id is not None:
         metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
+    if managed:
+        metadata[MA_METADATA_KEY_MANAGED] = "true"
     return ma_agent(
         id=id_,
         name=name,
@@ -1340,3 +1344,87 @@ async def test_a_users_agent_may_not_limit_a_skill_to_platforms() -> None:
             dry_run=False,
             managed=False,
         )
+
+
+_OTHER_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000002")
+
+
+@pytest.mark.parametrize(
+    "agents",
+    [
+        [_tagged_agent(id_="ag_renamed", name="default", tenant_id=TENANT_ID, managed=True)],
+        [
+            _tagged_agent(id_="ag_renamed", name="default", tenant_id=TENANT_ID, managed=True),
+            _tagged_agent(id_="ag_users", name="daimon", tenant_id=TENANT_ID),
+        ],
+    ],
+    ids=["renamed-only", "beside-a-users-daimon"],
+)
+async def test_reconcile_agent_leaves_seeded_agent_renamed_to_default_alone(
+    agents: list[dict[str, Any]],
+) -> None:
+    """A later release renames the seeded `daimon` to `default` in place. The
+    `daimon` spec must then write nothing: a create would fork the agent, an
+    update would rename it back, and adopting a workspace's own `daimon` would
+    overwrite it. No POST route is registered, so any write fails the test.
+    """
+    client = build_fake_anthropic_http(_router_with_agents(agents).dispatch)
+
+    outcome = await reconcile_agent(client, _agent_spec(), tenant_id=TENANT_ID, dry_run=False)
+
+    assert outcome.action is Action.SKIPPED, "the renamed seeded agent is reported unchanged"
+    assert outcome.anthropic_id == "ag_renamed", "the outcome names the renamed agent"
+
+
+@pytest.mark.parametrize(
+    "agents",
+    [
+        [_tagged_agent(id_="ag_users", name="default", tenant_id=TENANT_ID)],
+        [_tagged_agent(id_="ag_other", name="default", tenant_id=_OTHER_TENANT_ID, managed=True)],
+    ],
+    ids=["unmanaged-default", "other-tenants-default"],
+)
+async def test_reconcile_agent_still_creates_daimon_beside_a_default_that_is_not_the_seeded_one(
+    agents: list[dict[str, Any]],
+) -> None:
+    """Only this tenant's managed `default` stands in for the seeded agent; a
+    workspace's own `default` or another tenant's never does.
+    """
+    router = _router_with_agents(agents)
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda req, _m: httpx.Response(
+            200, json=_tagged_agent(id_="ag_new", name="daimon", tenant_id=TENANT_ID)
+        ),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcome = await reconcile_agent(client, _agent_spec(), tenant_id=TENANT_ID, dry_run=False)
+
+    assert outcome.action is Action.CREATED, "the seeded agent is created as before"
+    assert outcome.anthropic_id == "ag_new", "the new agent is the created one"
+
+
+async def test_reconcile_agent_updates_seeded_daimon_when_a_renamed_default_also_exists() -> None:
+    """With the seeded `daimon` still live, reconcile updates it as before."""
+    spec = _agent_spec()
+    router = _router_with_agents(
+        [
+            _tagged_agent(id_="ag_seeded", name="daimon", tenant_id=TENANT_ID, managed=True),
+            _tagged_agent(id_="ag_renamed", name="default", tenant_id=TENANT_ID, managed=True),
+        ]
+    )
+    router.add(
+        "POST",
+        r"/v1/agents/ag_seeded",
+        lambda req, _m: httpx.Response(
+            200, json=_tagged_agent(id_="ag_seeded", name="daimon", tenant_id=TENANT_ID, version=2)
+        ),
+    )
+    client = build_fake_anthropic_http(router.dispatch)
+
+    outcome = await reconcile_agent(client, spec, tenant_id=TENANT_ID, dry_run=False)
+
+    assert outcome.action is Action.UPDATED, "the live seeded agent is still updated"
+    assert outcome.anthropic_id == "ag_seeded", "the update targets the seeded daimon"

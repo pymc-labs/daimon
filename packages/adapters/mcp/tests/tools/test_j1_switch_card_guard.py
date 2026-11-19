@@ -1,12 +1,12 @@
 """Guard (smoke-5 P0): after "switch yourself to GPT" -> the copy offer -> "yes, make the
-copy", the switch CARD is posted in that same turn; the person approves it there.
+copy", the copy is switched in that same turn, with no card.
 
 No runtime rows: only code defaults (each provider's deployment key is set). The
 agent's MCP tools are called as its model would call them; everything behind them is
 the production path, with fake provider HTTP edges: the built-in Daimon refuses to
 switch the whole server and offers a copy; "yes" makes a NEW copy (owned by whoever
-asked), and its approved switch card hands this thread to it and switches it to GPT,
-in one step (a hand-off first is refused); the next message is
+asked), and its switch hands this thread to it and switches it to GPT, in one
+step (a hand-off first is refused); the next message is
 admitted to the copy on OpenAI. Any refusal on this path is a product bug.
 """
 
@@ -53,14 +53,7 @@ TOOLSET = [
         "type": "mcp_toolset",
         "mcp_server_name": "daimon-mcp",
         "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-        # As the deployed agent has it: a provider switch always asks first (the card).
-        "configs": [
-            {
-                "name": "request_agent_backend_switch",
-                "enabled": True,
-                "permission_policy": {"type": "always_ask"},
-            }
-        ],
+        "configs": [],
     }
 ]
 MCP_SERVERS = [{"name": "daimon-mcp", "type": "url", "url": "https://mcp.invalid"}]
@@ -236,18 +229,6 @@ async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
         yield Chat(runtime, auth, origin, ma, trace)
 
 
-#: Wording that makes the card wait for another chat reply after the person already
-#: said yes to the copy (smoke-5: the model held the card back, "the switch is still
-#: pending"). The card IS the person's approval: nothing may stand between the
-#: preview and posting it.
-_HOLDS_THE_CARD_BACK = (
-    r"\bonly if\b",
-    r"before anything else",
-    r"\bwait for\b",
-    r"\bask (them|the person) (again|first|to confirm)\b",
-)
-
-
 async def _switch_tool_description(runtime) -> str:
     from daimon.adapters.mcp.tools.agents import register_agent_tools
     from fastmcp import FastMCP
@@ -258,21 +239,8 @@ async def _switch_tool_description(runtime) -> str:
     return tool.description or ""
 
 
-def _assert_the_card_is_posted_in_this_turn(*guidance: str) -> None:
-    for text in guidance:
-        for pattern in _HOLDS_THE_CARD_BACK:
-            assert not re.search(pattern, text, flags=re.IGNORECASE), (pattern, text)
-        assert "preview_digest" in text, text  # says how to post the card: call again
-        # Says it outright (SMOKE 42591c55 J5: "If they want to proceed" read as "ask for
-        # a chat yes"): the second call is in this turn, and no chat yes is asked for.
-        flat = " ".join(text.lower().split())
-        assert "same turn" in flat or "same reply" in flat, text
-        assert re.search(r"(do not|never) ask the person to reply", flat), text
-
-
-async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
-    fresh_chat, monkeypatch
-):
+async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_chat, monkeypatch):
+    """Offer, copy, switch: one call hands this thread to the copy on GPT."""
     from dataclasses import replace
     from unittest.mock import AsyncMock
 
@@ -322,85 +290,28 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     assert copy.name == "Daimon-2"
     # 3. The BAD order (smoke-6 J1): handing this thread to the copy before its switch.
     #    Refused, with the plain next step, and nothing changes: the copy would otherwise
-    #    answer the next message with a switch card instead of on GPT.
+    #    answer the next message on Claude instead of on GPT.
     with pytest.raises(ToolError) as early:
         await _hand_off_task_impl(
             chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
         )
-    assert "post its switch card now" in str(early.value)
+    assert "switch it now instead" in str(early.value)
     assert "Nothing was changed" in str(early.value)
-    # 4. The copy switches to GPT: preview, then the confirmed call the card runs.
-    preview = await _request_agent_backend_switch_impl(
-        chat.runtime,
-        chat.auth,
-        agent_name=copy.name,
-        target_backend="openai",
-        origin_context_id=str(chat.origin.id),
-    )
-    # The guidance at this exact point posts the card now, in this turn: "yes, make the
-    # copy" already said go; the person approves or cancels on the card.
-    _assert_the_card_is_posted_in_this_turn(
-        preview.summary, await _switch_tool_description(chat.runtime)
-    )
-    # The card the person sees before Approve names what the copy won't have there.
-    from functools import partial as _partial
-    from unittest.mock import AsyncMock as _AsyncMock
-
-    from daimon.adapters.mcp.tools.agents import (
-        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
-    )
-    from daimon.core.channel_backend import make_backend_service
-    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
-    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-
-    # The card's own service, capturing the source the way the switch tool does.
-    card_service = make_backend_service(
-        chat.runtime.session_factory,
-        chat.runtime.settings.turn,
-        capture_source=_partial(_capture_backend_source, chat.runtime, chat.auth, chat.origin),
-    )
-    prepare, _ = backend_switch_callbacks(
-        card_service,
-        sessionmaker=chat.runtime.session_factory,
-        anthropic=chat.runtime.client,
-        tenant_id=chat.auth.tenant_id,
-        account_id=chat.auth.account_id,
-        current_admin=_AsyncMock(return_value=chat.auth.is_admin),
-        current_platform_admin=_AsyncMock(return_value=False),
-    )
-    card = await prepare(
-        prompt_for_tool_call(
-            ToolCall(
-                tool_use_id="j1-switch",
-                server_name=DAIMON_SERVER_NAME,
-                tool_name="request_agent_backend_switch",
-                input={
-                    "agent_name": copy.name,
-                    "target_backend": "openai",
-                    "expected_revision": preview.expected_revision,
-                    "preview_digest": preview.preview_digest,
-                    "accepted_drops": list(preview.declared_drops),
-                },
-            ),
-            requester_platform_user_id="123",
-            now=datetime.now(UTC),
-        )
-    )
-    assert card.action == f"Switch {copy.name} to OpenAI"
-    assert "On OpenAI it won't have " in card.consequence
-    assert "its memory" in card.consequence and "its sandbox" in card.consequence
+    # 4. The copy switches to GPT in one call, which hands it this thread.
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
         agent_name=copy.name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
     )
-    # The approval itself handed this thread to the copy, then switched it: one step.
+    assert changed.status == "changed", "the switch applies at once"
     assert "This conversation moves to OpenAI from the next message" in changed.summary
+    # The reply names what is off there, as information.
+    off = changed.summary.split("Off on OpenAI: ", 1)[-1]
+    assert "memory" in off and "sandbox" in off, changed.summary
+    description = await _switch_tool_description(chat.runtime)
+    assert "never ask them to confirm" in " ".join(description.split()), description
     # The server's default agent is unchanged, for everyone.
     service = AgentBackendService(chat.runtime.session_factory, enabled=True)
     daimon = await load_backend_agent(
@@ -499,14 +410,14 @@ async def _new_copy(chat: Chat, *, here: bool = True):
     )
 
 
-async def _switch(chat: Chat, name: str, **confirm):
+async def _switch(chat: Chat, name: str, **extra):
     return await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
         agent_name=name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
-        **confirm,
+        **extra,
     )
 
 
@@ -537,46 +448,36 @@ async def _provider_of(chat: Chat, name: str) -> str | None:
     return current.backend if current is not None else None
 
 
-@pytest.mark.parametrize("stale", ("revision", "digest"))
-async def test_a_refused_switch_card_leaves_the_thread_with_the_root(fresh_chat, stale):
-    """The hand-off the card promises comes with its switch or not at all: a stale or
-    changed card changes nothing, so the thread stays with the root (#1463 review 1)."""
+async def test_a_refused_switch_leaves_the_thread_with_the_root(fresh_chat):
+    """The hand-off comes with its switch or not at all: a switch refused because the
+    agent changed since it was read moves nothing, so the thread stays with the root."""
     chat = fresh_chat
     copy = await _new_copy(chat)
-    preview = await _switch(chat, copy.name)
     with pytest.raises(ToolError):
-        await _switch(
-            chat,
-            copy.name,
-            expected_revision=preview.expected_revision + (stale == "revision"),
-            preview_digest=preview.preview_digest if stale == "revision" else "0" * 64,
-            accepted_drops=preview.declared_drops,
-        )
+        await _switch(chat, copy.name, expected_revision=99)
     assert await _handed_to(chat) is None
     assert await _provider_of(chat, copy.name) in (None, "anthropic")
 
 
-async def test_a_repo_bound_thread_answers_the_unsaved_work_question_before_the_card(
+async def test_a_repo_bound_thread_answers_the_unsaved_work_question_before_the_switch(
     fresh_chat,
 ):
-    """A thread with a repo bound: the uncommitted-work question comes with the preview,
-    before any card, and its answer rides the confirmed call (#1463 review 2)."""
+    """A thread with a repo bound: the uncommitted-work question comes first, and the
+    switch called again with the person's answer applies that answer."""
     from daimon.core.stores.thread_sessions import get_live_thread_session
 
     chat = fresh_chat
     await _bind_a_repo(chat)
     copy = await _new_copy(chat)
-    with pytest.raises(ToolError, match="uncommitted changes in https://github.com/acme/data"):
+    with pytest.raises(
+        ToolError, match="uncommitted changes in https://github.com/acme/data"
+    ) as asked:
         await _switch(chat, copy.name)
-    preview = await _switch(chat, copy.name, unsaved_work="leave")
-    changed = await _switch(
-        chat,
-        copy.name,
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
-        unsaved_work="leave",
-    )
+    # The question names the tool whose retry carries the answer, never the hand-off
+    # that refuses a copy awaiting its switch.
+    assert "call request_agent_backend_switch again with unsaved_work" in str(asked.value)
+    assert await _handed_to(chat) is None, "nothing moves before the answer"
+    changed = await _switch(chat, copy.name, unsaved_work="leave")
     assert "This conversation moves to OpenAI from the next message" in changed.summary
     assert await _handed_to(chat) == copy.name
     async with chat.runtime.session_factory() as session:
@@ -607,70 +508,16 @@ async def test_switching_an_older_copy_never_moves_this_thread(fresh_chat, made)
         stamp["daimon_forked_in"] = stamp["daimon_forked_in"].replace("thread", "other-thread")
     else:
         assert "daimon_forked_from" not in chat.ma.agents[copy.id]["metadata"]
-    preview = await _switch(chat, copy.name)
-    changed = await _switch(
-        chat,
-        copy.name,
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
-    )
+    changed = await _switch(chat, copy.name)
     assert "isn't the one answering here" in changed.summary
     assert await _handed_to(chat) is None
-    # And hand_off_task treats it as any agent: no switch-card refusal (it's on OpenAI
-    # now, so the other-provider rule speaks instead).
+    # And hand_off_task treats it as any agent: no awaiting-switch refusal (it's on
+    # OpenAI now, so the other-provider rule speaks instead).
     with pytest.raises(ToolError) as refused:
         await _hand_off_task_impl(
             chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
         )
-    assert "post its switch card now" not in str(refused.value)
-
-
-async def _card(chat: Chat, name: str, preview, **extra):
-    """The card the host posts for a confirmed call, prepared as the host does."""
-    from functools import partial
-    from unittest.mock import AsyncMock
-
-    from daimon.adapters.mcp.tools.agents import (
-        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
-    )
-    from daimon.core.channel_backend import make_backend_service
-    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
-    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-
-    service = make_backend_service(
-        chat.runtime.session_factory,
-        chat.runtime.settings.turn,
-        capture_source=partial(_capture_backend_source, chat.runtime, chat.auth, chat.origin),
-    )
-    prepare, _ = backend_switch_callbacks(
-        service,
-        sessionmaker=chat.runtime.session_factory,
-        anthropic=chat.runtime.client,
-        tenant_id=chat.auth.tenant_id,
-        account_id=chat.auth.account_id,
-        current_admin=AsyncMock(return_value=chat.auth.is_admin),
-        current_platform_admin=AsyncMock(return_value=False),
-    )
-    return await prepare(
-        prompt_for_tool_call(
-            ToolCall(
-                tool_use_id="j1-card",
-                server_name=DAIMON_SERVER_NAME,
-                tool_name="request_agent_backend_switch",
-                input={
-                    "agent_name": name,
-                    "target_backend": "openai",
-                    "expected_revision": preview.expected_revision,
-                    "preview_digest": preview.preview_digest,
-                    "accepted_drops": list(preview.declared_drops),
-                    **extra,
-                },
-            ),
-            requester_platform_user_id="123",
-            now=datetime.now(UTC),
-        )
-    )
+    assert "switch it now instead" not in str(refused.value)
 
 
 async def _bind_a_repo(chat: Chat) -> None:
@@ -703,37 +550,6 @@ async def _bind_a_repo(chat: Chat) -> None:
         )
 
 
-async def test_the_unsaved_work_answer_is_bound_to_the_card(fresh_chat):
-    """The answer the person gave is the one the card shows and the switch applies: an
-    answer changed or invented after the preview is a different request (#1463 r2 a)."""
-    chat = fresh_chat
-    await _bind_a_repo(chat)
-    copy = await _new_copy(chat)
-    with pytest.raises(ToolError) as asked:
-        await _switch(chat, copy.name)
-    # The question names the tool whose retry carries the answer, never the hand-off
-    # that refuses a copy awaiting its switch.
-    assert "call request_agent_backend_switch again with unsaved_work" in str(asked.value)
-    preview = await _switch(chat, copy.name, unsaved_work="leave")
-    card = await _card(chat, copy.name, preview, unsaved_work="leave")
-    assert "Uncommitted changes in the repo are left where they are" in (card.consequence or "")
-    for changed in ("copy", None):
-        # Changed or dropped, the answer is bound to its preview: never re-previewed.
-        with pytest.raises(ValueError, match="(?i)preview the switch again"):
-            await _card(chat, copy.name, preview, unsaved_work=changed)
-        with pytest.raises(ToolError):
-            await _switch(
-                chat,
-                copy.name,
-                expected_revision=preview.expected_revision,
-                preview_digest=preview.preview_digest,
-                accepted_drops=preview.declared_drops,
-                unsaved_work=changed,
-            )
-        assert await _handed_to(chat) is None
-        assert await _provider_of(chat, copy.name) in (None, "anthropic")
-
-
 async def test_a_hand_off_that_fails_after_the_switch_says_the_switch_landed(
     fresh_chat, monkeypatch
 ):
@@ -752,15 +568,8 @@ async def test_a_hand_off_that_fails_after_the_switch_says_the_switch_landed(
 
     monkeypatch.setattr(task_continuity, "_hand_off_task_impl", failing)
     copy = await _new_copy(chat)
-    preview = await _switch(chat, copy.name)
     with pytest.raises(ToolError) as failed:
-        await _switch(
-            chat,
-            copy.name,
-            expected_revision=preview.expected_revision,
-            preview_digest=preview.preview_digest,
-            accepted_drops=preview.declared_drops,
-        )
+        await _switch(chat, copy.name)
     assert str(failed.value) == (
         f"{copy.name} now uses OpenAI, but this conversation couldn't be handed to it: "
         f"something went wrong on our side. Ask {copy.name} in a new conversation."
@@ -770,7 +579,7 @@ async def test_a_hand_off_that_fails_after_the_switch_says_the_switch_landed(
 
 
 async def _switch_outside_chat(chat: Chat, name: str, backend: str, model: str) -> None:
-    """An admin switches `name` outside chat (a setup panel's confirm): no card."""
+    """An admin switches `name` outside chat (a setup panel's pick)."""
     from dataclasses import replace
     from functools import partial
 
@@ -800,8 +609,6 @@ async def _switch_outside_chat(chat: Chat, name: str, backend: str, model: str) 
         channel_backend.BackendActor(
             chat.auth.tenant_id, chat.auth.account_id, Subject(is_admin=True)
         ),
-        expected_preview_digest=preview.digest,
-        accepted_drops=preview.declared_drops,
         model=model,
     )
 
@@ -817,7 +624,7 @@ class Wires:
 
 
 def _wires(chat: Chat, monkeypatch) -> Wires:
-    """Gemini as J10 fakes it, OpenAI as the card leg above fakes it: once per test."""
+    """Gemini as J10 fakes it, OpenAI as the switch leg above fakes it: once per test."""
     from unittest.mock import AsyncMock
 
     import mux.drivers.gemini as gemini_sdk
@@ -970,7 +777,7 @@ TARGETS = {"gemini": "gemini-3.8-flash", "openai": "gpt-6-luna"}
 async def test_m03_a_switch_outside_chat_moves_this_thread_once_and_keeps_it_there(
     fresh_chat, monkeypatch, backend
 ):
-    """M03 (P0): an agent switched outside chat (a setup panel, not the card) kept
+    """M03 (P0): an agent switched outside chat (a setup panel, not this chat) kept
     answering this thread on Claude while it claimed Gemini. On cheap models: Daimon on
     Haiku is switched to Gemini Flash or GPT Luna; the next message in the SAME thread
     moves there, says so once, and the second and third stay in that conversation
@@ -1089,9 +896,9 @@ async def test_m03_a_refused_message_leaves_no_move_behind(fresh_chat, monkeypat
     assert await store.get_binding(slot, include_released=True) is None, "nothing moved"
 
 
-async def test_m03_a_cards_pending_move_is_never_touched_by_a_follow(fresh_chat, monkeypatch):
-    """Review finding 2: a card confirmed meanwhile keeps its request; the message that
-    follows never deletes it, and the card's move is what applies."""
+async def test_m03_a_switchs_pending_move_is_never_touched_by_a_follow(fresh_chat, monkeypatch):
+    """Review finding 2: a switch made meanwhile keeps its request; the message that
+    follows never deletes it, and the switch's move is what applies."""
     from daimon.core.stores import thread_provider_releases
     from daimon.core.thread_release import request_thread_release
     from mux.contracts.ids import ChannelRef, ThreadRef
@@ -1112,21 +919,21 @@ async def test_m03_a_cards_pending_move_is_never_touched_by_a_follow(fresh_chat,
         await request_thread_release(session, slot, generation=0, now=datetime.now(UTC))
     wires = _wires(chat, monkeypatch)
     try:
-        moved = await _message(chat, "m03-card")
+        moved = await _message(chat, "m03-switch")
     finally:
         await wires.close()  # pyright: ignore[reportCallIssue]
-    # The card's request selected and was consumed by its own path; no follow ran.
+    # The switch's request selected and was consumed by its own path; no follow ran.
     assert moved[0].backend_follow is None
     _says_and_runs(*moved, "gemini", "gemini-3.8-flash")
     async with chat.runtime.session_factory() as session:
         assert await thread_provider_releases.requested_generation(session, slot) is None
 
 
-async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_fails(
+async def test_m03_a_switch_mid_message_keeps_its_move_when_the_follow_fails(
     fresh_chat, monkeypatch
 ):
-    """Review finding 2: a card is confirmed while a message is deciding to follow;
-    that message's own move is then refused by the provider. The card's request is
+    """Review finding 2: a switch is made while a message is deciding to follow;
+    that message's own move is then refused by the provider. The switch's request is
     never deleted (0cc9f903's withdraw deleted whatever request the slot held)."""
     from dataclasses import replace
 
@@ -1156,7 +963,7 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
     follow = admission_module._thread_follow  # pyright: ignore[reportPrivateUsage]
     confirmed: list[bool] = []
 
-    async def card_confirms_meanwhile(*args, **kwargs):
+    async def switch_meanwhile(*args, **kwargs):
         decided = await follow(*args, **kwargs)
         if not confirmed:
             confirmed.append(True)
@@ -1164,7 +971,7 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
                 await request_thread_release(session, slot, generation=0, now=datetime.now(UTC))
         return decided
 
-    monkeypatch.setattr(admission_module, "_thread_follow", card_confirms_meanwhile)
+    monkeypatch.setattr(admission_module, "_thread_follow", switch_meanwhile)
     sm = chat.runtime.session_factory
     deps = replace(
         deps_for_pinned_mux(chat.runtime.client, sm),
@@ -1187,8 +994,8 @@ async def test_m03_a_card_confirmed_mid_message_keeps_its_move_when_the_follow_f
             now=datetime.now(UTC),
             origin="chat",
         )
-    assert confirmed, "the card was confirmed during the message"
+    assert confirmed, "the switch was made during the message"
     async with sm() as session:
         assert await thread_provider_releases.requested_generation(session, slot) == 0, (
-            "the card's move request is still pending"
+            "the switch's move request is still pending"
         )

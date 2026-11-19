@@ -100,6 +100,27 @@ def test_factory_requires_identity_signer_only_on_mcp_service() -> None:
         create_mcp_app(settings=settings)
 
 
+def test_factory_requires_a_key_for_every_bearer_server() -> None:
+    settings = _settings(
+        jwt_secret=SecretStr("a" * 32),
+        public_url=HttpUrl("https://x/mcp"),
+    )
+    settings.mcp_identity = McpIdentitySettings(
+        servers=[
+            SignedIdentityServer(
+                name="tools",
+                url="https://tools.example.test/mcp",
+                auth="bearer",
+                requester_meta=True,
+                workspaces=frozenset({"discord:1"}),
+                agents=("Agent A",),
+            )
+        ]
+    )
+    with pytest.raises(BootstrapError, match="BEARERS needs a key for bearer servers: tools"):
+        create_mcp_app(settings=settings)
+
+
 def test_factory_accepts_valid_settings() -> None:
     settings = _settings(
         jwt_secret=SecretStr("a" * 32),
@@ -189,6 +210,17 @@ def test_factory_has_no_stripe_route_when_billing_absent() -> None:
     app = create_mcp_app(settings=settings, billing_config=None)
     route_paths = [r.path for r in app.routes if isinstance(r, Route)]
     assert "/webhooks/stripe" not in route_paths, "stripe route absent when billing unconfigured"
+
+
+def test_connector_relay_is_served_where_relay_urls_point() -> None:
+    from daimon.core.connector_relay import relay_url
+    from starlette.routing import Route
+
+    settings = _settings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp"))
+    app = create_mcp_app(settings=settings)
+    route = next(r for r in app.routes if isinstance(r, Route) and "{server_key}" in r.path)
+    path = relay_url("https://x/mcp", "drive").removeprefix("https://x")
+    assert route.path_regex.fullmatch(path), f"{route.path} must serve {path}"
 
 
 class _WarningCollector(logging.Handler):

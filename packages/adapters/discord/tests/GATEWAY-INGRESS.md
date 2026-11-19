@@ -134,20 +134,13 @@ are PENDING until an explicit owned native capture binding can pass the same
 dependency guard; their fixtures skip before ingress allocation. The Anthropic
 records are not independent QA recipe/oracle pins, and do not prove execution
 of the requested bash sleep. All whole-cell verdicts remain PENDING. The
-NEW6 probe retains a full 15-second real waiting-card history under both default
-and explicit `discord.tenant_cap_waiting_card=True` settings. The default product
-path still accepts its ordinary card and fails the queue-copy predicate. The
-opted-in initial mention renders queue wording on that same card while its real
-ticket waits at the owned tenant cap, then edits the same ID to ordinary progress
-before the third real root starts. Only the opted-in rendering facet may read
-**PASS under opt-in profile**; the missing native sleep recipe/oracle join still
-keeps whole cells PENDING. OpenAI/Gemini bindings remain explicitly PENDING.
-A mutation removes the product waiting-card hook and the real ingress witness
-fails the queue-copy assertion. Running and global-only queued tickets, foreign
-tenant context, released tickets and default-off payloads retain ordinary copy.
-The adapter observes only the original mention admission ticket; drained core
-successor turns keep their existing wording. No new card, notice, timer, provider
-request, queue claim/release or admission policy is introduced. N4's product
+NEW6 probe retains a full 15-second real waiting-card history. The product
+path accepts its ordinary card and fails the queue-copy predicate: the card carries
+no queue wording while its real ticket waits at the owned tenant cap. The missing
+native sleep recipe/oracle join keeps whole cells PENDING. OpenAI/Gemini bindings
+remain explicitly PENDING. Running and global-only queued tickets, foreign tenant
+context and released tickets retain ordinary copy. No new card, notice, timer,
+provider request, queue claim/release or admission policy is introduced. N4's product
 profile owner adds the default-False/opt-in-True seventh switch; a setting receipt
 alone supplies no native completion or whole-cell evidence.
 Production enqueue/cap mutations must break the corresponding queue witness;
@@ -209,7 +202,5 @@ product requests, routing, queue policy and ordinary defaults are unchanged.
 
 
 The observer forwards main's `startup_replay` and `resume_admitted` arguments
-unchanged; ordinary gateway delivery uses their false defaults. The opted-in
-initial waiting-card renderer keeps the actual cap passed to that mention's
-synchronous admission alongside its returned ticket. This replaces the cap field
-removed from main's ticket without changing core current-cap readmission.
+unchanged; ordinary gateway delivery uses their false defaults.
+

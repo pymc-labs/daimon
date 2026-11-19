@@ -294,17 +294,25 @@ def other(kind, id_):
     )
 
 
-async def test_changed_environment_is_still_refused(thread):
+async def test_changed_environment_replaces_the_session(thread):
+    """A different environment cannot be applied in place, so the session is replaced."""
     await thread.turn()
+    before = await thread.binding()
     environment = thread.environments.value
     thread.environments.value = environment.model_copy(
         update={"ref": other("environment", "other")}
     )
-    with pytest.raises(ContinuityLost, match="bound self-hosted configuration changed"):
-        await thread.prepare()
+    prepared = await thread.prepare()
+    after = await thread.binding()
+    assert prepared.continuity.state == "replaced", "the old conversation is carried over"
+    assert prepared.continuity.applied == ("environment",), "the reason is the environment"
+    assert (after.id, after.generation) == (before.id, before.generation + 1), (
+        "the replacement is the next generation of the same binding"
+    )
+    assert after.native_refs["session"] != before.native_refs["session"], "a new session"
 
 
-async def test_binding_of_another_account_scope_is_still_refused(thread):
+async def test_binding_of_another_account_scope_is_replaced_unread(thread):
     await thread.turn()
     bound = await thread.binding()
     foreign = bound.model_copy(
@@ -314,8 +322,13 @@ async def test_binding_of_another_account_scope_is_still_refused(thread):
         }
     )
     await thread.store.put_binding(foreign, expected_generation=bound.generation)
-    with pytest.raises(ContinuityLost, match="bound self-hosted configuration changed"):
-        await thread.prepare()
+    prepared = await thread.prepare()
+    assert prepared.continuity.state == "replaced_after_loss", (
+        "a session of another account scope is never read; the thread starts over"
+    )
+    assert (await thread.binding()).native_refs["account_scope"] != "another-scope", (
+        "the binding moved to the admitted account scope"
+    )
 
 
 async def test_changed_environment_revision_is_still_refused(thread):
@@ -334,7 +347,7 @@ async def test_archived_agent_is_still_refused(thread):
     thread.agents.value = thread.agents.value.model_copy(update={"lifecycle": "archived"})
     with pytest.raises(ContinuityLost) as lost:
         await thread.prepare()
-    assert "agent_archived" in str(lost.value)
+    assert "archived" in str(lost.value), "an archived agent gets no session at all"
     assert thread.wire.posts == 1
 
 

@@ -23,12 +23,14 @@ from daimon.core import allowance_limits
 from daimon.core._models import (
     Account,
     AgentMemoryStore,
+    AgentSkillFollow,
     CliPrincipal,
     GitHubAppInstallation,
     GitHubRemovalNotice,
     PlatformPrincipal,
     PrincipalLink,
     SecurityAuditEvent,
+    SupportEscalation,
     TaskContinuation,
     Tenant,
     TenantGitHubRepo,
@@ -173,6 +175,24 @@ async def make_account(
     session.add(orm)
     await session.flush()
     return AccountRow.model_validate(orm)
+
+
+async def make_held_update(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str, skill_id: str, digest: str
+) -> None:
+    """An update an earlier release held back for the agent's owner, as old rows store it."""
+    session.add(
+        AgentSkillFollow(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+            follow=True,
+            held_digest=digest,
+            held_reason="drops differ",
+            updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    await session.flush()
 
 
 async def make_cli_principal(
@@ -524,6 +544,32 @@ async def make_monthly_limit(
     )
 
 
+async def make_support_escalation(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str = "U1",
+    account_id: uuid.UUID | None = None,
+    platform: str = "slack",
+    channel_id: str = "C1",
+    message_id: str = "m1",
+    note: str = "help",
+) -> uuid.UUID:
+    """Insert one default-ledger request (charged 1, undelivered), as before limits existed."""
+    row = SupportEscalation(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+        channel_id=channel_id,
+        message_id=message_id,
+        note=note,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
 async def make_channel_budget(
     session: AsyncSession,
     *,
@@ -578,9 +624,9 @@ async def make_dm_conversation(
         memory_read_only=False,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
-    await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+    await start_conversation(session, conversation=conversation)
     return conversation
 
 

@@ -3,14 +3,15 @@
 A thread keeps its provider through its slot binding, so a switch normally
 applies to new threads only. A confirmed switch from a thread, of the agent
 answering it, records a release request for the requester's own slot of that
-thread. A hand-off never does: it is not confirmed, and moving a thread drops
-its history. The next turn there selects as if released and, once admitted,
-applies it:
+thread. A hand-off never does: it is not confirmed. The next turn there
+selects as if released and, once admitted, applies it:
 
 - only while the slot is still at the generation the confirmation saw, so a
   binding that moved since (another turn, another change) is never released;
 - through the binding compare-and-swap, as a sessionless successor that reads
-  as unbound (`mux.state.store.released_successor`), never an in-place edit;
+  as unbound (`mux.state.store.released_successor`), never an in-place edit; it
+  keeps the released session's refs, so the next provider carries the
+  conversation over (`daimon.core.turn.carry_over`);
 - and it fresh-starts the caller's live Managed Agents session there, so no
   earlier native session is reused by the next provider.
 
@@ -32,7 +33,13 @@ from mux.contracts.resources import ProviderBinding
 from mux.errors import BindingConflict
 from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
-from mux.state.store import RELEASED_REF, StateStore, is_released, released_successor
+from mux.state.store import (
+    PREVIOUS_PREFIX,
+    RELEASED_REF,
+    StateStore,
+    is_released,
+    released_successor,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -104,7 +111,7 @@ async def apply_thread_release(
             not finishing
             and not is_released(current)
             and not await _write_release(
-                store, slot, current, session if in_one_transaction else None
+                store, slot, current, now, session if in_one_transaction else None
             )
         ):
             return False
@@ -135,7 +142,7 @@ async def release_now(
     if is_released(current) or (current.generation if current is not None else 0) != generation:
         log.info("thread_follow_stale", requested=generation)
         return False
-    if not await _write_release(store, slot, current):
+    if not await _write_release(store, slot, current, now):
         return False
     async with sessionmaker.begin() as session:
         await _fresh_start(session, slot, tenant_id=tenant_id, account_id=account_id, now=now)
@@ -146,6 +153,7 @@ async def _write_release(
     store: StateStore,
     slot: Slot,
     current: ProviderBinding | None,
+    now: datetime,
     session: AsyncSession | None = None,
 ) -> bool:
     """Mark `slot` released at its next generation; False when another write won.
@@ -159,14 +167,14 @@ async def _write_release(
             thread=slot.thread,
             provider=MANAGED_AGENTS.provider,
             profile=MANAGED_AGENTS.profile_id,
-            native_refs={RELEASED_REF: "1"},
+            native_refs={RELEASED_REF: "1", PREVIOUS_PREFIX + "released_at": now.isoformat()},
             generation=1,
             config_revision=0,
             legacy_account_id=slot.account_id,
         )
         expected = 0
     else:
-        released, expected = released_successor(current), current.generation
+        released, expected = released_successor(current, released_at=now), current.generation
     try:
         if session is not None:
             from daimon.core.stores import mux_state

@@ -155,6 +155,12 @@ includes reasoning tokens. Changing a meter increments the same observation's
 revision; identical replay does not. Revisions support signed corrections such as
 `null → 100 → 120 → 110`. Session totals are never added to turn totals. Native
 cache-write counts, model identity and final billing amounts are not fabricated.
+An ended turn whose resource has no usage takes its terminal event's top-level
+`usage`, else that event's `turn.usage`, else the last root `turn.usage` streamed.
+A null read never replaces counts already revised. Such a fallback may be a
+mid-turn snapshot, so the observation is not `final`; only an ended turn whose
+resource itself reports usage is. With no fallback the turn stays unknown. Either
+way the host keeps re-reading with `reconcile_turn` until a `final` observation.
 See [observability and usage](https://developers.openai.com/api/docs/guides/agents-api/observability).
 Session resources also expose a nullable cumulative `usage` snapshot. A host
 choosing this grain must not add overlapping turn totals. Neither grain is a final

@@ -1,8 +1,8 @@
-"""Each chat platform's session runs a system prompt that names no other platform.
+"""Each chat platform's session runs its own variant of the shipped system prompt.
 
 The shipped prompt covers all three, so every session runs its platform's variant,
-sent as the session's own override. A prompt that drifted or was edited still never
-shows another platform's name: the variant drops the lines that do.
+sent as the session's own override. Lines a tenant wrote are kept, even when they
+name another chat app.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 
 import pytest
-import structlog
 import yaml
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.context_prompt import (
@@ -83,19 +82,24 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
     assert "again, unless the files hint says this person can't open one." in teams
 
 
-#: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
+#: What each chat platform's prompt hashes to. A new hash replaces its sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
-_PINNED_ON_MAIN = {
-    "discord": "13303be2407304db632faeef859d98abf179db73f072420aec68d776d698cddd",
-    "slack": "13fa944f1885f764f1b90ab3d9402464e456b182fd1562cc9a94504ea6f70ef9",
+_PINNED = {
+    "discord": "661bccea5fcd0879935e89e7a599ce71974901c0e24d36c22f39c6b5884240a7",
+    "slack": "130b352874a731beaf49c29f9d847615c529cd5d40bbde465b1a255e53443d49",
+    "teams": "68a8fc272e513898962d7e843ef5bf5cd067fcdd59dc108f6f776d37b2a32a73",
 }
 
 
-@pytest.mark.parametrize("platform", sorted(_PINNED_ON_MAIN))
-def test_the_discord_and_slack_prompts_are_byte_identical_to_main(platform: str) -> None:
+def test_every_chat_platform_has_a_pinned_prompt() -> None:
+    assert sorted(_PINNED) == sorted(_PLATFORMS), "a platform's prompt can move unnoticed"
+
+
+@pytest.mark.parametrize("platform", sorted(_PINNED))
+def test_each_chat_prompt_is_pinned(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
-    assert hash_system(variant) == _PINNED_ON_MAIN[platform]
+    assert hash_system(variant) == _PINNED[platform], "a new hash replaces every session"
 
 
 @pytest.mark.parametrize("platform", [None, "cli", ""])
@@ -104,32 +108,17 @@ def test_a_prompt_without_a_chat_platform_stays_the_agents_own(platform: str | N
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
-def test_a_drifted_formatting_passage_still_names_no_other_platform(platform: str) -> None:
-    system = _shipped_system()
-    drifted = system.replace("a CommonMark subset", "a CommonMark subsets", 1)
-    assert drifted != system
+def test_a_custom_line_naming_another_platform_is_kept(platform: str) -> None:
+    other = next(p for p in _PLATFORMS if p != platform).capitalize()
+    line = f"Post the summary in {other}."
 
-    with structlog.testing.capture_logs() as logs:
-        variant = system_for_platform(drifted, platform)
-
-    assert variant is not None
-    assert _others(platform).search(variant) is None
-    assert [log["platform"] for log in logs if log["event"] == "system_prompt.lines_dropped"], (
-        "the lines it dropped are logged"
+    assert system_for_platform(f"You are a research agent.\n{line}\n", platform) is None, (
+        "a prompt with no shipped passage needs no variant"
     )
-    for entry in logs:
-        assert set(entry) <= {"event", "log_level", "platform", "count"}, "a count, never text"
-
-
-@pytest.mark.parametrize("platform", _PLATFORMS)
-def test_a_custom_line_naming_another_platform_is_dropped_and_nothing_else(platform: str) -> None:
-    other = next(p for p in _PLATFORMS if p != platform)
-    own = platform.capitalize()
-    custom = f"You are a research agent.\nAnswer {other.capitalize()} questions first.\nBe brief on {own}.\n"
-
-    variant = system_for_platform(custom, platform)
-
-    assert variant == f"You are a research agent.\nBe brief on {own}.\n"
+    swapped = system_for_platform(f"{line}\nReply {SHIPPED_PASSAGES[0]}\n", platform)
+    assert swapped is not None, "the shipped passage is swapped"
+    assert swapped.startswith(f"{line}\n"), "the swap leaves the tenant's line alone"
+    assert SHIPPED_PASSAGES[0] not in swapped, "for this platform's wording"
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
@@ -149,11 +138,10 @@ _PLACES = {
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
-def test_each_variant_carries_the_rule_with_only_its_own_places(platform: str) -> None:
+def test_each_variant_carries_only_its_own_places(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
     assert variant is not None
-    assert "Never name or hint at another chat app, and never say Daimon works in one." in variant
     assert _PLACES[platform] in variant
     assert "only place" not in variant.lower()
     for other in _PLATFORMS:
@@ -178,7 +166,6 @@ def test_tenant_context_fragments_survive_whatever_they_name(platform: str) -> N
     assert variant.endswith(
         system.partition(FRAGMENT_MARKER)[1] + system.partition(FRAGMENT_MARKER)[2]
     )
-    assert _others(platform).search(variant.partition(FRAGMENT_MARKER)[0]) is None
     routine = context_prompt("routine", system=variant)
     assert f"Post the summary to {other} first." in routine
     assert DEFAULT_FRAGMENTS["routine"] in routine, "an extend fragment keeps the default"

@@ -31,6 +31,9 @@ from daimon.core.continuity.continuation import (
     settle_continuation,
 )
 from daimon.core.errors import DaimonError
+from daimon.core.host_calls import NOT_RUN_TEXT
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores import host_call_cards as host_cards
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.domain import ContinuationReason, CredentialRequestRow
 from daimon.core.stores.task_continuations import get_continuation
@@ -274,6 +277,120 @@ async def test_decide_dispatches_when_the_last_message_predates_the_queued_work(
     )
 
     assert decision.action == "dispatch", "the request that caused the handoff cannot supersede it"
+
+
+async def _approved_call(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    expires_at: datetime,
+) -> uuid.UUID:
+    """One press-approved call for the request's thread and agent, as a press leaves it."""
+    async with sessionmaker.begin() as session:
+        created = await host_cards.create_card(
+            session,
+            tenant_id=tenant_id,
+            origin_id=uuid.uuid4(),
+            requester_account_id=account_id,
+            requester_platform_user_id="discord-user-1",
+            platform="discord",
+            channel_id="C_PARENT",
+            thread_id="T_THREAD",
+            executing_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_TARGET_ID),
+            executing_ma_agent_id=_TARGET_ID,
+            agent_name="stats-bot",
+            tool_name="delete_allowance",
+            args_digest="d1",
+            reference={"args": {}},
+            expires_at=expires_at,
+        )
+        assert created is not None, "the card is recorded"
+        claimed = await host_cards.claim(
+            session, tenant_id=tenant_id, card_id=created.row.id, to="approved", now=_NOW
+        )
+        assert claimed is not None, "the press approves it"
+    return created.row.id
+
+
+async def test_decide_dispatches_a_confirmed_call_wake_while_calls_are_approved(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """The wake that has approved calls to run is the one turn that should start."""
+    tenant_id, account_id = caller
+    await _approved_call(
+        db_session_factory,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        expires_at=_NOW + timedelta(minutes=10),
+    )
+    request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
+    await record_continuation(db_session_factory, request)
+
+    decision = await decide_continuation(
+        db_session_factory,
+        _live_target(tenant_id),
+        request=request,
+        now=_NOW,
+        latest_user_message_at=None,
+        active_turn=False,
+    )
+
+    assert decision.action == "dispatch", "approved calls are waiting for this wake"
+
+
+async def test_decide_skips_a_confirmed_call_wake_when_an_earlier_wake_ran_the_calls(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """Two approvals queue two wakes; the first runs both calls, so the second has no work."""
+    tenant_id, account_id = caller
+    request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
+    await record_continuation(db_session_factory, request)
+
+    decision = await decide_continuation(
+        db_session_factory,
+        _live_target(tenant_id),
+        request=request,
+        now=_NOW,
+        latest_user_message_at=None,
+        active_turn=False,
+    )
+
+    assert decision.action == "skip_superseded", "no approved call left means no billed turn"
+    assert decision.message is None, "nobody is told about a wake that had nothing to do"
+
+
+async def test_decide_skips_a_confirmed_call_wake_whose_call_outlived_its_card(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    caller: tuple[uuid.UUID, uuid.UUID],
+) -> None:
+    """An approved call past its expiry fails as not run, so its late wake has no work."""
+    tenant_id, account_id = caller
+    card_id = await _approved_call(
+        db_session_factory,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        expires_at=_NOW + timedelta(minutes=10),
+    )
+    request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
+    await record_continuation(db_session_factory, request)
+
+    decision = await decide_continuation(
+        db_session_factory,
+        _live_target(tenant_id),
+        request=request,
+        now=_NOW + timedelta(minutes=11),
+        latest_user_message_at=None,
+        active_turn=False,
+    )
+
+    async with db_session_factory() as session:
+        stranded = await host_cards.get_card(session, tenant_id=tenant_id, card_id=card_id)
+    assert decision.action == "skip_superseded", "a stale approval is not run late"
+    assert stranded is not None and stranded.status == "failed", f"stranded call: {stranded}"
+    assert stranded.outcome == NOT_RUN_TEXT, "the card says it did not run"
 
 
 async def test_decide_defers_while_a_turn_is_already_running_in_the_thread(

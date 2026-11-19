@@ -13,6 +13,7 @@ workers only persist a subset of newly generated snapshots.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -35,6 +36,7 @@ from daimon.core.config import (
     SlackSettings,
     TurnSettings,
 )
+from daimon.core.features.tool_gate import WEB_APP_TOOLS
 from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -58,6 +60,15 @@ _MUST_CONTAIN = {
     "update_agent",
     "repo_memory_save",
     "repo_memory_delete",
+}
+
+
+# Tools that say "web" without meaning the web app, and why.
+_WEB_WORDS = {
+    "set_agent_builtin_tool": "the agent's web search built-in",
+    "web_fetch": "a public web page",
+    "replace_channel_file": "Microsoft's Office for the web",
+    "list_audit_log": "the stored `web` source value",
 }
 
 
@@ -174,9 +185,15 @@ async def test_rendered_tool_schema_matches_snapshot(
     assert not missing, f"expected tool group(s) missing from the rendered registry: {missing}"
 
     create = next(tool for tool in tools if tool.name == "create_watch")
-    assert create.parameters["properties"]["source"]["const"] == "poll"
+    assert create.parameters["properties"]["source"]["enum"] == ["poll", "callback"]
     assert "page_id" not in create.parameters["properties"]
 
+    named = {n for n, t in rendered.items() if re.search(r"(?i)\bweb\b", str(t))}
+    assert named - WEB_APP_TOOLS == _WEB_WORDS.keys(), (
+        f"{sorted(named - WEB_APP_TOOLS - _WEB_WORDS.keys())} name the web: add them to "
+        "WEB_APP_TOOLS (hidden while web_awareness is Off), word them without it, or list them "
+        "in _WEB_WORDS with a reason"
+    )
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
 
 
@@ -313,4 +330,9 @@ async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionma
     assert "pass it as ``model``" in fork, fork
     assert "request a backend switch" in fork, fork
     assert not any("fleet" in name.lower() for name in tools)
-    assert {"fork_agent", "request_provider_allowlist", "request_channel_pin_clear"} <= tools.keys()
+    assert {
+        "fork_agent",
+        "request_provider_allowlist",
+        "request_channel_pin",
+        "request_channel_pin_clear",
+    } <= tools.keys()

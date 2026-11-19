@@ -214,6 +214,7 @@ class AddChannelSkillModal(discord.ui.Modal):
                     actor_account_id=state.account_id,
                     platform_skills=view.runtime.turn_deps.platform_skills,
                     surface="panel",
+                    records=view.runtime.sessionmaker,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await interaction.response.send_message(

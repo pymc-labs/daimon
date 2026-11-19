@@ -121,7 +121,8 @@ docstrings and comments; history goes in `CHANGELOG.md` and the PR.
 | Area | Page |
 | --- | --- |
 | install, Compose, images, storage | `docs/self-hosting.md` |
-| model backends, harness, OpenAI, Gemini | `docs/providers.md` |
+| model backends, OpenAI, Gemini | `docs/providers.md` |
+| self-hosted harness | `docs/self-hosted-harness.md` |
 | upgrades, backups, logs, audit | `docs/operations.md` |
 | Slack, Teams, GitHub, MCP servers, plugin | the page under Connect |
 | `defaults/` and seeded agents | `docs/defaults.md`, `defaults/README.md` |

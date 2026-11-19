@@ -27,6 +27,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, authorize, build
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -173,19 +174,7 @@ class RoutineOrigin:
     private_dm_id: str
 
 
-def routine_origin(
-    policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
-) -> RoutineOrigin | None:
-    """The channel and thread a routine fires into, with the readers limits over them now.
-
-    Stamped on the routine's session so the routine transcript of a channel
-    with limited readers stays inside it. A routine without a destination is
-    placed by its saved channel (for one made in a DM, the channel the DM
-    came from); one with neither is headless (None). Every stamp is private
-    too (`private_routine_stamp`): the routine runs on its owner's
-    credentials, so no admin reads it from the hub, as
-    before it carried a channel.
-    """
+def _routine_channel_thread(row: RoutineRow, *, platform: str) -> tuple[str, str | None] | None:
     channel_id = routine_destination_channel(row) or row.channel_id
     if channel_id is None:
         return None
@@ -200,6 +189,33 @@ def routine_origin(
         )
     if thread_id == channel_id:
         thread_id = None
+    return channel_id, thread_id
+
+
+def routine_feature_place(row: RoutineRow, *, platform: str) -> FeaturePlace:
+    """Where a routine's features resolve: where it fires (`routine_origin`), with its agent,
+    as its session's toolset reads them."""
+    channel_id, thread_id = _routine_channel_thread(row, platform=platform) or (None, None)
+    return FeaturePlace.of(row.tenant_id, platform, channel_id, thread_id, agent_id=row.agent_id)
+
+
+def routine_origin(
+    policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
+) -> RoutineOrigin | None:
+    """The channel and thread a routine fires into, with the readers limits over them now.
+
+    Stamped on the routine's session so the routine transcript of a channel
+    with limited readers stays inside it. A routine without a destination is
+    placed by its saved channel (for one made in a DM, the channel the DM
+    came from); one with neither is headless (None). Every stamp is private
+    too (`private_routine_stamp`): the routine runs on its owner's
+    credentials, so no admin reads it from the hub, as
+    before it carried a channel.
+    """
+    found = _routine_channel_thread(row, platform=platform)
+    if found is None:
+        return None
+    channel_id, thread_id = found
     return RoutineOrigin(
         channel_id=channel_id,
         thread_id=thread_id,
@@ -331,6 +347,7 @@ async def load_rule_viewer(
     platform: str | None = None,
     thread_id: str | None = None,
     default: DeploymentDefault | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> RuleViewer | None:
     """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
@@ -345,7 +362,7 @@ async def load_rule_viewer(
     agents = (
         await list_live_agent_facts(session, tenant_id=tenant_id)
         if anthropic_disabled()
-        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return RuleViewer(
         policy,
@@ -437,7 +454,7 @@ async def is_thread_turn_refused(
     names: tuple[str | None, ...] = (config.agent_name,)
     if home_of(policy, thread_id, channel_id) is not None:
         agent = await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=config.agent_name
+            anthropic, tenant_id=tenant_id, name=config.agent_name, records=sessionmaker
         )
         if agent is not None:
             names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))

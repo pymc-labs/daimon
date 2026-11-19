@@ -31,7 +31,8 @@ async def test_refusal_precedes_insert_and_cannot_be_read_by_old_channel_reader(
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="slack", channel_id="proof")
     checks = []
 
-    async def verify(selection, origin, candidate):
+    async def verify(selection, origin, candidate, *, agent_revision):
+        assert agent_revision is not None, "a switch's check gets its revision"
         checks.append(candidate)
         assert origin == "agent"
         assert selection.backend == provider
@@ -68,7 +69,8 @@ async def test_exact_candidate_is_verified_before_write_and_existing_revision_re
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="slack", channel_id="verified")
     checks = []
 
-    async def verify(selection, origin, candidate):
+    async def verify(selection, origin, candidate, *, agent_revision):
+        assert agent_revision is not None, "a switch's check gets its revision"
         assert origin == "agent"
         if candidate is not None:
             checks.append(candidate)

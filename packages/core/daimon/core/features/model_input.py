@@ -1,42 +1,48 @@
-"""Pure answers of the model-input features: guidance, the session toolset, turn controls."""
+"""Pure answers of the model-input features: guidance, the session toolset, history depth."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_KEYS
 from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
-from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
+from daimon.core.features.tool_gate import gated_tools, hides_tools
 
 TOOL_KEYS: Final[tuple[str, ...]] = tuple(f"tool.{tool}" for tool in BUILTIN_TOOLS)
 SESSION_KEYS: Final[tuple[str, ...]] = (
-    "daimon_tools",
     *TOOL_KEYS,
     "agent_env_file",
     *CAPABILITY_KEYS,
 )
-TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
-"""What `SessionToolset.of` reads: `repo_memory` also hides its tools, while it binds per turn."""
-TURN_KEYS: Final[tuple[str, ...]] = ("daimon_tools", "turn_controls", "web_awareness")
+TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory", "web_awareness")
+"""What `SessionToolset.of` reads: `repo_memory` and `web_awareness` also hide their tools,
+while they bind per turn."""
+HIDING_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, "repo_memory", "web_awareness")
+"""What `hidden_daimon_tools` reads; no backend narrows any of them."""
+TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
-    "mcp_briefing", "repo_memory", "context_provider", "origin_fragments", "checkpoint_prompt",
+    "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",
 )  # fmt: skip
 """Turn-bound switches each turn checks with `Admission.feature_on`."""
-MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS[1:])
+MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
-HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
+HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "dm_history_depth", "channel_history")
+LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit", "unattended_time_limit", "answer_messages")
+"""Limits every admitted turn reads."""
+ANSWER_MESSAGES: Final = 5
+"""Messages one answer may post before it becomes a file, until a setting says otherwise."""
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
+    "model_reactions",
+    "tool_server_names",
     "message_feedback",
-    "native_footer_cost",
     "support_escalation",
-    "status_log",
     "outbound_people",
     "reach_budget",
     "daily_model_cap",
@@ -44,9 +50,8 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
 )
 """Chat display settings the adapters read from the turn's admission."""
 CHANNEL_BACKFILL: Final[int] = 25
-"""The most channel messages around a new thread any chat adapter reads."""
+"""The channel messages around a new thread a chat adapter reads by default."""
 
-TurnControls = Literal["full", "origin", "minimal"]
 TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
 
@@ -55,32 +60,69 @@ def guidance_applies(*, isolated: bool, features: FeatureSnapshot) -> bool:
     return not isolated and features.on("guidance")
 
 
-def turn_controls(features: FeatureSnapshot) -> TurnControls:
-    """The turn-control level; Daimon tools need the origin ids, so they lift Minimal."""
-    level = features.value("turn_controls")
-    if level == "minimal" and features.on("daimon_tools"):
-        return "origin"
-    return "full" if level == "full" else "origin" if level == "origin" else "minimal"
-
-
 @dataclass(frozen=True)
 class HistoryDepth:
     """How many earlier messages a chat adapter reads: the thread's, and the channel's."""
 
     replay: int = 100
+    channel: int = CHANNEL_BACKFILL
 
     @property
     def backfill(self) -> int:
-        return min(CHANNEL_BACKFILL, self.replay)
+        """The channel messages read: the channel setting, never past the thread's depth."""
+        return min(self.channel, self.replay)
 
     @classmethod
     def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
-        """From a snapshot; none, or one without the key (a hand-built admission), reads 100."""
-        found = features.features.get("history_depth") if features is not None else None
-        return cls() if found is None else cls(limit_int(found.value))
+        """From a snapshot; none, or one without a key (a hand-built admission), reads defaults."""
+        if features is None:
+            return cls()
+        replay = features.features.get("history_depth")
+        channel = features.features.get("channel_history")
+        return cls(
+            replay=cls.replay if replay is None else limit_int(replay.value),
+            channel=cls.channel if channel is None else limit_int(channel.value),
+        )
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
+
+DM_CHARS_PER_TURN: Final[int] = 1_000
+DM_MIN_CHARS: Final[int] = 16_000
+
+
+@dataclass(frozen=True)
+class DmHistoryCap:
+    """How much of a DM conversation each reply carries: messages, and the characters they fill."""
+
+    turns: int = 12
+
+    @property
+    def chars(self) -> int:
+        return max(DM_MIN_CHARS, self.turns * DM_CHARS_PER_TURN)
+
+    @classmethod
+    def of(cls, features: FeatureSnapshot | None) -> DmHistoryCap:
+        """From a snapshot; none, or one without the key (a hand-built admission), reads 12."""
+        found = features.features.get("dm_history_depth") if features is not None else None
+        return cls() if found is None else cls(limit_int(found.value))
+
+
+DEFAULT_DM_HISTORY: Final[DmHistoryCap] = DmHistoryCap()
+
+
+def answer_message_cap(features: FeatureSnapshot | None) -> int:
+    """The most messages one answer may post; the built-in 5 for a hand-built admission."""
+    found = features.features.get("answer_messages") if features is not None else None
+    return ANSWER_MESSAGES if found is None else limit_int(found.value)
+
+
+def turn_limit_minutes(features: FeatureSnapshot | None, *, unattended: bool = False) -> int | None:
+    """The turn time limit in minutes (the unattended run limit when `unattended`); None, for a
+    hand-built admission or a snapshot without the key, leaves the built-in ceiling."""
+    key = "unattended_time_limit" if unattended else "turn_time_limit"
+    found = features.features.get(key) if features is not None else None
+    return None if found is None else limit_int(found.value)
 
 
 @dataclass(frozen=True)
@@ -97,6 +139,8 @@ class SessionToolset:
     """Repository memory is on here, not off or missing its setup: legacy readers step aside."""
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
+    web_app: bool = True
+    """`web_awareness`: the web app's own tools (`WEB_APP_TOOLS`) are offered."""
     off_capabilities: frozenset[str] = frozenset()
     """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
     are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
@@ -121,25 +165,20 @@ class SessionToolset:
             if found.on and isolated:
                 continue
             builtins[tool] = found.on
-        found = features.features.get("daimon_tools")
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
-        # Without the setup, or Off and locked at the deployment, no memory tools are registered.
-        hides_memory = (
-            memory is not None and not memory.on and memory.tier not in ("default", "deployment")
-        )
+        web = features.features.get("web_awareness")
         return cls(
-            daimon_tools=not isolated and (found is None or found.on),
+            daimon_tools=not isolated,
             builtins=builtins,
-            repo_memory=not hides_memory,
+            repo_memory=memory is None or not hides_tools(memory),
             memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
+            web_app=web is None or not hides_tools(web),
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
-                if (cap := features.features.get(key)) is not None
-                and not cap.on
-                and (cap.tier != "default" or cap.unavailable in (None, "requires"))
+                if (cap := features.features.get(key)) is not None and hides_tools(cap)
             ),
         )
 
@@ -150,6 +189,7 @@ class SessionToolset:
             or bool(self.builtins)
             or not self.repo_memory
             or not self.env_file
+            or not self.web_app
             or bool(self.off_capabilities)
         )
 
@@ -160,8 +200,9 @@ class SessionToolset:
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
-        hidden: frozenset[str] = frozenset() if self.repo_memory else REPO_MEMORY_TOOLS
-        return hidden.union(*(CAPABILITY_TOOLS[key] for key in self.off_capabilities))
+        memory = () if self.repo_memory else ("repo_memory",)
+        web = () if self.web_app else ("web_awareness",)
+        return gated_tools((*self.off_capabilities, *memory, *web))
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""

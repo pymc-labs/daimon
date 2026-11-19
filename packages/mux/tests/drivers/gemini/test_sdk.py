@@ -548,3 +548,36 @@ async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
         assert error.native_error_code == "http_429"
         assert len(calls) == 1
         await client.aio.aclose()
+
+
+async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config() -> None:
+    """google-genai 2.7 sends a model interaction's thinking level in generation_config."""
+    from contextlib import AsyncExitStack
+
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec
+    from mux.drivers.gemini.core import compile_agent
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    captured: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"id": "i1", "status": "completed", "steps": []})
+
+    body = compile_agent(
+        AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        max_output_tokens=4096,
+        thinking_level="low",
+    )
+    body.update(input=[{"type": "text", "text": "question"}], background=True, store=True)
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        await SDKTransport(client).create(body)
+    posted = json.loads(captured[0].content)
+    assert posted["generation_config"]["thinking_level"] == "low", (
+        "a model interaction sends effort in generation_config"
+    )
+    assert "agent_config" not in posted, "a model interaction sends no agent_config"

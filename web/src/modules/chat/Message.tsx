@@ -128,9 +128,10 @@ function Feedback({ m }: { m: Msg }) {
   )
 }
 
-export function AssistantMessage({ m, agent, first, last, busy, onAnswer }: {
+export function AssistantMessage({ m, agent, first, last, busy, onAnswer, onSwitchBack }: {
   m: Msg; agent: AgentRef; first: boolean; last: boolean; busy: boolean
   onAnswer: (card: Card, a: CardAnswer) => void
+  onSwitchBack?: () => Promise<string>
 }) {
   const done = !m.streaming && !!m.content && !m.card && !m.stopped
   return (
@@ -151,7 +152,7 @@ export function AssistantMessage({ m, agent, first, last, busy, onAnswer }: {
       {!m.streaming && m.files?.map((f) => <FileCard key={f.id} f={f} />)}
       {m.card && (
         <div className={m.content ? "mt-3" : ""}>
-          <CardView card={m.card} busy={busy} onAnswer={(a) => onAnswer(m.card!, a)} />
+          <CardView card={m.card} busy={busy} onAnswer={(a) => onAnswer(m.card!, a)} onSwitchBack={onSwitchBack} />
         </div>
       )}
       {(done || m.stopped) && (
@@ -159,7 +160,7 @@ export function AssistantMessage({ m, agent, first, last, busy, onAnswer }: {
           {done && <CopyButton text={m.content} label="Copy answer" />}
           {done && m.id && !m.id.startsWith("tmp") && <Feedback m={m} />}
           {m.stopped && <span className="px-1 text-xs text-faint">Stopped</span>}
-          {m.cost_usd != null && m.cost_usd > 0 && (
+          {m.cost_usd != null && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className={cn("ml-auto flex gap-2 text-xs text-faint tabular", !last && "opacity-0 transition-opacity group-hover/msg:opacity-100")}>

@@ -18,6 +18,8 @@ from daimon.adapters.cli.commands.config import config_app
 from daimon.adapters.cli.commands.context_provider import context_provider_app
 from daimon.adapters.cli.commands.crypto import crypto_app
 from daimon.adapters.cli.commands.defaults import defaults_app
+from daimon.adapters.cli.commands.deployment import deployment_app
+from daimon.adapters.cli.commands.dm import dm_app
 from daimon.adapters.cli.commands.environments import environments_app
 from daimon.adapters.cli.commands.features import features_app
 from daimon.adapters.cli.commands.github import github_app
@@ -33,6 +35,8 @@ from daimon.adapters.cli.commands.selfhosted import selfhosted_app
 from daimon.adapters.cli.commands.sessions import sessions_app
 from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
+from daimon.adapters.cli.commands.support import support_app
+from daimon.adapters.cli.commands.tags import tags_app
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.commands.watches import watches_app
@@ -47,6 +51,7 @@ app.add_typer(agents_app, name="agents")
 app.add_typer(admins_app, name="admins")
 app.add_typer(backup_app, name="backup")
 app.add_typer(channels_app, name="channels")
+app.add_typer(deployment_app, name="deployment")
 app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
@@ -68,7 +73,10 @@ app.add_typer(promo_app, name="promo")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")
 app.add_typer(watches_app, name="watches")
+app.add_typer(tags_app, name="tags")
 app.add_typer(features_app, name="features")
+app.add_typer(dm_app, name="dm")
+app.add_typer(support_app, name="support")
 app.command("run")(run_command)
 app.command("smoke")(smoke_command)
 

@@ -35,7 +35,7 @@ async def test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload()
         assert native.metadata["daimon_tenant"] != str(tenant)
         with pytest.raises(add_skill.SkillAddRefused) as refusal:
             await add_skill.add_previewed_skill(
-                cast(TeamsRuntime, SimpleNamespace(anthropic=new)),
+                cast(TeamsRuntime, SimpleNamespace(anthropic=new, sessionmaker=None)),
                 cast(Actor, SimpleNamespace(tenant_id=tenant)),
                 cast(RosterAgent, SimpleNamespace(name="project", ma_agent_id="agent1")),
                 cast(SkillBundle, SimpleNamespace()),

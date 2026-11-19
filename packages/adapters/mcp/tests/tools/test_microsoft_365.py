@@ -1314,7 +1314,7 @@ async def test_personal_credential_own_endpoint_alias_requires_card_before_workb
     fake.graph[("POST", path)] = httpx.Response(200, json={"index": 0})
     card = AsyncMock(return_value="denied")
     decide = interactive_decider(
-        ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+        ToolSafetyPolicy(enabled=True),
         requester_platform_user_id=OID,
         confirm=card,
         trusted_servers=trusted_servers_for(public_url, bindings),

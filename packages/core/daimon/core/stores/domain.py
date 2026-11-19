@@ -13,10 +13,13 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
+from daimon.core.windows import BudgetWindow as BudgetWindow
 from mux.contracts.config import CapabilityRequirement, ThreadMode
-from mux.contracts.ids import PROVIDERS, Provider, Scope
-from mux.contracts.profile import Capability
+from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     Agent,
     AgentSpec,
@@ -25,7 +28,7 @@ from mux.contracts.resources import (
     ResourceBinding,
     WorkspaceSource,
 )
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 # NOTE: Adding a platform requires updating this Literal AND the DB column
 # (currently untyped Text). If mismatched, Pydantic model_validate raises
@@ -55,6 +58,7 @@ ContinuationReason = Literal[
     "watch_fired",
     "job_finished",
     "watch_report",
+    "confirmed_call",
 ]
 #: Where a watch reports each fire.
 WatchDelivery = Literal["thread", "dm", "new_thread"]
@@ -98,6 +102,37 @@ class AccountIdentityRow(BaseModel):
     # platform_principals.foreign_home_id: the principal was verified to belong to another
     # organisation (sticky), so it is a client on every call, even with no running turn.
     foreign_home_id: str | None = None
+
+
+class SkillSizeRow(BaseModel):
+    """One source skill version's measured bundle."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    skill_id: str
+    version: str
+    name: str
+    total_bytes: int
+    largest_file_bytes: int
+    file_count: int
+    text_only: bool
+    manifest_bytes: int | None = None
+    """The SKILL.md's bytes; -1: not text; None: measured before they were kept, or unreadable."""
+
+
+class SkillCopyRow(BaseModel):
+    """A source skill version's copy in one provider project."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    provider: str
+    account_scope_id: str
+    skill_id: str
+    version: str
+    copy_id: str
+    copy_version: str
 
 
 class ChannelSkillRow(BaseModel):
@@ -319,6 +354,8 @@ class ThreadSessionRow(BaseModel):
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
     active_turn_channel_id: str | None = None
+    active_turn_deadline: datetime | None = None
+    model_marks: list[str] | None = None
     # The configuration the MA session froze at create time. NULL on rows
     # written before continuity existed — callers read that as "unknown".
     effective_config: SessionSnapshot | None = None
@@ -514,6 +551,35 @@ class MicrosoftUserTokenRow(BaseModel):
     updated_at: datetime
 
 
+ConnectorRefreshOwner = Literal["ma", "daimon"]
+"""Who refreshes one connector grant: the Managed Agents vault, or Daimon's store."""
+
+
+class ConnectorTokenRow(BaseModel):
+    """One stored connector grant, ciphertext only; `account_id` None means agent-wide."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    agent_id: uuid.UUID
+    server_url: str
+    access_token_encrypted: bytes
+    refresh_token_encrypted: bytes | None
+    token_endpoint: str
+    client_id: str
+    client_secret_encrypted: bytes | None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"]
+    scope: str | None
+    resource: str | None
+    expires_at: datetime | None
+    refresh_owner: ConnectorRefreshOwner
+    refresh_started_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class MicrosoftSignInRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -578,9 +644,6 @@ class UsageEventRow(BaseModel):
     observation_revision: int | None = None
     channel_id: str | None = None
     agent_id: str | None = None
-
-
-BudgetWindow = Literal["monthly", "total", "fixed"]
 
 
 class ChannelBudgetRow(BaseModel):
@@ -1210,24 +1273,6 @@ class FileUploadRow(BaseModel):
     created_at: datetime
 
 
-class SupportEscalationRow(BaseModel):
-    """Pydantic row for SupportEscalation — one human-support request."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    account_id: uuid.UUID | None
-    platform: str
-    platform_user_id: str
-    channel_id: str
-    message_id: str
-    ma_session_id: str | None
-    note: str
-    delivered_at: datetime | None
-    created_at: datetime
-
-
 FeatureTier = Literal["workspace", "agent", "channel", "thread"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
 FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
@@ -1333,13 +1378,15 @@ class TurnOriginRow(BaseModel):
     platform_message_id: str | None = None
     helper_of: uuid.UUID | None = None
     serves_helpers: bool = False
+    self_helpers: bool = False
+    helper_key: str | None = None
 
     @property
     def session_thread_id(self) -> str:
         """The thread key of this turn's session: a helper's own (`helper_thread_key`)."""
         if self.helper_of is None:
             return self.thread_id
-        return helper_thread_key(self.thread_id, self.responder_ma_agent_id)
+        return self.helper_key or helper_thread_key(self.thread_id, self.responder_ma_agent_id)
 
 
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
@@ -1395,6 +1442,16 @@ class SourceRepresentation(_Facts):
     # Whole capabilities a partial representation (an agent template) leaves out;
     # consent must declare each one.
     unavailable_capabilities: tuple[str, ...] = ()
+    # Source skills, at concrete versions, the target installs per session (not on
+    # its agent): every custom and channel skill within the profile's size limit.
+    session_skills: tuple[SkillRef, ...] = ()
+    # A measured skill's own name by id: a `skill:` drop keys it by id, people see this.
+    skill_names: dict[str, str] = Field(default_factory=dict)
+    # The target runs the source's execution tools in the provider's own sandbox
+    # (an agent template: OpenAI's hosted bash, Gemini's code_execution), set up as
+    # `environment` (None: the provider's default). `finer_drops.sandbox_losses`
+    # names what the source's environment had beyond it.
+    provider_execution: bool = False
 
 
 class BackendAgent(_Facts):
@@ -1412,8 +1469,11 @@ class BackendAgent(_Facts):
     # Owner-loaded preparation inputs are kept in memory, never in settings or logs.
     source: Agent | None = Field(default=None, exclude=True, repr=False)
     effective_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
-    # `effective_spec` before Daimon's own gating: what the consent pin hashes.
+    # `effective_spec` before Daimon's own gating: what earlier consent pins hashed.
     ungated_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
+    # The owner's setup alone, before any place (a channel's skills, a person's
+    # hidden servers) or Daimon's gating: what the consent pin hashes.
+    owner_spec: AgentSpec | None = Field(default=None, exclude=True, repr=False)
     environment: Environment | None = Field(default=None, exclude=True, repr=False)
     resource_scope: Scope | None = Field(default=None, exclude=True, repr=False)
     resource_requirements: tuple[ResourceBinding, ...] = Field(default=(), exclude=True, repr=False)
@@ -1438,30 +1498,7 @@ class TenantBackendPolicy(_Facts):
     explicit: bool = True
 
 
-class _BackendDropConsent(_Facts):
-    declared_drops: tuple[str, ...]
-    source_pin: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-    target_digest: str = Field(pattern=r"^[0-9a-f]{64}$", strict=True)
-
-    @field_validator("declared_drops")
-    @classmethod
-    def _labels(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return TypeAdapter(
-            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
-        ).validate_python(value)
-
-
-class _BackendConsentFacts(_Facts):
-    drop_consent: _BackendDropConsent | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @property
-    def declared_drops(self) -> tuple[str, ...]:
-        return self.drop_consent.declared_drops if self.drop_consent is not None else ()
-
-
-class AgentBackendRevision(_BackendConsentFacts):
+class AgentBackendRevision(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     local: int = Field(ge=1)
@@ -1471,14 +1508,23 @@ class AgentBackendRevision(_BackendConsentFacts):
     profile: str | None = None
     requires: dict[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
+    effort: Effort | None = None
+    environment: str | None = Field(default=None, pattern=r"^sh_env_")
     agent_name: str
     preview_digest: str
     digest: str
     previous_local: int | None
     created_at: datetime
+    # Read and ignored: the losses a switch was confirmed with, before switches applied at once.
+    drop_consent: dict[str, JsonValue] | None = Field(default=None, exclude=True)
+
+    @property
+    def born(self) -> bool:
+        """`record_born_backend`'s row: where a record created there runs, not a switch."""
+        return self.preview_digest == self.digest
 
 
-class CompatibilityPreview(_BackendConsentFacts):
+class CompatibilityPreview(_Facts):
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
     target_backend: Provider
@@ -1491,6 +1537,12 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # What the target can't carry, from a captured source (`AgentSpec.declared_drops`).
+    declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # Run by the host in place of the native feature, never lost (`source_translations`).
+    translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # The name each lost skill shows; its `skill:` drop keys it by id.
+    skill_names: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's own profile, requirements and thread mode, only when any is set.
@@ -1750,6 +1802,47 @@ class WebAgentGrantRow(BaseModel):
     groups: tuple[str, ...] = ()
 
 
+DmGrantMode = Literal["members", "listed", "excluded"]
+DmRuleSubject = Literal["user", "group", "everyone"]
+
+
+class DmAgentGrantRow(BaseModel):
+    """Who may DM one agent (see `DmAgentGrant`); `members` when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_name: str
+    who: DmGrantMode = "members"
+    user_ids: tuple[str, ...] = ()
+    group_ids: tuple[str, ...] = ()
+    set_by: str | None = None
+
+
+class DmRuleRow(BaseModel):
+    """One ordered routing rule (see `DmRule`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    position: int
+    subject: DmRuleSubject
+    subject_id: str | None = None
+    agent_name: str | None = None
+    locked: bool = False
+    set_by: str | None = None
+
+
+class DmAgentPickRow(BaseModel):
+    """A person's chosen DM agent in a workspace (see `DmAgentPick`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_name: str
+
+
 class WebWorkspaceSettingsRow(BaseModel):
     """A workspace's web app choices (see `WebWorkspaceSettings`); defaults when unset."""
 
@@ -1831,6 +1924,8 @@ class WebRefusalCard(BaseModel):
     title: str
     body: str
     help: str
+    # The one button the card offers an admin; None for everyone else.
+    action: Literal["switch_back_to_claude"] | None = None
 
 
 class WebCredentialCard(BaseModel):
@@ -1895,3 +1990,12 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+class PendingCarryOverRow(BaseModel):
+    """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    user_prefix: str
+    system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...]

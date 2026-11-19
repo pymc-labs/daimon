@@ -108,7 +108,9 @@ JSON object.
 Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
 rejected). Default is members (live membership required). Set mode=disabled to disable
 DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
-Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
+Deprecated: checked with per-agent DM access on every path, the stricter wins; `daimon
+dm import-policies` copies it into stored access. Configure
+DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
 ### `DAIMON_TABLE_RENDERING`
 
@@ -540,9 +542,24 @@ private HTTPS server. Attach such a server to an agent at &lt;app root&gt;/mcp-
 identity/&lt;name&gt; instead of its own URL: Daimon forwards each request with a short-
 lived EdDSA token naming the agent, the workspace and, for a person's turn, who asked,
 the channel and the message. Daimon names the asker only while that person's turn is
-live in the calling session's thread. The MCP service requires
-DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the same server policy without the
-signing key. Default: [] (off).
+live in the calling session's thread. A server may instead set auth to "bearer": Daimon
+then sends the key from DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and
+workspaces and agents (agent names that may use it) are required. Set requester_meta to
+true for a server that attributes writes to the requester: Daimon removes any requester
+fields the caller supplied and stamps each tool call with who it is for and where: the
+asker while their turn is live, or the person an unattended run acts for. The MCP
+service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat
+workers use the same server policy without the signing key. Default: [] (off).
+
+### `DAIMON_MCP_IDENTITY__BEARERS`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Keys for the servers whose auth is "bearer", by server name: a JSON object such as
+{"tools": "&lt;key&gt;"}. Kept apart from DAIMON_MCP_IDENTITY__SERVERS so the key is set
+as a secret. Daimon sends the key as the server's bearer in place of the caller's own
+credential, which never reaches the server. Only the MCP service needs them, and there
+every bearer server needs one; no other server may have one. Default: {} (none).
 
 ## Hub
 
@@ -703,15 +720,6 @@ Maximum recently active Discord channels and threads scanned per guild on startu
 Maximum recent Discord messages scanned per channel or thread on startup. Current
 message gates and durable admissions prevent duplicate turns.
 
-### `DAIMON_DISCORD__WRITERS_NONE_NOTICE`
-
-`bool` · optional · default `False`
-
-Opt in to one stop reaction on an explicit bot mention refused by a confirmed
-writers=none rule. Only the posting owner reacts, with per-requester, channel and bot-
-wide cooldowns. No text, DM or agent turn is sent. Unknown protection stays silent.
-Limits are process-local and reset on restart.
-
 ### `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY`
 
 `bool` · optional · default `False`
@@ -730,24 +738,6 @@ thread is still opening. Includes thread naming and Discord rate-limit waits. Se
 to react immediately. The reaction is removed when creation finishes; a failed creation
 is answered with a visible error reply.
 
-### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
-
-`bool` · optional · default `False`
-
-React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
-opened, as a hint that only mentions start a turn. The message itself is never answered.
-At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
-mentions someone else, never to any bot, never where the agent may not post, and never
-while the thread is followed (thread participation on). Off by default: the cooldown is
-kept in memory, so each restart allows one more hint per thread.
-
-### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
-
-`float` · optional · default `24.0`
-
-Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
-memory, so a restart allows one more.
-
 ### `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN`
 
 `float` · optional · default `10.0`
@@ -764,15 +754,6 @@ per person and channel, so a restart allows one more.
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
 
-### `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`
-
-`bool` · optional · default `False`
-
-Opt in to queue wording on the existing initial Discord mention card while its admitted
-turn waits behind the tenant concurrency cap. The same card returns to ordinary progress
-when the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
-information is displayed.
-
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
 
 `int | None` · optional · default unset
@@ -786,9 +767,9 @@ turn_queue); continuation wakes keep their existing admission path.
 `int` · optional · default `86400`
 
 Minimum age in seconds before Discord can retire a card after definite recovery failure
-or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
-Recovery runs at startup and periodically, and deletes a known pending card when the bot
-has Manage Messages permission.
+or repeated failed recovery passes. Must be at least the longest turn time limit (180
+minutes) plus 15 minutes. Recovery runs at startup and periodically, and deletes a known
+pending card when the bot has Manage Messages permission.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
 
@@ -1644,39 +1625,34 @@ with no current tariff is refused. It resets at midnight UTC. 0 allows no OpenAI
 
 Read from `daimon.core.config.SupportSettings`. Prefix `DAIMON_SUPPORT__`.
 
-Human-support escalation: where requests land, and how many each user gets.
+Ask a person: the default channel per platform, and each person's default credits.
 
-`credits_per_user` is a COUNT of human interactions, deliberately not the USD in
-`BillingSettings.signup_credit`. Sharing a ledger with billing would let a support
-request eat the tenant's ability to run turns, and would give a paid-up tenant unlimited
-support. Different unit, different table.
+Support credits are their own unit, not the USD in `BillingSettings.signup_credit`:
+sharing billing's ledger would let a request eat a tenant's turns and give a paid-up
+tenant unlimited support. A request is charged to the most specific place with a support
+limit, else to the person's default credits.
 
-Each platform's requests go only to its own channel: Discord's to
-`escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams' to
-`teams_escalation_channel_id`. An unset channel disables the affordance it serves
-entirely rather than recording requests nobody will ever see. Failing closed is the
-honest behaviour: an escalate button that reaches no one is worse than no button,
-because the person believes they have asked for help. Every platform spends the same
-per-user, per-tenant allowance from one ledger.
+Each platform's requests go to its own default channel, or to a channel the workspace
+picked while `support_own_channel` is on. With neither, Ask a person is unavailable
+there: a button that reaches no one is worse than none.
 
 ### `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Discord channel id where human-support requests from Discord are posted (the unprefixed
-name predates per-platform channels). A Teams id (`19:…`) left here is ignored. Unset
-(the default) disables the escalate affordance on Discord — a request that reaches
-nobody is worse than no button at all. A channel rather than operator DMs: it survives
-one person's DMs being closed, and it leaves a shared record anyone on the rota can pick
-up. The bot must be able to post there.
+Default Discord channel id for Ask a person requests from Discord (the unprefixed name
+predates per-platform channels). A Teams id (`19:…`) left here is ignored. A workspace
+may pick its own channel instead while support_own_channel is on. Unset, with no own
+channel, Ask a person is unavailable on Discord. The bot must be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask the team button on Slack. Slack requests never go to another platform's
-channel, nor theirs here. The bot must be a member of the channel.
+Default Slack channel id for Ask a person requests from Slack. A workspace may pick its
+own channel instead while support_own_channel is on. Unset, with no own channel, Ask a
+person is unavailable on Slack. Requests never go to another platform's channel. The bot
+must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
 
@@ -1691,31 +1667,30 @@ suits a single-workspace install. Daimon must be installed in the named workspac
 
 `str | None` · optional · default unset
 
-Teams channel id (`19:…`) where human-support requests from Teams are posted. Unset (the
-default) disables Ask a person on Teams. Teams requests never go to the Discord or Slack
-channel, nor theirs here. The Teams bot must be a member of the channel's team (and of
-the channel, if it is private).
+Default Teams channel id (`19:…`) for Ask a person requests from Teams. A workspace may
+pick its own channel instead while support_own_channel is on. Unset, with no own
+channel, Ask a person is unavailable on Teams. Requests never go to another platform's
+channel. The Teams bot must be a member of the channel's team (and of the channel, if it
+is private).
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
 `int` · optional · default `20`
 
-How many human-support requests each user gets within a tenant. A COUNT of interactions,
-NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — the two are deliberately separate
-ledgers. 0 disables escalation.
+Default support credits each person gets within a workspace, spent where no support
+limit applies. A request costs its menu option's price, one credit on the default menu.
+Not the USD in DAIMON_BILLING__SIGNUP_CREDIT. 0 leaves Ask a person to places with a
+support limit.
 
 ### `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT`
 
 `dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
-wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
-the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
-DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and
-DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. Missing/false (the default) keeps
-the form in the database only. The form tells the person their answers are shared when
-it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
-JSON object.
+Deprecated: the support_feedback feature replaces it, and `daimon features import-env`
+stores this map as workspace settings. Per-tenant switch, keyed by tenant UUID: true
+also posts every submitted 👎 "What went wrong?" form to where Ask a person requests go.
+A workspace setting beats it. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON
+object.
 
 ## Turn
 
@@ -1733,15 +1708,6 @@ retried work before it is sent again.
 
 Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports.
 Emergency stop only: legacy returns every turn to the Managed Agents-only path.
-
-### `DAIMON_TURN__NATIVE_FOOTER_COST`
-
-`bool` · optional · default `False`
-
-Display settled native OpenAI/Gemini turn cost on platform footers. Requires complete
-normalized usage, verified rates and root accounting. Incomplete totals display Cost
-unknown or Cost partial, never an estimate. Off by default; Anthropic footers are
-unchanged with either value.
 
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
@@ -1761,16 +1727,6 @@ Capture complete scoped source and resource intent for an agent-selected native 
 Unproved obligations are refused; counterpart identity readback alone never authorizes
 execution. Requires mux and channel_backends; on by default. Emergency stop only: false
 refuses agent-selected native backends.
-
-### `DAIMON_TURN__STATUS_LOG`
-
-`bool` · optional · default `False`
-
-Keep each message the agent writes apart in its answer. Off by default: consecutive
-messages from the agent are joined into one block of text. On: an answer made of several
-messages keeps every one, set apart by a blank line instead of being run together.
-Either way the "Working on it…" card shows the last three messages the agent wrote,
-oldest first, one line each (cut at 120 characters).
 
 ## Thread Naming
 
@@ -1944,6 +1900,26 @@ raised floor polls at the floor. Default (also used when the value is empty):
 read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
 60. Set [] to allow no polls.
 
+### `DAIMON_WATCHES__CALLBACK_BASE_URL`
+
+`str | None` · optional · default unset
+
+Public https address of the callback endpoint, with no path, query or trailing slash
+(for example https://hooks.example.com). Callback watches give their owner a secret link
+under it once; unset refuses new callback watches and leaves existing ones working.
+Route /callbacks/watches/ on the sidecar to it, and keep proxy access logs off that
+path, since the secret is part of it.
+
+### `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`
+
+`int` · optional · default `4096`
+
+Largest body, in bytes, that one post to a callback watch link may carry; a larger post
+is refused. Default 4096 (4 KiB); up to 524288 (512 KiB). Raise it for senders that post
+a whole record, for example 262144 for 256 KiB. The per-watch, per-owner and per-server
+evidence limits grow with it, and a wake that would carry more than 512 KiB of evidence
+drops its oldest posts. Signed page events keep their own 4 KiB limit.
+
 ### `DAIMON_WATCHES__CHAT_TOOLS`
 
 `list[str]` · optional · default unset
@@ -2008,16 +1984,6 @@ on).
 Apply workspace-admin tool rules for individual agents and MCP tools: third-party tools,
 and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
 remain editable but inactive until enabled.
-
-### `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`
-
-`bool` · optional · default `False`
-
-Let native server admins change third-party MCP write approvals from /settings at
-server, channel or thread scope. The most specific explicit on/off setting wins. Stored
-settings are ignored while off. Fixed confirmation and permission-setter names never
-receive an override, regardless of server host. Deny rules, direct messages and
-unattended_writes retain their existing behavior.
 
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 
@@ -2137,13 +2103,6 @@ S3 signing region supplied by the bucket provider.
 
 Lifetime of each presigned artifact GET URL; defaults to ten minutes.
 
-### `DAIMON_ARTIFACTS__EMBED_IMAGES`
-
-`bool` · optional · default `True`
-
-Also return bounded MCP image blocks for model vision. Disable independently when a
-hosted client cannot accept image content.
-
 ## Scheduler
 
 Read from `daimon.adapters.scheduler.settings.SchedulerSettings`. Prefix
@@ -2184,12 +2143,13 @@ by the adapters.
 
 `float` · optional · default `3000.0`
 
-An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core ~45-minute
-ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn and fires
-first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
-OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
-the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
+ceiling (daimon.core.turn.ceiling: 45 minutes, or less by the unattended run limit) is
+enforced inside headless_runner.run_turn and fires first, producing a
+TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
+ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
+recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
+the core ceiling becomes unreachable for routines. Each routine has its own timeout;
 continuous scheduler ticks do not await in-flight routines. Missed slots follow the
 routine's catch_up_policy.
 

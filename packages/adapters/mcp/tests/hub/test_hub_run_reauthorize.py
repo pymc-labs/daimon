@@ -18,7 +18,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_message_event import
 )
 from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.access_policy import set_access_policy
@@ -33,6 +33,10 @@ from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, ma_sessi
 from .test_turn_parity import _TOKEN, _call_tool, _runtime
 
 _PINNED = TenantAccessPolicy(agent_channel_pins={DEFAULT_AGENT_NAME: ("elsewhere",)})
+_HOMED = TenantAccessPolicy(
+    channel_rules={"home": ChannelRule(readers="own", writers="own")},
+    agent_rules={DEFAULT_AGENT_NAME: AgentRule(runs_in=("home",))},
+)
 
 
 async def _hub_call(
@@ -42,6 +46,8 @@ async def _hub_call(
     tool_name: str,
     change_on: tuple[str, str],
     admin: bool = False,
+    policy: TenantAccessPolicy = _PINNED,
+    demote: bool = True,
 ) -> tuple[dict[str, Any], AsyncMock, list[dict[str, Any]]]:
     """Run one hub turn; the policy pin (and a demotion, for an admin) lands on ``change_on``."""
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
@@ -89,8 +95,8 @@ async def _hub_call(
     async def changing(req: httpx.Request) -> httpx.Response:
         if (req.method, req.url.path) == change_on:
             async with db_session_factory.begin() as session:
-                await set_access_policy(session, tenant_id=tenant.id, policy=_PINNED)
-                if admin:
+                await set_access_policy(session, tenant_id=tenant.id, policy=policy)
+                if admin and demote:
                     await set_role(session, principal.account_id, Role.USER)
         return router.dispatch(req)
 
@@ -152,6 +158,24 @@ async def test_hub_admin_demoted_mid_turn_is_held_to_the_pin(db_session, db_sess
         tool_name="start_turn",
         change_on=("GET", "/v1/environments"),
         admin=True,
+    )
+    assert result["result"].get("isError"), result
+    create.assert_not_awaited()
+    assert sent == []
+
+
+async def test_hub_admin_is_held_once_the_agent_gains_a_home_mid_turn(
+    db_session, db_session_factory
+):
+    """A channel's own agent answers only in its home, so the admin's recheck refuses it."""
+    result, create, sent = await _hub_call(
+        db_session,
+        db_session_factory,
+        tool_name="start_turn",
+        change_on=("GET", "/v1/environments"),
+        admin=True,
+        policy=_HOMED,
+        demote=False,
     )
     assert result["result"].get("isError"), result
     create.assert_not_awaited()

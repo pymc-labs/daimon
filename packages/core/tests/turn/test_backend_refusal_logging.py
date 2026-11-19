@@ -98,14 +98,14 @@ def test_nested_private_errors_log_only_closed_reason_and_capability_labels():
 
 
 def test_a_refusal_detail_is_logged_only_from_the_closed_set():
-    stale = AgentBackendRefused("re_confirm", detail="source_pin")
-    stale.__cause__ = AgentBackendRefused("re_confirm", detail="private-PRIVATE")
+    gap = AgentBackendRefused("source_unavailable", detail="source")
+    gap.__cause__ = AgentBackendRefused("source_unavailable", detail="private-PRIVATE")
     with capture_logs() as logs:
-        _log_backend_unsupported("preparation_counterpart", stale)
+        _log_backend_unsupported("preparation_counterpart", gap)
     assert logs[0]["causes"] == [
-        {"type": "AgentBackendRefused", "reason": "re_confirm", "detail": "source_pin"},
-        {"type": "AgentBackendRefused", "reason": "re_confirm"},
-    ]
+        {"type": "AgentBackendRefused", "reason": "source_unavailable", "detail": "source"},
+        {"type": "AgentBackendRefused", "reason": "source_unavailable"},
+    ], "only a detail from the closed set is logged"
 
 
 def test_capture_sentences_include_its_nested_helpers():
@@ -280,3 +280,70 @@ def test_an_upstream_failure_is_busy_only_when_a_retry_can_clear_it(cause, busy)
     raised = TurnError(kind="upstream", message="upstream")
     raised.__cause__ = cause
     assert transient_failure(raised) is busy
+
+
+def _raised_names() -> set[str]:
+    """Every literal name our code raises: `.unsupported("x")`, `UnsupportedCapability(("x",)`."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4]
+    names: set[str] = set()
+    for base in ("packages/mux/mux", "packages/core/daimon"):
+        for path in (root / base).rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                func, arg = node.func, node.args[0]
+                called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if called in ("unsupported", "_unsupported") and isinstance(arg, ast.Constant):
+                    names.add(arg.value)
+                elif called == "UnsupportedCapability" and isinstance(arg, ast.Tuple):
+                    names |= {e.value for e in arg.elts if isinstance(e, ast.Constant)}
+    return {n for n in names if isinstance(n, str)}
+
+
+def test_every_name_our_code_raises_is_logged_by_name():
+    from daimon.core.channel_backend import _raised_capability
+
+    names = _raised_names()
+    assert len(names) > 100  # the scan finds the drivers' names
+    assert sorted(n for n in names if not _raised_capability(n)) == []
+
+
+def test_every_logged_provider_failure_handler_logs_its_causes() -> None:
+    """A provider error handler that logs must log why: `backend_refusal_causes`
+    carries the redacted native code, param and message (incident: a skill
+    archive mismatch logged only as `invalid_request (400)`)."""
+    import ast
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4] / "packages"
+    provider = {"ProviderError", "MuxError", "APIStatusError", "APIError", "AnthropicError"}
+    paths = [*root.glob("core/daimon/**/*.py"), *root.glob("adapters/*/daimon/**/*.py")]
+    trees = {path: ast.parse(path.read_text()) for path in paths}
+    # Module-level tuple aliases, starred ones too: `_ERRORS = (MuxError, *_OTHERS)`.
+    aliases = {
+        target.id: set(re.findall(r"\w+", ast.unparse(node.value)))
+        for tree in trees.values()
+        for node in tree.body
+        if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Tuple)
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+    missing: list[str] = []
+    for path, tree in trees.items():
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                continue
+            caught = set(re.findall(r"\w+", ast.unparse(handler.type)))
+            while grown := {name for word in caught for name in aliases.get(word, ())} - caught:
+                caught |= grown
+            if not provider & caught:
+                continue
+            body = "\n".join(ast.unparse(statement) for statement in handler.body)
+            logs = re.search(r"log\w*(\(\))?\.(debug|info|warning|error|exception)\(", body)
+            if logs and "backend_refusal_causes(" not in body:
+                missing.append(f"{path.relative_to(root)}:{handler.lineno}")
+    assert not missing, f"provider failure logs without causes: {missing}"

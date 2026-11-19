@@ -4,7 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from daimon.core._models import GeminiRuntimeState
@@ -850,3 +850,44 @@ async def test_a_snapshot_read_that_gets_no_connection_is_busy_and_named(
     assert [(e["label"], e["reasons"]) for e in named] == [
         ("gemini_state:records:read", ["pool_timeout"])
     ]
+
+
+async def test_postgres_shared_state_is_the_threads_own_and_needs_no_account(postgres_state):
+    """A shared thread's derived owner has no Account row: the slot vouches for it."""
+    from daimon.core.shared_threads import shared_owner, shared_slot
+
+    sessions, scope, _, _ = postgres_state
+    tenant = scope.tenant_id
+    slot = shared_slot(UUID(tenant), "slack", "channel", "thread")
+    shared_scope = scope.model_copy(update={"account_id": str(shared_owner(slot))})
+    first = PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=slot)
+    async with first.transaction() as records:
+        records.creations[(tenant, shared_scope.account_id, "key")] = ("p", "digest", "agent")
+    # Every caller's turn reaches the same state, from a fresh owner.
+    again = PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=slot)
+    async with again.transaction() as records:
+        assert list(records.creations) == [(tenant, shared_scope.account_id, "key")]
+    held = PostgresFlashAccounting(
+        sessions,
+        scope=shared_scope,
+        project="project",
+        hold_usd=Decimal(".49"),
+        cap_usd=Decimal(".49"),
+        shared_slot=slot,
+    )
+    await held.before_attempt(model=ModelRef(provider="gemini", id=FLASH_PRIMARY), attempt=1)
+    # An account-less owner without its slot, and a slot that is not the owner's, refuse.
+    with pytest.raises(ValueError, match="account is unavailable"):
+        async with PostgresGeminiStorage(
+            sessions, scope=shared_scope, project="project"
+        ).transaction():
+            pass
+    other = shared_slot(UUID(tenant), "slack", "channel", "another-thread")
+    with pytest.raises(ValueError, match="differs from its thread"):
+        PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=other)
+    foreign = shared_slot(uuid4(), "slack", "channel", "thread")
+    with pytest.raises(ValueError, match="differs from its thread"):
+        PostgresGeminiStorage(sessions, scope=shared_scope, project="project", shared_slot=foreign)
+    async with sessions() as db:
+        rows = (await db.scalars(select(GeminiRuntimeState))).all()
+    assert sorted(row.kind for row in rows) == ["holds", "records"]

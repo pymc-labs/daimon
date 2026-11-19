@@ -53,6 +53,13 @@ __all__ = [
     "InvocationRequest",
     "Limits",
     "MCPServer",
+    "OUTPUT_DIRECTORY",
+    "OUTPUT_FILES_MAX",
+    "OUTPUT_FILE_MAX_BYTES",
+    "OutputContent",
+    "OutputDeleted",
+    "OutputFile",
+    "OutputsResponse",
     "ModelRequestStartedData",
     "PROTOCOL",
     "Part",
@@ -72,6 +79,8 @@ __all__ = [
     "URLSkill",
     "UsageData",
     "WireModel",
+    "output_id",
+    "output_route",
     "skill_sha256",
     "validate_skill_path",
 ]
@@ -425,3 +434,58 @@ class InvocationEnvelope(WireModel):
 class TurnAccepted(ResponseModel):
     accepted: Literal[True] = True
     turn_id: str
+
+
+# Files the agent saves under `$HOME/outputs` are listed, read and deleted by id.
+OUTPUT_DIRECTORY = "outputs"
+OUTPUT_FILE_MAX_BYTES = 32 * 1024 * 1024
+OUTPUT_FILES_MAX = 500
+
+
+def output_id(path: str, version: str) -> str:
+    """Encode a relative output path and its version as one URL path segment."""
+    raw = json.dumps([path, version], separators=(",", ":"), ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def output_route(identifier: str) -> tuple[str, str]:
+    """Decode an output id; reject non-canonical ids and unsafe paths."""
+    try:
+        padded = identifier + "=" * (-len(identifier) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, UnicodeError, binascii.Error):
+        raise ValueError("invalid output id") from None
+    if (
+        not isinstance(decoded, list)
+        or len(cast(list[object], decoded)) != 2
+        or not all(isinstance(item, str) for item in cast(list[object], decoded))
+    ):
+        raise ValueError("invalid output id")
+    path, version = cast(list[str], decoded)
+    validate_skill_path(path)
+    if output_id(path, version) != identifier:
+        raise ValueError("invalid output id")
+    return path, version
+
+
+class OutputFile(ResponseModel):
+    id: str
+    path: str
+    size_bytes: int = Field(ge=0)
+    modified_at: AwareDatetime
+
+
+class OutputsResponse(ResponseModel):
+    outputs: list[OutputFile]
+    truncated: bool = False
+
+
+class OutputContent(ResponseModel):
+    id: str
+    size_bytes: int = Field(ge=0)
+    content_b64: str
+
+
+class OutputDeleted(ResponseModel):
+    deleted: Literal[True] = True
+    id: str

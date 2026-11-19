@@ -15,10 +15,11 @@ import anthropic
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.channel_backend import backend_selection_enabled
+from daimon.core.channel_backend import backend_refusal_causes, backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import backend_switch_tools
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
@@ -37,6 +38,7 @@ from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     REACH_APPROVAL_TOOLS,
+    RETIRED_GATES,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -68,20 +70,27 @@ async def session_card_gap(
     *,
     tool_name: str,
     require_public_context: bool = False,
+    gated: bool = True,
 ) -> CardGap | None:
     """None when this call's session waits for the person's Approve, else why it does not.
 
     Read from the session itself: the verified origin's live session must run
     the origin's responder and hold `tool_name` on `always_ask`, as MA reports
     it or, failing that, as daimon recorded sending it (`_recorded_as_gated`).
-    An `agent_chat` or unattended session has no origin.
+    An `agent_chat` or unattended session has no origin, or an unattended one.
+    `gated=False` checks only the session's place and responder, for a tool that
+    asks nobody.
     """
     if origin is None:
         return "no_origin"
+    if gated and card_satisfied(auth):
+        # The person pressed Approve on Daimon's own card for exactly this call.
+        return None
+    if not origin.attended:
+        # A provider turn nobody watches has an unattended origin; MA's has none.
+        return "no_origin"
     if tool_name == "lead_intake_resolve" and (
-        not origin.attended
-        or not auth.chat_session_id
-        or origin.chat_session_id != auth.chat_session_id
+        not auth.chat_session_id or origin.chat_session_id != auth.chat_session_id
     ):
         return "no_origin"
     async with runtime.session_factory() as session:
@@ -126,15 +135,20 @@ async def session_card_gap(
                 return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
             return "other_agents_session"
-        if has_confirmation_gate(
-            [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=tool_name
-        ) or await _recorded_as_gated(
-            runtime,
-            auth,
-            live,
-            tool_name=tool_name,
-            ma_agent_id=ma_session.agent.id,
-            reported_tools_sha256=hash_tools(ma_session.agent.tools),
+        if (
+            not gated
+            or has_confirmation_gate(
+                [tool.model_dump(mode="json") for tool in ma_session.agent.tools],
+                tool_name=tool_name,
+            )
+            or await _recorded_as_gated(
+                runtime,
+                auth,
+                live,
+                tool_name=tool_name,
+                ma_agent_id=ma_session.agent.id,
+                reported_tools_sha256=hash_tools(ma_session.agent.tools),
+            )
         ):
             return None
         return "session_not_gated"
@@ -147,6 +161,7 @@ async def session_card_gap(
             tool=tool_name,
             ma_session_id=live.ma_session_id,
             error=str(exc),
+            causes=backend_refusal_causes(exc),
         )
         return "session_unreadable"
 
@@ -220,6 +235,7 @@ async def _recorded_as_gated(
         runtime.client,
         ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,
@@ -258,12 +274,30 @@ async def _recorded_as_gated(
     legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
     before_config = confirmed - {
         "request_provider_allowlist",
+        "request_channel_pin",
         "request_channel_pin_clear",
     }
     before_config_legacy = before_config | (
         {"request_channel_backend_switch"} if selection else set[str]()
     )
-    before_pin_clear = confirmed - {"request_channel_pin_clear"}
+    before_pin_set = confirmed - {"request_channel_pin"}
+    before_pin_clear = before_pin_set - {"request_channel_pin_clear"}
+    candidates = (
+        confirmed,
+        legacy,
+        before_config,
+        before_config_legacy,
+        before_pin_set,
+        before_pin_clear,
+    )
+    # A bind from before the provider switches stopped asking holds them gated; it
+    # still proves every other card. Older still, the thread-model pick didn't ask.
+    if selection:
+        candidates += tuple(
+            candidate | switch
+            for switch in (RETIRED_GATES, RETIRED_GATES - {"set_thread_model"})
+            for candidate in candidates
+        )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and
     # the two vary independently. Such a template proves only a call to some other
@@ -281,7 +315,7 @@ async def _recorded_as_gated(
             pre_carded,
             pre_skills,
         )
-        for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for candidate in candidates
         for pre_carded in (False, True)
         if pre_carded_ok or not pre_carded
         for pre_skills in (False, True)

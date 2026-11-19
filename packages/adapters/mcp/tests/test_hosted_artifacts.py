@@ -321,32 +321,6 @@ async def test_invalid_outputs_fail_open_to_unchanged_text() -> None:
     assert warning.call_args.kwargs["failure_count"] == 2
 
 
-async def test_embedding_can_be_disabled_without_disabling_urls() -> None:
-    client, _transport = _client()
-    store = FakeStore()
-    output = _ChartOutput(file_id="file-1", filename="chart.png", size_bytes=len(_PNG))
-    settings = _settings()
-
-    with patch(
-        "daimon.adapters.mcp.hosted_artifacts._discover_chart_outputs",
-        new=AsyncMock(return_value=(output,)),
-    ):
-        result = await deliver_hosted_charts(
-            client,
-            settings=settings,
-            tenant_id="tenant-1",
-            account_id="account-1",
-            session_id="session-1",
-            turn_started_at=_NOW,
-            message="Answer",
-            store=store,
-            embed_images=False,
-        )
-
-    assert len(result.chart_urls) == 1
-    assert result.image_blocks == ()
-
-
 async def test_storage_failure_keeps_embed_only_result() -> None:
     client, _transport = _client()
     store = FakeStore(fail=True)

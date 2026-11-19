@@ -18,18 +18,22 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
+from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
-from daimon.core.config import McpSettings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import set_workspace_feature
+from daimon.core.features.snapshot import CACHE
+from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import FundingMode, Role, TenantRow
+from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
@@ -41,6 +45,7 @@ from daimon.core.turn.admission import (
     MissingTurnConfigError,
     admit,
 )
+from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.ma import resolved_agent_env_router
@@ -52,7 +57,7 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
     skill_response,
 )
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -619,6 +624,135 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     )
 
 
+async def test_admission_limits_follow_their_settings(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Defaults stay 45 minutes and 5 messages; workspace settings change them.
+
+    A retained authority deadline still caps the longer time limit.
+    """
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    async def admitted() -> Admission:
+        admission = await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        assert isinstance(admission, Admission), "the turn is admitted"
+        return admission
+
+    first = await admitted()
+    assert first.answer_message_cap == 5, "an answer may post 5 messages by default"
+    assert first.turn_ceiling_s == TURN_CEILING_S == 45 * 60.0, "the default stays 45 minutes"
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="turn_time_limit",
+        value="30",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="answer_messages",
+        value="10",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    later = await admitted()
+    assert later.answer_message_cap == 10, "a workspace setting raises the answer message cap"
+    shortened = later.turn_ceiling_s
+    assert shortened == 30 * 60.0, "a workspace setting of 30 minutes shortens the turn"
+    capped = turn_deadline(
+        now=_NOW, ceiling_s=shortened, authority_deadline=_NOW + timedelta(minutes=10)
+    )
+    assert capped == _NOW + timedelta(minutes=10), "retained authority still caps the limit"
+
+
+async def test_unattended_turns_read_their_own_time_limit(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A wake or routine follows `unattended_time_limit`, a person's message `turn_time_limit`."""
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    async def ceiling(origin: str, attended: bool | None = None) -> float:
+        admission = await admit(
+            deps,
+            origin=origin,
+            attended=attended,
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        assert isinstance(admission, Admission), "the turn is admitted"
+        return admission.turn_ceiling_s
+
+    for origin in ("chat", "routine", "watch_fired"):
+        assert await ceiling(origin) == TURN_CEILING_S, f"{origin} keeps 45 minutes by default"
+    for minutes, key in (("20", "unattended_time_limit"), ("30", "turn_time_limit")):
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key=key,
+            value=minutes,
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
+    assert await ceiling("chat") == 30 * 60.0, "a person's message follows the answer time limit"
+    assert await ceiling("handoff") == 30 * 60.0, "a hand-over is a person's message"
+    assert await ceiling("routine") == 20 * 60.0, "a routine follows the unattended run limit"
+    for origin in ("timer", "watch_fired", "watch_report", "job_finished"):
+        assert await ceiling(origin, attended=False) == 20 * 60.0, f"a {origin} wake follows it"
+    for origin in ("confirmed_call", "private_input_applied", "github_access_ready"):
+        assert await ceiling(origin, attended=True) == 30 * 60.0, (
+            f"{origin} resumes for a person who is waiting: the answer time limit"
+        )
+    assert await ceiling("chat", attended=False) == 20 * 60.0, "an unattended chat turn follows it"
+
+
 async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -885,6 +1019,56 @@ async def test_admit_raises_resolver_miss_when_the_resolved_agent_is_archived(
         "the raised error must name the scoped agent tag the channel resolved to"
     )
     assert (tenant.id, "agent", "doomed-agent") not in cache
+
+
+async def test_admit_keeps_references_to_a_converted_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A convert archives the Managed Agents copy; the channel's name now means the record."""
+    from daimon.core.turn import selfhosted_records
+
+    async def converted(*_args: object) -> bool:
+        return True
+
+    monkeypatch.setattr(selfhosted_records, "names_a_record", converted)
+    tenant = await make_tenant(db_session)
+    scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="chan-1")
+    await set_fields(
+        db_session, scope=scope, tenant_id=tenant.id, agent_name="moved", environment_name="default"
+    )
+    await db_session.commit()
+    dead = ma_agent(
+        id="ag_dead",
+        name="moved",
+        tenant_id=tenant.id,
+        archived_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    cache = new_resolver_cache()
+    cache[(tenant.id, "agent", "moved")] = "ag_dead"
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_archived_agent_router(tenant_id=tenant.id, dead_agent=dead),
+        resolver_cache=cache,
+    )
+
+    with pytest.raises(MAResolverMissError):
+        await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+
+    async with db_session_factory() as s:
+        assert await get_scope(s, scope=scope) is not None, "the channel still names it"
 
 
 async def test_admit_invalidates_archived_environment_cache(
@@ -1233,6 +1417,72 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
+
+
+async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deployment where only the MCP server carries the notebook, report and cloud computer
+    settings: the worker admitting the turn leaves that setup to the MCP server and keeps the
+    tools, while an Off, locked or not, still hides them."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    worker = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+        }
+    )
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        settings=worker,
+    )
+
+    async def hidden() -> frozenset[str]:
+        CACHE.clear()
+        admission = await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        return admission.toolset.hidden_daimon_tools
+
+    async def put(target: FeatureTarget, key: str, value: str, *, locked: bool = False) -> None:
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=target,
+            key=key,
+            value=value,
+            locked=locked,
+            set_by=None,
+            surface="cli",
+        )
+        await db_session.commit()
+
+    tools = {
+        key: CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
+        for key in ("notebooks", "report_publish", "compute")
+    }
+    kept = await hidden()
+    for key, gated in tools.items():
+        assert gated and not gated & kept, f"{key} tools hidden: {gated & kept}"
+    await put(FeatureTarget("workspace"), "notebooks", "off")
+    await put(FeatureTarget("channel", channel_id="chan-1"), "compute", "off", locked=True)
+    off = await hidden()
+    assert tools["notebooks"] <= off, "a workspace Off hides the notebook tools"
+    assert tools["compute"] <= off, "a channel Off, locked, hides the compute tools"
+    assert not tools["report_publish"] & off, "report tools stay without an Off"
 
 
 @pytest.mark.parametrize(("read_on", "expected"), [(False, False), (True, True)])
@@ -2430,12 +2680,12 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     assert admission.private_dm_id == "dm-scope"
 
 
-async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budget(
+async def test_an_admins_dm_never_runs_an_isolated_channels_own_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """An admin may DM chan-1's own agent; the turn counts toward chan-1 and stops at its budget."""
+    """chan-1's own agent answers only in chan-1: an admin's DM is refused before any charge."""
     policy = _ISOLATED.model_copy(
         update={"agent_rules": {"daimon": AgentRule(runs_in=("chan-1",))}}
     )
@@ -2446,25 +2696,20 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
         defaults_root=tmp_path,
         router=_admittable_router(tenant),
     )
-    args = {
-        "tenant_id": tenant.id,
-        "platform": "discord",
-        "external_user_id": "boss",
-        "channel_id": "dm-1",
-        "is_dm": True,
-        "verified_membership": True,
-        "role": Role.ADMIN,
-        "requester_org": RequesterOrg.HOST,
-    }
-
-    admission = await admit(deps, origin="chat", **args, now=_NOW)
-    assert admission.budget_channel_id == "chan-1", "charged to the agent's channel"
-
-    await make_channel_budget(db_session, tenant=tenant, limit_usd=Decimal("0"))
-    await db_session.commit()
-    with pytest.raises(AdmissionDenied) as exc_info:
-        await admit(deps, origin="chat", **args, now=_NOW)
-    assert exc_info.value.reason == "channel_budget_exceeded", "a $0 channel budget stops it"
+    with pytest.raises(AdmissionDenied):
+        await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            platform="discord",
+            external_user_id="boss",
+            channel_id="dm-1",
+            is_dm=True,
+            verified_membership=True,
+            role=Role.ADMIN,
+            requester_org=RequesterOrg.HOST,
+            now=_NOW,
+        )
 
 
 async def _admit_as(
@@ -2519,13 +2764,11 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
     assert await _stored_role(db_session, admission) == Role.ADMIN.value
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("is_dm", [False, True])
 async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    enabled: bool,
     is_dm: bool,
 ) -> None:
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
@@ -2557,7 +2800,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
             router=router,
             native_member_admin=False,
         ),
-        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=enabled),
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
     admission = await admit(
         deps,
@@ -2572,7 +2815,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         now=_NOW,
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+        ApprovalGate("inherit", "server", None, tenant.id) if not is_dm else None
     )
     async with db_session_factory.begin() as session:
         await set_access_policy(
@@ -2588,12 +2831,10 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         )
     fresh = await reauthorize(deps, admission)
     assert fresh.approval_gate == (
-        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id)
-        if enabled and not is_dm
-        else None
+        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id) if not is_dm else None
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+        ApprovalGate("inherit", "server", None, tenant.id) if not is_dm else None
     )
 
     assert fresh.grant is not None
@@ -2659,7 +2900,7 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
                 ma_environment(id="env_1", name="default", tenant_id=tenant.id),
             ),
         ),
-        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
     target = {"server": None, "channel": "chan-1", "thread": "thread-1"}[scope]
 
@@ -2816,3 +3057,137 @@ async def test_delegated_admission_never_caches_admin_authority(
     assert admission.is_admin and not admission.is_platform_admin
     account = await get_account(db_session, admission.account_id)
     assert account is not None and account.role is Role.USER
+
+
+_RELAY_APP = "https://daimon.example.com"
+
+
+async def _admit_with_servers(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    server_urls: list[str],
+    *,
+    channel_id: str = "chan-1",
+) -> Admission:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(
+            id="ag_1",
+            name="daimon",
+            tenant_id=tenant.id,
+            mcp_servers=[
+                {"type": "url", "name": f"s{i}", "url": url} for i, url in enumerate(server_urls)
+            ],
+        ),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        public_url=f"{_RELAY_APP}/mcp",
+    )
+    CACHE.clear()
+    return await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id=channel_id,
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+
+
+async def test_admit_holds_a_relay_agent_to_its_channel_and_drops_its_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An agent with an identity-relay server runs held to the channel the relay signs,
+    with no admin standing and no long-term memory."""
+    admission = await _admit_with_servers(
+        db_session, db_session_factory, tmp_path, [f"{_RELAY_APP}/mcp-identity/grove"]
+    )
+    assert admission.hold is not None
+    assert (admission.hold.channel_id, admission.hold.client) == ("chan-1", False)
+    assert admission.grant is not None and admission.grant.hold == admission.hold
+    assert not admission.grant.subject.is_admin and not admission.is_admin
+    identity = admission.identity
+    assert not (identity.personal_memory or identity.shared_memory or identity.channel_memory)
+    assert not admission.feature_on("repo_memory")
+    assert admission.origin_seal_ids == {"chan-1"}, "its session is sealed to its channel"
+
+
+async def test_admit_leaves_an_agent_without_a_relay_server_as_it_was(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No relay server (none, or another server): no hold, admin kept, memory on."""
+    for urls in ([], ["https://tools.example.com/mcp", f"{_RELAY_APP}/mcp"]):
+        admission = await _admit_with_servers(
+            db_session, db_session_factory, tmp_path, urls, channel_id=f"chan-{len(urls)}"
+        )
+        assert admission.hold is None
+        assert admission.grant is not None and admission.grant.hold is None
+        assert admission.grant.subject.is_admin
+        identity = admission.identity
+        assert identity.personal_memory and identity.shared_memory and identity.channel_memory
+        assert admission.feature_on("repo_memory")
+        assert not admission.origin_seal_ids and not admission.source_sealed
+
+
+async def test_a_relay_agents_helper_inherits_its_hold_seal_and_no_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A helper with no relay server of its own still runs held, sealed and memory-free
+    when the asking turn is a relay agent's; a plain asker's helper is unchanged."""
+    from daimon.core.scope import HelperTarget
+    from daimon.core.turn.admission import HelperCall, admit_helper
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    relay_agent = ma_agent(
+        id="ag_1",
+        name="daimon",
+        tenant_id=tenant.id,
+        mcp_servers=[{"type": "url", "name": "g", "url": f"{_RELAY_APP}/mcp-identity/grove"}],
+    )
+    helper_agent = ma_agent(id="ag_2", name="helper", tenant_id=tenant.id)
+    router = resolved_agent_env_router(
+        relay_agent, ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    )
+    router.add_agent(helper_agent)
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        public_url=f"{_RELAY_APP}/mcp",
+    )
+    call = HelperCall(target=HelperTarget(ma_agent_id="ag_2", name="helper"), thread_key="h-1")
+    CACHE.clear()
+    parent = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+    assert parent.request is not None and parent.request.relay_scoped
+    helper = await admit_helper(deps, parent.request, call, now=_NOW)
+    assert helper.agent.id == "ag_2"
+    assert helper.hold is not None and helper.hold.relay and helper.hold.channel_id == "chan-1"
+    assert helper.origin_seal_ids == {"chan-1"}
+    identity = helper.identity
+    assert not (identity.personal_memory or identity.shared_memory or identity.channel_memory)
+    assert not helper.feature_on("repo_memory") and not helper.is_admin
+
+    plain = replace(parent.request, relay_scoped=False)
+    unchanged = await admit_helper(deps, plain, call, now=_NOW)
+    assert unchanged.hold is None and not unchanged.origin_seal_ids
+    assert unchanged.identity.shared_memory

@@ -246,6 +246,32 @@ async def test_team_owners_refused_without_consent() -> None:
     assert caught.value.status == 403, "no TeamMember.Read.Group consent is a failed read"
 
 
+async def test_list_team_member_ids_when_paged_then_keeps_everyone_unfiltered() -> None:
+    seen: list[httpx.Request] = []
+    next_link = f"https://graph.microsoft.com/v1.0/teams/{GROUP}/members?$skiptoken=p2"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "skiptoken" in str(request.url):
+            return httpx.Response(200, json={"value": [{"userId": "B2", "roles": []}]})
+        members = [{"userId": "a1", "roles": ["owner"]}, {"roles": []}]
+        return httpx.Response(200, json={"value": members, "@odata.nextLink": next_link})
+
+    members = await _client(handler, seen).list_team_member_ids(GROUP)
+
+    assert members == frozenset({"a1", "b2"}), "owners and members, ids lower-cased"
+    assert "$filter" not in seen[0].url.params, "every member, not only owners"
+
+
+async def test_list_team_member_ids_when_pages_never_end_then_unavailable() -> None:
+    endless = f"https://graph.microsoft.com/v1.0/teams/{GROUP}/members?$skiptoken=again"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": [], "@odata.nextLink": endless})
+
+    with pytest.raises(GraphUnavailable, match="too many member pages"):
+        await _client(handler).list_team_member_ids(GROUP)
+
+
 async def test_create_subscription_asks_for_new_messages_without_their_content() -> None:
     """One POST, not retried; Graph's id and expiry come back parsed."""
     seen: list[httpx.Request] = []

@@ -29,11 +29,16 @@ from typing import Final
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import dm_access as dm_access_store
+from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import held_timers as held_timers_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -45,6 +50,7 @@ from daimon.core.stores import routines as routines_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
@@ -90,17 +96,26 @@ class PurgePreview(BaseModel):
     github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
+    connector_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     gemini_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     selfhosted_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mcp_tokens: PurgePreviewRow
     slack_user_tokens: PurgePreviewRow
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_carry_overs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    held_timers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_picks: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
+    support_requests_anonymized: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_person_limits: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -118,11 +133,13 @@ class PurgePreview(BaseModel):
     mux_leases: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    host_call_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # What stays, so the confirmation can say so: conversations other people share with
     # the person (and the person's requests in them), and settlement records.
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_shared_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_shared_provider_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def held_lines(preview: PurgePreview) -> list[str]:
@@ -138,12 +155,18 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.github_connect_click_intents, "GitHub connect button"),
         (preview.github_user_links, "linked GitHub account"),
         (preview.mcp_tokens, "Daimon access token"),
+        (preview.connector_tokens, "saved connector sign-in"),
         (preview.gemini_records, "Gemini conversation record"),
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
+        (preview.dm_carry_overs, "imported earlier conversation"),
+        (preview.held_timers, "imported timer"),
         (preview.tag_opt_outs, "never-tag setting"),
+        (preview.dm_picks, "private conversation agent choice"),
+        (preview.dm_rules, "private conversation routing rule"),
+        (preview.dm_grant_users, "private conversation access entry"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
         (preview.platform_user_names, "remembered name"),
@@ -153,6 +176,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
+        (preview.host_call_cards, "approval request"),
     )
     parts = [
         "saved settings"
@@ -326,6 +350,9 @@ async def collect_purge_preview(
         gemini_records_count = await gemini_state_store.count_records_for_account(
             session, account_id=account_id
         )
+        connector_tokens_count = await connector_tokens_store.count_connector_tokens_for_account(
+            session, account_id=account_id
+        )
         selfhosted_operations_count = await selfhosted_store.count_operations_for_account(
             session, account_id=account_id
         )
@@ -444,6 +471,21 @@ async def collect_purge_preview(
             )
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
+        # Limit rows are anonymized, not deleted, so the preview names them apart; the
+        # own limits and the settled-by rows match purge's principal and account passes.
+        support_anonymized_count = await support_escalation_store.count_limit_requests_for_account(
+            session,
+            account_id=account_id,
+            platform_user_keys=message_feedback_platform_user_keys,
+        )
+        support_person_limits_count = await support_store.count_person_limits_for_people(
+            session, platform_user_keys=message_feedback_platform_user_keys
+        )
+        support_settlers_count = await support_escalation_store.count_settled_by(
+            session,
+            account_id=account_id,
+            settler_keys=[(pp.platform, pp.external_id) for pp in pp_list],
+        )
 
         # 16. daimon_admins — the grants that list this person's id.
         from daimon.core.stores.daimon_admins import count_user_rows
@@ -504,11 +546,20 @@ async def collect_purge_preview(
         web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
             session, account_id=account_id
         )
+        host_call_cards_total = await host_call_cards_store.count_for_account(
+            session, account_id=account_id
+        )
         mux = await mux_erasure_store.inventory(
             session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
         )
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
+        )
+        dm_carry_overs_count = await dm_carry_overs_store.count_for_users(
+            session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+        )
+        held_timers_count = await held_timers_store.count_for_users(
+            session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
         )
         github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
@@ -516,6 +567,12 @@ async def collect_purge_preview(
         tag_opt_outs_count = await tag_opt_outs_store.count_for_account(
             session, account_id=account_id
         )
+        dm_keys = [(pp.tenant_id, pp.external_id) for pp in pp_list]
+        dm_picks_count = await dm_access_store.count_picks_for_account(
+            session, account_id=account_id
+        )
+        dm_rules_count = await dm_access_store.count_user_rules(session, keys=dm_keys)
+        dm_grant_users_count = await dm_access_store.count_grants_listing(session, keys=dm_keys)
         github_connect_click_intents_count = (
             await github_connect_store.count_click_intents_for_account(
                 session, account_id=account_id
@@ -537,6 +594,7 @@ async def collect_purge_preview(
         ),
         github_user_links=github_user_links,
         mcp_tokens=mcp_tokens,
+        connector_tokens=PurgePreviewRow(count=connector_tokens_count, example=None),
         gemini_records=PurgePreviewRow(count=gemini_records_count, example=None),
         selfhosted_operations=PurgePreviewRow(count=selfhosted_operations_count, example=None),
         slack_user_tokens=slack_user_tokens,
@@ -545,10 +603,18 @@ async def collect_purge_preview(
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
+        support_requests_anonymized=PurgePreviewRow(count=support_anonymized_count, example=None),
+        support_person_limits=PurgePreviewRow(count=support_person_limits_count, example=None),
+        support_settlers_cleared=PurgePreviewRow(count=support_settlers_count, example=None),
         daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
+        dm_carry_overs=PurgePreviewRow(count=dm_carry_overs_count, example=None),
+        held_timers=PurgePreviewRow(count=held_timers_count, example=None),
         tag_opt_outs=PurgePreviewRow(count=tag_opt_outs_count, example=None),
+        dm_picks=PurgePreviewRow(count=dm_picks_count, example=None),
+        dm_rules=PurgePreviewRow(count=dm_rules_count, example=None),
+        dm_grant_users=PurgePreviewRow(count=dm_grant_users_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
@@ -561,6 +627,7 @@ async def collect_purge_preview(
         mux_leases=PurgePreviewRow(count=mux.erased.leases, example=None),
         mux_release_requests=PurgePreviewRow(count=mux.erased.release_requests, example=None),
         mux_operations=PurgePreviewRow(count=mux.erased.operations, example=None),
+        host_call_cards=PurgePreviewRow(count=host_call_cards_total, example=None),
         retained_shared_conversations=PurgePreviewRow(
             count=mux.retained.shared_conversations, example=None
         ),
@@ -569,5 +636,8 @@ async def collect_purge_preview(
         ),
         retained_accounting_records=PurgePreviewRow(
             count=mux.retained.accounting_records, example=None
+        ),
+        retained_shared_provider_records=PurgePreviewRow(
+            count=mux.retained.shared_provider_records, example=None
         ),
     )

@@ -63,7 +63,7 @@ async def _setup(
         await session.commit()
     runtime = SimpleNamespace(
         session_factory=sessionmaker,
-        settings=SimpleNamespace(outbound=OutboundSettings()),
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
         teams_client=None,
     )
     auth = AuthIdentity(
@@ -573,7 +573,7 @@ async def _session_turn(
         ]
     runtime = SimpleNamespace(
         session_factory=sessionmaker,
-        settings=SimpleNamespace(outbound=OutboundSettings()),
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
         teams_client=None,
     )
     auth = AuthIdentity(
@@ -902,3 +902,35 @@ async def test_an_unreadable_limit_keeps_the_operators_config(sessionmaker):
         config.max_people,
     )
     assert rules.reach is True and rules.budget is True
+
+
+async def test_a_failed_rules_read_keeps_the_limits_and_stops_posting_to_others(
+    sessionmaker, monkeypatch: pytest.MonkeyPatch
+):
+    """Fail closed: without the rules, outbound_reach cannot be known to be on, so a post
+    to others is refused while the own conversation still works."""
+    runtime, auth = await _setup(sessionmaker, "discord")
+
+    async def broken(*args: object, **kwargs: object) -> object:
+        raise ConnectionError("database away")
+
+    monkeypatch.setattr(_outbound, "resolve_features", broken)
+    rules = await _outbound.outbound_rules(runtime, auth, _scope(card=False))
+    config = runtime.settings.outbound
+    assert (rules.reach, rules.budget) == (False, True), "reach off, budget on"
+    assert (rules.threads, rules.places, rules.people, rules.length) == (
+        config.max_threads,
+        config.max_places,
+        config.max_people,
+        config.max_length,
+    ), "the operator's limits stay"
+    own = OutgoingPost(text="hi", place="home")
+    assert await prepare_posts(runtime, auth, [own], plan=None, scope=_scope(card=False))
+    with pytest.raises(ToolError, match=REACH_OFF):
+        await prepare_posts(
+            runtime,
+            auth,
+            [OutgoingPost(text="hi", place="C1")],
+            plan=ReachPlan(threads=0, places=1, people=0),
+            scope=_scope(),
+        )

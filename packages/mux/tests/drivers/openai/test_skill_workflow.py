@@ -33,6 +33,8 @@ class Wire:
         self.requests.append(request)
         path = request.url.path.removeprefix("/v1")
         assert request.headers["OpenAI-Beta"] == "agents=v1"
+        if request.method == "GET" and path.startswith("/skills/skill/versions/"):
+            return httpx.Response(200, json={"skill_id": "skill", "version": path.split("/")[-1]})
         if path == "/skills" and request.method == "POST":
             assert request.headers["Idempotency-Key"] == "skill"
             return httpx.Response(

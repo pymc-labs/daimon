@@ -298,6 +298,12 @@ class OpenAIScriptedTransport:
         if path == "/agents/sessions/session/turns" and request.method == "GET":
             values = [native_turn(self._status()), native_turn("completed", child=True)]
             return httpx.Response(200, json={"data": values, "has_more": False, "last_id": "child"})
+        if (
+            path.startswith("/agents/sessions/session/turns/")
+            and path.endswith("/items")
+            and request.method == "GET"
+        ):
+            return httpx.Response(200, json={"data": [], "has_more": False, "last_id": None})
         if path == "/agents/sessions/session/turns/root" and request.method == "GET":
             return httpx.Response(200, json=native_turn(self._status()))
         if path == "/agents/sessions/session/items" and request.method == "GET":

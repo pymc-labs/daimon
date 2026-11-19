@@ -8,6 +8,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import request_pin_refusal
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import CredentialRequestRow
@@ -64,11 +65,16 @@ async def resolve_credential_target(
     """
     try:
         agent = await find_agent_by_derived_uuid(
-            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=runtime.sessionmaker,
         )
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         structlog.get_logger().exception(
-            "credential_target.lookup_failed", tenant_id=str(row.tenant_id)
+            "credential_target.lookup_failed",
+            tenant_id=str(row.tenant_id),
+            causes=backend_refusal_causes(error),
         )
         await interaction.followup.send(
             embed=build_notice_embed(
@@ -100,7 +106,12 @@ async def refuse_if_pinned_elsewhere(
 ) -> bool:
     """Refuse a form for a pinned agent that was asked for from outside its channels."""
     async with runtime.sessionmaker() as session:
-        refusal = await request_pin_refusal(session, row=row, agent=agent)
+        refusal = await request_pin_refusal(
+            session,
+            row=row,
+            agent=agent,
+            location_verified=is_credential_interaction_valid(interaction, row),
+        )
     if refusal is None:
         return False
     await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)

@@ -80,9 +80,11 @@ from ..harness import seed_server_admin
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
+    client = MagicMock(spec=AsyncAnthropic)
+    client.api_key = "sk-test"  # a keyed client, so agent reads reach Managed Agents
     return McpRuntime(
         session_factory=sessionmaker,
-        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
@@ -176,9 +178,8 @@ async def test_tenant_summary_leaves_out_dm_channels(
                 memory_read_only=False,
                 history=[],
                 recent_message_ids=[],
-                active_until=None,
+                claimed_at=None,
             ),
-            now=datetime.now(UTC),
         )
 
     auth = replace(auth, token_kind="cli", is_platform_admin=True)

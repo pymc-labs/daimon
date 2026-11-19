@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 216 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 232 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,8 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **OpenAI and Gemini agents** — carries the `host-memory` tag.
+- **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -43,7 +45,7 @@ Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `grant_admin` | admin only | Make a user or role a Daimon admin, not a web app role (see update_web_person). |
+| `grant_admin` | admin only | Make a user or role a Daimon admin, a role of its own beside any sign-in role. |
 | `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
 | `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
@@ -85,7 +87,18 @@ owners and helpers and save a skill's files.
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
 | `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
-| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
+| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these person or account ids. |
+
+## `agent_memory`
+
+Memory tools for agents whose backend has no memory stores of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `memory_create` | OpenAI and Gemini agents | Save a new memory file at `path` (for example `/notes/project.md`). |
+| `memory_delete` | OpenAI and Gemini agents | Delete a memory file. |
+| `memory_str_replace` | OpenAI and Gemini agents | Replace the one occurrence of `old_str` in a memory file with `new_str`. |
+| `memory_view` | OpenAI and Gemini agents | Read a memory file, or list the memory paths under a directory. |
 
 ## `agent_removal`
 
@@ -120,10 +133,10 @@ Agent tools: list / get / create / update / fork / archive.
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
-| `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
-| `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
+| `request_agent_backend_switch` | all callers | Change an agent's model to another provider's. |
+| `set_agent_backend` | all callers | Change which provider's model the agent uses, or clear it with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
-| `update_agent` | all callers | Change an agent's instructions (system prompt), switch its model, or add existing skills such as build-models. |
+| `update_agent` | all callers | Update an agent: change its instructions (system prompt), switch its model, or add existing skills such as build-models. |
 
 ## `allowances`
 
@@ -132,7 +145,7 @@ invite.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_allowance` | admin only | Set an allowance for a person (web person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
+| `create_allowance` | admin only | Set an allowance for a person (person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
@@ -145,7 +158,7 @@ tool calls and panel writes, newest first.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
-| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes in the web app, ``security`` for chat tool calls and panel writes. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first. |
 
 ## `channel_budgets`
 
@@ -336,6 +349,14 @@ Current-place status tool with short text and complete structured facts.
 | --- | --- | --- |
 | `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
 
+## `host_web_fetch`
+
+`web_fetch` for agents whose backend has no page fetch of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `web_fetch` | OpenAI, Gemini and self-hosted agents | Open a public https web page and return its text. |
+
 ## `lead_intake`
 
 First-party lead intake tools; authority derives only from live server context.
@@ -460,6 +481,7 @@ Provider and channel-pin configuration over the service owners.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `request_channel_pin` | admin only | Pin THIS channel to another provider's model, with admin confirmation. |
 | `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
 | `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 
@@ -511,7 +533,7 @@ The Settings group from chat: `get_settings` (anyone) and `change_setting` (card
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `change_setting` | Discord callers, Slack callers, Teams callers | Change one setting where you are, after the person presses Approve. |
-| `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (every registered feature). |
+| `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (features set up here or with a saved value). |
 
 ## `self_edit`
 
@@ -587,6 +609,24 @@ Skill tools: sync / list / get / delete.
 | `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
 
+## `support`
+
+Support limits for Ask a person, for platform admins acting with personal user
+credentials.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `support_channel_get` | admin only | Show where this workspace's support requests go. |
+| `support_channel_set` | admin only | Send this workspace's support requests to its own channel, or reset it. |
+| `support_limit_clear` | admin only | Remove a support limit, or one person's own limit at a place. |
+| `support_limit_list` | admin only | List the support limits for Ask a person, with credits used. |
+| `support_limit_set` | admin only | Set a support limit for the workspace, an agent or a channel. |
+| `support_menu_get` | admin only | Show one support menu by key, or every menu with no key. |
+| `support_menu_set` | admin only | Set, replace or remove (``body`` null) a support menu. |
+| `support_menu_use` | admin only | Pick the support menu a place offers. |
+| `support_requests_list` | admin only | List support requests, newest first; pending only by default. |
+| `support_requests_settle` | admin only | Settle a support request at ``charge`` credits, or decline it (null). |
+
 ## `task_continuity`
 
 Conversational task handoff and fresh start.
@@ -611,7 +651,7 @@ harder").
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
+| `set_thread_model` | all callers | Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_overrides`
 
@@ -668,7 +708,7 @@ Owner-bound watch management.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_watch` | Discord callers | Watch a listed read tool from this conversation: a Discord reader or an MCP server's. |
+| `create_watch` | Discord callers | Watch a listed read tool from this conversation, or wake on posts to a secret link. |
 | `delete_watch` | Discord callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
 | `list_watches` | Discord callers | List your watches in this workspace; admins may list every owner's with scope "all". |
 | `pause_watch` | Discord callers | Pause your watch and cancel its queued wakes. |
@@ -696,10 +736,10 @@ The web app's people, groups and agent access, from chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_web_person` | admin only | Show one web person: role, status, groups, sign-ins and, for a visitor, their invite. |
+| `get_web_person` | admin only | Show one person: role, status, groups, sign-ins and, for a visitor, their invite. |
 | `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
-| `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
-| `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
+| `list_web_groups` | admin only | List everyone and each group people sign in with, with head counts. |
+| `list_web_people` | admin only | List the workspace's people, oldest first, with role, status and groups. |
 | `set_agent_web_access` | admin only | Turn an agent's web chat on or off and set who may use it: everyone or up to 100 groups or invitees. |
 | `update_web_person` | admin only | Set a web person's role (web app admin or member, not Daimon admin) or suspend or restore them. |
 
@@ -710,7 +750,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the web modules, web chat agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message settings. |
 
 ## `wizard`
 

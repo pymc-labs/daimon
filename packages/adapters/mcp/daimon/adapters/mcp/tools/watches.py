@@ -21,7 +21,7 @@ from daimon.adapters.mcp import watch_polling as polling
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
-from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -39,7 +39,7 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -47,6 +47,7 @@ from daimon.core.continuity.poll_tools import (
     require_listed,
     validate_mcp_poll,
 )
+from daimon.core.dm_access import member_roles, roles_by_membership
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
@@ -186,16 +187,11 @@ def list_entry(
     )
 
 
-async def private_key_delivery(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    watch: WatchRow,
-    *,
-    key_id: str,
-    key: str,
+async def private_owner_message(
+    runtime: McpRuntime, auth: AuthIdentity, watch: WatchRow, *, content: str
 ) -> None:
-    """Never return plaintext keys to an MCP result or post into a conversation."""
-    policy = runtime.settings.direct_message_policies.get(watch.tenant_id, DirectMessagePolicy())
+    """DM a secret to the owner. Never return it in an MCP result or post it in a conversation."""
+    policy = env_dm_policy(runtime.settings.direct_message_policies, watch.tenant_id)
     if not policy.allows(watch.owner_external_id):
         raise ToolError("Private owner delivery is disabled")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=watch.owner_external_id)
@@ -206,14 +202,35 @@ async def private_key_delivery(
         guild = await client.fetch_guild(int(auth.external_id))
         member = await guild.fetch_member(int(watch.owner_external_id))
         if member.bot:
-            raise ToolError("Watch keys require a human owner")
+            raise ToolError("Watch secrets require a human owner")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=watch.owner_external_id,
+            groups=member_roles(str(role.id) for role in member.roles),
+        )
         dm = await member.create_dm()
-        await dm.send(
+        await dm.send(content, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def private_key_delivery(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    watch: WatchRow,
+    *,
+    key_id: str,
+    key: str,
+) -> None:
+    await private_owner_message(
+        runtime,
+        auth,
+        watch,
+        content=(
             f"Page signing key for watch {watch.id}, page {watch.page_id}:\n"
             f"key_id={key_id}\nkey={key}\n"
-            "Install it privately on the page host and sidecar. This key is shown once.",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            "Install it privately on the page host and sidecar. This key is shown once."
+        ),
+    )
 
 
 async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
@@ -315,12 +332,22 @@ async def require_delivery_allowed(
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
     if delivery == "dm":
-        policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+        policy = env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id)
         async with runtime.session_factory() as db:
             enabled = await dm_enabled(db, tenant_id=auth.tenant_id)
         if not enabled or not policy.allows(auth.platform_user_id):
             raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
         await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
+        if auth.external_id is None:
+            raise ToolError("Missing team")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=auth.platform_user_id,
+            groups=roles_by_membership(
+                runtime.membership_resolver, tenant_id=auth.tenant_id, guild_id=auth.external_id
+            ),
+        )
         return
     async with rest_client(_require_bot_token(runtime)) as client:
         try:
@@ -378,7 +405,7 @@ async def create_watch_impl(
     *,
     origin_context_id: str,
     instructions: str,
-    source: Literal["page_event", "poll"],
+    source: Literal["page_event", "poll", "callback"],
     server: str = DAIMON_SERVER_NAME,
     tool: str = "read_thread",
     arguments: dict[str, object] | None = None,
@@ -398,7 +425,11 @@ async def create_watch_impl(
     if source == "page_event":
         raise ToolError("Page-event watches are unavailable until a page-event producer exists")
     assert auth.platform_user_id is not None
-    if not permanent and not 1 <= lifetime_days <= 30:
+    if source == "callback" and permanent:
+        raise ToolError(
+            "Whoever runs Daimon sets whether a callback watch is permanent; leave this out"
+        )
+    if source != "callback" and not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
     # Left out, the default daily limit; the firing SQL still holds it to the ceiling.
     approver = await admin_approval(
@@ -426,6 +457,16 @@ async def create_watch_impl(
         idempotency_key=uuid.uuid4(),
     )
     await require_delivery_allowed(runtime, auth, origin, delivery)
+    if source == "callback":
+        return await create_callback_watch(
+            runtime,
+            auth,
+            binding,
+            instructions=instructions,
+            now=now,
+            delivery=delivery,
+            max_turns_per_day=daily,
+        )
     if server != DAIMON_SERVER_NAME:
         return await create_mcp_watch(
             runtime,
@@ -472,6 +513,55 @@ async def create_watch_impl(
         raise ToolError(str(exc)) from exc
 
 
+async def create_callback_watch(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    binding: ContinuationRequest,
+    *,
+    instructions: str,
+    now: datetime,
+    delivery: WatchDelivery,
+    max_turns_per_day: int,
+) -> WatchSummary:
+    """A watch fed by posts to a secret link, which goes only to the owner's DMs."""
+    settings = load_watches_settings()
+    base = settings.callback_base_url
+    if base is None:
+        raise ToolError("Callback watches are not set up on this Daimon")
+    try:
+        async with runtime.session_factory.begin() as db:
+            watch, token = await watches.register_callback_watch(
+                db,
+                binding,
+                instructions=instructions,
+                lifetime=await watches.callback_lifetime(db, runtime.settings, binding.tenant_id),
+                now=now,
+                delivery=delivery,
+                max_turns_per_day=max_turns_per_day,
+            )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    try:
+        await private_owner_message(
+            runtime,
+            auth,
+            watch,
+            content=(
+                f"Callback link for watch {watch.id}:\n"
+                f"{base}/callbacks/watches/{watch.id}/{token}\n"
+                "Anyone with this link can wake the watch with a POST body of up to "
+                f"{settings.callback_max_body_bytes // 1024} KiB. "
+                "Keep it private. It is shown once and ends with the watch."
+            ),
+        )
+    except BaseException:
+        # A link nobody received is useless; do not leave the watch behind.
+        async with runtime.session_factory.begin() as db:
+            await watches.delete_watch(db, watch.id, now=datetime.now(UTC))
+        raise
+    return summary(watch)
+
+
 async def create_mcp_watch(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -503,6 +593,7 @@ async def create_mcp_watch(
             runtime.client,
             binding.target_ma_agent_id,
             scope=resource_scope(tenant_id=str(auth.tenant_id)),
+            records=runtime.session_factory,
         )
         if server.lower().startswith("https://"):
             attached = [item for item in agent.mcp_servers if same_ascii_mcp_url(item.url, server)]
@@ -982,7 +1073,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         origin_context_id: str,
         instructions: str,
-        source: Literal["poll"],
+        source: Literal["poll", "callback"],
         server: str = DAIMON_SERVER_NAME,
         tool: str = "read_thread",
         arguments: dict[str, object] | None = None,
@@ -996,7 +1087,16 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         permanent: bool = False,
         max_turns_per_day: int | None = None,
     ) -> WatchSummary:
-        """Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
+        """Watch a listed read tool from this conversation, or wake on posts to a secret link.
+
+        With source "callback" nothing is polled: Daimon DMs the owner a private link, and
+        each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent
+        with that text as evidence. The link is never shown in chat or in this result and
+        cannot be shown again; delete the watch and make a new one to change it. A callback
+        watch needs a deployment that has set a callback address. It lasts as long as whoever runs
+        Daimon allows (30 days unless they changed it, or permanent), so
+        `lifetime_days` and `permanent` do not apply to it.
+        The tool, server, arguments, projection, rule, interval and key fields are for polls.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
         `delivery` says where each report goes: "thread" (this thread, the default),

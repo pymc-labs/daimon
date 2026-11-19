@@ -115,37 +115,6 @@ def test_with_the_switch_off_a_status_line_is_glued_onto_the_answer_as_before() 
     ]
 
 
-@pytest.mark.usefixtures("status_log_on")
-def test_apply_keeps_consecutive_agent_messages_as_separate_text_blocks() -> None:
-    state = TurnState()
-    state = apply(state, make_agent_message(event_id="sevt_1", text="📚 Found: 14 patterns"))
-    state = apply(state, make_agent_message(event_id="sevt_2", text="Here is the answer."))
-    assert state.content == [
-        TextBlock(kind="text", text="📚 Found: 14 patterns"),
-        TextBlock(kind="text", text="Here is the answer."),
-    ]
-
-
-@pytest.mark.usefixtures("status_log_on")
-def test_messages_after_the_last_tool_are_kept_apart_not_glued() -> None:
-    state = TurnState()
-    events = [
-        make_agent_message(event_id="m1", text="🔍 **Looking up:** saturation priors"),
-        make_tool_use(event_id="t1", name="search"),
-        make_agent_message(event_id="m2", text="🔍 **Looking up:** adstock"),
-        make_tool_use(event_id="t2", name="search"),
-        make_agent_message(event_id="m3", text="📚 **Found:** 14 patterns"),
-        make_agent_message(event_id="m4", text="Priors on saturation are usually Beta."),
-    ]
-    for event in events:
-        state = apply(state, event)
-    assert extract_final_response(state.content) == (
-        "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
-    )
-    assert extract_sealed_responses(state.content, min_chars=500) == []
-
-
-@pytest.mark.usefixtures("status_log_on")
 def test_an_ordinary_turn_posts_the_same_answer() -> None:
     state = TurnState()
     for event in [
@@ -157,7 +126,6 @@ def test_an_ordinary_turn_posts_the_same_answer() -> None:
     assert extract_final_response(state.content) == "It is 42.\n\nSecond paragraph."
 
 
-@pytest.mark.usefixtures("status_log_on")
 def test_apply_ignores_an_agent_message_with_no_text() -> None:
     state = apply(TurnState(), make_agent_message(event_id="sevt_1", text=""))
     assert state.content == []

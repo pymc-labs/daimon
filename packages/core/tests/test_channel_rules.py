@@ -60,7 +60,9 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ADMIN = Subject(is_admin=True)
+ADMIN = Subject(
+    is_admin=True, operator=True
+)  # operator: the sealed-channel rule is tested in test_sealed_settings.py
 DEFAULT = DeploymentDefault(agent_name="daimon")
 OWN = ChannelRule(readers="own", writers="own")
 RULES = {"roamer": AgentRule(runs_in=("c6", "c7")), "homebody": AgentRule(runs_in=("c8",))}
@@ -345,7 +347,9 @@ async def test_own_readers_looks_agents_up_before_taking_the_policy_lock(
         await real_lock(session, tenant_id=tenant_id)
         locked = True
 
-    async def find(anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> Any:
+    async def find(
+        anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str, records: object = None
+    ) -> Any:
         if locked:
             lookups_under_lock.append(name)
         return await real_find(anthropic, tenant_id=tenant_id, name=name)

@@ -21,11 +21,13 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.wakes import (
     WAKE_MAX_ATTEMPTS,
     WAKE_POLL_INTERVAL_S,
     busy_retry_at,
     claim_wake,
+    keep_wake,
     release_wake,
     settle_wake,
     start_wake,
@@ -102,7 +104,8 @@ async def dispatch_watch_report(
             return
         skip_reason: str | None = None
         try:
-            await run_report(row, seed)
+            async with keep_wake(sessionmaker, claim, now=now):
+                await run_report(row, seed)
         except AnthropicDisabled:
             log.warning("watch_report.provider_guard_denied", row_id=str(row.id))
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
@@ -123,7 +126,10 @@ async def dispatch_watch_report(
             skip_reason = f"admission_denied:{exc.reason}"
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning(
-                "watch_report.dispatch_failed", row_id=str(row.id), error_type=type(exc).__name__
+                "watch_report.dispatch_failed",
+                row_id=str(row.id),
+                error_type=type(exc).__name__,
+                causes=backend_refusal_causes(exc),
             )
             skip_reason = "dispatch_failed"
         await settle_wake(

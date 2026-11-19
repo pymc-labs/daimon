@@ -205,8 +205,8 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     # Listing names no skill and changes nothing; adding one reaches the whole library.
     "add_server_skill": "skill",
     "lead_intake_resolve": "resolution",
-    "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",
+    "request_channel_pin": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # The card itself is the point: every call asks.
     "approve_reach": "threads",
@@ -244,13 +244,11 @@ def confirmation_gated_tools() -> frozenset[str]:
     )
 
 
-def self_carded_tools() -> frozenset[str]:
-    """Gated tools Daimon confirms with a card it posts itself (`daimon.core.switch_cards`).
-
-    A provider turn with no confirmation card of its own may call them: the
-    tool posts the card instead of acting, and the press applies.
-    """
-    return frozenset({"request_agent_backend_switch"})
+#: Asked before a provider switch applied like a model change. An old agent's
+#: stored ask on one is read as none: the call runs.
+RETIRED_GATES: Final[frozenset[str]] = frozenset(
+    {"request_agent_backend_switch", "set_thread_model"}
+)
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
@@ -258,8 +256,8 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     return (
         frozenset(
             {
-                "request_agent_backend_switch",
                 "request_provider_allowlist",
+                "request_channel_pin",
                 "request_channel_pin_clear",
             }
         )
@@ -536,17 +534,6 @@ class ToolSafetyPolicy(BaseModel):
             "Off by default; stored rules remain editable but inactive until enabled."
         ),
     )
-    allow_gate_overrides: bool = Field(
-        default=False,
-        exclude_if=lambda value: not value,
-        description=(
-            "Let native server admins change third-party MCP write approvals from /settings "
-            "at server, channel or thread scope. The most specific explicit on/off setting wins. "
-            "Stored settings are ignored while off. Fixed confirmation and permission-setter "
-            "names never receive an override, regardless of server host. Deny rules, direct "
-            "messages and unattended_writes retain their existing behavior."
-        ),
-    )
     effects: dict[str, ToolEffect] = Field(
         default_factory=dict,
         description=(
@@ -601,11 +588,6 @@ class ToolSafetyPolicy(BaseModel):
             "minutes."
         ),
     )
-
-    @property
-    def gate_overrides_active(self) -> bool:
-        """Whether native admins can override third-party write approvals."""
-        return self.enabled and self.allow_gate_overrides
 
 
 OPEN_TOOL_SAFETY: Final[ToolSafetyPolicy] = ToolSafetyPolicy()
@@ -894,7 +876,10 @@ def decide_tool_call(
     )
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
-    if call.permission == "ask" and verdict.outcome == "allow":
+    inner = unwrap_daimon_call(call, trusted_servers)
+    retired = inner.server_name in trusted_servers and inner.tool_name in RETIRED_GATES
+    if call.permission == "ask" and verdict.outcome == "allow" and not retired:
+        # A retired gate's ask, stored on a session started before it was lifted, runs.
         return ToolVerdict(
             outcome="ask" if attended else "deny", effect=verdict.effect, reason="agent_rule_ask"
         )
@@ -967,12 +952,7 @@ def _decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
-    if (
-        policy.allow_gate_overrides
-        and attended
-        and call.server_name not in trusted_servers
-        and gate_protected_tool(call.tool_name)
-    ):
+    if attended and call.server_name not in trusted_servers and gate_protected_tool(call.tool_name):
         # Endpoint comparison cannot prove another hostname is third-party.
         # Protected names cannot be widened by annotations, operator read hints,
         # an agent allow rule, or a scoped approval switch. Denials still win.

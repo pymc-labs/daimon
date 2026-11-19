@@ -253,6 +253,8 @@ Gemini skills are host-stored, immutable bundle versions; text deploys as inline
 Existing pins do not follow later publications. Uploaded artifact bytes remain
 in the injected host storage; UTF-8 uploads can seed inline workspace files.
 Workspace artifact discovery uses the documented Files API workspace tar snapshot.
+Discovery leaves out what the session's request mounted: skill files and
+repository directories always, inline files while their bytes are unchanged.
 Downloads verify the discovered content digest; unavailable or changed files
 produce typed errors. Unsafe, oversized or malformed archives are refused without
 extracting files to disk. Native vaults and workspace-file deletion are unsupported.
@@ -610,7 +612,7 @@ lazily after interaction acceptance, preserves provider root identities across
 replay/cancel and emits cumulative interaction usage through the neutral host
 recorder. The host configures `gemini-3.8-flash` as primary; only create HTTP503
 permits the reviewed Flash fallback chain. A channel revision may instead pin
-`gemini-4-argon`, which is a single attempt with no fallback. Preparation rejects missing stores,
+an opt-in model (`gemini-4-argon`, `gemini-4-carbon` or `gemini-4-hydrogen`), which is a single attempt with no fallback. Preparation rejects missing stores,
 foreign bindings, seals and unsupported deployment policies before dispatch.
 Unsupported runtime/model/policy selections return the host's typed
 `backend_unsupported` refusal. Native journal source identities are scoped to
@@ -800,8 +802,11 @@ file digest manifest. Persisted receipts mount immutable directories at the
 original skill paths, including binary fonts/images, and retain old version
 pins after publication. The host owns authorized GCS publication/access and
 retention; no publisher or credentials are selected implicitly. Without that
-adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
-text bundles retain inline mounts. See
+adapter or a `skill_files` reader, binary/oversize bundles refuse
+`skill_bundle_gcs_deployment`; normal text bundles retain inline mounts. With
+`skill_files`, bundles up to 28 MiB upload into an environment created before
+the first interaction; failed uploads are left out and named in
+`Session.native["skills_left_out"]`. See
 [the capability notes](docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
 

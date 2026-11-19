@@ -15,6 +15,7 @@ from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ports import Agents, Artifacts, Environments, ManagedAgents, Skills
 from mux.contracts.profile import Profile
+from mux.drivers.selfhosted.artifacts import SelfHostedArtifacts
 from mux.drivers.selfhosted.config import (
     SESSION_POOL_AUDIENCE,
     HarnessConfig,
@@ -50,6 +51,7 @@ __all__ = [
     "FoundryInvocationsTransport",
     "HarnessConfig",
     "HighWater",
+    "SelfHostedArtifacts",
     "SelfHostedDriver",
     "SelfHostedEvents",
     "SelfHostedModels",
@@ -104,11 +106,12 @@ class SelfHostedDriver:
         )
         self.sessions.events = self.events
         self.usage = SelfHostedUsage(self.events)
+        self._artifacts = SelfHostedArtifacts(context, self.events)
         self.models = SelfHostedModels((deployment or model or "gpt-6.1-sol",))
 
     @property
     def artifacts(self) -> Artifacts:
-        raise UnsupportedCapability(("artifacts",), LOOP.profile_id)
+        return self._artifacts
 
     @property
     def skills(self) -> Skills:

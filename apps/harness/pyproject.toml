@@ -1,6 +1,6 @@
 [project]
 name = "daimon-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Self-hosted Daimon agent harness"
 requires-python = ">=3.12"
 dependencies = [

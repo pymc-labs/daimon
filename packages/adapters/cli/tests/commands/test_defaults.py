@@ -26,6 +26,7 @@ from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.errors import DefaultsError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
@@ -107,10 +108,67 @@ def test_format_report_table_renders_system_config_rows() -> None:
 
 
 class _NoAnthropicSettings:
-    """Just enough shape for `defaults_apply`'s OpenAI-only skip branch."""
+    """Just enough shape for `defaults_apply` with no Anthropic key."""
 
     class anthropic:  # mirrors the real nested-settings shape
         api_key = None
+
+    class mcp:
+        public_url = None
+
+
+def _keyless_runtime() -> CliRuntime:
+    rt = object.__new__(CliRuntime)
+    object.__setattr__(rt, "settings", cast(Settings, _NoAnthropicSettings()))
+    return rt
+
+
+def _run_defaults_apply(rt: CliRuntime) -> str:
+    buf = StringIO()
+    console = Console(file=buf, force_terminal=False, highlight=False, width=200)
+    asyncio.run(
+        defaults_apply(
+            rt=rt, console=console, dry_run=False, as_json=False, defaults_root=Path("unused")
+        )
+    )
+    return buf.getvalue()
+
+
+def test_defaults_apply_with_no_provider_key_says_there_is_nothing_to_run_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for env in DEFAULT_KEY_ENV.values():
+        monkeypatch.delenv(env, raising=False)
+
+    out = _run_defaults_apply(_keyless_runtime())
+
+    assert "no Anthropic, OpenAI or Gemini key is configured" in out, (
+        "a keyless install is told to set a provider key"
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+def test_defaults_apply_runs_with_only_a_non_anthropic_key(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    for env in DEFAULT_KEY_ENV.values():
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "set")
+    calls: list[Path] = []
+
+    async def fake_apply(sessionmaker: Any, client: Any, root: Path, **kwargs: Any) -> ApplyReport:
+        calls.append(root)
+        return ApplyReport()
+
+    monkeypatch.setattr(cmd_mod, "apply_defaults", fake_apply)
+    rt = _keyless_runtime()
+    object.__setattr__(rt, "sessionmaker", None)
+    object.__setattr__(rt, "anthropic", None)
+
+    out = _run_defaults_apply(rt)
+
+    assert calls == [Path("unused")], "the defaults are applied on a non-Anthropic key alone"
+    assert "nothing to run" not in out
 
 
 def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(

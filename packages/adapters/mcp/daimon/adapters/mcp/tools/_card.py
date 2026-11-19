@@ -8,6 +8,7 @@ key, an operator token, a routine, a held or client credential or a turn with no
 from __future__ import annotations
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
@@ -32,7 +33,7 @@ async def require_card(
         or auth.is_external_agent
         or auth.hold is not None
         or auth.client
-        or auth.no_confirmation_surface
+        or (auth.no_confirmation_surface and not card_satisfied(auth))
         or auth.platform_user_id is None
     ):
         raise ToolError(NEEDS_CARD)

@@ -8,7 +8,7 @@ in code is registered and every registered key is read.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, get_args
 
@@ -21,13 +21,15 @@ TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
 LOCKABLE: Final[frozenset[Tier]] = frozenset({"deployment", "workspace", "agent", "channel"})
 Effect = Literal["model", "display", "capability", "guardrail", "limit"]
 Combine = Literal["most_specific", "ceiling", "stricter", "minimum"]
-Binding = Literal["turn", "session_mutable", "session_identity", "provision"]
+Binding = Literal["turn", "session_mutable", "session_identity", "provision", "restart"]
 """When a change lands. ``session_mutable``: the live session's tools and servers are updated
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
-replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync."""
+replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync.
+``restart``: read once when the process starts."""
 Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
+    "anthropic_key",
     "compute_setup",
     "notebook_host",
     "report_host",
@@ -36,9 +38,11 @@ Requirement = Literal[
     "repo_memory_setup",
     "teams_public_url",
     "support_channel",
+    "support_credits",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
-``support_channel``: the platform has an escalation channel and people have credits to ask.
+``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
+``support_credits``: people have credits to ask (Everyone above 0, or any limit).
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
@@ -122,8 +126,15 @@ class FeatureSpec:
     platform_defaults: Mapping[str, str] = field(default_factory=dict[str, str])
     """A platform whose default differs from `default`, kept as it was before the registry."""
     env_map: str | None = None
-    """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
-    stands for the workspace tier; a stored workspace row always beats it."""
+    """The `Settings` field (dotted for a nested block) of a deprecated per-workspace map
+    (workspace id to on/off) that stands for the workspace tier; a stored workspace row always
+    beats it."""
+    minimum: float = 0
+    """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
+    above 0 where 0 would be an unusable limit, not an off switch."""
+    zero_unlimited: bool = False
+    """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
+    combine, 0 is the loosest value, never the smallest."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)
@@ -142,7 +153,7 @@ class FeatureSpec:
 
     def accepts(self, value: str, tier: Tier) -> bool:
         """Whether `value` may be stored at `tier`. A limit's deployment tier also takes any
-        non-negative number, so an operator's variable keeps its exact value; lower tiers
+        number from its `minimum`, so an operator's variable keeps its exact value; lower tiers
         choose from the listed steps."""
         if value in self.values:
             return True
@@ -151,7 +162,7 @@ class FeatureSpec:
                 number = float(value)
             except ValueError:
                 return False
-            return math.isfinite(number) and number >= 0
+            return math.isfinite(number) and number >= self.minimum
         return False
 
     def label(self, value: str) -> str:
@@ -189,6 +200,11 @@ _BUILTIN_WORDS: Final[Mapping[str, tuple[str, str]]] = {
 """Each built-in tool's name and what it lets the agent do."""
 
 
+_SEARCH_BILLING: Final = (
+    " Each search is billed at the provider's list price, past any free allowance."
+)
+
+
 def _builtin(tool: str) -> FeatureSpec:
     name, does = _BUILTIN_WORDS[tool]
     return FeatureSpec(
@@ -203,6 +219,7 @@ def _builtin(tool: str) -> FeatureSpec:
         doc=(
             f"The agent can {does}. Off removes it here; On never gives more than the "
             "agent's own tool settings allow. Applies from the next message in a conversation."
+            + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
         backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
@@ -228,52 +245,21 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
-    FeatureSpec(
-        key="daimon_tools",
-        name="Daimon tools",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace", "agent", "channel", "thread"),
-        binds="session_mutable",
-        doc=(
-            "Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept "
-            "apart from the team's data never has them, and Gemini and OpenAI agents always do. "
-            "Applies from the next message in a conversation."
-        ),
-        backend_fixed={_GEMINI: "on", _OPENAI: "on"},
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
     FeatureSpec(
-        key="turn_controls",
-        name="Message controls",
-        category="model_input",
-        effect="model",
-        values={"full": "Full", "origin": "Where and who", "minimal": "Basics"},
-        default="full",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "What each message tells the agent: where it was sent, who is answering and how to "
-            "act on that. Where and who drops the how-to; Basics keeps only the model and the "
-            "conversation. Daimon tools need Where and who or more."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
-    FeatureSpec(
         key="web_awareness",
-        name="Web app links",
+        name="Web app",
         category="model_input",
         effect="model",
         values=_ON_OFF,
         default="on",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
-        doc="Each message tells the agent the web app's address and the pages it may link to.",
+        doc=(
+            "The agent knows about the web app: messages, routine runs and tool results carry "
+            "its address and the pages it may link to, its invite and access tools are offered, "
+            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+        ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -329,24 +315,6 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
-    FeatureSpec(
-        key="checkpoint_prompt",
-        name="Carry working files",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "When a long conversation starts over, the agent is first asked to save its working "
-            "files to carry across. Off carries only the conversation and skips that extra paid "
-            "step. Claude agents only."
-        ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
 )
 
 
@@ -380,11 +348,13 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The skills Daimon adds for the chat app, such as its formatting. A conversation "
-            "keeps what it started with until /new. Claude agents only."
+            "The skills Daimon adds for the chat app, such as its formatting. They need the read "
+            "tool, so they are off wherever it is. A conversation keeps what it started with "
+            "until /new. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -398,10 +368,12 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills listed on the agent. Off leaves them out of new conversations; "
-            f"the agent keeps its list. {_KEPT} Always on for Gemini and OpenAI agents."
+            "the agent keeps its list. Skills need the read tool, so they are off wherever it "
+            f"is. {_KEPT} Always on for Gemini and OpenAI agents."
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -415,9 +387,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills added to a channel. They need the read tool, so they are off wherever it "
-            "is. A conversation keeps what it started with until /new. Claude agents only."
+            "is. A conversation keeps what it started with until /new."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
@@ -433,10 +404,10 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "Each person's own memory with the agent, in conversations only they can read. "
-            f"On never adds it anywhere else. {_KEPT} Off for Gemini and OpenAI agents."
+            f"On never adds it anywhere else. {_KEPT}"
         ),
-        backend_fixed={_GEMINI: "off", _OPENAI: "off"},
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -454,6 +425,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -466,20 +438,29 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The memory a restricted channel keeps for itself in place of the shared one. "
-            f"{_KEPT} Claude agents only."
+            "The memory a restricted channel keeps for itself in place of the shared one. Off "
+            f"leaves such a channel with no memory at all. {_KEPT}"
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
+_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _DISCORD: Final = frozenset({"discord"})
+_CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 # Long jobs spend money in the background: server admins only, no delegation, no owners.
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
+_TIME_LIMITS: Final[Mapping[str, str]] = {
+    "45": "45 minutes",
+    "30": "30 minutes",
+    "20": "20 minutes",
+    "15": "15 minutes",
+}
+"""Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 WEB_MODULES: Final[tuple[str, ...]] = (
@@ -546,6 +527,21 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="completion_pings",
     ),
     _shown(
+        "model_reactions",
+        "Model reactions",
+        "The first message in a thread, and the first after the model or effort changes, gets "
+        "an emoji for the model and one for the effort it runs on.",
+        tiers=("workspace", "agent"),
+        platforms=frozenset({"discord"}),
+    ),
+    _shown(
+        "tool_server_names",
+        "Tool server names",
+        "Tool lines on the working card name the connected server each tool belongs to.",
+        tiers=("workspace", "agent"),
+        default="on",
+    ),
+    _shown(
         "table_rendering",
         "Table images",
         "Tables in an answer are drawn as an image or a native table instead of text.",
@@ -565,53 +561,10 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="budget_notices",
     ),
     _shown(
-        "status_log",
-        "Separate agent messages",
-        (
-            "An answer made of several agent messages keeps each one, set apart by a blank line, "
-            "instead of joining them into one block."
-        ),
-        legacy_env=("DAIMON_TURN__STATUS_LOG",),
-    ),
-    _shown(
-        "native_footer_cost",
-        "Cost on Gemini and OpenAI footers",
-        (
-            "A finished answer from a Gemini or OpenAI agent shows what it cost, or that the "
-            "cost is unknown or partial. Claude agent footers are unchanged."
-        ),
-        legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
-    ),
-    _shown(
         "message_feedback",
         "Vote buttons",
         "Finished answers get thumbs up and down for feedback.",
         default="on",
-        platforms=_DISCORD,
-    ),
-    _shown(
-        "unmentioned_reply_hint",
-        "Reply hint",
-        "A short reminder that a reply needs a mention, where an unmentioned message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__UNMENTIONED_REPLY_HINT",),
-    ),
-    _shown(
-        "writers_none_notice",
-        "No-writers notice",
-        "Says so when a channel's write access is set to no one and a message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__WRITERS_NONE_NOTICE",),
-    ),
-    _shown(
-        "waiting_card",
-        "Waiting card",
-        "A card shows in a channel whose reply is waiting on the team's limit on replies at once.",
-        platforms=_DISCORD,
-        tiers=("deployment", "workspace"),
-        legacy_env=("DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",),
     ),
     FeatureSpec(
         key="private_channel_messages",
@@ -621,7 +574,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         values=_ON_OFF,
         default="on",
         tiers=("deployment",),
-        binds="turn",
+        binds="restart",
         doc=(
             "Every message in private and shared channels is read through Microsoft Graph, not "
             "only the ones that mention the agent. Needs the public address the bot is reached "
@@ -639,13 +592,36 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="off",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "People may message the agent directly; on for the team, every agent takes part "
+            "unless it opts out. Who may message which agent is set apart from this."
+        ),
+        # Teams personal chats always reached an agent, so they stay on unless turned off.
+        platforms=_DM_PLATFORMS | {"teams"},
+        platform_defaults={"teams": "on"},
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="dm_debounce_seconds",
+        name="Direct message wait",
+        category="chat",
+        effect="display",
+        values={
+            "0": "Off",
+            "1": "1 second",
+            "3": "3 seconds",
+            "5": "5 seconds",
+        },
+        default="0",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "Conversations may move to a direct message with the agent. The agent that answers "
-            "there is the team's DM agent, which is chosen apart from this."
+            "Holds a direct message for more, so a burst gets one reply; at most ten seconds, "
+            "and never an approval reply."
         ),
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -658,7 +634,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc="A reply in a direct message can read the agent's memory but not change it.",
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
 )
@@ -698,6 +674,38 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
         legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
+    ),
+    FeatureSpec(
+        key="host_call_gate",
+        name="Approve cards for OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card "
+            "and runs once the person presses it. Off refuses those tools there."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="mcp_connector_relay",
+        name="Connectors on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An agent's own connectors work on OpenAI and Gemini agents: Daimon calls "
+            "them for the agent with the person's sign-in. Off leaves them out there."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="reach_budget",
@@ -799,6 +807,9 @@ def _limit(
     default: str | None = None,
     legacy_env: tuple[str, ...] = (),
     authority: Authority = _SETTINGS,
+    minimum: float = 0,
+    zero_unlimited: bool = False,
+    depends_on: tuple[str, ...] = (),
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
     strictest; the default is the first unless `default` names another step."""
@@ -815,6 +826,9 @@ def _limit(
         platforms=EVERY_PLATFORM,
         authority=authority,
         legacy_env=legacy_env,
+        minimum=minimum,
+        zero_unlimited=zero_unlimited,
+        depends_on=depends_on,
     )
 
 
@@ -879,22 +893,20 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         requires=("microsoft_accounts",),
     ),
     FeatureSpec(
-        key="artifact_images",
-        name="Chart images in answers",
-        category="capabilities",
+        key="thread_providers",
+        name="Other providers per conversation",
+        category="chat",
         effect="capability",
         values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace"),
+        default="off",
+        tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "Charts the agent makes come back inside its answer to a connected app as "
-            "pictures the app can see. Off sends the links only, for an app that cannot "
-            "take pictures."
+            "Anyone who can change a conversation's model may pick an OpenAI or Gemini model "
+            "for it. Off, only the agent's owner or an admin can."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SETTINGS,
-        legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
     ),
     FeatureSpec(
         key="support_escalation",
@@ -903,15 +915,51 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace"),
+        tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask the Daimon team for help, which posts the request in the "
+            "Answers offer a way to ask a person for help, which posts the request in the "
             "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "channel and each person's credits."
+            "default channel and credits; an admin can set limits, a menu and their own channel."
+        ),
+        requires=("support_channel", "support_credits"),
+        authority=_SETTINGS,
+    ),
+    FeatureSpec(
+        key="support_feedback",
+        name="Feedback to support",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent", "channel"),
+        binds="turn",
+        doc=(
+            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "link to the answer) is also posted where Ask a person requests go, and the form "
+            "says so first. It spends no credits. Off keeps the form in the database only."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
+        legacy_env=("DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT",),
+        env_map="support.feedback_to_support",
+    ),
+    FeatureSpec(
+        key="support_own_channel",
+        name="Own support channel",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An admin may send Ask a person requests to a channel of their own instead of the "
+            "default one; whoever runs Daimon then no longer sees them. Off sends every request "
+            "to the default channel."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     _capability(
         "github",
@@ -933,6 +981,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
         authority=_SERVER_ADMIN,
+        minimum=0.01,
     ),
     _limit(
         "long_jobs_max_deadline",
@@ -942,6 +991,49 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
         authority=_SERVER_ADMIN,
+        minimum=1,
+    ),
+    _limit(
+        "callback_watch_lifetime",
+        "Callback watch lifetime",
+        "How long a callback watch lasts, new or moved in, before it must be renewed. "
+        "The smallest setting wins.",
+        {"0": "Permanent", "90": "90 days", "30": "30 days", "7": "7 days"},
+        default="30",
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+        zero_unlimited=True,
+    ),
+    _limit(
+        "turn_time_limit",
+        "Answer time limit",
+        (
+            "The longest one answer may take before it is stopped when someone is talking to "
+            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
+            "or shorter. The smallest setting wins. Routines and watches use "
+            "the unattended run limit."
+        ),
+        _TIME_LIMITS,
+        default="45",
+        tiers=("workspace", "agent"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+    ),
+    _limit(
+        "unattended_time_limit",
+        "Unattended run time limit",
+        (
+            "The longest a run nobody is watching may take before it is stopped: a routine, a "
+            "watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 "
+            "minutes, or shorter. The smallest setting wins. Chats use the "
+            "answer time limit."
+        ),
+        _TIME_LIMITS,
+        default="45",
+        tiers=("workspace", "agent"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
     ),
     _capability(
         "outbound_reach",
@@ -957,6 +1049,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "else, one reply may open without approval. The smallest setting wins.",
         {"2": "2 threads", "1": "1 thread", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
     _limit(
@@ -966,6 +1059,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "conversation one reply may post into without approval. The smallest setting wins.",
         {"2": "2 places", "1": "1 place", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
     _limit(
@@ -974,6 +1068,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "How many different people one reply may tag without approval. The smallest setting wins.",
         {"5": "5 people", "3": "3 people", "1": "1 person", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
     ),
     _limit(
@@ -988,6 +1083,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "250": "250 characters",
         },
         tiers=TIERS,
+        zero_unlimited=True,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(
@@ -1015,8 +1111,10 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Ask before an agent writes to an outside service. Only an admin of the chat app can "
-            "change it, once whoever runs Daimon allows approval changes."
+            "Ask before an agent writes to an outside service in a chat reply. Allow writes "
+            "covers chat replies only: routines and watches follow the unattended rule whoever "
+            "runs Daimon set. Only an admin of the chat app can change it, or the operator at the "
+            "command line, who gives a reason that is audited."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
@@ -1122,9 +1220,75 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "How many earlier chat messages a new conversation reads, up to 100 from the "
-            "thread and 25 from the channel around it. The smallest setting wins."
+            "thread and from the channel around it. The smallest setting wins."
         ),
         platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="dm_history_depth",
+        name="Direct message memory",
+        category="model_input",
+        effect="limit",
+        values={
+            "12": "12 messages",
+            "25": "25 messages",
+            "50": "50 messages",
+            "100": "100 messages",
+        },
+        default="12",
+        # Teams personal chats replayed up to 100 messages before this setting existed.
+        platform_defaults={"teams": "100"},
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=("Earlier direct messages each reply carries; more costs more. The smallest wins."),
+        platforms=_DM_MEMORY_PLATFORMS,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="channel_history",
+        name="Channel background",
+        category="model_input",
+        effect="display",
+        values={
+            "100": "100 messages",
+            "50": "50 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "0": "None",
+        },
+        default="25",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "How many recent channel messages a new thread reads for background when a message "
+            "in the channel starts it. Chat history still caps it."
+        ),
+        platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="answer_messages",
+        name="Answer messages",
+        category="chat",
+        effect="display",
+        values={
+            "1000": "1000 messages",
+            "100": "100 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "5": "5 messages",
+            "3": "3 messages",
+            "1": "1 message",
+        },
+        default="5",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "The most messages one answer may post in a thread. A longer answer is attached "
+            "as a single file instead."
+        ),
+        platforms=frozenset({"discord"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     *_MODEL_INPUT,
@@ -1139,6 +1303,27 @@ FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 
 def feature(key: str) -> FeatureSpec | None:
     return FEATURES.get(key)
+
+
+def resolution_order(keys: Collection[str] | None = None) -> list[FeatureSpec]:
+    """`keys` (every feature by default) plus what they depend on, each after its
+    dependencies and otherwise in registry order, so a reader that resolves one by one
+    always has a feature's `depends_on` answered before it."""
+    ordered: dict[str, FeatureSpec] = {}
+
+    def visit(key: str, path: tuple[str, ...]) -> None:
+        if key in ordered:
+            return
+        if key in path:
+            raise ValueError(f"feature dependency cycle: {' -> '.join((*path, key))}")
+        for dep in FEATURES[key].depends_on:
+            visit(dep, (*path, key))
+        ordered[key] = FEATURES[key]
+
+    for key in FEATURES:
+        if keys is None or key in keys:
+            visit(key, ())
+    return list(ordered.values())
 
 
 def deployment_key(name: str) -> str:
@@ -1158,6 +1343,8 @@ def parse_deployment(key: str, raw: str) -> tuple[str, bool]:
     if value == "disabled" and spec.off is not None and not flag:
         return spec.off, True
     if not spec.accepts(value, "deployment") or flag not in ("", "locked"):
-        takes = ", ".join(spec.values) + (" or a number" if spec.effect == "limit" else "")
+        takes = ", ".join(spec.values) + (
+            f" or a number of at least {spec.minimum:g}" if spec.effect == "limit" else ""
+        )
         raise ValueError(f"feature {key!r} takes {takes}, optionally ':locked'")
     return value, flag == "locked"

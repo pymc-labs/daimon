@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any, Final
+
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_ACCOUNT as MA_METADATA_KEY_ACCOUNT
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME as MA_METADATA_KEY_NAME
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_TENANT as MA_METADATA_KEY_TENANT
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
@@ -34,9 +39,6 @@ MA_METADATA_KEY_CHANNEL = "daimon_channel"
 MA_METADATA_KEY_THREAD = "daimon_thread"
 MA_METADATA_KEY_SEALED = "daimon_sealed"
 
-MA_METADATA_KEY_TENANT = "daimon_tenant"
-MA_METADATA_KEY_NAME = "daimon_name"
-MA_METADATA_KEY_ACCOUNT = "daimon_account"
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"
@@ -62,6 +64,9 @@ MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# Stamped on a Managed Agents agent converted from a Daimon record, with the
+# record's id, so a re-run after a crash adopts it instead of making another.
+MA_METADATA_KEY_CONVERTED_FROM = "daimon_converted_from"
 # A copy fork_agent made from a chat conversation names the agent it was copied from
 # (its MA id) and that conversation (platform, channel, thread). Switching such a copy off its
 # source's provider from that conversation hands the conversation to it, in one step
@@ -88,6 +93,28 @@ MA_METADATA_KEY_BUDGET_CHANNEL = "daimon_budget_channel"
 # tenant resource — see `daimon.core.ma.find_workspace_disposable_sentinel`.
 MA_METADATA_KEY_WORKSPACE = "daimon_workspace"
 MA_METADATA_VALUE_WORKSPACE_DISPOSABLE = "disposable"
+
+
+# The seeded agent's former name, then its current one: apply renames it in place
+# (the same agent, its `daimon_name` rewritten). Releases from before the rename
+# treat a managed `default` as the seeded agent, so a rollback keeps working; this
+# code still answers `daimon` with it. Never remove before every deployment has run the rename.
+SEEDED_AGENT_RENAME: Final = ("daimon", BUILTIN_AGENT_NAME)
+
+
+def is_renamed_seeded_agent(metadata: Mapping[str, str]) -> bool:
+    """True for a defaults-managed agent named `default`: the seeded agent after its rename."""
+    name = unicodedata.normalize("NFKC", metadata.get(MA_METADATA_KEY_NAME, "")).casefold()
+    return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == SEEDED_AGENT_RENAME[1]
+
+
+def is_renamed_seeded_record(name: str, metadata: Mapping[str, str] | None) -> bool:
+    """`is_renamed_seeded_agent` for a Daimon record, whose name is its own field.
+
+    Releases before the rename rewrote only the record's `name`, not its stored
+    `daimon_name`, so the record's `name` is the one judged here.
+    """
+    return is_renamed_seeded_agent({**(metadata or {}), MA_METADATA_KEY_NAME: name})
 
 
 def forked_in(platform: str | None, channel_id: str | None, thread_id: str | None) -> str:

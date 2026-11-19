@@ -57,7 +57,9 @@ async def _resolve_store_id(
 ) -> str | None:
     validated_platform = _validate_platform(platform)
     tenant_id = derive_tenant_uuid(platform=validated_platform, workspace_id=workspace)
-    ma_agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent)
+    ma_agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent, records=rt.sessionmaker
+    )
     if ma_agent is None:
         raise DaimonError(f"agent {agent!r} not found for {platform}/{workspace}")
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(ma_agent.id))

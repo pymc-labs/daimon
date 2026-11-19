@@ -1,6 +1,6 @@
-"""Post-then-delete sweep of a Managed Agents session's output files.
+"""Post-then-delete sweep of a session's output files, on any provider.
 
-The sweep polls the session's Files API listing, downloads each downloadable
+The sweep polls the session's output listing (an `OutputRuntime`), downloads each downloadable
 entry, hands it to an injected ``post`` callable, and deletes the listing
 entry only after the post succeeded. Because a posted file leaves the listing,
 the listing itself is the delivery ledger: it only ever holds undelivered
@@ -36,18 +36,14 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
-from daimon.core.output_ports_compat import (
-    delete_output_record,
-    list_output_records,
-    read_output_record,
-)
+from daimon.core.output_ports_compat import list_output_records, read_output_record
+from daimon.core.output_runtime import AnthropicOutputRuntime, OutputRuntime, SessionOutput
 from mux.contracts.ids import Scope
 
 _log = structlog.get_logger(__name__)
@@ -92,6 +88,8 @@ class SkippedFile:
     filename: str
     size_bytes: int
     mime_type: str = "application/octet-stream"
+    max_bytes: int | None = None
+    """The limit that skipped it, when lower than the caller's own."""
 
 
 class OutputPostingUnavailable(DaimonError):
@@ -127,7 +125,7 @@ def render_oversize_notice(
     The file is kept, so the notice says so and names what the person can ask
     for instead; it never offers a download it cannot give.
     """
-    limit = _mb(max_bytes)
+    limit = _mb(max_bytes if skipped.max_bytes is None else min(max_bytes, skipped.max_bytes))
     prefix = f"For {for_whom}: " if for_whom else ""
     return (
         f"{prefix}`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
@@ -235,35 +233,58 @@ async def delete_output_file(
     anthropic_client: AsyncAnthropic, *, session_id: str, file_id: str, scope: Scope | None = None
 ) -> None:
     """Delete a listing entry after its post won; failure to delete is logged, not raised."""
-    try:
-        await delete_output_record(
-            anthropic_client,
-            file_id,
-            scope=scope
-            or Scope.legacy_host_authorized(call_site="output_delivery:delete_output_file"),
-        )
-    except anthropic.NotFoundError:
-        # An entry a concurrent sweep already removed is not an error.
-        pass
-    except anthropic.APIError as exc:
-        _log.warning(
-            "output_delivery.delete_failed",
-            session_id=session_id,
-            file_id=file_id,
-            error=str(exc)[:300],
-        )
+    await AnthropicOutputRuntime(
+        anthropic_client,
+        session_id,
+        scope=scope or Scope.legacy_host_authorized(call_site="output_delivery:delete_output_file"),
+    ).delete_output(file_id)
 
 
-async def sweep_session_outputs(
-    anthropic_client: AsyncAnthropic,
+async def _poll_outputs(
+    runtime: OutputRuntime,
     *,
-    session_id: str,
+    sleep: Callable[[float], Awaitable[None]],
+    quiet_s: float | None,
+) -> list[SessionOutput]:
+    """List until the listing settles (see the module docstring); one listing if it cannot lag."""
+    if not runtime.settles:
+        return list(await runtime.list_outputs())
+    seen: dict[str, SessionOutput] = {}
+    elapsed = quiet_s or 0.0
+    delays = _POLL_DELAYS_S
+    if quiet_s is not None:
+        delays = (0.0, max(_MIN_SETTLE_S - quiet_s, _POLL_DELAYS_S[1]), _POLL_DELAYS_S[-1])
+    polls = 0
+    for delay in delays:
+        if delay > 0:
+            await sleep(delay)
+        elapsed += delay
+        polls += 1
+        added_new_id = False
+        for output in await runtime.list_outputs():
+            if output.id not in seen:
+                seen[output.id] = output
+                added_new_id = True
+        if elapsed >= _MIN_SETTLE_S and not added_new_id:
+            break
+    _log.info(
+        "output_delivery.settled",
+        session_id=runtime.session_id,
+        polls=polls,
+        elapsed_s=elapsed,
+        file_count=len(seen),
+    )
+    return list(seen.values())
+
+
+async def sweep_outputs(
+    runtime: OutputRuntime,
+    *,
     post: Callable[[DeliverableFile], Awaitable[None]],
     on_skip: Callable[[SkippedFile], Awaitable[None]] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     max_bytes: int = MAX_BYTES_PER_FILE,
     exclude_filename_prefixes: tuple[str, ...] = (HANDOFF_FILENAME_PREFIX,),
-    scope: Scope | None = None,
     noticed: NoticedFiles | None = None,
     discard_skipped_up_to: int = 0,
     order: Callable[[Sequence[str]], Sequence[int]] | None = None,
@@ -295,11 +316,8 @@ async def sweep_session_outputs(
     file no larger than it is deleted after its notice, as before, while a
     larger one, which no destination could take, is still kept.
     """
-    settled = await poll_output_files(
-        anthropic_client, session_id=session_id, sleep=sleep, scope=scope, quiet_s=quiet_s
-    )
-
-    listed = list(settled.values())
+    session_id = runtime.session_id
+    listed = await _poll_outputs(runtime, sleep=sleep, quiet_s=quiet_s)
     if order is not None:
         listed = [listed[index] for index in order([meta.filename for meta in listed])]
 
@@ -319,19 +337,19 @@ async def sweep_session_outputs(
             # Snapshot-at-first-write means a 0-byte entry can never gain
             # content; it is permanent noise unless deleted.
             _log.info("output_delivery.skipped_empty", session_id=session_id, file_id=meta.id)
-            await delete_output_file(
-                anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
-            )
+            await runtime.delete_output(meta.id)
             continue
 
+        # The provider's own download limit applies too: a larger file only fails to read.
+        limit = max_bytes if meta.max_read_bytes is None else min(max_bytes, meta.max_read_bytes)
         try:
-            if meta.size_bytes > max_bytes:
+            if meta.size_bytes > limit:
                 _log.info(
                     "output_delivery.skipped_oversize",
                     session_id=session_id,
                     file_id=meta.id,
                     size_bytes=meta.size_bytes,
-                    max_bytes=max_bytes,
+                    max_bytes=limit,
                 )
                 if on_skip is not None and (noticed is None or meta.id not in noticed):
                     # Notice before any delete: if the notice fails, the
@@ -343,14 +361,13 @@ async def sweep_session_outputs(
                             filename=meta.filename,
                             size_bytes=meta.size_bytes,
                             mime_type=meta.mime_type,
+                            max_bytes=limit if limit < max_bytes else None,
                         )
                     )
                     if noticed is not None:
                         noticed.add(meta.id)
                 if meta.size_bytes <= discard_skipped_up_to:
-                    await delete_output_file(
-                        anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
-                    )
+                    await runtime.delete_output(meta.id)
                 # Otherwise kept: the person was told how to get it, and the
                 # agent can still compress or split the file it wrote.
                 continue
@@ -361,7 +378,7 @@ async def sweep_session_outputs(
                     filename=meta.filename,
                     mime_type=meta.mime_type,
                     size_bytes=meta.size_bytes,
-                    content=await download_output_file(anthropic_client, meta.id, scope=scope),
+                    content=await runtime.read_output(meta.id),
                 )
             )
         except OutputDeliveryDeferred:
@@ -379,9 +396,7 @@ async def sweep_session_outputs(
             )
             continue
 
-        await delete_output_file(
-            anthropic_client, session_id=session_id, file_id=meta.id, scope=scope
-        )
+        await runtime.delete_output(meta.id)
         posted += 1
         _log.info(
             "output_delivery.posted",

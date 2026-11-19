@@ -11,15 +11,18 @@ exist before anything is written.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Final
 
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import admin_caller
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
     NOT_OFFERED_NOTE,
@@ -90,13 +93,14 @@ async def load_picker_subject(
     """
     caller = admin_caller(interaction.user)
     async with runtime.sessionmaker() as session:
-        return await load_live_subject(
+        subject = await load_live_subject(
             session,
             tenant_id=panel_tenant_id(state),
             platform="discord",
             caller=caller,
             action=DelegatedAction.ENVIRONMENTS,
         )
+    return replace(subject, origin_channel_ids=interaction_origin(interaction))
 
 
 async def may_pick_environment(
@@ -136,9 +140,15 @@ async def load_environment_picker(
                 is_admin=state.is_admin,
                 default=runtime.deployment_default,
             )
-        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id, hidden=hidden)
-    except anthropic.APIError:
-        log.warning("agent_setup.environment_picker.list_failed", exc_info=True)
+        names = await list_environment_names(
+            runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker, hidden=hidden
+        )
+    except anthropic.APIError as error:
+        log.warning(
+            "agent_setup.environment_picker.list_failed",
+            exc_info=True,
+            causes=backend_refusal_causes(error),
+        )
         return None
     return plan_environment_picker(
         answering_map,
@@ -188,6 +198,7 @@ async def save_environment_choice(
             channel_id=channel_id,
             environment_name=name,
             default=runtime.deployment_default,
+            records=runtime.sessionmaker,
         )
     if not pick.decision:
         await audit_environment_pick(

@@ -1,0 +1,77 @@
+"""Executable record of message feedback's per-platform capture mechanisms.
+
+Discord captures votes through seeded reactions; Slack captures them through
+buttons on the final answer message, chosen specifically so the bot token
+does not need ``reactions:read``. Agent-initiated DMs separately require
+``im:write`` and re-authorization. Asserting both
+halves here, rather than merely documenting them, makes drift fail loudly:
+a scope quietly growing without a reason, or the Slack surface disappearing
+while the core still claims both platforms are covered.
+
+No platform parametrization, no database -- this is a scope-and-surface
+check, not a scenario test.
+"""
+
+from __future__ import annotations
+
+import daimon.core.message_feedback
+from daimon.adapters.slack.feedback import handle_feedback_vote, run_feedback_text_submission
+from daimon.adapters.teams import card
+from daimon.core.slack_oauth import SLACK_BOT_SCOPES
+
+
+def test_slack_bot_scopes_still_lack_the_reaction_feedback_scopes() -> None:
+    assert "reactions:read" not in SLACK_BOT_SCOPES, (
+        "Slack feedback deliberately uses buttons instead of reactions so the bot token "
+        "never needs reactions:read (adding it forces every installed "
+        "workspace to re-authorize); if a scope grew, either the button path was replaced "
+        "on purpose -- update this record -- or the scope is an accident and must go"
+    )
+
+
+def test_slack_feedback_surface_exists() -> None:
+    assert callable(handle_feedback_vote) and callable(run_feedback_text_submission), (
+        "the Slack button-based feedback path must exist alongside Discord's reaction path; "
+        "if it was removed on purpose, restore the per-platform capture this test records"
+    )
+
+
+def test_message_feedback_core_documents_the_per_platform_split() -> None:
+    doc = daimon.core.message_feedback.__doc__
+
+    assert doc is not None, "daimon.core.message_feedback must carry a module docstring"
+    assert "reactions:read" in doc, (
+        "the module docstring must name the reactions:read scope the Slack button path avoids"
+    )
+    assert "im:write" in doc, (
+        "the module docstring must name the im:write scope the Slack button path avoids"
+    )
+    assert "button" in doc.lower(), (
+        "the module docstring must describe the Slack button-based capture path"
+    )
+    assert "Discord-only" not in doc, (
+        "the module docstring must not still claim message feedback is Discord-only -- "
+        "the Slack button path exists now"
+    )
+
+
+def test_teams_feedback_uses_card_buttons() -> None:
+    message = card.controls_card("Ada  12s", ask_human=False)
+    rendered = message.model_dump_json(by_alias=True)
+    assert card.VOTE_UP_DIALOG in rendered and card.VOTE_DOWN_DIALOG in rendered, (
+        "Teams answers carry daimon's own 👍/👎 buttons with the reasons form behind 👎; "
+        "if that changed on purpose, update this record and the core docstring"
+    )
+    assert message.channel_data is None or message.channel_data.feedback_loop is None
+
+
+def test_teams_controls_card_drops_the_votes_with_the_feature_off() -> None:
+    """`message_feedback` is a setting on every platform: Off removes the buttons, and a card
+    with nothing left to show is not posted."""
+    with_summary = card.controls_card("Ada  12s", ask_human=False, votes=False)
+    assert with_summary is not None, "the summary line still shows"
+    rendered = with_summary.model_dump_json(by_alias=True)
+    assert card.VOTE_UP_DIALOG not in rendered, "votes off must leave no vote buttons"
+    assert card.controls_card(None, ask_human=False, votes=False) is None, (
+        "nothing to show means no card"
+    )

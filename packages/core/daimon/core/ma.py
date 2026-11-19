@@ -42,6 +42,7 @@ from daimon.core.mux_compat import (
 )
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import CoreAdmin, LegacyTurnTransport
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
@@ -257,11 +258,14 @@ async def interrupt_orphaned_session(
         log.warning("turn.orphan_interrupt_timeout", session_id=session_id, timeout_s=timeout_s)
         return False
     except APIError as err:
+        from daimon.core.channel_backend import backend_refusal_causes
+
         log.info(
             "turn.orphan_interrupt_failed",
             session_id=session_id,
             err_type=type(err).__name__,
             error=str(err)[:200],
+            causes=backend_refusal_causes(err),
         )
         return False
     log.info("turn.orphan_interrupted", session_id=session_id)
@@ -274,8 +278,11 @@ async def update_agent_with_version_retry(
     apply_update: Callable[[BetaManagedAgentsAgent], Awaitable[BetaManagedAgentsAgent]],
     *,
     scope: Scope | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     """Retrieve `agent_id`, apply `apply_update`, retry once on version conflict.
+
+    `records` routes a Daimon-owned agent id to its record store.
 
     Caller contract for `apply_update`:
     - The closure receives the freshly-retrieved `BetaManagedAgentsAgent` and must
@@ -294,18 +301,21 @@ async def update_agent_with_version_retry(
     scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.ma:update_agent_with_version_retry"
     )
-    agent = await retrieve_agent(anthropic, agent_id, scope=scope)
+    agent = await retrieve_agent(anthropic, agent_id, scope=scope, records=records)
     try:
         return await apply_update(agent)
     except APIStatusError as err:
+        from daimon.core.channel_backend import backend_refusal_causes
+
         if err.status_code not in _VERSION_CONFLICT_STATUSES:
             raise
         log.info(
             "ma.update_version_conflict_retry",
             agent_id=agent_id,
             status_code=err.status_code,
+            causes=backend_refusal_causes(err),
         )
-        fresh = await retrieve_agent(anthropic, agent_id, scope=scope)
+        fresh = await retrieve_agent(anthropic, agent_id, scope=scope, records=records)
         return await apply_update(fresh)
 
 
@@ -324,11 +334,14 @@ async def delete_skill_and_versions(
         try:
             await delete_skill_version(anthropic, skill_id, v.version, scope=scope)
         except APIStatusError as err:
+            from daimon.core.channel_backend import backend_refusal_causes
+
             if err.status_code == 404:
                 log.info(
                     "skill version already deleted",
                     skill_id=skill_id,
                     version=v.version,
+                    causes=backend_refusal_causes(err),
                 )
                 continue
             raise

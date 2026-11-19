@@ -23,7 +23,6 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
@@ -101,7 +100,7 @@ def on_message(state: CardState, text: str) -> CardState:
     """A whole agent message joins the draft log; an empty one changes nothing."""
     if not text:
         return state
-    line = format_draft(scrub_other_platforms(text, "teams"))
+    line = format_draft(text)
     earlier, latest = roll_draft(state.earlier_drafts, state.draft, line)
     return dataclasses.replace(state, earlier_drafts=earlier, draft=latest)
 
@@ -110,7 +109,7 @@ def on_draft(state: CardState, text: str) -> CardState:
     """A provider's preview of the message in progress revises the latest draft line."""
     if not text:
         return state
-    return dataclasses.replace(state, draft=format_draft(scrub_other_platforms(text, "teams")))
+    return dataclasses.replace(state, draft=format_draft(text))
 
 
 def on_activity(state: CardState, turn: TurnState) -> CardState:
@@ -127,8 +126,8 @@ def on_activity(state: CardState, turn: TurnState) -> CardState:
     return dataclasses.replace(
         state,
         is_working=has_running_tool(turn.content),
-        tool_lines=tuple(scrub_other_platforms(line, "teams") for line in lines),
-        plan_lines=tuple(scrub_other_platforms(line, "teams") for line in plan),
+        tool_lines=lines,
+        plan_lines=plan,
     )
 
 
@@ -291,17 +290,22 @@ def vote_actions() -> list[Action]:
     ]
 
 
-def controls_card(summary: str | None, *, ask_human: bool) -> MessageActivityInput:
+def controls_card(
+    summary: str | None, *, ask_human: bool, votes: bool = True
+) -> MessageActivityInput | None:
     """Posted just below the answer: its summary line, 👍/👎 and Ask a human.
 
     A click names this message (`replyToId`), so a vote or request links to
     it, the answer's next message, and a request is made once per answer.
-    With the footer hidden (`summary` None) only the buttons are left.
+    With the footer hidden (`summary` None) only the buttons are left; with `votes` off
+    (`message_feedback`) and nothing else to show there is no card.
     """
-    actions = [*vote_actions(), *([ask_human_action()] if ask_human else [])]
-    elements: list[CardElement] = [ActionSet(actions=actions)]
+    actions = [*(vote_actions() if votes else []), *([ask_human_action()] if ask_human else [])]
+    elements: list[CardElement] = [ActionSet(actions=actions)] if actions else []
     if summary:
         elements.insert(0, _summary_line(summary))
+    if not elements:
+        return None
     return _card(elements, fallback=summary or CONTROLS_FALLBACK)
 
 

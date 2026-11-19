@@ -21,19 +21,22 @@ from daimon.core.turn.state import extract_final_response
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.profiles import INLINE_REUSE
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 
 from ..test_agent_backend import owned as owned
-from .test_declared_drop_preparation import consent_request as consent_request
+from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_full_source import PARAMS
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_template_mcp import template as template
 
 
 @pytest.mark.parametrize(
-    ("consent_request", "model"),
-    [(PARAMS, FLASH_PRIMARY), ({**PARAMS, "backend_model": ARGON_MODEL}, ARGON_MODEL)],
-    indirect=["consent_request"],
+    ("switched_request", "model"),
+    [
+        (PARAMS, FLASH_PRIMARY),
+        *(({**PARAMS, "backend_model": model}, model) for model in OPT_IN_MODELS),
+    ],
+    indirect=["switched_request"],
 )
 async def test_a_copys_gemini_turn_runs_from_the_code_default_template(
     template, monkeypatch: pytest.MonkeyPatch, model: str
@@ -88,7 +91,7 @@ async def test_a_copys_gemini_turn_runs_from_the_code_default_template(
     assert any(t.get("type") == "mcp_server" for t in sent[-1].get("tools", []))
 
 
-@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("failure", ["own", "deeper"])
 async def test_a_skipped_mcp_representation_is_logged_without_content(
     template, monkeypatch: pytest.MonkeyPatch, failure: str

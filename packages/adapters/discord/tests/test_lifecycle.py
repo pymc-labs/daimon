@@ -48,12 +48,10 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
-from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -633,9 +631,9 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     in_dm: bool | None = None,
-    waiting_for_tenant_slot: Callable[[], bool] | None = None,
     clock: Callable[[], float] = time.monotonic,
     requester_is_admin: bool = True,
+    answer_message_cap: int = 5,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -659,6 +657,7 @@ def _make_lifecycle(
         requester_id=123,
         requester_is_admin=requester_is_admin,
         render_tables=render_tables,
+        answer_message_cap=answer_message_cap,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -667,7 +666,6 @@ def _make_lifecycle(
         tenant_id=tenant_id,
         budget_channel_id=budget_channel_id,
         in_dm=in_dm,
-        waiting_for_tenant_slot=waiting_for_tenant_slot,
         clock=clock,
     )
     return lc, sends, edits
@@ -711,6 +709,26 @@ def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
     assert card.description == "Send a message to start again."
     assert card.colour is not None and card.colour.value == COLOR_RED
     assert edit_kwargs.get("view") is None, "the Stop button is gone"
+
+
+async def test_a_reply_tagging_many_people_pings_only_the_asker() -> None:
+    """Deliberate difference from Slack, which caps a reply's pings at the people limit:
+    a Discord reply may name anyone but its sends allow only the asker to be notified,
+    so no cap is needed here."""
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    crowd = " ".join(f"<@{900 + n}>" for n in range(8))
+
+    await lc.on_terminal_success(_make_success_state(f"Looping in {crowd}"))
+
+    carrying = [
+        kw for kw in [*sends, *[e[1] for e in edits]] if "<@900>" in str(kw.get("content", ""))
+    ]
+    assert carrying, "the reply with the tags was posted"
+    for kwargs in carrying:
+        allowed = kwargs["allowed_mentions"]
+        assert not allowed.everyone and not allowed.roles, "no group pings"
+        assert [u.id for u in allowed.users or []] in ([], [123]), "only the asker can be pinged"
 
 
 async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
@@ -845,54 +863,6 @@ class TestFirstEventSendsEmbed:
 
 
 class TestPostInitial:
-    async def test_queue_card_changes_only_title_and_clears_same_card(self) -> None:
-        default, default_sends, default_edits = _make_lifecycle(clock=lambda: 1.0)
-        off, off_sends, off_edits = _make_lifecycle(
-            waiting_for_tenant_slot=lambda: False, clock=lambda: 1.0
-        )
-        queued, queued_sends, queued_edits = _make_lifecycle(
-            waiting_for_tenant_slot=lambda: True, clock=lambda: 1.0
-        )
-        for lifecycle in (default, off, queued):
-            await lifecycle.post_initial()
-
-        def wire(sends: list[dict[str, Any]]) -> bytes:
-            return json.dumps(
-                {"embeds": [e.to_dict() for e in sends[0]["embeds"]], "view": sends[0]["view"]},
-                ensure_ascii=False,
-            ).encode()
-
-        assert wire(off_sends) == wire(default_sends)
-        expected = default_sends[0]["embeds"][0].to_dict()
-        expected["title"] = "Queued — waiting for a free slot…"
-        assert queued_sends[0]["embeds"][0].to_dict() == expected
-        await default.on_slot_started()
-        await off.on_slot_started()
-        await queued.on_slot_started()  # immediate, inside the ordinary debounce
-        assert not default_edits and not off_edits
-        assert len(queued_sends) == len(queued_edits) == 1
-        assert queued_edits[0][0] is _SENTINEL_REF
-        assert queued_edits[0][1]["embeds"][0].to_dict() == default_sends[0]["embeds"][0].to_dict()
-        await queued.on_slot_started()
-        assert len(queued_edits) == 1
-
-    async def test_queue_card_clear_failure_does_not_prevent_turn_start(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        lifecycle, sends, edits = _make_lifecycle(waiting_for_tenant_slot=lambda: True)
-        await lifecycle.post_initial()
-        original = lifecycle._edit
-
-        async def unavailable(*args: Any, **kwargs: Any) -> None:
-            raise OSError("offline lost cosmetic edit")
-
-        monkeypatch.setattr(lifecycle, "_edit", unavailable)
-        await lifecycle.on_slot_started()
-        monkeypatch.setattr(lifecycle, "_edit", original)
-        await lifecycle.on_slot_started()
-        assert len(sends) == len(edits) == 1
-        assert edits[0][1]["embeds"][0].title == "Working on it…"
-
     async def test_post_initial_sends_thinking_embed_immediately(self) -> None:
         """post_initial posts the thinking embed without waiting for SSE events,
         giving instant feedback while session setup (a potentially minutes-long
@@ -3232,6 +3202,47 @@ async def test_long_final_answer_is_attached_instead_of_flooding(notify):
     assert text in files[0].fp.read().decode()
 
 
+async def test_answer_message_cap_decides_inline_or_attached():
+    """Seven chunks stay inline under a cap of 10 and become answer.txt under the default 5."""
+    text = " ".join(["word"] * 3600)  # about 18000 characters: seven chunks
+    for cap, attached in ((10, False), (5, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=cap)
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+        posted = [s for s in sends if s.get("content")]
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"answer.txt only past the cap of {cap}"
+        if attached:
+            assert not posted, "the whole answer moves to the file"
+        else:
+            assert len(posted) >= 6, f"the answer stays inline under a cap of {cap}"
+
+
+async def test_sealed_posts_shrink_the_answer_message_budget():
+    """Two sealed posts leave room for 3 of a cap of 5: a 4-chunk final answer is attached."""
+    text = " ".join(["word"] * 1700)  # about 8500 characters: four chunks
+    for sealed, attached in ((0, False), (2, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=5)
+        state = TurnState()
+        for index in range(sealed):
+            state.content.extend(
+                [
+                    TextBlock(kind="text", text=f"Step {index}: " + "x" * 600),
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id=str(index),
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                ]
+            )
+            await lc.on_render(state)
+        state.content.append(TextBlock(kind="text", text=text))
+        await lc.on_terminal_success(state)
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"{sealed} sealed posts and a four-chunk answer"
+
+
 async def test_huge_sealed_block_is_deferred_without_using_message_budget():
     lc, sends, edits = _make_lifecycle()
     text = "Useful prose. " * 1000
@@ -3284,64 +3295,20 @@ async def test_final_response_preserves_whitespace_between_distinct_blocks():
     assert edits[-1][1]["content"] == "Hello world."
 
 
-@pytest.mark.usefixtures("status_log_on")
-async def test_consecutive_final_messages_collapse_but_distinct_answers_survive_with_the_log_on():
-    lc, _, edits = _make_lifecycle()
-    await lc.on_terminal_success(
-        TurnState(
-            content=[
-                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
-                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
-                TextBlock(kind="text", text="Second part.\nMore of the second."),
-            ]
-        )
-    )
-    assert (
-        edits[-1][1]["content"]
-        == "First part.\nMore of the first.\n\nSecond part.\nMore of the second."
-    )
-
-
-@pytest.mark.usefixtures("status_log_on")
-async def test_final_response_keeps_every_message_set_apart_by_a_blank_line():
-    lc, _, edits = _make_lifecycle()
-    await lc.on_terminal_success(
-        TurnState(
-            content=[
-                TextBlock(kind="text", text="⚠️ Do not run this against production."),
-                TextBlock(kind="text", text="Run it against staging."),
-            ]
-        )
-    )
-    assert (
-        edits[-1][1]["content"]
-        == "⚠️ Do not run this against production.\n\nRun it against staging."
-    )
-
-
-def _repeated_run_state(*, merged: bool) -> tuple[TurnState, str]:
+def _repeated_run_state() -> tuple[TurnState, str]:
     """An answer of two messages, sealed by a tool call, then said again after it."""
     first = "First part of the answer. " * 12
     second = "Second part of the answer. " * 12
     tool = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
-    messages = (
-        [TextBlock(kind="text", text=first + second)]
-        if merged
-        else [
-            TextBlock(kind="text", text=first),
-            TextBlock(kind="text", text=second),
-        ]
-    )
+    messages = [TextBlock(kind="text", text=first + second)]
     return TurnState(content=[*messages, tool, *messages]), first.strip()
 
 
-@pytest.mark.parametrize("log_on", [True, False])
-async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool):
-    with status_log_override(log_on):
-        lc, sends, edits = _make_lifecycle()
-        state, first = _repeated_run_state(merged=not log_on)
-        await lc.on_render(state)
-        await lc.on_terminal_success(state)
+async def test_an_answer_repeated_after_a_tool_is_not_posted_twice():
+    lc, sends, edits = _make_lifecycle()
+    state, first = _repeated_run_state()
+    await lc.on_render(state)
+    await lc.on_terminal_success(state)
     posted = [s["content"] for s in sends if "content" in s]
     posted += [e[1]["content"] for e in edits if e[1].get("content")]
     assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
@@ -3508,39 +3475,6 @@ async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
         )
     assert count() - before == 1
     assert guard.failed
-
-
-class TestOtherAppsNeverNamed:
-    """What a person on Discord reads never names Slack or Teams."""
-
-    async def test_draft_tool_lines_and_answer_are_posted_without_other_apps(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        await lc.on_sse_event(_message_event("Checking Slack and Microsoft Teams for it"))
-        tool = ToolUseBlock(
-            kind="tool_use", id="t1", type="agent.tool_use", name="slack_search", input={}
-        )
-        await lc.on_render(TurnState(content=[tool]))
-        card_text = sends[0]["embeds"][0].description
-        assert "Slack" not in card_text and "Teams" not in card_text
-        assert "> Checking other apps for it" in card_text
-
-        reply = "Use Discord, not Slack or Teams. See https://acme.slack.com/archives/C1."
-        await lc.on_terminal_success(_make_success_state(reply))
-        posted = "\n".join(
-            str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
-        )
-        assert "Use Discord, not another app. See another app." in posted
-        assert "Slack" not in posted and "Teams" not in posted
-
-    async def test_a_sealed_answer_before_a_tool_call_is_scrubbed(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        sealed = "Here is the longer answer, which names Slack so that it is long enough. " * 10
-        tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
-        await lc.on_render(TurnState(content=[TextBlock(kind="text", text=sealed), tool]))
-        posted = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
-        assert "another app" in posted and "Slack" not in posted
 
 
 async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged() -> None:

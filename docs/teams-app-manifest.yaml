@@ -133,6 +133,8 @@ bots:
             description: Who answers here and what it can use
           - title: settings
             description: Turn features on or off here
+          - title: model
+            description: This conversation's model
           - title: memory
             description: What the agent remembers
           - title: routines

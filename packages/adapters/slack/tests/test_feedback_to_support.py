@@ -16,7 +16,6 @@ import json
 import re
 import uuid
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import yarl
@@ -33,6 +32,7 @@ from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.testing.factories import make_tenant, make_thread_session
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -77,7 +77,7 @@ def _runtime(
     routed: dict[uuid.UUID, bool] | None = None,
     channel: str | None = _SUPPORT_CHANNEL,
 ) -> Any:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.support = SupportSettings(
         slack_escalation_channel_id=channel, feedback_to_support=routed or {}
     )

@@ -49,9 +49,9 @@ def test_key_without_snapshot_or_features_still_names_the_prompts() -> None:
 
 
 def test_the_controls_hash_follows_the_rendered_wording(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The hash is of the text a model reads at each level, not of the code that renders it."""
+    """The hash is of the text a model reads, not of the code that renders it."""
     levels = sample_controls()
-    assert len(set(levels)) == 3, "full, origin and minimal read differently"
+    assert len(set(levels)) == 2, "the controls read differently with and without web links"
     monkeypatch.setattr(turn_origin, "WEB_SENTENCE", " Other web wording.")
     assert sample_controls() != levels, "a changed sentence changes what is hashed"
 

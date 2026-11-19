@@ -25,7 +25,7 @@ def runtime(monkeypatch):
     for module in (edits, library):
         monkeypatch.setattr(module, "_edit_deps", lambda _rt: object(), raising=False)
         monkeypatch.setattr(module, "_edit_actor", lambda _a: object(), raising=False)
-    monkeypatch.setattr(edits, "_change_deps", lambda _rt: object())
+    monkeypatch.setattr(edits, "_change_deps", lambda _rt, _auth=None: object())
     monkeypatch.setattr(edits, "_web_edit_deps", lambda _rt: object())
 
     async def confirmed(*_a: Any, **_k: Any) -> None:
@@ -37,6 +37,11 @@ def runtime(monkeypatch):
     for module in (edits, library):
         monkeypatch.setattr(module, "require_card", confirmed)
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
+
+    async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
+        return links
+
+    monkeypatch.setattr(web_url, "_where_aware", aware)
     rt = fake_runtime()
     web = WebSettings(public_url="https://web.test")  # type: ignore[call-arg]
     rt.settings = SimpleNamespace(  # type: ignore[misc]

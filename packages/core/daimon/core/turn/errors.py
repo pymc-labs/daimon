@@ -56,9 +56,6 @@ BackendRefusalCause = Literal[
     "provider_not_allowed",
     "agent_backend",
     "provider_not_configured",
-    # A switch's stored consent no longer matches its source: ask for a fresh
-    # preview instead of claiming the provider is not set up (J6g).
-    "re_confirm",
     "no_credit_yet",
     # Getting the agent ready failed for a reason a retry can clear (a timeout, a
     # busy database): "busy, try again", never "not set up".
@@ -66,6 +63,12 @@ BackendRefusalCause = Literal[
     # Getting the agent ready failed for a reason nobody proved is missing setup:
     # "couldn't get it ready", with the reference, never "not set up".
     "preparation_failed",
+    # A Managed Agents agent on an install with no Anthropic key: make a copy on a
+    # keyed provider, or add the key. Never a 401.
+    "anthropic_unconfigured",
+    # A channel pinned to a keyed provider whose code defaults hold no channel row
+    # (OpenAI's needs a native agent): the operator adds a row, or the pin is cleared.
+    "channel_row_missing",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

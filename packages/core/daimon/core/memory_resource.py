@@ -38,6 +38,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta.beta_managed_agents_memory_store_resource_param import (
     BetaManagedAgentsMemoryStoreResourceParam,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_memory_store, create_memory_store, delete_memory_store
@@ -192,16 +193,24 @@ async def _ensure_store(
         # active store per session attempt.
         try:
             await delete_memory_store(anthropic, created.id, scope=scope)
-        except anthropic_errors.APIError:
-            _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
+        except anthropic_errors.APIError as error:
+            _log.warning(
+                "memory_store.orphan_delete_failed",
+                orphan=created.id,
+                causes=backend_refusal_causes(error),
+            )
         raise
     if store_id != created.id:
         # Lost the provisioning race — discard the orphan store.
         _log.info("memory_store.race_lost", orphan=created.id, winner=store_id)
         try:
             await delete_memory_store(anthropic, created.id, scope=scope)
-        except anthropic_errors.APIError:
-            _log.warning("memory_store.orphan_delete_failed", orphan=created.id)
+        except anthropic_errors.APIError as error:
+            _log.warning(
+                "memory_store.orphan_delete_failed",
+                orphan=created.id,
+                causes=backend_refusal_causes(error),
+            )
     else:
         _log.info("memory_store.provisioned", memory_store_id=store_id, name=name)
     return store_id
@@ -447,6 +456,7 @@ async def archive_memory_store_for_agent(
                 "memory_store.channel_archive_failed",
                 memory_store_id=channel_store_id,
                 error=type(error).__name__,
+                causes=backend_refusal_causes(error),
             )
             failure = failure or error
             continue
@@ -469,6 +479,7 @@ async def archive_memory_store_for_agent(
                 "memory_store.personal_archive_failed",
                 memory_store_id=personal_id,
                 error=type(error).__name__,
+                causes=backend_refusal_causes(error),
             )
             failure = failure or error
             continue
@@ -524,6 +535,7 @@ async def delete_personal_memory_stores_for_account(
                 "memory_store.personal_delete_failed",
                 memory_store_id=store_id,
                 error=type(error).__name__,
+                causes=backend_refusal_causes(error),
             )
             complete = False
             continue

@@ -14,7 +14,14 @@ from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, Revision
 from mux.contracts.ports import ManagedAgents, Steering
-from mux.contracts.resources import AgentFilter, AgentPatch, AgentSpec, EnvironmentSpec, SessionSpec
+from mux.contracts.resources import (
+    AgentFilter,
+    AgentPatch,
+    AgentSpec,
+    EnvironmentSpec,
+    NetworkPolicy,
+    SessionSpec,
+)
 from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
@@ -350,6 +357,41 @@ async def test_agents_templates_omission_empty_and_session_hosted_mode(
         )
     with pytest.raises(MigrationUnsupported):
         await driver.sessions.migrate(SCOPE, REF, config(), expected=0, key="migration")
+
+
+@pytest.mark.asyncio
+async def test_template_network_and_packages_when_created_then_sent_and_host_range_enforced(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """Packages and a restricted network ride the template; 0 or 101 hosts refuse first."""
+    transport.responses["POST", "/agents/environments/templates"] = {
+        "id": "template",
+        "name": "t",
+        "created_at": 0,
+    }
+    hosts = ("api.example.com",)
+    spec = EnvironmentSpec(
+        name="t",
+        network=NetworkPolicy(mode="limited", allowed_hosts=hosts),
+        packages={"system": ("gh",), "python": ("duckdb",)},
+    )
+    await driver.environments.create(SCOPE, spec, key="t")
+    body = transport.calls[-1][2]
+    assert body is not None and body["network"] == {
+        "access": "restricted",
+        "allowed_domains": ["api.example.com"],
+    }, "the restricted network must reach the template"
+    assert body["packages"] == {"system": ["gh"], "python": ["duckdb"]}, "packages must ride"
+    calls = len(transport.calls)
+    for count in (0, 101):
+        many = NetworkPolicy(
+            mode="limited", allowed_hosts=tuple(f"h{i}.example.com" for i in range(count))
+        )
+        with pytest.raises(UnsupportedCapability, match="environment_network"):
+            await driver.environments.create(
+                SCOPE, spec.model_copy(update={"network": many}), key=f"many{count}"
+            )
+    assert len(transport.calls) == calls, "a refused network must not reach OpenAI"
 
 
 @pytest.mark.asyncio

@@ -128,10 +128,62 @@ def test_model_backend_switch_reaches_new_threads_as_a_provider_setting() -> Non
     assert agent_changes.provider_moved(a, b), "the switch writes the provider setting"
     patch = agent_changes.patch_for(ma_agent(id="ag_x", name="helper"), [change], b)
     assert patch.model is None, "another provider's model is not the Managed Agents model"
-    effort = b.model_copy(update={"model": b.model.model_copy(update={"effort": "low"})})
+
+
+def _on(config: AgentConfigDoc, **model: object) -> AgentConfigDoc:
+    return config.model_copy(update={"model": config.model.model_copy(update=model)})
+
+
+def test_provider_effort_is_stored_when_chosen_and_unset_reads_as_the_model_default() -> None:
+    """One rule for web and chat: unset is the model default; any chosen level is stored."""
+    unset = _config(
+        model=ModelChoice(id="gpt-5.5", backend="openai", speed="standard", effort=None)
+    )
+    medium = _on(unset, effort="medium")
     assert (
-        agent_changes.unsupported(agent_changes.diff_config(b, effort), a=b, b=effort) is not None
-    ), "effort on another provider is not saved as if it applied"
+        agent_changes.unsupported(agent_changes.diff_config(unset, medium), a=unset, b=medium)
+        is None
+    ), "an offered level saves"
+    assert agent_changes.provider_moved(unset, medium), "picking medium writes the provider setting"
+    assert agent_changes._stated_effort(unset, medium) == "medium", "an explicit medium is stored"
+    assert agent_changes._stated_effort(medium, medium) is None, (
+        "an unchanged level is not restated"
+    )
+
+
+def test_claude_top_effort_maps_to_the_provider_highest_on_a_switch() -> None:
+    claude = _config(
+        model=ModelChoice(
+            id="claude-sonnet-4-6", backend="anthropic", speed="standard", effort="max"
+        )
+    )
+    openai = _on(claude, id="gpt-5.5", backend="openai")
+    changes = agent_changes.diff_config(claude, openai)
+    assert agent_changes.unsupported(changes, a=claude, b=openai) is None, (
+        "the switch is not refused"
+    )
+    assert agent_changes._stated_effort(claude, openai) == "high", (
+        "max runs as the provider's highest"
+    )
+
+
+def test_effort_on_a_model_without_one_is_refused_unless_carried() -> None:
+    claude = _config(
+        model=ModelChoice(
+            id="claude-sonnet-4-6", backend="anthropic", speed="standard", effort="high"
+        )
+    )
+    gemini = _on(claude, id="gemini-4-argon", backend="gemini")
+    assert (
+        agent_changes.unsupported(agent_changes.diff_config(claude, gemini), a=claude, b=gemini)
+        is None
+    ), "a level carried over unchanged is dropped, not refused"
+    assert agent_changes._stated_effort(claude, gemini) is None, "nothing stated on Gemini"
+    picked = _on(gemini, effort="low")
+    assert (
+        agent_changes.unsupported(agent_changes.diff_config(gemini, picked), a=gemini, b=picked)
+        == "That effort isn't available for this model. Nothing was saved."
+    ), "a level chosen on a model without one is refused at save"
 
 
 def test_patch_for_writes_only_what_changed() -> None:

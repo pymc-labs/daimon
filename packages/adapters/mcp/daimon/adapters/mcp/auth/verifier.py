@@ -25,30 +25,41 @@ the older rule that a channel-bound agent key needs an admin by stored role. A
 registered agent key's `is_admin` and `internal` claims are dropped, so a hand-made
 token never borrows an admin's tool surface from them: admin comes only from the
 account's stored role.
+
+An agent converted to another provider gets a new id; its token rows move with it, but
+signed tokens keep the old id. Such a token is admitted when the row's agent names that
+old id as its ``daimon_converted_from`` marker, and then acts as the current agent.
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 
 import structlog
+from anthropic import AnthropicError, AsyncAnthropic
 from daimon.core.coding_keys import holds_coding_key_standing
 from daimon.core.config import McpSettings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_CONVERTED_FROM
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
     chat_token_label,
+    is_held_provider_row,
+    provider_hold_refusal,
     registered_agent_claims_match,
 )
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.domain import AccountIdentityRow, McpTokenRow, Role
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.security_audit import append_event
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from mux.contracts.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Claim keys only this verifier writes, from the token's registry row. Any
@@ -59,6 +70,31 @@ TOKEN_JTI_CLAIM = "daimon_token_jti"
 TOKEN_LABEL_CLAIM = "daimon_token_label"
 SCOPES_CLAIM = "daimon_scopes"
 FOREIGN_HOME_CLAIM = "daimon_foreign_home"
+
+#: The id an agent was converted from, read from its marker; None when it has none.
+ConvertedFrom = Callable[[uuid.UUID, str], Awaitable[str | None]]
+
+
+def agent_converted_from(
+    client: AsyncAnthropic | None, sessionmaker: async_sessionmaker[AsyncSession]
+) -> ConvertedFrom:
+    """Read an agent's ``daimon_converted_from`` marker, as a Daimon record or on Claude."""
+
+    async def read(tenant_id: uuid.UUID, agent_id: str) -> str | None:
+        try:
+            agent = await retrieve_agent(
+                client,
+                agent_id,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+                records=sessionmaker,
+            )
+        except (AnthropicError, ProviderError):
+            return None  # Unreadable: the token stays refused.
+        marker = (agent.metadata or {}).get(MA_METADATA_KEY_CONVERTED_FROM)
+        return marker if isinstance(marker, str) else None
+
+    return read
+
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
@@ -88,7 +124,12 @@ def _hold_refusal(
     signed claim names: row and claim must say the same, so neither a claim
     forged on an unheld row nor a row bound without its claim counts. Nothing
     else may carry the claim, and a bound chat row is never admitted without it.
+
+    A provider turn's held credential (`is_held_provider_row`) is the one other
+    held binding, checked the same way; it is never a vault chat token.
     """
+    if row.surface == "provider_turn":
+        return provider_hold_refusal(row, hold_claim)
     if hold_claim is None:
         bound = vault_chat and (row.channel_id is not None or held_label)
         return "hold_claim_missing" if bound else None
@@ -133,7 +174,10 @@ def token_row_refusal(
     if row.platform is not None and row.platform != identity.platform:
         return "platform_mismatch"  # a channel binding this deployment never minted
     held_label = row.kind == "agent" and row.label == chat_token_label(row.jti, held=True)
-    vault_chat = held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    provider_held = is_held_provider_row(row)
+    vault_chat = not provider_held and (
+        held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    )
     hold_refusal = _hold_refusal(
         row, hold_claim=hold_claim, vault_chat=vault_chat, held_label=held_label
     )
@@ -166,7 +210,12 @@ def token_row_refusal(
         if is_coding_key(row):
             if not coding_key_standing:
                 return "not_admin_or_owner"
-        elif row.channel_id is not None and not vault_chat and identity.role is not Role.ADMIN:
+        elif (
+            row.channel_id is not None
+            and not vault_chat
+            and not provider_held
+            and identity.role is not Role.ADMIN
+        ):
             return "admin_required"
         return None
     if claims.get("kind") != row.kind:
@@ -268,7 +317,9 @@ class DaimonJWTVerifier(JWTVerifier):
         sessionmaker: async_sessionmaker[AsyncSession],
         legacy_token_cutoff: datetime | None = None,
         allow_legacy_tokens: bool = False,
+        converted_from: ConvertedFrom | None = None,
     ) -> None:
+        self._converted_from = converted_from
         super().__init__(
             public_key=secret.decode(),
             algorithm="HS256",
@@ -371,6 +422,17 @@ class DaimonJWTVerifier(JWTVerifier):
                 hold_claim=hold_claim,
                 coding_key_standing=coding_key_standing,
             )
+            if refusal == "agent_mismatch" and await self._converted(row, access.claims):
+                # One hop only: a token from two conversions back stays refused.
+                access.claims["agent_id"] = row.agent_id
+                refusal = token_row_refusal(
+                    row,
+                    claims=access.claims,
+                    identity=identity_row,
+                    now=datetime.now(UTC),
+                    hold_claim=hold_claim,
+                    coding_key_standing=coding_key_standing,
+                )
             if refusal is not None:
                 await self._audit_refusal(row, identity=identity_row, reason=refusal)
                 return _reject_token(refusal, access.claims)
@@ -409,6 +471,13 @@ class DaimonJWTVerifier(JWTVerifier):
                 # Checked against the row above: the only copy downstream may read.
                 access.claims[HOLD_CLAIM] = hold_claim
         return access
+
+    async def _converted(self, row: McpTokenRow, claims: Mapping[str, object]) -> bool:
+        """Whether the token names the agent the row's agent was converted from."""
+        signed = claims.get("agent_id")
+        if self._converted_from is None or row.agent_id is None or not isinstance(signed, str):
+            return False
+        return await self._converted_from(row.tenant_id, row.agent_id) == signed
 
     async def _audit_refusal(
         self, row: McpTokenRow, *, identity: AccountIdentityRow, reason: str

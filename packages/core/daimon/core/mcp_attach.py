@@ -266,6 +266,7 @@ async def attach_mcp_server_to_agent(
     shares_token: bool = False,
     before_update: Callable[[], Awaitable[None]] | None = None,
     scope: Scope | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent:
     """Attach ``server_name`` at ``url`` to ``agent_id``, preserving the rest.
 
@@ -314,6 +315,9 @@ async def attach_mcp_server_to_agent(
             payload={"mcp_servers": servers, "tools": tools},
             version=fresh.version,
             scope=backend_scope,
+            records=records,
         )
 
-    return await update_agent_with_version_retry(client, agent_id, _apply, scope=backend_scope)
+    return await update_agent_with_version_retry(
+        client, agent_id, _apply, scope=backend_scope, records=records
+    )

@@ -13,7 +13,6 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -41,6 +40,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.support_escalation import RECORDED_UNDELIVERED, received_text
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -109,7 +109,7 @@ async def _tenant_row(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow:
 
 
 def _runtime(key: str, factory: async_sessionmaker[AsyncSession], **support: Any) -> Any:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.support = SupportSettings(slack_escalation_channel_id=_ESC_CHANNEL, **support)
     return build_slack_runtime(key, factory, settings=settings)
 

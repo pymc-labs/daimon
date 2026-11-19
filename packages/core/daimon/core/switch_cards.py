@@ -1,12 +1,8 @@
-"""The provider switch card Daimon posts itself, and what pressing it does.
+"""What pressing an older provider switch card does, and the lines a switch says.
 
-A Claude turn shows the switch card through the provider's own tool
-confirmation. An OpenAI or Gemini turn has none, so the MCP tool records the
-previewed switch (`stores.backend_switch_cards`) and posts a card only its
-requester can press, in the conversation the request came from. Pressing it
-is a fresh request: the card is claimed once, then the same checks as the
-Claude card's click run again (`confirmation.backend_switch_callbacks`) and
-the switch goes through the same `set_backend` write.
+A switch applies at once and posts no card. A card posted before that still
+answers its requester's press: it is claimed once, then the switch it names
+goes through the same `set_backend` write as any switch.
 """
 
 from __future__ import annotations
@@ -21,7 +17,10 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 from daimon.core.scope import DeploymentDefault
+from mux.contracts.config import ThreadMode
 from mux.contracts.ids import Provider
+from mux.contracts.profile import Capability, Effort
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -145,47 +144,14 @@ async def move_this_thread(
             now=datetime.datetime.now(datetime.UTC),
         )
     return (
-        f"This conversation moves to {provider} from the next message; "
-        "earlier messages here aren't carried over."
+        f"This conversation moves to {provider} from the next message "
+        "and keeps its earlier messages."
     )
 
 
 #: A self-posted card lives outside any turn, so a turn's ceiling doesn't cap
 #: it; it never waits past a day (#1414's longest card), and says when it ends.
 SWITCH_CARD_MAX_S: Final[int] = 86400
-
-#: The requested card's footer; each renderer fills the requester and the expiry.
-SWITCH_FOOTER: Final[str] = "Only {requester} can confirm. Expires {expires}."
-
-
-def requested_switch_card(
-    card_id: uuid.UUID,
-    *,
-    title: str,
-    facts: tuple[str, ...],
-    requester_platform_user_id: str,
-    expires_at: datetime.datetime,
-) -> PostedCard:
-    """The card as posted: what the switch does, and Confirm / Cancel for its requester."""
-    from daimon.core.posted_controls import CardButton, PostedCard
-
-    return PostedCard(
-        kind="switch",
-        state="requested",
-        headline=f"🔁 {title}",
-        facts=facts,
-        buttons=(
-            CardButton(
-                label="Confirm", style="primary", custom_id=card_custom_id(card_id, "confirm")
-            ),
-            CardButton(
-                label="Cancel", style="primary", custom_id=card_custom_id(card_id, "cancel")
-            ),
-        ),
-        footer=SWITCH_FOOTER,
-        requester_platform_user_id=requester_platform_user_id,
-        expires_at_unix=int(expires_at.timestamp()),
-    )
 
 
 def answered_switch_card(press: SwitchCardPress) -> PostedCard:
@@ -222,7 +188,7 @@ FAILED_TEXT: Final[str] = (
 
 async def press_switch_card(
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -239,8 +205,7 @@ async def press_switch_card(
     """Answer one press. None: not the requester's (the card stays as it is).
 
     The requester is checked before the card is claimed, so nobody else's press
-    can use it up. A claimed card is applied or refused exactly once. `deps`
-    None reads no source (only for a service whose previews read none).
+    can use it up. A claimed card is applied or refused exactly once.
     """
     from daimon.core.stores import backend_switch_cards as cards
 
@@ -305,11 +270,27 @@ async def press_switch_card(
         return await end("refused", FAILED_TEXT)
 
 
+class _PostedSwitch(BaseModel):
+    """What an older card names. Its preview digest and accepted losses are ignored."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    agent: str
+    target_backend: Provider
+    model: str | None = None
+    expected_revision: int
+    thread_mode: ThreadMode | None = None
+    required_capabilities: tuple[Capability, ...] | None = None
+    effort: Effort | None = None
+    profile: str | None = None
+    for_everyone: bool = False
+
+
 async def _apply(
     claimed: SwitchCardRow,
     end: Callable[[Literal["applied", "refused"], str], Awaitable[SwitchCardPress]],
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -319,88 +300,53 @@ async def _apply(
     current_admin: Callable[[str], Awaitable[bool]],
     place_word: str,
 ) -> SwitchCardPress:
+    """Apply the switch an older card names, as a switch applies today: no consent."""
     from daimon.core.authz import Place, build_subject
+    from daimon.core.backend_refusals import refusal_card
     from daimon.core.channel_backend import (
         AgentBackendRefused,
         BackendActor,
         BackendUnsupported,
+        answers_for_everyone,
         load_backend_agent,
         make_backend_service,
     )
-    from daimon.core.confirmation import (
-        BackendSwitchReference,
-        ConfirmationPrompt,
-        backend_switch_callbacks,
-        reference_settings,
-    )
+    from daimon.core.confirmation import stated_settings
     from daimon.core.scope import ScopeContext
     from daimon.core.turn.admission import capture_backend_source
-    from daimon.core.turn.notices import provider_name, switched_meanwhile_text
+    from daimon.core.turn.notices import (
+        default_agent_switch_text,
+        switched_meanwhile_text,
+        uses_phrase,
+    )
 
     card_id = claimed.id
-    reference = BackendSwitchReference.model_validate(claimed.reference)
-
-    platform_admin = current_admin
-
-    async def admin_now(user: str) -> bool:
-        # A requester from another organisation is never an admin here.
-        return not claimed.client and await platform_admin(user)
-
-    is_admin = await admin_now(clicker)
+    reference = _PostedSwitch.model_validate(claimed.reference)
+    # A requester from another organisation is never an admin here.
+    is_admin = not claimed.client and await current_admin(clicker)
     subject = build_subject(is_admin=is_admin, platform_user_id=clicker, client=claimed.client)
-    # The source is read in the card's own conversation, as the MCP tool read it
-    # for the preview, so the same agent setup yields the same preview digest.
-    capture = (
-        None
-        if deps is None
-        else partial(
-            capture_backend_source,
-            deps,
-            context=ScopeContext(
-                tenant_id=tenant_id,
-                account_id=claimed.account_id,
-                platform=claimed.platform,
-                channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-            ),
-            subject=subject,
-            place=Place.from_origin(
-                parent_channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-                setup_thread=claimed.setup_thread,
-            ),
-            is_dm=False,
-            slack_turn_context_id=None,
-            private_dm_id=None,
-        )
+    # The source is read in the card's own conversation, as the MCP tool read it.
+    capture = partial(
+        capture_backend_source,
+        deps,
+        context=ScopeContext(
+            tenant_id=tenant_id,
+            account_id=claimed.account_id,
+            platform=claimed.platform,
+            channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+        ),
+        subject=subject,
+        place=Place.from_origin(
+            parent_channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+            setup_thread=claimed.setup_thread,
+        ),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
     )
-    service = make_backend_service(
-        sessionmaker,
-        turn_settings,
-        capture_source=capture,
-    )
-    _, check = backend_switch_callbacks(
-        service,
-        sessionmaker=sessionmaker,
-        anthropic=anthropic,
-        tenant_id=tenant_id,
-        account_id=claimed.account_id,
-        current_admin=admin_now,
-        current_platform_admin=admin_now,
-        default_agent_name=deployment_default.agent_name,
-        place_word=place_word,
-        answering_agent_name=claimed.answering_agent_name,
-    )
-    prompt = ConfirmationPrompt(
-        title="Change the model provider?",
-        requester_platform_user_id=claimed.requester_platform_user_id,
-        expires_at=claimed.expires_at,
-        admin=True,
-        backend_switch=reference,
-    )
-    refusal = await check(prompt, clicker)
-    if refusal is not None:
-        return await end("refused", refusal)
+    service = make_backend_service(sessionmaker, turn_settings, capture_source=capture)
     actor = BackendActor(tenant_id=tenant_id, account_id=claimed.account_id, subject=subject)
     try:
         agent = await load_backend_agent(
@@ -408,19 +354,30 @@ async def _apply(
         )
     except AgentBackendRefused:
         return await end("refused", f"{reference.agent} is no longer available. Nothing changed.")
+    if not reference.for_everyone and await answers_for_everyone(
+        sessionmaker, agent, default_agent_name=deployment_default.agent_name
+    ):
+        return await end(
+            "refused",
+            default_agent_switch_text(
+                agent.name,
+                reference.target_backend,
+                place=place_word,
+                me=claimed.answering_agent_name == agent.name,
+            ),
+        )
     try:
         await service.set_backend(
             agent,
             reference.target_backend,
             reference.expected_revision,
             actor,
-            expected_preview_digest=reference.preview_digest,
             model=reference.model,
-            settings=reference_settings(reference),
-            **(
-                {"accepted_drops": reference.accepted_drops}
-                if reference.accepted_drops is not None
-                else {}
+            settings=stated_settings(
+                reference.thread_mode,
+                reference.required_capabilities,
+                reference.effort,
+                reference.profile,
             ),
         )
     except AgentBackendRefused as exc:
@@ -436,15 +393,12 @@ async def _apply(
                 )
                 + " Nothing changed.",
             )
-        return await end(
-            "refused", "This switch was refused when it was confirmed. Nothing changed."
-        )
-    except BackendUnsupported:
+        line, _ = refusal_card(exc, provider=reference.target_backend, admin=is_admin)
+        return await end("refused", f"{line} Nothing changed.")
+    except BackendUnsupported as unsupported:
         log.warning("switch_card.unsupported", card_id=str(card_id))
-        return await end(
-            "refused",
-            f"{provider_name(reference.target_backend)} can't run here right now. Nothing changed.",
-        )
+        line, _ = refusal_card(unsupported, provider=reference.target_backend)
+        return await end("refused", f"{line} Nothing changed.")
     pin = await channel_pin_line(
         sessionmaker, tenant_id=tenant_id, platform=claimed.platform, channel_id=claimed.channel_id
     )
@@ -463,5 +417,6 @@ async def _apply(
     log.info("switch_card.applied", card_id=str(card_id), target=reference.target_backend)
     return await end(
         "applied",
-        f"Switched {reference.agent} to {provider_name(reference.target_backend)}. {moved}",
+        f"{reference.agent} now uses "
+        f"{uses_phrase(reference.target_backend, reference.model)}. {moved}",
     )

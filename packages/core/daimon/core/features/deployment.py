@@ -44,13 +44,7 @@ def _set(block: object | None, name: str) -> bool | None:
 _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "thread_naming": lambda s: _set(s.thread_naming, "enabled"),
     "private_channel_messages": lambda s: _set(s.private_channel_messages, "enabled"),
-    "native_footer_cost": lambda s: _set(s.turn, "native_footer_cost"),
-    "status_log": lambda s: _set(s.turn, "status_log"),
-    "writers_none_notice": lambda s: _set(s.discord, "writers_none_notice"),
-    "unmentioned_reply_hint": lambda s: _set(s.discord, "unmentioned_reply_hint"),
-    "waiting_card": lambda s: _set(s.discord, "tenant_cap_waiting_card"),
     "watches": lambda s: _set(s.watches, "enabled"),
-    "artifact_images": lambda s: _set(s.artifacts, "embed_images"),
     "tool_safety": lambda s: _set(s.tool_safety, "enabled"),
     "reach_budget": lambda s: _set(s.outbound, "reach_budget_enabled"),
     "require_routine_destination": lambda s: _set(s.mcp, "require_routine_destination"),

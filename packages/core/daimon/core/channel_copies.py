@@ -21,7 +21,8 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -29,7 +30,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
-from daimon.core.permissions import without_agent_rules
+from daimon.core.permissions import SEALED_REFUSAL, without_agent_rules
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -45,6 +46,7 @@ _log = structlog.get_logger(__name__)
 
 ArchiveRefusal = Literal[
     "admin_required",
+    "sealed_channel",
     "not_found",
     "ambiguous",
     "not_channel_copy",
@@ -56,6 +58,7 @@ ArchiveRefusal = Literal[
 
 _REFUSALS: dict[ArchiveRefusal, str] = {
     "admin_required": "Only an admin can archive an agent.",
+    "sealed_channel": SEALED_REFUSAL,
     "not_found": "There is no agent by that name.",
     "ambiguous": "More than one agent has that name, or it changed: list the agents again.",
     "not_channel_copy": (
@@ -120,9 +123,16 @@ def archive_refusal(
 
 
 async def _find(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str, expected_ma_agent_id: str | None
+    client: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    expected_ma_agent_id: str | None,
 ) -> BetaManagedAgentsAgent:
-    found = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    found = await find_agents_by_daimon_tag(
+        client, tenant_id=tenant_id, name=name, records=sessionmaker
+    )
     if not found:
         raise ChannelCopyArchiveRefused("not_found")
     if len(found) > 1 or (expected_ma_agent_id not in (None, found[0].id)):
@@ -148,14 +158,26 @@ async def archive_channel_copy(
     a copy freed from its channel and still running.
     """
     agent = await _find(
-        client, tenant_id=tenant_id, name=name, expected_ma_agent_id=expected_ma_agent_id
+        client,
+        sessionmaker,
+        tenant_id=tenant_id,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
     )
     names = {n for n in agent_pin_names(agent.name, agent.metadata) if n}
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not authorize(policy, subject=subject, action=Action.ARCHIVE_CHANNEL_COPY):
-            raise ChannelCopyArchiveRefused("admin_required")
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=Action.ARCHIVE_CHANNEL_COPY,
+            agent=AgentRef.of(name, *names),
+        )
+        if not decision:
+            raise ChannelCopyArchiveRefused(
+                "sealed_channel" if decision.reason == "sealed_channel" else "admin_required"
+            )
         tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
         refusal = archive_refusal(
             name=name,
@@ -168,7 +190,9 @@ async def archive_channel_copy(
         )
         if refusal is not None:
             raise ChannelCopyArchiveRefused(refusal)
-        await archive_agent(client, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
+        await archive_agent(
+            client, agent.id, scope=resource_scope(tenant_id=str(tenant_id)), records=sessionmaker
+        )
         updated = without_agent_rules(policy, names)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)
@@ -181,9 +205,12 @@ async def archive_channel_copy(
             tenant_id=tenant_id,
             agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
         )
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         # The agent is archived already; its store is an audit trail, kept.
         _log.warning(
-            "channel_copy.memory_store_archive_failed", tenant_id=str(tenant_id), agent=name
+            "channel_copy.memory_store_archive_failed",
+            tenant_id=str(tenant_id),
+            agent=name,
+            causes=backend_refusal_causes(error),
         )
     return ArchivedCopy(name=name, agent_id=agent.id, closed_channel_id=closing_channel_id)

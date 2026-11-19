@@ -52,17 +52,19 @@ from daimon.adapters.teams.setup_conversation import (
     end_setup_conversation,
     open_setup_conversation,
 )
-from daimon.core import channel_backend
+from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails, GitHubDeploymentFacts, load_agent_details
+from daimon.core.agent_editing import AgentEditDeps
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_blank_agent
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
-from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_panel import load_grants_panel
@@ -73,7 +75,21 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
-from daimon.core.models_catalog import ModelChoice, list_model_choices
+from daimon.core.model_switch import (
+    ModelPicker,
+    SwitchRefusal,
+    back_to_claude,
+    panel_actor,
+    panel_edit_deps,
+    pick_or_refusal,
+    read_picker,
+    set_effort,
+)
+from daimon.core.models_catalog import (
+    ModelChoice,
+    claude_model_choices,
+    is_priced_claude_model,
+)
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.native_admins import AdminCaller, load_live_subject
@@ -102,8 +118,6 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import AdaptiveCard
-from mux.contracts.config import BackendConfig
-from mux.contracts.ids import Provider
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger()
@@ -152,7 +166,19 @@ def _page(data: Mapping[str, object]) -> int:
 
 
 def _models() -> tuple[ModelChoice, ...]:
-    return list_model_choices(default=DEFAULT_AGENT_MODEL)
+    return claude_model_choices(default=DEFAULT_AGENT_MODEL)
+
+
+_MODEL_OPS = frozenset(
+    {
+        "backend_preview",
+        "backend_confirm",
+        "backend_cancel",
+        "backend_back",
+        "backend_again",
+        "effort_set",
+    }
+)
 
 
 class SetupPanel:
@@ -297,8 +323,12 @@ class SetupPanel:
             return dialog_message(exc.refusal)
         except SkillIngestError as exc:
             return dialog_message(f"{exc} Nothing was added.")
-        except (DaimonError, anthropic.APIError):
-            log.exception("teams.agent_setup.skill_add_failed", agent_name=agent.name)
+        except (DaimonError, anthropic.APIError) as error:
+            log.exception(
+                "teams.agent_setup.skill_add_failed",
+                agent_name=agent.name,
+                causes=backend_refusal_causes(error),
+            )
             return dialog_message(
                 f"Adding {bundle.preview.name} to {agent.name} failed. Try again."
             )
@@ -421,6 +451,7 @@ class SetupPanel:
                     is_admin=is_admin,
                     platform="teams",
                     default=self._runtime.deployment_default,
+                    records=self._runtime.sessionmaker,
                 )
             )
             return await load_roster(
@@ -432,6 +463,7 @@ class SetupPanel:
                 thread_id=None,
                 default=self._runtime.deployment_default,
                 viewer=viewer,
+                records=self._runtime.sessionmaker,
             )
 
     async def _agents(
@@ -468,6 +500,7 @@ class SetupPanel:
                     is_admin=viewer.is_admin,
                     platform="teams",
                     default=self._runtime.deployment_default,
+                    records=self._runtime.sessionmaker,
                 ),
             )
 
@@ -511,6 +544,7 @@ class SetupPanel:
             is_admin=actor.is_admin,
             platform="teams",
             default=self._runtime.deployment_default,
+            records=self._runtime.sessionmaker,
         )
         if viewer is None:
             return details
@@ -554,12 +588,16 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
-                web=web_links(
+                web=await web_links(
                     self._runtime,
                     actor.tenant_id,
                     admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                     foreign=actor.foreign,
+                    channel_id=actor.channel_thread[0],
+                    thread_id=actor.channel_thread[1],
+                    agent_id=match.ma_agent_id,
                 ),
+                records=self._runtime.sessionmaker,
             )
             details = await self._without_hidden_places(session, actor, details)
             # Only a member's ownership adds anything: an admin already gets every control.
@@ -582,22 +620,18 @@ class SetupPanel:
         channel_names = await self._channel_names(
             actor.tenant_id, cards.place_channel_ids(details, here=actor.conversation_id)
         )
-        backend_options: tuple[Provider, ...] = ()
-        backend_selection: Provider | None = None
-        if actor.admin_for(
-            DelegatedAction.AGENT_SETTINGS
-        ) and channel_backend.backend_selection_enabled(self._runtime.settings.turn):
-            service = channel_backend.make_backend_service(
-                self._runtime.sessionmaker, self._runtime.settings.turn
+        model_picker: ModelPicker | None = None
+        if actor.admin_for(DelegatedAction.AGENT_SETTINGS) or owned:
+            model_picker = await read_picker(
+                channel_backend.make_backend_service(
+                    self._runtime.sessionmaker,
+                    self._runtime.settings.turn,
+                    capture_source=channel_backend.NO_CAPTURE,
+                ),
+                self._edit_deps(),
+                tenant_id=actor.tenant_id,
+                agent_name=name,
             )
-            selection = await service.read_selection(
-                self._runtime.anthropic, tenant_id=actor.tenant_id, agent_name=name
-            )
-            if selection is not None:
-                backend_options = selection.policy.enabled_backends
-                backend_selection = (
-                    selection.revision.backend if selection.revision is not None else None
-                )
         return cards.details_card(
             details,
             here=actor.conversation_id,
@@ -607,9 +641,117 @@ class SetupPanel:
             owned=owned,
             github_panel=github_panel,
             expanded=expanded,
-            backend_options=backend_options,
-            backend_selection=backend_selection,
+            model_picker=model_picker,
             channel_names=channel_names,
+        )
+
+    def _edit_deps(self) -> AgentEditDeps:
+        return panel_edit_deps(
+            self._runtime.settings,
+            client=self._runtime.anthropic,
+            session_factory=self._runtime.sessionmaker,
+            resolver_cache=self._runtime.resolver_cache,
+            deployment_default=self._runtime.deployment_default,
+        )
+
+    async def _model_op(
+        self,
+        activity: AdaptiveCardInvokeActivity,
+        actor: Actor,
+        op: str,
+        data: Mapping[str, object],
+        page: int,
+    ) -> AdaptiveCardInvokeResponse:
+        """Pick a model and it applies; or step back, or switch back to Claude.
+
+        Switch on a card from before picks applied at once applies its pick. Who may
+        change the agent is decided by the write (admin or owner), not by the card.
+        """
+        name = str(data.get("agent") or "")
+        admin = actor.admin_for(DelegatedAction.AGENT_SETTINGS)
+
+        async def audit(outcome: PanelOutcome, reason: str) -> None:
+            await record_panel_write(
+                self._runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                platform_user_id=actor.user_id,
+                op="agent_backend",
+                outcome=outcome,
+                reason=reason,
+                agent_name=name,
+            )
+
+        async def details() -> AdaptiveCardInvokeResponse:
+            card = await self._details(actor, name, page)
+            return replace_card(card) if card is not None else toast(GONE)
+
+        if op == "backend_cancel":
+            return await details()
+        value = str(data.get("model_pick" if op == "backend_preview" else "target") or "")
+
+        def refused(refusal: SwitchRefusal) -> AdaptiveCardInvokeResponse:
+            return replace_card(
+                cards.model_switch_card(
+                    (refusal.line,), agent_name=name, value=value, action=refusal.action
+                )
+            )
+
+        account_id = await get_or_create_account(self._runtime, actor)
+        subject = build_subject(
+            is_admin=admin, platform_user_id=actor.user_id, origin_channel_ids=actor.origin
+        )
+        service = channel_backend.make_backend_service(
+            self._runtime.sessionmaker,
+            self._runtime.settings.turn,
+            capture_source=backend_capture.for_agent(
+                self._runtime.turn_deps, account_id=account_id, subject=subject
+            ),
+        )
+        edit = self._edit_deps()
+        who = panel_actor(tenant_id=actor.tenant_id, account_id=account_id, subject=subject)
+        if op == "backend_back":
+            done = await back_to_claude(
+                service,
+                edit,
+                actor=who,
+                agent_name=name,
+                platform="teams",
+                channel_id=actor.conversation_id,
+                admin=admin,
+            )
+            if isinstance(done, SwitchRefusal):
+                await audit("denied", done.reason)
+                return refused(done)
+            await audit("allowed", "switched_back")
+            return await details()
+        if op == "effort_set":
+            done = await set_effort(
+                service,
+                edit,
+                actor=who,
+                agent_name=name,
+                effort=str(data.get("effort_pick") or ""),
+                admin=admin,
+            )
+            if isinstance(done, SwitchRefusal):
+                await audit("denied", done.reason)
+                return refused(done)
+            await audit("allowed", "effort_set")
+            return await details()
+        if not value:
+            return toast("That pick is no longer on the card.\nChoose a model again.")
+        done = await pick_or_refusal(
+            service, edit, actor=who, agent_name=name, value=value, admin=admin
+        )
+        if isinstance(done, SwitchRefusal):
+            await audit("denied", done.reason)
+            return refused(done)
+        await audit("allowed", "completed")
+        if not done.lines:
+            return await details()
+        return replace_card(
+            cards.model_switch_card(done.lines, agent_name=name, value=value, refused=False)
         )
 
     async def _act(
@@ -621,117 +763,8 @@ class SetupPanel:
             return toast(DENIED)
         data = activity.value.action.data
         op, page, chat = data.get("op"), _page(data), actor.conversation_id
-        if op in ("backend_preview", "backend_confirm", "backend_cancel"):
-            name = str(data.get("agent") or "")
-            if not actor.admin_for(
-                DelegatedAction.AGENT_SETTINGS
-            ) or not channel_backend.backend_selection_enabled(self._runtime.settings.turn):
-                await record_panel_write(
-                    self._runtime.sessionmaker,
-                    tenant_id=actor.tenant_id,
-                    platform="teams",
-                    platform_user_id=actor.user_id,
-                    op="agent_backend",
-                    outcome="denied",
-                    reason="needs_admin"
-                    if not actor.admin_for(DelegatedAction.AGENT_SETTINGS)
-                    else "feature_disabled",
-                    agent_name=name,
-                )
-                return toast("Model provider wasn't changed. Ask an organisation admin.")
-            if op == "backend_cancel":
-                card = await self._details(actor, name, page)
-                return replace_card(card) if card is not None else toast(GONE)
-            service = channel_backend.make_backend_service(
-                self._runtime.sessionmaker, self._runtime.settings.turn
-            )
-            choice = str(data.get("model_backend" if op == "backend_preview" else "target") or "")
-            target = BackendConfig.model_validate(
-                {"backend": None if choice == "clear" else choice}
-            ).backend
-            selection = await service.read_selection(
-                self._runtime.anthropic,
-                tenant_id=actor.tenant_id,
-                agent_name=name,
-                target_backend=target,
-            )
-            if selection is None:
-                await record_panel_write(
-                    self._runtime.sessionmaker,
-                    tenant_id=actor.tenant_id,
-                    platform="teams",
-                    platform_user_id=actor.user_id,
-                    op="agent_backend",
-                    outcome="denied",
-                    reason="selection_unavailable",
-                    agent_name=name,
-                )
-                return toast("That preview isn't available. Nothing was changed; choose again.")
-            if op == "backend_preview":
-                preview = selection.preview
-                return replace_card(
-                    cards.backend_preview_card(preview, agent_name=name, clear=target is None)
-                )
-            local, digest = data.get("revision"), data.get("digest")
-            if (
-                not isinstance(local, int)
-                or isinstance(local, bool)
-                or local < 0
-                or not isinstance(digest, str)
-                or not digest
-            ):
-                return toast("That preview is no longer available. Choose a model provider again.")
-            account_id = await get_or_create_account(self._runtime, actor)
-            live_actor = await card_actor(self._runtime, activity)
-            if live_actor is None:
-                return toast(DENIED)
-            verified = channel_backend.BackendActor(
-                tenant_id=live_actor.tenant_id,
-                account_id=account_id,
-                subject=build_subject(
-                    is_admin=live_actor.admin_for(DelegatedAction.AGENT_SETTINGS),
-                    platform_user_id=live_actor.user_id,
-                ),
-            )
-            try:
-                current = await channel_backend.load_backend_agent(
-                    self._runtime.anthropic,
-                    self._runtime.sessionmaker,
-                    tenant_id=actor.tenant_id,
-                    agent_name=name,
-                )
-                if target is None:
-                    await service.clear_backend(
-                        current, local, verified, expected_preview_digest=digest
-                    )
-                else:
-                    await service.set_backend(
-                        current, target, local, verified, expected_preview_digest=digest
-                    )
-            except channel_backend.AgentBackendRefused as exc:
-                await record_panel_write(
-                    self._runtime.sessionmaker,
-                    tenant_id=actor.tenant_id,
-                    platform="teams",
-                    platform_user_id=actor.user_id,
-                    op="agent_backend",
-                    outcome="denied",
-                    reason=exc.reason,
-                    agent_name=name,
-                )
-                return toast(str(exc))
-            await record_panel_write(
-                self._runtime.sessionmaker,
-                tenant_id=actor.tenant_id,
-                platform="teams",
-                platform_user_id=actor.user_id,
-                op="agent_backend",
-                outcome="allowed",
-                reason="completed",
-                agent_name=name,
-            )
-            card = await self._details(live_actor, name, page)
-            return replace_card(card) if card is not None else toast(GONE)
+        if op in _MODEL_OPS:
+            return await self._model_op(activity, actor, str(op), data, page)
         if op == "details":
             name, expanded = str(data.get("agent") or ""), cards.expanded_list(data)
             card = await self._details(actor, name, page, expanded)
@@ -788,7 +821,7 @@ class SetupPanel:
         error, created_id = None, None
         if not _NAME.match(name):
             error = "Name must be 1-64 characters: letters, digits, hyphens, underscores."
-        elif values["model"] not in ALLOWED_MODEL_IDS:
+        elif not is_priced_claude_model(values["model"]):
             error = "Choose a model from the list."
         else:
             mcp_url = self._runtime.settings.mcp.public_url
@@ -892,6 +925,7 @@ class SetupPanel:
                 self._runtime.anthropic,
                 target.ma_agent_id,
                 scope=resource_scope(tenant_id=str(actor.tenant_id)),
+                records=self._runtime.sessionmaker,
             )
             agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
         decision, bound_channel_id = authorize_coding_token(

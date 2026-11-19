@@ -30,17 +30,20 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
     list_skills_lenient,
+    pick_renamed_seeded_agent,
 )
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    SEEDED_AGENT_RENAME,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -149,7 +152,12 @@ async def retrieve_agent_cached(
 
 
 async def retrieve_environment_cached(
-    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, environment_id: str
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    tenant_id: uuid.UUID,
+    environment_id: str,
+    *,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     key = (tenant_id, environment_id)
@@ -158,7 +166,9 @@ async def retrieve_environment_cached(
             cache.environments,
             cache.environment_retrieves,
             key,
-            lambda: retrieve_environment(client, environment_id, scope=backend_scope),
+            lambda: retrieve_environment(
+                client, environment_id, scope=backend_scope, records=records
+            ),
         )
     except ScopeViolation:
         cache.environments.pop(key, None)
@@ -204,7 +214,10 @@ async def list_skills_lenient_cached(
 
 
 async def _list_derived_agents(
-    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None,
 ) -> _DerivedAgents:
     """The tenant's live agents by derived uuid, one listing for concurrent callers."""
     task = cache.derived_agent_listings.get(tenant_id)
@@ -213,7 +226,9 @@ async def _list_derived_agents(
         async def load() -> _DerivedAgents:
             agents = {
                 derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id): agent
-                for agent in await list_agents_by_tenant(client, tenant_id=tenant_id)
+                for agent in await list_agents_by_tenant(
+                    client, tenant_id=tenant_id, records=records
+                )
             }
             # Publish before the task completes, as `_retrieve_shared` does.
             for derived, agent in agents.items():
@@ -234,7 +249,12 @@ async def _list_derived_agents(
 
 
 async def find_agent_by_derived_uuid_cached(
-    client: AsyncAnthropic, cache: ResolverCache, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
     """`find_agent_by_derived_uuid` without listing every agent in the org per call.
 
@@ -247,10 +267,10 @@ async def find_agent_by_derived_uuid_cached(
     key = (tenant_id, agent_id)
     ma_agent_id = cache.derived_agent_ids.get(key)
     if ma_agent_id is None:
-        return (await _list_derived_agents(client, cache, tenant_id)).get(agent_id)
+        return (await _list_derived_agents(client, cache, tenant_id, records)).get(agent_id)
     try:
         agent = await retrieve_agent(
-            client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id)), records=records
         )
     except ScopeViolation:
         return None  # the agent is stamped for another tenant now
@@ -374,12 +394,19 @@ async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind
 def _route_builtin(
     found: dict[str, str], agents: list[BetaManagedAgentsAgent], tenant_id: uuid.UUID
 ) -> None:
-    """Point the built-in name at the seeded agent, never at a workspace's own."""
+    """Point the built-in name at the seeded agent, never at a workspace's own.
+
+    `daimon` still answers with the seeded agent once renamed, for a reference
+    a rollback wrote under the old name (`SEEDED_AGENT_RENAME`).
+    """
     seeded = route_builtin_agent(agents, tenant_id=tenant_id, surface="ma_resolver")
     if seeded is None:
         found.pop(BUILTIN_AGENT_NAME, None)
     elif seeded:
         found[BUILTIN_AGENT_NAME] = seeded[0].id
+    renamed = pick_renamed_seeded_agent(agents)
+    if renamed is not None:
+        found.setdefault(SEEDED_AGENT_RENAME[0], renamed.id)
 
 
 async def _lookup_tags(
@@ -406,6 +433,15 @@ async def _lookup_tags(
 
         task.add_done_callback(clear)
     return await asyncio.shield(task)
+
+
+async def find_agent_id_cached(
+    client: AsyncAnthropic, cache: ResolverCache, *, tenant_id: uuid.UUID, name: str
+) -> str | None:
+    """The live agent `name` (its daimon tag) resolves to, from the cache or one shared
+    listing; None when there is none. Unlike `resolve_agent`, never applies defaults."""
+    found = cache.get((tenant_id, "agent", name))
+    return found or (await _lookup_tags(client, tenant_id, "agent", cache)).get(name)
 
 
 async def resolve_agent(

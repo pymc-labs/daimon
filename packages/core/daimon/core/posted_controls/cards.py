@@ -79,7 +79,15 @@ CardState = Literal[
 #: `env_file` is a bulk upload of one .env file; the other four match the
 #: single-value request kinds in `daimon.core.credential_requests`.
 CardKind = Literal[
-    "env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "watch_credential", "switch"
+    "env",
+    "env_file",
+    "mcp",
+    "mcp_oauth",
+    "repo",
+    "skill_repo",
+    "watch_credential",
+    "switch",
+    "call",
 ]
 RefusalReason = Literal[
     "admin_required",
@@ -155,20 +163,22 @@ class CardButton(BaseModel):
     """One button on a posted card.
 
     A `primary` button opens the private form and carries the request token in
-    its `custom_id`; a `link` button just sends the person to a URL.
+    its `custom_id`; a `link` button just sends the person to a URL. On a card
+    answered in place (a call or switch), `primary` is its one filled action and
+    `secondary` the plain one beside it.
     """
 
     model_config = ConfigDict(frozen=True)
 
     label: str
-    style: Literal["primary", "link"]
+    style: Literal["primary", "secondary", "link"]
     custom_id: str | None = None
     url: str | None = None
 
     @model_validator(mode="after")
     def _check_style_matches_target(self) -> Self:
-        if self.style == "primary" and (self.custom_id is None or self.url is not None):
-            raise ValueError("style='primary' needs a custom_id and no url")
+        if self.style != "link" and (self.custom_id is None or self.url is not None):
+            raise ValueError(f"style={self.style!r} needs a custom_id and no url")
         if self.style == "link" and (self.url is None or self.custom_id is not None):
             raise ValueError("style='link' needs a url and no custom_id")
         return self

@@ -19,8 +19,8 @@ __all__ = [
     "HANDED_OVER_NOTICE",
     "LOST_WORKSPACE_NOTICE",
     "mcp_failure_notices",
+    "missing_skills_notice",
     "render_agent_notices",
-    "stale_switch_notice",
 ]
 
 _REASON = {
@@ -60,14 +60,12 @@ def mcp_failure_notices(failures: Sequence[McpServerFailure]) -> tuple[str, ...]
     )
 
 
-def stale_switch_notice(provider: str) -> str:
-    """This turn runs on the agent's source: its switch's consent went stale."""
-    from daimon.core.turn.notices import provider_name
-
+def missing_skills_notice(names: Sequence[str]) -> str:
+    """Skills this conversation goes without: too large, unreadable or refused on upload."""
+    listed = ", ".join(f"`{_server(name)}`" for name in names)
     return (
-        f"Your switch to {provider_name(provider)} needs to be confirmed again, so this reply "
-        "runs on Anthropic. Offer to switch again (request_agent_backend_switch), so the "
-        "person can confirm it on the new card."
+        f"These skills could not be added to this conversation, so they are missing: {listed}. "
+        "An admin can check them."
     )
 
 

@@ -16,6 +16,504 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Agent copies such as `daimon-copy` keep their names. Skills synced to the built-in agent before the rename keep their `daimon/` title prefix.
   `daimon selfhosted init --name` defaults to `default`.
   On Discord, a reply from the deployment's default agent is unlabelled under any name, as on Slack and Teams.
+- **Agents can wake on posts to a private link.** `create_watch` with source
+  `callback` DMs the owner a secret link; each post to it wakes the agent once.
+  Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
+  `callback_watch_lifetime` feature (30 days by default, or permanent) and a post
+  may carry up to `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default).
+  `daimon watches import` also carries over such watches and held reminders from
+  every file of an export, and `daimon watches go-live` makes everything an import
+  holds for an agent live in one step, in place of `daimon watches confirm`.
+  Reminders fire in the private conversation, thread or channel they came from,
+  only while the agent may post there and the owner can still see it. A rerun
+  updates what has not gone live, `--full` cancels what no file of the run lists,
+  and `unpause`, `renew` and `rotate-link` manage what came in.
+  Moving people in never messages them. A timers or callback import names its
+  agent: held timers belong to it, so another agent's `go-live` and `--full` run
+  leave them alone. Reminders in a private conversation or channel only fire for an
+  agent on Managed Agents (a plain channel's own backend setting wins over the agent's);
+  `go-live` lists the others by name and schedules none.
+  Each watch imports in its own transaction, so watch ingress never waits for a
+  whole import. Importing the same files again after a privacy purge restores the
+  purged rows, so delete the import files after use. `daimon watches confirm` is
+  removed. After the `callback_watch_imports` migration, roll back by downgrading
+  it first, because an old sidecar refuses the new grant. Reminders set in a
+  private conversation now fire; those already due when this deploys are settled
+  without firing. A callback watch cannot be made in a private conversation, and
+  the lane proxy now routes callback links with the configured body limit.
+- **Operators can move people in from another bot.** `daimon tags import` opts
+  listed Discord members out of being tagged. `daimon dm import-history` holds
+  each person's earlier private conversation for their first DM here with the
+  agent it names, which starts from it once, without saying so.
+- **Answer and unattended run time limits.** Two new workspace and agent settings, set
+  by server admins, limit how long one turn may run: `turn_time_limit` for a person's
+  message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
+  nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
+  Each takes 15, 20, 30 or 45 minutes, 45 by default, and the smallest setting wins.
+- **Hide the server name on tool lines.** A new workspace or agent setting,
+  `tool_server_names`, drops the connected server's name from the working card's tool lines.
+- **Model and effort reactions in Discord.** A new setting, off by default, reacts
+  to the first message in a thread, and to the first after the model or effort
+  changes, with an emoji for the model and one for the effort.
+- **An answer message cap setting.** In Discord, an answer posts up to 5 messages
+  as before, and past that is attached as a file. A setting from 1 to 1000
+  changes the cap for a workspace, agent, channel or thread.
+- **A channel background setting.** A new setting, `channel_history`, sets how many recent
+  channel messages (none, 10, 25, 50 or 100; 25 by default) a thread started from a channel
+  message reads for background, never more than its chat history setting allows.
+- **Answers in a thread another bot already opened.** When a channel's other
+  bot threads every message, Discord answers in that thread instead of
+  reporting that it could not open one.
+- **An edit that adds a mention gets an answer.** Editing a message to mention
+  the bot in Discord answers it like a new mention, once.
+- **Routines can run role-gated agents for an owner who holds the role.**
+  Before, a routine on an agent limited to certain Discord roles was always
+  refused. Now it runs as its owner, whose membership is read live at each
+  run and each send; it needs every required role, and an admin without them
+  does not qualify. Saving or editing such a routine needs the same of the
+  person saving. If the owner loses a role the run is skipped, the owner gets
+  one direct message on Discord, and the routine is paused until someone
+  resumes it. `daimon routines check-roles` lists the routines whose owner
+  would be paused or refused. Long jobs are still refused.
+- **A remote MCP server can attribute writes to the person who asked.** An
+  identity relay server set to `"auth": "bearer"` is called with one key from
+  `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the
+  workspaces and agents that may use it. With `"requester_meta": true` Daimon
+  removes any `requester_platform_user_id`, `requester_conversation` or
+  `requester_kind` a tool call carries in `params._meta`, then sets them from
+  the person's own turn (their user id, where it runs, kind `"person"`) or any
+  unattended run such as a routine, watch, timer, wake or DM routine (the person
+  it runs for, its place, kind `"routine"`). A routine's owner is signed into
+  its credential and must still match at call time. Keys are removed under every
+  method's `_meta`. Senders from another organisation, replaced sessions and two
+  turns at once carry none. A body that is not strict JSON, or cannot be
+  re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
+  in the servers JSON only after every service runs this release; older images
+  reject unknown keys.
+- **Other chat apps' names are no longer replaced.** Replies, status lines, routine
+  posts, tool sends and edits, and Discord thread names keep whatever the model
+  wrote. The instruction not to name another chat app, and the quote clause that
+  went with it, are gone from the prompt, and a prompt line that names another chat
+  app is no longer dropped, so a line a tenant wrote such as "post the summary in
+  Slack" stays; each platform's prompt still says where Daimon works there.
+  Because the system prompt changed, existing Discord, Slack and Teams sessions
+  are replaced once.
+- **The operator can set Approvals from the command line.** `daimon features set
+  approvals <on|off> --reason "..."` works for a workspace, channel or thread,
+  without a chat admin. The reason is required, and the audit log records the
+  operator, the old and new value and the reason. Other features refuse
+  `--reason`. Chat users who are not admins and agent keys are refused as before.
+- **Choose who may DM which agent.** Each agent has a DM grant (every member, only those
+  listed, or all but those listed, by person or group: a Discord role, Slack user group
+  or Teams team), and a server has a default agent and ordered rules that send a person,
+  a group or everyone to an agent. A locked rule decides alone. When several agents
+  admit a person, a picker lets them choose, answers the messages sent meanwhile in one
+  turn and remembers the choice. A server with no rules or narrower grants keeps its
+  earlier DM behaviour: only the default agent answers, and a Teams personal chat
+  without one keeps its own agent. `/dm-me`, cold DMs (Slack too), Teams personal chats
+  (DMs on by default there), hand-overs and agents that send DMs follow the same grants,
+  and a failed group lookup refuses. Slack user groups need the `usergroups:read` scope
+  and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web
+  app (Admin > Agent access and Admin > Workspace, with a "Check a person" box that
+  reads the person's groups from the platform) or from chat, each change checked and
+  audited; `daimon features set direct_messages on|off` turns DMs on or off
+  (`daimon tenants dm-policy` is gone: `dm default` and `features set` replace it).
+  `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
+  access; until it is removed the env setting applies with it on every path, `dm
+  explain` included. Erasing a person removes their pick, rules and grant entries.
+- **Teams personal chats follow the DM settings.** The DM wait, DM history depth
+  and read-only DM memory apply to them as they do to Discord and Slack DMs.
+- **Direct messages take files, forwards and replies.** A picture or a file sent in a
+  direct message reaches the agent as it does in a channel, and a message with only a
+  picture is answered. A forwarded message is passed as untrusted content, and a
+  reply shows the message it answers. A forward is also passed in channels.
+- **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
+  messages each direct message reply carries: 12 (the default; 100 on Teams), 25, 50 or 100, at the
+  deployment, workspace and agent levels. The smallest setting wins. It applies to
+  Discord, Slack and web direct messages. A higher setting costs more.
+- **Direct messages wait for you to finish.** `dm_debounce_seconds` (off by default; 1, 3
+  or 5 seconds at the deployment or workspace) holds a direct message until nothing new
+  has arrived for that long, up to ten seconds after the first, then answers everything
+  sent in one turn.
+  Messages sent while a reply runs are answered together by the next one. Each held
+  message gets an eyes reaction until it is answered. An approval reply such as "yes"
+  is answered on its own, at once. A restart answers held messages at once. If
+  `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
+  sent. It applies to Discord, Slack and Teams, set per workspace or deployment.
+- **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
+  with no model, written by a new pod, makes old pods fail turns in that conversation
+  until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+- **Earlier turns are no longer sent again into a continuing session.** A Discord direct
+  message into a session that already answered a turn sends only the new message. A new,
+  replaced or recovered session, or one whose first turn failed, still gets the history.
+- **`/model` works in direct messages, with an effort choice.** `/model` in a direct
+  message sets the model for that conversation, and a new `effort` option (low, medium,
+  high, xhigh, max) sets how hard Claude thinks. Effort alone keeps the agent's model, and
+  a later model pick keeps the effort. `default` clears both. The `thread_model` MCP tool
+  takes the same `effort`. Effort has no effect on other providers.
+- **Fable is a model choice.** `/model` and the model pickers offer Fable, applied
+  like the other models.
+- **GPT threads start with skills whose description spans lines.** A SKILL.md
+  block scalar (`description: >`) made OpenAI refuse the session. `name` and
+  `description` now upload as one line, an invalid name such as
+  `marimo_notebooks` uploads as `marimo-notebooks`, and older copies upload again.
+- **Provider failures log the provider's reason.** Turn, session and sync
+  failure logs carry the redacted provider code, field and message.
+- **The first GPT or Gemini turn after a restart no longer stalls other turns.**
+  Workers load provider runtimes at startup, and log the blocking code's stack
+  when anything holds the event loop over a second.
+
+- **An agent's page shows it is loading.** While a slow agent loaded, the page
+  stayed blank.
+- **Switching a Gemini conversation's model no longer times out.** The switch
+  reads the agent's setup once instead of twice, and its reads run together.
+- **Agents switched to GPT or Gemini answer again.** A new conversation with
+  one was refused with "Something went wrong on our side".
+- **The Web app setting (`web_awareness`, was "Web app links") turns off every
+  mention of the web app at its place.** Off at the deployment, workspace,
+  agent, channel or thread leaves the web address out of routine runs and tool
+  results, hides and refuses the web invite, visitor link and web access tools
+  (on Claude, OpenAI and Gemini turns alike), leaves the web app rows out of
+  the agent's settings list and drops the "Open in web" buttons from Discord,
+  Slack and Teams cards there, as well as from a message's own controls. A card
+  in a channel follows the agent assigned there, an agent key its own agent, and
+  a routine's links the channel or thread it posts in. The people and group
+  lookups stay, since allowances and owners take their ids. Tool descriptions
+  and the setup skill no longer name the web app.
+- **Approval-gated tools work on OpenAI and Gemini turns as on Claude.** Each
+  one, reach approvals included, asks on the same card with the same checks,
+  and a tool Claude runs without asking runs at once. Claude's default speed
+  and effort are no longer reported as lost, an effort the new provider offers
+  carries over, and each setting that is lost is named.
+
+- **A sealed channel's conversations and its own agent stay in the channel,
+  admins included.** Admins no longer read another person's conversation from a
+  sealed or limited channel through the hub, even after the channel is opened
+  again. No hub lists a channel's own agent, and an admin can't run it from a DM
+  or the hub. Admins keep hub reads of open channels. Admins who used a home
+  channel's agent from a DM now use it in its channel.
+- **A private channel's settings change only from inside the channel, for admins
+  too.** In every install, an admin can't change a channel with limited readers,
+  or the agent that channel keeps to itself, from the web app, the hub or a DM.
+  That covers rules, prompt, tools and connections, budget, skills and
+  environments, feature switches including memory, coding keys, and reading the
+  agent's memory text. Use the settings panel or the chat tool in the channel.
+  An agent key, a resumed turn or a routine can't make these changes either.
+  Archiving an agent or environment that such a channel picks waits until the
+  channel picks another one, from inside. The operator CLI is unchanged, and so
+  are members and open channels.
+- **OpenAI turns record their tokens and cost when usage arrives late.** OpenAI
+  can end a turn before its turn resource reports usage, and fill it in up to
+  half an hour later. Daimon takes the usage the turn's completion event carries,
+  else the last usage the turn reported while it ran. A turn with neither is
+  billed from that value at first and re-read in the background for about an
+  hour, until the turn resource itself reports usage; what it reports is billed
+  then and counts toward spend caps. No turn waits for its usage, a replayed
+  turn keeps the counts already recorded, and a restart within that hour leaves
+  the turn unfinished.
+- **Switching an agent's or a thread's provider applies at once, like a model
+  change.** No card asks to confirm it on Discord, Slack, Teams or the web app,
+  and the switch tool and the CLI apply on the first call. What the new provider
+  can't run, such as some skills, MCP servers or tools, is off there and said once
+  as information; it comes back on a switch back. Creating an agent on an OpenAI
+  or Gemini model sets its provider. Who may switch, the provider allowlist,
+  prices and daily caps are unchanged, and a switch button posted earlier applies
+  the switch when pressed.
+- **An agent with a signed-identity MCP server stays in its channel and keeps no
+  memory.** Its channel turns run held: they post only in their channel and its
+  threads, send no DMs and have no admin tools. It keeps no long-term memory, and
+  its sessions are sealed to the channel: each channel turn starts a fresh session,
+  and it cannot read stored compute or job output. It neither hands work off nor
+  receives a handoff summary or carried work, and its helpers inherit these limits.
+  Agents without such a server are unchanged.
+- **An agent switched to OpenAI keeps answering there after its prompt or tools
+  change.** An agent whose Daimon tool list was long no longer fails to start on
+  OpenAI, and a provider that is set up is never reported as missing.
+- **Chat sessions keep notebook and report tools the MCP server is set up for.**
+  In a deployment where only the MCP server carries the notebook host, report host,
+  Gemini, cloud computer or Microsoft 365 settings, the worker running a chat turn no
+  longer drops those tools from the session. The MCP server judges that setup with
+  its own settings: without it, the tools leave every tool list it serves and a call
+  is refused as not set up yet. A capability turned Off still removes
+  its tools from the session. A settings panel on such a worker still lists the
+  feature as Not set up, but it can be turned Off, locked Off or reset to Default.
+- **Agents and threads can use GPT-6.2 Astra and GPT-6.2 Sol on OpenAI.** Pick
+  `gpt-6.2-astra` or `gpt-6.2-sol` as an agent's or a thread's model; `gpt-6-luna`
+  stays the default and `gpt-6-astra` stays available. GPT-6.2 Astra costs $8
+  input, $40 output, $0.40 cached input and $10 cache writes per million tokens;
+  GPT-6.2 Sol costs $2, $10, $0.10 and $2.50. Like GPT-6 Astra, a request above
+  272k input tokens is priced wholly at twice the input and cache rates and 1.5x
+  the output rate, an upper bound, and each model has its own daily cap. "astra"
+  names GPT-6.2 Astra and "gpt 6 astra" GPT-6 Astra; "sol" names GPT-6.2 Sol.
+- **Agents Daimon stores itself keep working when the built-in agent is
+  named `default`.** On an install that runs agents from its own records (for
+  example with an OpenAI or Gemini key and no Anthropic key), asking for
+  `daimon` now answers with the workspace's built-in agent renamed to
+  `default`. Defaults sync no longer creates a second `daimon` beside it, and
+  setup conversations find it. A user's own agent named `default` is never
+  taken for it.
+- **Admin > Support follows the order an admin sets Ask a person up.** Turn it
+  on for the workspace, choose where it shows, pick the request channel, then
+  set credit limits and menus in one list. The later steps stay open when it is
+  on but something is missing, and say what. Thumbs-down feedback has its
+  switch beside the request channel and in a channel's own settings. Adding a
+  limit for a person who already has one opens it. A menu in use says where it
+  is used. Requests no channel received open from **Not delivered**, where an
+  admin settles one with a charge within its price or declines it; the person
+  is not told.
+- **Admins manage credit limits, menus and the request channel for Ask a
+  person.** A limit sets credits for the workspace, an agent or a channel, for
+  everyone there, each person, or both. A request is charged at the most
+  specific place with a limit. One person's own limit sets their cap at a place
+  or everywhere. Start and end dates are set by hand. Menus of priced options,
+  and the channel that receives requests, are set under **Admin** > **Support**
+  in the web app, with `daimon support` and with the `support_*` MCP tools. See
+  [Ask a person](docs/support.md).
+- **A thumbs-down form can also be posted where Ask a person requests go.**
+  The `support_feedback` feature, off by default, posts a submitted form with
+  its reasons, text, person, agent and a link to the answer to the support
+  channel, and the form says so first. It spends no credits. See
+  [Ask a person](docs/support.md).
+- **A workspace can send Ask a person requests to its own channel.** The
+  `support_own_channel` feature, on by default, lets an admin pick the channel
+  instead of the deployment's one; off sends every request to the default
+  channel and locks the choice. See [Ask a person](docs/support.md).
+- **Ask a person offers a menu in Discord, Slack and Teams.** A
+  person picks an option, fills in its fields and sees what it costs and what is
+  left. A request priced by staff holds its minimum until someone in the support
+  channel sets the charge or declines it from the request's post. On Teams the
+  charge box and buttons are on the post itself. The person who asked is not told
+  the final charge. Workspace admins' requests are sent but charged nowhere.
+  Ask a person can be turned off for an agent or a channel as well as the
+  workspace, and locked. See [Ask a person](docs/support.md).
+- **Switching an agent to another provider works like a model pick.** A switch
+  that loses nothing applies at once, in Discord, Slack, Teams, the web app and
+  the MCP tools. A run nobody started, such as a routine, never applies one at once.
+  A switch that loses something asks once with a short card.
+  It reads "Switch Ada to GPT-6?" and "Stops working:" with every loss, plus any
+  shared-thread limit. A model pick's card has Cancel and Switch buttons.
+  Price, reach and thread lines are off the card; the model pickers show the price.
+  After an agent edit, a conversation's pick that loses nothing is kept again at once.
+- **Switching an agent to OpenAI or Gemini keeps its packages and network rules.**
+  Its sandbox is set up like the source agent's, also in threads that started
+  earlier. The switch preview names only what the provider cannot set up.
+- **OpenAI and Gemini agents search the web.** Web search is on by default and
+  carries over when an agent switches provider, with Google Search on Gemini.
+  A search that must ask first is still named on the switch card. Every search
+  is counted on every provider and billed at list price: $0.01 on Anthropic and
+  OpenAI, $0.014 on Gemini. Gemini's first 5,000 searches a month are free,
+  shared by the deployment's Gemini project. A replayed or retried turn never
+  counts a search twice, and two turns crossing the free limit split it exactly.
+- **A Gemini agent sends only the files it made.** The skills installed for
+  the agent, and the input files and repositories set up in its sandbox, are
+  never sent to the thread as the agent's files, also in conversations that
+  started earlier. A skill's own files stay out even if the agent edits them;
+  files the agent makes beside them, and input files it changes, are sent. The first
+  answer after switching an agent to Gemini carries no skill files.
+- **Switching an agent to Gemini keeps its large skills.** A skill with fonts,
+  images or other binary files, or over Gemini's 2 MiB inline limit, is
+  uploaded into the agent's sandbox, up to 28 MiB each. Only its `SKILL.md`
+  counts toward the 2 MiB that small skills share. A skill whose upload fails
+  is left out of that conversation, and the agent is told.
+- **Switching an agent with many skills to OpenAI or Gemini finishes its preview.**
+  The preview gets 90 seconds to read the agent's skills, and each skill it
+  reads is kept even when the preview runs out of time, so a retry picks up
+  where it stopped. The current version of a skill set to "latest" is looked
+  up at most every five minutes; the service that publishes a new one sees it
+  at once, other services within five minutes. The preview reads the agent's
+  tools and skills once for every model it offers. A skill too large to carry
+  is named on the card. One confirmation holds in every channel whose own
+  losses match it; a channel with its own skills, or a person's own servers,
+  can ask again. A brief provider error, or a change while the agent is set
+  up, asks to try again, without asking to confirm again.
+- **A model switch names what the provider's sandbox cannot keep.** On OpenAI
+  and Gemini the sandbox keeps a plain default environment, but not installed
+  packages, sandbox files or network rules, and the preview, the card and
+  the tool text now say exactly which ("its installed packages", "its network
+  rules") instead of claiming the whole sandbox carries over. A lone effort
+  setting reads "its effort setting". A confirmation that accepted the sandbox
+  or the model settings still covers these parts, so nobody confirms twice.
+- **Changing an agent's model to another provider's says it is the same agent.**
+  Cards, confirmations and tool results say "Researcher now uses Gemini 4
+  Argon", never a version or copy of the agent.
+- **Gemini 4 Carbon and Gemini 4 Hydrogen are selectable Gemini models.** They
+  join Gemini 4 Argon wherever a model is picked, each as a single attempt with
+  no fallback to Flash. Argon and Carbon cost more from 2026-12-01.
+- **An agent can run on a self-hosted model.** Once an operator grants the
+  agent, its model picker lists the self-hosted model, and one preview and
+  confirm switches it. A channel pin still wins.
+- **Self-hosted channels can share a thread.** Everyone in it works in one
+  session, and each person's own sign-ins stay hidden from the others.
+- **Self-hosted agents attach the files they save.** Files a self-hosted
+  agent writes to its outputs folder are attached to its reply on Discord,
+  Slack and Teams, as on other providers. Operators must update their harness
+  to 0.2.0 to get this; an older harness attaches no files.
+- **Picking another provider's model switches the agent.** Every place that
+  picks a model lists one catalog: Claude's models plus the OpenAI and Gemini
+  models the workspace has enabled, each with its price and without unpriced or
+  expired ones. Discord has `/model`, Slack the Model message shortcut, Teams
+  the `model` command, and the web has the agent editor and the chat header; the
+  Discord, Slack and Teams agent panels have one model select, and the separate
+  provider step is gone. The `update_agent` tool and `daimon agents create|update
+  --model provider:id` (for example `openai:gpt-6-luna`, with `--yes` and
+  `--accept-drops`) do the same. Admins can pin a channel to such a model from
+  its web page or by asking in chat, and an OpenAI agent can carry a low,
+  medium or high reasoning effort; Gemini agents take none. An unset effort shows as the model's
+  default, and Claude's max or extra-high effort becomes the new provider's
+  highest level on a switch.
+
+- **One conversation can run on another provider's model.** `set_thread_model`
+  takes a model from `list_models`, and the chat shortcuts above do the same for
+  one thread; the agent keeps its own model everywhere else. The
+  `thread_providers` feature lets anyone who may change a conversation's model
+  do this; off, only the agent's owner or an admin can. A conversation moved to
+  another provider keeps its recent messages in every direction, and its saved
+  files where the new provider has a persistent workspace. It also carries them
+  over when the agent, model or plan behind it changes, on routines and wakes
+  too, and keeps them for the next try when the first message fails.
+
+- **Every switch shows what changes first.** A pick on another provider shows
+  what the move drops, the shared-thread limits, the price and what happens to
+  threads, then asks once. Confirming accepts those losses, from chat, a panel
+  or the web editor, so the next message does not ask again; an agent switched
+  before this asks once more, then keeps the answer. When an admin edits the
+  agent after someone chose a model for a conversation, the next message there
+  posts the card once. A refusal gives one plain line for its cause, such as a
+  provider that is off, a shared thread that needs an admin, a price window that
+  ended or a switch to confirm again, and nothing changes.
+
+- **Ask to go back to Claude from any provider.** "Switch back to Claude" is on
+  refused replies, switch cards and panels for an admin when the install has a
+  Claude key. `daimon agents convert <name> [--to openai|gemini|anthropic]` moves
+  an agent in either direction. To OpenAI or Gemini it keeps the name, owner and
+  rules and retires the Claude original; back to Claude it keeps owner, threads,
+  routines, memory, settings and grants. Both bring the agent's own skills along
+  as the admin's, and name any they couldn't carry; run from the CLI they are
+  only named. Both are safe to re-run after a failure. Both are refused while the agent has queued
+  wakes, pending approvals or running jobs.
+
+- **Gemini works from the published image.** The image includes the Gemini SDK,
+  so Gemini no longer needs a custom image.
+
+- **Daimon runs with only an OpenAI or Gemini key.** With no Anthropic key,
+  setup seeds the default agents on the keyed provider at its default model, and
+  agents you create live there too, pinned, so no reply falls back to Anthropic.
+  Lookups of routines, rules, rosters, agent details, skills, MCP connections,
+  forks and reports use Daimon's own agent records as well as Claude's. Thread
+  titles and participation checks use a small model from the active provider,
+  or another keyed provider's when that model has no known price.
+  Environment lists and checks show environments Daimon keeps itself. An agent
+  still on Anthropic gets a card offering a copy on another provider. A channel
+  pinned to OpenAI without a channel row says whoever runs Daimon must add one.
+  Off Google Cloud, hosted OpenAI environments use a stored id; `daimon
+  deployment reset-id` makes a new one.
+
+- **OpenAI and Gemini agents keep more of what a Claude agent has.** OpenAI
+  and Gemini agents attach their custom and channel skills, also on a
+  channel-set deployment, uploaded once per version. A skill over its size
+  limit, or one that cannot be read or uploaded, is left out and named: on the
+  switch card for an agent's own skills, and to the agent itself otherwise. Gemini skills are
+  text only, 2 MiB in all. An OpenAI conversation that gains skills moves once
+  to a new session, keeping its recent messages and, where the workspace
+  persists, its saved files. Both providers read and write shared, personal
+  and channel memory through Daimon's tools, which needs an Anthropic key.
+  They ask copies of themselves through `ask_helper`, sharing $10 per
+  message: the first copy runs alone, and later ones start only while their
+  share still fits. A refused copy says why, such as a model
+  with no known price. OpenAI, Gemini and self-hosted agents open public https
+  pages through Daimon's page reader, under the place's web page setting.
+  Files an agent produces are posted on Discord, Slack, Teams and the web on
+  OpenAI and Gemini, each once. A spend limit now stops an OpenAI reply; cache
+  writes are not metered, so the count can fall slightly under the bill.
+
+- **An agent's own connectors and confirmations work on OpenAI and
+  Gemini.** The provider calls connectors through Daimon with a credential for
+  that reply only, and Daimon calls the connector with the person's sign-in, which the
+  provider never sees. Daimon keeps and renews those sign-ins; personal
+  connectors need one Reconnect after a switch. A tool that needs a
+  confirmation posts an Approve and Deny card that only the asker answers, and
+  an approved call runs once. Routines, watch wakes and long jobs keep Daimon's
+  tools, running what their rules allow. Operators can turn these off with the
+  `mcp_connector_relay` and `host_call_gate` features. Self-hosted agents get
+  neither.
+
+- **Shared, held and sealed channels run on other providers.** OpenAI and Gemini
+  agents answer in shared threads, without Daimon's tools or any caller's
+  personal stores, and in Slack Connect and other held channels with only that
+  channel's memory. An agent that picks OpenAI itself keeps Daimon's tools in
+  a shared thread: each person acts as themselves, and nobody's personal
+  sign-ins are used. Sealed channels and Slack DM context also run on
+  self-hosted harnesses, and sessions a sealed reply starts stay sealed.
+  Self-hosted harnesses still refuse shared threads.
+
+- **`daimon selfhosted init` sets up the whole grant.** Beyond the agent and
+  environment, it writes a runtime-file row for each `--channel` and prints the
+  admission flag, the harness auth binding for the tenant and the model's rates.
+  `--input-usd` and `--output-usd` are required, so no price is assumed.
+- **The agent editor lays its cards on a ring round the agent.** Instructions, model, channels and people sit top
+  left, setup, tools and skills top right, and connections below; each group takes the room its cards need and keeps
+  a much wider gap from the next. The ring takes the window's shape: a tall oval in a half-width window, a wide
+  one on an ultrawide screen. A card body taller than about seven rows folds behind Show more, so one large MCP server
+  no longer pushes the first view far out. Cards glide to their new place when one opens, closes or finishes loading,
+  and their lines follow. Cmd or Ctrl with the mouse wheel zooms at most 1.15x at once and 2x a second, so a
+  smooth-scrolling mouse utility no longer jumps 3x on one notch; one plain notch and a trackpad pinch zoom as before.
+
+- **Chat hides what is not set up, and nine development switches are gone.**
+  `/settings` and `get_settings` list a feature only when it is available or has a saved value at some level, as the
+  web app does. "Allow writes" in the approvals panel covers chat replies only; routines and watches follow the
+  deployment's unattended-writes rule. Upgrade notes: saved "Allow writes" choices are reset to Ask and must be set
+  again. Stored Off values of Daimon tools, full turn controls, the working-file carry-over and chart images in
+  artifacts are reset to the default (On). Third-party tools whose names look like permission, policy or admin setters
+  now always ask in chat. These variables log a startup warning naming them and are otherwise ignored:
+  `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`, `DAIMON_TURN__STATUS_LOG`, `DAIMON_TURN__NATIVE_FOOTER_COST`,
+  `DAIMON_DISCORD__WRITERS_NONE_NOTICE`, `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`,
+  `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`, `DAIMON_ARTIFACTS__EMBED_IMAGES` (`false` no longer stops image
+  embedding) and `DAIMON_FEATURES__<removed key>`; an agent spec that lists a removed key is loaded without it. Any
+  other unknown feature still stops startup.
+
+- **The web app sets a thread's value as chat does.**
+  Where a setting is open to anyone in a thread, such as progress plans, a member who can
+  see the channel can change it on the thread's page, not only a channel admin. Locks and
+  every other setting stay with admins.
+
+- **Admin > Workspace no longer repeats the feature switches.**
+  Web modules, direct messages, read-only memory in direct messages and typed
+  mentions are set on the feature list only.
+- **Chat `/settings` pages through long lists.**
+  A workspace with more than 25 agents, or a group with more than 25 settings, no
+  longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
+  between pages.
+
+- **Upgrade note: limit settings with a zero or too-small value.**
+  `DAIMON_FEATURES__OUTBOUND_LENGTH=0` starts as before and means no post length limit,
+  as `DAIMON_OUTBOUND__MAX_LENGTH=0` does; it never overrides a limit a workspace sets,
+  and where limits combine, 0 counts as unlimited rather than the smallest value.
+  `DAIMON_FEATURES__LONG_JOBS_MAX_USD` below 0.01 and `DAIMON_FEATURES__LONG_JOBS_MAX_DEADLINE`
+  below 1 stop startup with an error that names the lowest value accepted; set a
+  workable limit or remove the variable.
+
+- **Feature settings now reach the paths that ignored them.**
+  An Off watch no longer holds up the others in the poll queue. A routine retries when its
+  features cannot be read, and a required destination can no longer be cleared. Long job
+  limits of zero or below the minimum are refused, and Off jobs no longer block newer ones.
+  Turning cloud computers Off keeps a running session stoppable from chat. Posting to other
+  places stops when the posting rules cannot be read, a post length of 0 no longer lifts a
+  workspace limit, and the thread, place and people limits apply only while the reach check
+  is on. A Discord thread now takes its parent channel's setting for typed bot names. Vote
+  buttons can be switched off on Slack and Teams too. Platform and agent skills are off
+  wherever the read tool is, repository memory tools are hidden wherever it is Off, and
+  private channel messages now say they apply after a restart.
+
+- **A capability turned off is refused on every path, not only in Claude sessions.**
+  The MCP server checks the feature where the call runs (its conversation, routine,
+  agent key channel, or else the workspace) and refuses a tool whose capability is Off,
+  for Gemini and OpenAI turns, connected MCP clients and agent keys alike, including calls
+  made through `call_tool`. Other clients' tool lists drop those tools too. Stopping and
+  listing cloud computers and long jobs stays available, so running work can be stopped.
+
+- **Daimon tolerates its seeded agent being renamed in place to `default`.**
+  Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
+
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
 - **One settings system for every feature.**
@@ -23,12 +521,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
   The web app shows every feature from one schema-driven list on the workspace, agent, channel and thread pages, with a feature-by-level table in the agent editor. `daimon features list|get|set|diff` does the same from the CLI.
 - **What the agent is sent is now a feature too.**
-  Guidance, the facts sent with each message, web app links, Daimon's own tools, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
+  Guidance, the facts sent with each message, web app links, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
   `DAIMON_MCP_CONTEXT__ENABLED` still works but logs a deprecation. Repository memory still needs `DAIMON_REPO_MEMORY__ENABLED` and is then on until a level turns it off.
-  Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
 
 - **What a conversation starts with, and how much chat it reads, are features too.**
-  The platform prompt, skills, memory, notes on non-chat messages, the keys file and the working-file save at a restart can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
+  The platform prompt, skills, memory, notes on non-chat messages and the keys file can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
   A conversation keeps what it started with until `/new`. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
   `daimon sessions create` builds its session with the agent's features, as chat does.
 
@@ -36,11 +533,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
 
 - **What the agent can do is a feature too.**
-  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message and stops the work it started there.
-  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation.
+  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level. A level that turns one off removes its tools from the next message and stops the work it started there.
+  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` still works but logs a deprecation.
 
 - **Limits and the last switches are features too.**
-  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help and keeping an answer's messages apart are set too.
+  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help is set too.
   Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes. The old variables for these still work but log a deprecation, and nothing changes until a level sets one.
 
 - **Long jobs are set as features.**
@@ -49,10 +546,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A workspace or agent owner, or an admin handed that job, can no longer change them in `/settings`, the web app or by asking Daimon.
 
 - **Chat behaviour and display settings join the same system.**
-  Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
+  Completion pings, table rendering, message feedback buttons are set at every level; typed `@name` mentions, budget notices and thread naming down to a channel; direct messages and read-only memory in direct messages at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.
   `daimon tenants access-policy set --dm-memory-read-only` is gone, as nothing read it; set the `dm_memory_read_only` feature instead.
-  The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+  The older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) write the same stored values, so the two never disagree. `PATCH /api/admin/settings` refuses the fields that are features now (`modules`, `dm_enabled`, `dm_memory_read_only`, `plain_text_mentions`) with a 422.
 
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
@@ -399,7 +896,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a live platform admin. Delegated admins do not acquire the hub exception for
   reading other people’s sessions or sealed transcripts.
 
-- Add opt-in server-admin overrides for third-party MCP write approvals at
+- Add server-admin overrides for third-party MCP write approvals at
   server, channel and thread scope, through audited native `/here` controls on
   Discord, Slack and Teams. Every click/submission rechecks native admin authority.
   Changes apply to the next write in prepared and running turns; failed setting
@@ -411,7 +908,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native server/workspace admin must use `/here` (Teams: `here`) to choose
   **Inherit** for Server and for every channel/thread with a saved override.
   Alternatively, restore a policy backup from before overrides were saved.
-  Disabling the deployment flag does not remove the stored fields.
 
 - **Settings, redeeming and audit in the web app.** Admin > Settings gains an Access group
   (who may start turns, shown by person, plus direct messages, read-only DM memory and typed

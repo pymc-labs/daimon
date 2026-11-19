@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -62,9 +62,6 @@ from mux.contracts.ports import ManagedAgents
 from mux.state.store import StateStore
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-if TYPE_CHECKING:
-    pass
 
 
 @dataclass(frozen=True)

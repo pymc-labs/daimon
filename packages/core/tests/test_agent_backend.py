@@ -8,6 +8,7 @@ import json
 import sys
 import uuid
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,10 @@ from alembic.operations import Operations
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
+    NO_CAPTURE,
     AgentBackendRefused,
     AgentBackendService,
+    AgentSettings,
     BackendActor,
     BackendAgent,
     BackendUnsupported,
@@ -64,6 +67,14 @@ async def owned(
     return service, agent, actor, sessions
 
 
+async def _accept_origin(*_args: Any, **_kwargs: Any) -> None:
+    """Stands in for the turn's origin check, which production always supplies."""
+
+
+# Production resolves a switch only with an origin validator (the guard refuses without one).
+resolve_validated = partial(resolve_turn_backend, validate_origin=_accept_origin)
+
+
 async def enable(service: AgentBackendService, agent: BackendAgent, actor: BackendActor) -> None:
     policy = await service.tenant_policy(agent.tenant_id)
     await service.set_tenant_allowlist(
@@ -94,7 +105,7 @@ def test_preview_reports_unknown_and_unsupported_from_profile_metadata() -> None
     assert preview.unsupported_skills == ("native-pin",)
     assert preview.unsupported_mcps == ("private-server",)
     assert preview.unsupported_capabilities == ("native_schedules", "workspace_export_import")
-    assert preview.shared_thread_limits
+    assert preview.shared_thread_limits == (), "Gemini runs shared threads, so no limit is shown"
     assert (
         preview.digest
         == compatibility_preview(agent, "gemini", policy, cost_line=preview.cost_line).digest
@@ -117,6 +128,24 @@ def test_preview_reports_unknown_and_unsupported_from_profile_metadata() -> None
         != compatibility_preview(
             agent, "gemini", policy, setting_revision=1, cost_line=preview.cost_line
         ).digest
+    )
+
+
+def test_gemini_agent_effort_is_refused_at_save_and_not_carried() -> None:
+    """A Gemini agent runs as its own named agent, which takes no effort: saving one is
+    refused instead of failing every message, and a switch drops the level it carried."""
+    agent = BackendAgent(
+        tenant_id=uuid.uuid4(), agent_id=uuid.uuid4(), name="helper", configuration_digest="d"
+    )
+    policy = TenantBackendPolicy(tenant_id=agent.tenant_id, revision="policy")
+    with pytest.raises(AgentBackendRefused) as refused:
+        compatibility_preview(agent, "gemini", policy, settings=AgentSettings(effort="high"))
+    assert refused.value.reason == "effort_not_offered", "the save names why"
+    assert AgentSettings(effort="high").for_backend("gemini").effort is None, (
+        "a switch to Gemini drops the carried level"
+    )
+    assert AgentSettings(effort="high").for_backend("openai").effort == "high", (
+        "a provider that offers the level keeps it"
     )
 
 
@@ -144,9 +173,12 @@ async def test_set_clear_revert_and_independent_audit_readback(owned) -> None:
     with pytest.raises(AgentBackendRefused, match="backend not allowed"):
         await service.set_backend(agent, "openai", 0, actor)
     await enable(service, agent, actor)
-    preview = await service.preview(agent, "openai")
+    await service.preview(agent, "openai")
     first = await service.set_backend(
-        agent, "openai", 0, actor, expected_preview_digest=preview.digest
+        agent,
+        "openai",
+        0,
+        actor,
     )
     second = await service.clear_backend(agent, 1, actor)
     third = await service.revert(agent, actor, expected_revision=2)
@@ -160,31 +192,19 @@ async def test_set_clear_revert_and_independent_audit_readback(owned) -> None:
     assert all(r.account_id == actor.account_id for r in rows)
 
 
-async def test_stale_preview_rejects_policy_agent_and_price_replacements(owned) -> None:
+async def test_a_switch_holds_no_preview_and_checks_the_allowlist_when_saved(owned) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
-    preview = await service.preview(agent, "openai")
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await service.set_backend(
-            agent.model_copy(update={"configuration_digest": "changed"}),
-            "openai",
-            0,
-            actor,
-            expected_preview_digest=preview.digest,
-        )
+    await service.preview(agent, "openai")
+    changed = agent.model_copy(update={"configuration_digest": "changed"})
     policy = await service.tenant_policy(agent.tenant_id)
     await service.set_tenant_allowlist(
-        agent.tenant_id, ("anthropic", "openai"), policy.revision, actor
+        agent.tenant_id, ("anthropic", "gemini"), policy.revision, actor
     )
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await service.set_backend(agent, "openai", 0, actor, expected_preview_digest=preview.digest)
-    assert await service.current(agent) is None
-    line = {"value": "existing rate snapshot"}
-    priced = AgentBackendService(sessions, enabled=True, cost_line=lambda a, b: line["value"])
-    quote = await priced.preview(agent, "openai")
-    line["value"] = "changed rate snapshot"
-    with pytest.raises(AgentBackendRefused, match="stale preview"):
-        await priced.set_backend(agent, "openai", 0, actor, expected_preview_digest=quote.digest)
+    with pytest.raises(AgentBackendRefused, match="backend not allowed"):
+        await service.set_backend(changed, "openai", 0, actor)
+    priced = AgentBackendService(sessions, enabled=True, cost_line=lambda a, b: "changed rate")
+    assert (await priced.set_backend(changed, "gemini", 0, actor)).backend == "gemini"
 
 
 async def test_foreign_tenant_and_account_refused(owned) -> None:
@@ -230,29 +250,30 @@ async def test_audit_failure_rolls_back_setting(owned, monkeypatch) -> None:
 async def test_agent_effective_revisions_do_not_become_channel_overrides(owned) -> None:
     service, agent, actor, sessions = owned
     await enable(service, agent, actor)
-    await service.set_backend(agent, "openai", 0, actor)
+    held = await service.set_backend(agent, "openai", 0, actor)
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="chan")
     async with sessions.begin() as session:
-        first, shared, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+        first, shared, source = await resolve_validated(session, channel, agent, enabled=True)
         assert first is not None and source == "agent" and not shared
     async with sessions.begin() as session:
         assert await current_backend(session, channel) is None
-        repeated, _, _ = await resolve_turn_backend(session, channel, agent, enabled=True)
+        repeated, _, _ = await resolve_validated(session, channel, agent, enabled=True)
         assert repeated == first
-        assert await mux_state.put_config_revision(session, first) == first
+        put = partial(mux_state.put_config_revision, session, first, origin="agent")
+        assert await put(agent_revision=held) == first
         assert await current_backend(session, channel) is None
     await service.set_backend(agent, "gemini", 1, actor)
     async with sessions.begin() as session:
-        second, _, _ = await resolve_turn_backend(session, channel, agent, enabled=True)
+        second, _, _ = await resolve_validated(session, channel, agent, enabled=True)
         assert second is not None and second.local > first.local
         assert (
-            await resolve_turn_backend(
+            await resolve_validated(
                 session, channel, agent, enabled=True, retained_revision=first.local
             )
         )[0] == first
         explicit = await set_channel_backend(session, channel, BackendConfig())
         assert explicit.local > second.local
-        assert (await resolve_turn_backend(session, channel, agent, enabled=True))[0] == explicit
+        assert (await resolve_validated(session, channel, agent, enabled=True))[0] == explicit
 
 
 async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(owned) -> None:
@@ -261,17 +282,25 @@ async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(own
     await service.set_backend(agent, "openai", 0, actor)
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="chan")
     async with sessions.begin() as session:
-        revision, _, _ = await resolve_turn_backend(session, channel, agent, enabled=True)
+        revision, _, _ = await resolve_validated(session, channel, agent, enabled=True)
     assert revision is not None
     with pytest.raises(BackendUnsupported):
         check_backend(revision, enabled_backends=("anthropic",))
 
 
 def test_factory_uses_existing_flags() -> None:
-    assert make_backend_service(None, TurnSettings()).enabled, "on by default"
-    assert not make_backend_service(None, TurnSettings(path="legacy")).enabled
-    assert not make_backend_service(None, TurnSettings(channel_backends=False)).enabled
-    assert make_backend_service(None, TurnSettings(path="mux", channel_backends=True)).enabled
+    assert make_backend_service(None, TurnSettings(), capture_source=NO_CAPTURE).enabled, (
+        "on by default"
+    )
+    assert not make_backend_service(
+        None, TurnSettings(path="legacy"), capture_source=NO_CAPTURE
+    ).enabled
+    assert not make_backend_service(
+        None, TurnSettings(channel_backends=False), capture_source=NO_CAPTURE
+    ).enabled
+    assert make_backend_service(
+        None, TurnSettings(path="mux", channel_backends=True), capture_source=NO_CAPTURE
+    ).enabled
 
 
 async def test_public_loader_uses_actual_scoped_sdk_projection_and_never_updates(owned) -> None:
@@ -316,7 +345,7 @@ async def test_audit_filters_before_pagination_and_unknown_accounts_are_not_acce
 async def test_factory_preserves_actual_agent_model_and_unknown_native_rates(owned) -> None:
     _, agent, _, sessions = owned
     settings = TurnSettings(path="mux", channel_backends=True)
-    service = make_backend_service(sessions, settings)
+    service = make_backend_service(sessions, settings, capture_source=NO_CAPTURE)
     opus = await service.preview(agent.model_copy(update={"model": "claude-opus-5-5"}), "anthropic")
     assert "claude-opus-5-5" in opus.cost_line
     assert "haiku" not in opus.cost_line.lower()
@@ -338,10 +367,10 @@ async def test_default_revision_reput_does_not_become_override_or_hide_agent_set
         await mux_state.put_config_revision(session, default)
         assert await current_backend(session, channel) is None
         assert await mux_state.latest_config_revision(session, channel) == default
-        effective, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+        effective, _, source = await resolve_validated(session, channel, agent, enabled=True)
         assert effective is not None and source == "agent" and effective.backend == "openai"
     async with sessions() as session:
-        assert await resolve_turn_backend(
+        assert await resolve_validated(
             session, channel, agent, enabled=True, retained_revision=0
         ) == (None, False, "default")
 
@@ -437,11 +466,25 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
+    effort_path = path.with_name("0198_agent_backend_effort.py")
+    effort_spec = importlib.util.spec_from_file_location("agent_effort_restore", effort_path)
+    assert effort_spec is not None and effort_spec.loader is not None
+    effort_module = importlib.util.module_from_spec(effort_spec)
+    effort_spec.loader.exec_module(effort_module)
+    environment_path = path.with_name("0202_agent_backend_environment.py")
+    environment_spec = importlib.util.spec_from_file_location(
+        "agent_environment_restore", environment_path
+    )
+    assert environment_spec is not None and environment_spec.loader is not None
+    environment_module = importlib.util.module_from_spec(environment_spec)
+    environment_spec.loader.exec_module(environment_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                environment_module.downgrade()
+                effort_module.downgrade()
                 owner_module.downgrade()
                 model_module.downgrade()
                 consent_module.downgrade()
@@ -465,6 +508,8 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     consent_module.upgrade()
                     model_module.upgrade()
                     owner_module.upgrade()
+                    effort_module.upgrade()
+                    environment_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:
@@ -499,24 +544,22 @@ async def test_recreated_agent_resolves_by_scoped_identity_without_old_name_inhe
     replacement = old.model_copy(update={"agent_id": uuid.uuid4()})
     channel = ChannelRef(tenant_id=str(old.tenant_id), platform="discord", channel_id="recreated")
     async with sessions.begin() as session:
-        assert await resolve_turn_backend(session, channel, replacement, enabled=True) == (
+        assert await resolve_validated(session, channel, replacement, enabled=True) == (
             None,
             False,
             "default",
         )
     await service.set_backend(replacement, "gemini", 0, actor)
     async with sessions.begin() as session:
-        revision, _, source = await resolve_turn_backend(
-            session, channel, replacement, enabled=True
-        )
+        revision, _, source = await resolve_validated(session, channel, replacement, enabled=True)
         assert source == "agent" and revision.backend == "gemini"
         with pytest.raises(AgentBackendRefused, match="agent identity required"):
-            await resolve_turn_backend(session, channel, old.name, enabled=True)
+            await resolve_validated(session, channel, old.name, enabled=True)
         assert (
             await current_agent_backend(session, old.tenant_id, replacement.agent_id)
         ).agent_id == replacement.agent_id
     async with sessions.begin() as session:
-        revision, _, source = await resolve_turn_backend(session, channel, old, enabled=True)
+        revision, _, source = await resolve_validated(session, channel, old, enabled=True)
         assert source == "agent" and revision.backend == "openai"
 
 
@@ -531,11 +574,9 @@ async def test_identity_lookup_retains_renamed_clear_and_ignores_same_name_repla
     channel = ChannelRef(tenant_id=str(old.tenant_id), platform="discord", channel_id="renamed")
     async with sessions.begin() as session:
         assert await current_agent_backend(session, old.tenant_id, old.agent_id) == cleared
-        revision, _, source = await resolve_turn_backend(
-            session, channel, replacement, enabled=True
-        )
+        revision, _, source = await resolve_validated(session, channel, replacement, enabled=True)
         assert source == "agent" and revision.backend == "gemini"
-        assert (await resolve_turn_backend(session, channel, renamed, enabled=True))[2] == "default"
+        assert (await resolve_validated(session, channel, renamed, enabled=True))[2] == "default"
 
 
 async def test_channel_clear_inherits_agent_without_losing_explicit_or_retained_overrides(owned):
@@ -545,34 +586,34 @@ async def test_channel_clear_inherits_agent_without_losing_explicit_or_retained_
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="clear")
     async with sessions.begin() as session:
         previous = await set_channel_backend(session, channel, BackendConfig())
-        assert (await resolve_turn_backend(session, channel, agent, enabled=True))[2] == "channel"
+        assert (await resolve_validated(session, channel, agent, enabled=True))[2] == "channel"
         cleared = await clear_channel_backend(session, channel)
         assert cleared.local > previous.local
         assert await current_backend(session, channel) == cleared
         assert await clear_channel_backend(session, channel) == cleared
-        revision, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+        revision, _, source = await resolve_validated(session, channel, agent, enabled=True)
         assert source == "agent" and revision.backend == "openai"
         assert await mux_state.put_config_revision(session, cleared) == cleared
         assert await mux_state.config_origin(session, channel, cleared.local) == "channel_clear"
-        retained, _, source = await resolve_turn_backend(
+        retained, _, source = await resolve_validated(
             session, channel, agent, enabled=True, retained_revision=cleared.local
         )
         assert retained == cleared and source == "channel"
         explicit = await set_channel_backend(session, channel, BackendConfig())
         assert explicit.local > revision.local
-        assert (await resolve_turn_backend(session, channel, agent, enabled=True)) == (
+        assert (await resolve_validated(session, channel, agent, enabled=True)) == (
             explicit,
             False,
             "channel",
         )
         assert await set_channel_backend(session, channel, BackendConfig()) == explicit
         assert (
-            await resolve_turn_backend(
+            await resolve_validated(
                 session, channel, agent, enabled=True, retained_revision=previous.local
             )
         )[0] == previous
         await clear_channel_backend(session, channel)
-        assert (await resolve_turn_backend(session, channel, agent, enabled=True))[2] == "agent"
+        assert (await resolve_validated(session, channel, agent, enabled=True))[2] == "agent"
 
 
 async def test_channel_clear_without_agent_setting_keeps_default_and_sharing_history(owned):
@@ -581,12 +622,12 @@ async def test_channel_clear_without_agent_setting_keeps_default_and_sharing_his
     async with sessions.begin() as session:
         shared = await set_channel_backend(session, channel, BackendConfig(thread_mode="shared"))
         cleared = await clear_channel_backend(session, channel)
-        assert await resolve_turn_backend(session, channel, agent, enabled=True) == (
+        assert await resolve_validated(session, channel, agent, enabled=True) == (
             None,
             True,
             "default",
         )
-        retained, _, source = await resolve_turn_backend(
+        retained, _, source = await resolve_validated(
             session, channel, agent, enabled=True, retained_revision=shared.local
         )
         assert retained == shared and source == "channel"
@@ -605,7 +646,7 @@ async def test_concurrent_resolvers_share_read_fence_and_refuse_held_writer_befo
             tenant_id=str(agent.tenant_id), platform="discord", channel_id=f"concurrent-{index}"
         )
         async with sessions.begin() as session:
-            assert await resolve_turn_backend(session, channel, agent, enabled=True) == (
+            assert await resolve_validated(session, channel, agent, enabled=True) == (
                 None,
                 False,
                 "default",
@@ -625,9 +666,9 @@ async def test_concurrent_resolvers_share_read_fence_and_refuse_held_writer_befo
         await access_policy.lock_policy_writes_exclusive(writer, tenant_id=agent.tenant_id)
         async with sessions.begin() as reader_session:
             with pytest.raises(FenceUnavailable):
-                await resolve_turn_backend(reader_session, channel, agent, enabled=True)
+                await resolve_validated(reader_session, channel, agent, enabled=True)
     async with sessions.begin() as session:
-        assert await resolve_turn_backend(session, channel, agent, enabled=True) == (
+        assert await resolve_validated(session, channel, agent, enabled=True) == (
             None,
             False,
             "default",
@@ -664,15 +705,15 @@ async def test_concurrent_materialization_settles_actual_postgres_conflict(
 
     async def resolve(agent):
         async with sessions.begin() as session:
-            return await resolve_turn_backend(session, channel, agent, enabled=True)
+            return await resolve_validated(session, channel, agent, enabled=True)
 
     async with asyncio.timeout(15):
         results = await asyncio.gather(resolve(first_agent), resolve(second_agent))
     assert candidates == [1, 1]
     assert [result[2] for result in results] == ["agent", "agent"]
     assert [result[0].backend for result in results] == ["openai", replacement_backend]
-    expected = {1} if replacement_backend == "openai" else {1, 2}
-    assert {result[0].local for result in results} == expected
+    # Each agent's switch keeps its own row, even when both picked the same.
+    assert {result[0].local for result in results} == {1, 2}
     async with sessions() as session:
         for result in results:
             assert (
@@ -774,20 +815,20 @@ async def test_retained_and_disabled_resolution_need_no_fabricated_source(owned)
     async with sessions.begin() as session:
         retained = await set_channel_backend(session, channel, BackendConfig())
     async with sessions.begin() as session:
-        assert await resolve_turn_backend(session, channel, None, enabled=False) == (
+        assert await resolve_validated(session, channel, None, enabled=False) == (
             None,
             False,
             "default",
         )
-        assert await resolve_turn_backend(
+        assert await resolve_validated(
             session, channel, None, enabled=True, retained_revision=0
         ) == (None, False, "default")
-        result = await resolve_turn_backend(
+        result = await resolve_validated(
             session, channel, None, enabled=True, retained_revision=retained.local
         )
         assert result == (retained, False, "channel")
         with pytest.raises(AgentBackendRefused, match="agent identity required"):
-            await resolve_turn_backend(session, channel, None, enabled=True)
+            await resolve_validated(session, channel, None, enabled=True)
 
 
 async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owned):
@@ -878,17 +919,82 @@ async def test_non_admin_and_agent_key_refused_without_revision_or_audit(owned, 
     assert await service.audit(agent.tenant_id) == ()
 
 
-async def test_selfhosted_agent_selection_refuses_before_source_capture(owned):
+def grant_agent(path, agent: BackendAgent, *, environment: str = "sh_env_granted") -> None:
+    """The operator's runtime-file row letting `agent` pick the self-hosted default itself."""
+    import json
+
+    from daimon.core.channel_backend import agent_selection
+
+    row = dict(
+        profile="selfhosted.loop",
+        tenant_id=str(agent.tenant_id),
+        platform="*",
+        channel_id="*",
+        account_id="*",
+        config_digest=agent_selection("selfhosted", None).content_digest(),
+        agent_id="sh_agent_granted",
+        environment_id=environment,
+        infrastructure_usd="0",
+        source_agent_id=str(agent.agent_id),
+    )
+    path.write_text(json.dumps([row]))
+
+
+async def test_selfhosted_agent_selection_needs_the_operators_agent_grant(
+    owned, tmp_path, monkeypatch
+):
+    from daimon.core.channel_backend import agent_selection, compatibility_preview
+    from mux.contracts.config import ConfigRevision
+
     service, agent, actor, sessions = owned
-
-    async def forbidden_capture(source):
-        raise AssertionError("source capture must not run for a selfhosted agent preference")
-
-    service = AgentBackendService(sessions, enabled=True, capture_source=forbidden_capture)
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(tmp_path / "runtime.json"))
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "selfhosted"), policy.revision, actor
+    )
+    policy = await service.tenant_policy(agent.tenant_id)
     with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
         await service.preview(agent, "selfhosted")
+    other = agent.model_copy(update={"agent_id": uuid.uuid4()})
+    grant_agent(tmp_path / "runtime.json", other)
     with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
-        compatibility_preview(agent, "selfhosted", await service.tenant_policy(agent.tenant_id))
+        await service.preview(agent, "selfhosted")
+
+    grant_agent(tmp_path / "runtime.json", agent)
+    preview = await service.preview(agent, "selfhosted")
+    assert preview.allowed and preview.target_backend == "selfhosted"
+    assert preview.target_settings == {"environment": "sh_env_granted"}
+    assert (
+        preview.declared_drops == compatibility_preview(agent, "selfhosted", policy).declared_drops
+    )
+    saved = await service.set_backend(
+        agent,
+        "selfhosted",
+        0,
+        actor,
+    )
+    assert (saved.backend, saved.environment) == ("selfhosted", "sh_env_granted")
+
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="any")
+    async with sessions.begin() as session:
+        resolved, _, source = await resolve_validated(session, channel, agent, enabled=True)
+    assert resolved is not None and source == "agent" and resolved.backend == "selfhosted"
+    async with sessions.begin() as session:
+        latest = await mux_state.latest_config_revision(session, channel)
+        local = 1 if latest is None else latest.local + 1
+        pinned = ConfigRevision.create(channel, local, agent_selection("gemini", None))
+        await mux_state.put_config_revision(session, pinned)
+        resolved, _, source = await resolve_validated(session, channel, agent, enabled=True)
+    assert source == "channel" and resolved is not None, "a channel pin overrides the agent's"
+    assert resolved.content_digest() == pinned.content_digest()
+
+    # Withdrawing the grant refuses the stored choice; nothing falls back to another model.
+    grant_agent(tmp_path / "runtime.json", other)
+    elsewhere = channel.model_copy(update={"channel_id": "elsewhere"})
+    async with sessions.begin() as session:
+        with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
+            await resolve_validated(session, elsewhere, agent, enabled=True)
 
 
 @pytest.mark.fresh_schema
@@ -902,7 +1008,10 @@ async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
     async with sessions.begin() as db:
         # Model an invalid legacy row inside this test's isolated DDL schema.
         await db.execute(
-            text("ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider")
+            text(
+                "ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider,"
+                " DROP CONSTRAINT ck_agent_backend_environment"
+            )
         )
         await agent_backends.put_revision(
             db,
@@ -919,7 +1028,7 @@ async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
             db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
         )
         with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
-            await resolve_turn_backend(db, channel, agent, enabled=True)
+            await resolve_validated(db, channel, agent, enabled=True)
         assert await mux_state.latest_config_revision(db, channel) is None
         await agent_backends.put_revision(
             db,
@@ -955,14 +1064,13 @@ async def test_a_picked_model_is_stored_previewed_reverted_and_resolved(owned) -
         "gemini",
         0,
         actor,
-        expected_preview_digest=argon.digest,
         model="gemini-4-argon",
     )
     assert (first.backend, first.model) == ("gemini", "gemini-4-argon")
     assert resolve_agent_backend(None, first).model == "gemini-4-argon"
     channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="any")
     async with sessions.begin() as session:
-        resolved, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+        resolved, _, source = await resolve_validated(session, channel, agent, enabled=True)
     assert resolved is not None and source == "agent"
     assert (resolved.backend, resolved.model) == ("gemini", "gemini-4-argon")
     assert resolved.content_digest() == agent_selection("gemini", "gemini-4-argon").content_digest()
@@ -972,6 +1080,38 @@ async def test_a_picked_model_is_stored_previewed_reverted_and_resolved(owned) -
     assert (third.backend, third.model) == ("gemini", "gemini-4-argon")
     cleared = await service.clear_backend(agent, 3, actor)
     assert (cleared.backend, cleared.model) == (None, None)
+
+
+async def test_saving_the_current_provider_and_model_again_writes_nothing(owned) -> None:
+    """A repeat pick adds no revision and no audit row; a different model still does."""
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    first = await service.set_backend(agent, "gemini", 0, actor, model="gemini-4-argon")
+    again = await service.set_backend(agent, "gemini", first.local, actor, model="gemini-4-argon")
+    assert again == first, "the saved revision comes back unchanged"
+    async with sessions() as session:
+        rows = await security_audit.list_events(session, tenant_id=agent.tenant_id)
+    assert [r.operation for r in rows if r.tool_name == "agent_backend"].count("set") == 1, (
+        "a repeat pick adds no audit row"
+    )
+    other = await service.set_backend(agent, "gemini", first.local, actor, model="gemini-3.8-flash")
+    assert other.local == first.local + 1 and other.model is None, "a new model is a new revision"
+
+
+async def test_a_switch_without_an_origin_check_is_refused_as_source_unavailable(owned) -> None:
+    """A turn runs a switch's target from the agent's source, so no validator means no run."""
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    await service.set_backend(agent, "openai", 0, actor)
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="any")
+    async with sessions.begin() as session:
+        with pytest.raises(AgentBackendRefused) as refused:
+            await resolve_turn_backend(session, channel, agent, enabled=True)
+        assert refused.value.reason == "source_unavailable", "fails closed, never unchecked"
+        assert await mux_state.latest_config_revision(session, channel) is None, "nothing stored"
+    async with sessions.begin() as session:
+        resolved, _, source = await resolve_validated(session, channel, agent, enabled=True)
+    assert resolved is not None and source == "agent", "the same turn resolves when checked"
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_skill_params import BetaManagedAgentsSkillParams
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, find_attach_mount_collision
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.report import Action, ResourceOutcome
@@ -58,7 +59,7 @@ async def attach_imported_skills(
     if not skill_ids:
         return SkillAttach(note="Nothing new to attach.", attached=False, agent_name=None)
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         return SkillAttach(note="That agent no longer exists.", attached=False, agent_name=None)
@@ -83,14 +84,23 @@ async def attach_imported_skills(
             version=fresh.version,
             payload={"skills": merged},
             scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
 
     try:
         await update_agent_with_version_retry(
-            runtime.anthropic, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
     except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
-        log.warning("teams.credential.skill_attach_failed", err_type=type(err).__name__)
+        log.warning(
+            "teams.credential.skill_attach_failed",
+            err_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
+        )
         note = "Attaching them did not finish. Ask again to retry."
         return SkillAttach(note=note, attached=False, agent_name=agent.name)
     note = f"Attached {len(skill_ids)} to `{agent.name}`."

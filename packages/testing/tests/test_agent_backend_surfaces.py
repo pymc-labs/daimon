@@ -44,9 +44,17 @@ from daimon.core.config import Settings, TurnSettings
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.model_switch import (
+    ModelPicker,
+    SwitchRefusal,
+    panel_actor,
+    panel_edit_deps,
+    pick_or_refusal,
+    preview_model_switch,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TenantBackendPolicy
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import (
     make_account,
@@ -58,11 +66,11 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel
 from rich.console import Console
-from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 TENANT = derive_tenant_uuid(platform="discord", workspace_id="2001")
@@ -84,14 +92,7 @@ class Preview(BaseModel):
     allowed: bool = True
     digest: str = "d" * 64
     target_model: str | None = None
-    # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
-    # drops are declared in these stubs, so the CLI's drop-consent gate reads
-    # the same "nothing to accept" shape it reads from the real preview.
-    drop_consent: object | None = None
-
-    @property
-    def declared_drops(self) -> tuple[str, ...]:
-        return () if self.drop_consent is None else self.drop_consent.declared_drops
+    declared_drops: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,32 +150,27 @@ def seam(monkeypatch):
     service.current = AsyncMock(return_value=None)
     # The owner-or-admin read; this fake has no owners, so admins only.
     service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
+    service.edit_refusal = AsyncMock(
+        side_effect=lambda actual, actor: (
+            None if actor.subject.is_admin else "owner_or_admin_required"
+        )
+    )
     service.tenant_policy = AsyncMock(
-        return_value=SimpleNamespace(enabled_backends=("anthropic", "openai"))
+        return_value=TenantBackendPolicy(
+            tenant_id=TENANT, revision="1", enabled_backends=("anthropic", "openai", "gemini")
+        )
     )
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
-    async def change(
-        actual,
-        target,
-        local,
-        actor,
-        *,
-        expected_preview_digest,
-        model=None,
-        settings=None,
-        accepted_drops=None,
-    ):
-        calls.append((actual, target, local, actor, expected_preview_digest))
+    async def change(actual, target, local, actor, *, model=None, settings=None):
+        calls.append((actual, target, local, actor))
         if service.refused:
             raise Refused(service.refused)
         return SimpleNamespace(backend=target, local=local + 1, model=model)
 
-    async def clear(actual, local, actor, *, expected_preview_digest):
-        return await change(
-            actual, None, local, actor, expected_preview_digest=expected_preview_digest
-        )
+    async def clear(actual, local, actor):
+        return await change(actual, None, local, actor)
 
     service.set_backend = AsyncMock(side_effect=change)
     service.clear_backend = AsyncMock(side_effect=clear)
@@ -219,6 +215,7 @@ def seam(monkeypatch):
         client=object(),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        turn_deps=None,
     )
     return SimpleNamespace(
         calls=calls,
@@ -252,7 +249,7 @@ def details():
     )
 
 
-def discord_view(seam, *, preview=None, clear=False):
+def discord_view(seam, *, picker=None, switch_value=None):
     state = PanelState(
         roster=[],
         selected=None,
@@ -260,15 +257,14 @@ def discord_view(seam, *, preview=None, clear=False):
         guild_id=2001,
         is_admin=True,
         details=details(),
-        backend_options=("anthropic", "openai"),
+        model_picker=picker,
     )
     return dv.DetailsView(
         state,
         runtime=seam.runtime,
         allowed_user_id=42,
         details=state.details,
-        backend_preview=preview,
-        backend_clear=clear,
+        switch_value=switch_value,
     )
 
 
@@ -296,7 +292,7 @@ async def test_flag_off_panels_and_mcp_registration_do_not_expose_backend_contro
     seam.settings.turn = TurnSettings(path=path, channel_backends=enabled)
     view = discord_view(seam)
     assert not any(
-        isinstance(item, discord.ui.Select) and item.placeholder == "Model provider"
+        isinstance(item, discord.ui.Select) and item.placeholder == "Model"
         for item in view.walk_children()
     )
     mcp = FastMCP()
@@ -321,11 +317,13 @@ async def test_direct_mcp_uses_preview_and_reread_for_shared_service_cas(seam, b
         seam.runtime, auth, "analyst", backend=backend, expected_revision=4
     )
     assert seam.loader.await_count == 2
-    assert seam.calls[0][1:] == (
-        backend,
-        4,
-        BackendActor(TENANT, ACCOUNT, Subject(is_admin=True)),
-        "d" * 64,
+    _, target, local, actor = seam.calls[0]
+    assert (target, local) == (backend, 4), "the write carries the preview's revision only"
+    # A model write builds core's own actor; the fields are what matter.
+    assert (actor.tenant_id, actor.account_id, actor.subject) == (
+        TENANT,
+        ACCOUNT,
+        Subject(is_admin=True),
     )
     assert result["revision"] == 5
     assert result["preview"]["cost_line"] == Preview().cost_line
@@ -354,9 +352,7 @@ async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(seam, a
     assert seam.calls == []
 
 
-@pytest.mark.parametrize(
-    "reason", ["stale_revision", "stale_preview", "backend_not_allowed", "tenant_mismatch"]
-)
+@pytest.mark.parametrize("reason", ["stale_revision", "backend_not_allowed", "tenant_mismatch"])
 async def test_direct_mcp_preserves_shared_service_refusal(seam, reason):
     seam.service.refused = reason
     auth = AuthIdentity(account_id=ACCOUNT, tenant_id=TENANT, role=Role.ADMIN, is_admin=True)
@@ -364,7 +360,8 @@ async def test_direct_mcp_preserves_shared_service_refusal(seam, reason):
         await mcp_agents._set_agent_backend_impl(seam.runtime, auth, "analyst", backend="openai")
 
 
-async def test_chat_turn_cannot_bypass_confirmation_with_direct_mcp_tool(seam):
+async def test_chat_turn_is_pointed_at_the_chat_switch_tool(seam):
+    """In chat the headless tool refuses and names the one that also moves the thread."""
     auth = AuthIdentity(
         account_id=ACCOUNT, tenant_id=TENANT, role=Role.ADMIN, is_admin=True, chat_agent_id=AGENT
     )
@@ -388,56 +385,6 @@ async def test_cli_set_clear_uses_the_same_bound_preview_and_actor(seam, backend
     assert seam.calls[0][2] == 4
     assert seam.calls[0][3].tenant_id == TENANT
     assert seam.calls[0][3].subject.is_admin
-    assert seam.calls[0][4] == "d" * 64
-
-
-@pytest.mark.parametrize(
-    "admin,user,guild", [(False, 42, 2001), (True, 43, 2001), (True, 42, 2002)]
-)
-async def test_discord_confirm_rechecks_live_actor_and_tenant_before_lookup(
-    seam, admin, user, guild
-):
-    view = discord_view(seam, preview=Preview())
-    await view._on_backend_confirm(interaction(admin=admin, user_id=user, guild_id=guild))
-    seam.loader.assert_not_awaited()
-    assert seam.calls == []
-
-
-@pytest.mark.parametrize("clear", [False, True])
-async def test_discord_confirm_rereads_agent_and_forwards_bound_revision(seam, clear):
-    view = discord_view(seam, preview=Preview(), clear=clear)
-    view.swap_to = AsyncMock()
-    await view._on_backend_confirm(interaction())
-    assert seam.loader.await_count == 1
-    assert seam.calls[0][1] == (None if clear else "openai")
-    assert seam.calls[0][2] == 4
-    assert seam.calls[0][4] == "d" * 64
-    dv.record_panel_write.assert_awaited_once()
-    assert dv.record_panel_write.await_args.kwargs["op"] == "agent_backend"
-
-
-async def test_discord_expired_view_cannot_apply(seam):
-    view = discord_view(seam, preview=Preview())
-    view.stop()
-    await view._on_backend_confirm(interaction())
-    seam.loader.assert_not_awaited()
-    assert seam.calls == []
-
-
-async def test_discord_preview_renders_all_shared_facts(seam):
-    view = discord_view(seam, preview=Preview())
-    text = "\n".join(
-        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
-    )
-    for fact in (
-        "legacy skill",
-        "private connector",
-        "native schedules",
-        "per caller only",
-        "List price",
-        "Worst case",
-    ):
-        assert fact in text
 
 
 def slack_meta(**kwargs):
@@ -460,44 +407,16 @@ async def slack_dispatch(seam, client, *, action_id, meta=None, action=None):
     )
 
 
-async def test_slack_preview_binds_server_revision_digest_and_facts(seam):
+async def test_slack_switch_on_an_old_modal_applies_its_pick(seam, monkeypatch):
+    """Switch on a modal from before picks applied at once picks its model; the digest is ignored."""
+    pick = AsyncMock(return_value=SimpleNamespace(lines=()))
+    monkeypatch.setattr(sa, "pick_or_refusal", pick)
     client = SimpleNamespace(views_update=AsyncMock())
-    await slack_dispatch(
-        seam,
-        client,
-        action_id=sv.ACTION_BACKEND_SELECT,
-        action={"selected_option": {"value": "openai"}},
-    )
-    rendered = client.views_update.await_args.kwargs["view"]
-    meta = decode_panel_metadata(rendered["private_metadata"])
-    assert (meta.backend_revision, meta.backend_digest, meta.backend_target) == (
-        4,
-        "d" * 64,
-        "openai",
-    )
-    assert "private connector" in json.dumps(rendered)
-    assert seam.calls == []
-
-
-async def test_slack_superseded_modal_refuses_before_service_mutation(seam):
-    client = SimpleNamespace(
-        views_update=AsyncMock(side_effect=SlackApiError("stale", {"error": "hash_conflict"}))
-    )
-    meta = slack_meta(backend_revision=4, backend_digest="d" * 64, backend_target="openai")
+    meta = slack_meta(backend_revision=3, backend_digest="d" * 64, backend_target="openai:gpt-6")
     await slack_dispatch(seam, client, action_id=sv.ACTION_BACKEND_CONFIRM, meta=meta)
-    assert seam.calls == []
-    assert seam.factory.begins == 0
-
-
-async def test_slack_confirm_rereads_after_claim_and_rechecks_admin(seam):
-    client = SimpleNamespace(views_update=AsyncMock())
-    meta = slack_meta(backend_revision=4, backend_digest="d" * 64, backend_target="clear")
-    await slack_dispatch(seam, client, action_id=sv.ACTION_BACKEND_CONFIRM, meta=meta)
-    assert seam.loader.await_count == 2
-    assert sa.resolve_is_admin.await_count == 2
-    assert seam.calls[0][1] is None
-    assert seam.calls[0][2] == 4
-    assert seam.calls[0][4] == "d" * 64
+    assert pick.await_args is not None, "the old Switch press is a pick"
+    assert pick.await_args.kwargs["value"] == "openai:gpt-6", "it picks the modal's model"
+    client.views_update.assert_awaited_once()
 
 
 def test_slack_metadata_defaults_stay_identical_and_malformed_revision_is_refused():
@@ -505,22 +424,6 @@ def test_slack_metadata_defaults_stay_identical_and_malformed_revision_is_refuse
     assert json.loads(raw) == {"t": "T1", "c": "C1", "v": "details", "a": "analyst"}
     assert decode_panel_metadata(json.dumps({**json.loads(raw), "br": True})) is None
     assert decode_panel_metadata(json.dumps({**json.loads(raw), "br": -1})) is None
-
-
-async def test_teams_preview_uses_actual_shared_facts_and_bound_reference(seam, monkeypatch):
-    actor = Actor(user_id="person", tenant_id=TENANT, is_admin=True, conversation_id="chat")
-    monkeypatch.setattr(tp, "card_actor", AsyncMock(return_value=actor))
-    data = {"op": "backend_preview", "agent": "analyst", "model_backend": "openai"}
-    ctx = SimpleNamespace(
-        activity=SimpleNamespace(value=SimpleNamespace(action=SimpleNamespace(data=data)))
-    )
-    panel = tp.SetupPanel(seam.runtime)
-    result = await panel._act(ctx)
-    text = result.model_dump_json()
-    assert "private connector" in text
-    assert '"revision":4' in text
-    assert "d" * 64 in text
-    assert seam.calls == []
 
 
 async def test_teams_non_admin_confirmation_refuses_before_lookup(seam, monkeypatch):
@@ -538,30 +441,6 @@ async def test_teams_non_admin_confirmation_refuses_before_lookup(seam, monkeypa
     assert seam.calls == []
 
 
-async def test_teams_confirmation_rereads_actor_and_agent(seam, monkeypatch):
-    actor = Actor(user_id="person", tenant_id=TENANT, is_admin=True, conversation_id="chat")
-    actor_read = AsyncMock(return_value=actor)
-    monkeypatch.setattr(tp, "card_actor", actor_read)
-    panel = tp.SetupPanel(seam.runtime)
-    panel._details = AsyncMock(return_value=tc.notice_card("Updated"))
-    data = {
-        "op": "backend_confirm",
-        "agent": "analyst",
-        "target": "openai",
-        "revision": 4,
-        "digest": "d" * 64,
-    }
-    ctx = SimpleNamespace(
-        activity=SimpleNamespace(value=SimpleNamespace(action=SimpleNamespace(data=data)))
-    )
-    await panel._act(ctx)
-    assert actor_read.await_count == 2
-    assert seam.loader.await_count == 2
-    assert seam.calls[0][1] == "openai"
-    assert seam.calls[0][2] == 4
-    assert seam.calls[0][4] == "d" * 64
-
-
 def test_slack_teams_unconfigured_renderers_keep_backend_control_absent():
     slack = sv.build_details_view(
         details(),
@@ -572,8 +451,8 @@ def test_slack_teams_unconfigured_renderers_keep_backend_control_absent():
         attribution=None,
     )
     teams = tc.details_card(details(), here="chat", page=0, coding_tools=False, is_admin=True)
-    assert "Model provider" not in json.dumps(slack)
-    assert "Model provider" not in teams.model_dump_json()
+    assert sv.ACTION_BACKEND_SELECT not in json.dumps(slack)
+    assert "model_pick" not in teams.model_dump_json()
 
 
 @pytest.fixture
@@ -597,7 +476,7 @@ async def persisted(
             "turn": {"path": "mux", "channel_backends": True},
         }
     )
-    service = cb.make_backend_service(sessions, settings.turn)
+    service = cb.make_backend_service(sessions, settings.turn, capture_source=cb.NO_CAPTURE)
     actor = cb.BackendActor(tenant.id, account.id, Subject(is_admin=True))
     policy = await service.tenant_policy(tenant.id)
     await service.set_tenant_allowlist(
@@ -650,6 +529,7 @@ def runtime(persisted, client):
         client=client,
         deployment_default=DeploymentDefault(agent_name="analyst", environment_name="default"),
         resolver_cache=new_resolver_cache(),
+        turn_deps=None,
     )
 
 
@@ -676,33 +556,6 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
             role=Role.ADMIN,
             is_admin=True,
         )
-        if surface == "mcp" and drops:
-            # The headless `set_agent_backend` MCP tool has no human to ask for
-            # consent (that is exactly what `request_agent_backend_switch`'s
-            # chat Confirm card is for), so a target that needs declared drops
-            # always refuses here -- never a silent drop, never a guessed
-            # accept.
-            with pytest.raises(ToolError, match="drops_required"):
-                await mcp_agents._set_agent_backend_impl(
-                    rt, auth, "analyst", backend=backend, expected_revision=0
-                )
-            async with persisted.sessions() as session:
-                rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
-            assert [row.operation for row in rows] == ["allowlist"]
-            assert [(r.method, r.path) for r in trace.requests] == [
-                ("GET", "/v1/agents"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments/env_test"),
-                ("GET", "/v1/agents"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments"),
-                ("GET", "/v1/agents/actual-owned-agent"),
-                ("GET", "/v1/environments/env_test"),
-            ]
-            assert not trace.violations
-            return
         if surface == "cli":
             for target in (backend, None):
                 console = Console(file=StringIO(), force_terminal=False, highlight=False)
@@ -714,7 +567,6 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
                     yes=True,
                     as_json=True,
                     selector=TenantSelector(tenant_id=str(persisted.tenant.id)),
-                    accept_drops=",".join(drops) if target is not None and drops else None,
                 )
                 assert json.loads(console.file.getvalue())["backend"] == target
         else:
@@ -731,6 +583,9 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
     assert all(
         row.account_id == persisted.account.id and row.outcome == "allowed" for row in writes
     )
+    # What the provider can't carry applies and is recorded, never asked about.
+    expected = "completed" + ("; declared_drops=" + ",".join(drops) if drops else "")
+    assert writes[0].reason == expected, "the set records what it turned off"
     agent = cb.BackendAgent(
         tenant_id=persisted.tenant.id,
         agent_id=writes[0].agent_id,
@@ -763,13 +618,8 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
     assert not trace.replies and not trace.violations
 
 
-async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persisted):
-    # DD3's trusted source capture re-reads the real target agent by id on
-    # every preview (not the list response `load_backend_agent` used before
-    # DD3), so the race this test proves is now visible there: the first
-    # capture (inside the initial `service.preview`) sees the original
-    # agent; the second capture (inside `_change`, just before the write)
-    # sees it changed, which must still land as a digest mismatch refusal.
+async def test_agent_changed_after_the_preview_still_switches(persisted):
+    """A write reads the agent afresh, so an edit after the preview never refuses it."""
     changed = {**persisted.native, "description": "Changed after the preview"}
     calls = {"agent": 0}
 
@@ -803,59 +653,13 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
             role=Role.ADMIN,
             is_admin=True,
         )
-        # Anthropic (same profile as the source): no drops are declared, so
-        # this exercises the digest-staleness refusal alone, independent of
-        # the drop-consent gate exercised elsewhere.
-        with pytest.raises(ToolError, match="stale_preview"):
-            await mcp_agents._set_agent_backend_impl(
-                runtime(persisted, client), auth, "analyst", backend="anthropic"
-            )
+        result = await mcp_agents._set_agent_backend_impl(
+            runtime(persisted, client), auth, "analyst", backend="anthropic"
+        )
+    assert result["revision"] == 1, "the switch applied at the preview's revision"
     async with persisted.sessions() as session:
         rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
-    assert [row.operation for row in rows] == ["allowlist"]
-    assert not trace.replies and not trace.violations
-
-
-@pytest.mark.parametrize("clear", [False, True])
-async def test_discord_confirm_records_shared_and_panel_audit(persisted, clear):
-    trace = ScriptedTransport()
-    replies(trace, persisted.native, 2)
-    async with trace.client() as client:
-        agent = await cb.load_backend_agent(
-            client, persisted.sessions, tenant_id=persisted.tenant.id, agent_name="analyst"
-        )
-        preview = await persisted.service.preview(agent, "anthropic" if clear else "gemini")
-        state = PanelState(
-            roster=[],
-            selected=None,
-            account_id=persisted.account.id,
-            guild_id=2001,
-            is_admin=True,
-            details=details(),
-            backend_options=("anthropic", "openai", "gemini"),
-        )
-        view = dv.DetailsView(
-            state,
-            runtime=runtime(persisted, client),
-            allowed_user_id=42,
-            details=state.details,
-            backend_preview=preview,
-            backend_clear=clear,
-        )
-        view.swap_to = AsyncMock()
-        await view._on_backend_confirm(interaction())
-        view.swap_to.assert_awaited_once()
-    current = await persisted.service.current(agent)
-    assert current.local == 1 and current.backend == (None if clear else "gemini")
-    async with persisted.sessions() as session:
-        rows = await security_audit.list_events(session, tenant_id=persisted.tenant.id)
-    write = next(
-        row for row in rows if row.tool_name == "agent_backend" and row.operation != "allowlist"
-    )
-    panel = next(row for row in rows if row.tool_name == "panel:agent_backend")
-    assert write.account_id == panel.account_id == persisted.account.id
-    assert write.outcome == panel.outcome == "allowed"
-    assert panel.platform == "discord" and panel.platform_user_id == "42"
+    assert [row.operation for row in rows] == ["allowlist", "set"], "one audited write"
     assert not trace.replies and not trace.violations
 
 
@@ -884,26 +688,6 @@ async def test_mcp_set_clear_schema_requires_explicit_target(seam):
     assert {
         alternative.get("type") for alternative in tool.parameters["properties"]["backend"]["anyOf"]
     } == {"string", "null"}
-
-
-async def test_large_preview_lists_keep_cost_and_thread_limits_visible(seam):
-    preview = Preview(
-        unsupported_skills=("large skill " * 200,), unsupported_mcps=("large connector " * 200,)
-    )
-    view = discord_view(seam, preview=preview)
-    discord_text = "\n".join(
-        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
-    )
-    slack_text = json.dumps(sv.build_backend_preview_view(preview, meta=slack_meta()))
-    teams_text = json.dumps(
-        tc.backend_preview_card(preview, agent_name="analyst", clear=False).model_dump(mode="json")
-    )
-    for text in (discord_text, slack_text, teams_text):
-        assert "truncated" in text
-        assert "List price: unknown" in text
-        assert "per caller only" in text
-        assert "Existing threads keep" not in text
-        assert "on their next message; shared threads stay on their current provider" in text
 
 
 async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
@@ -980,14 +764,14 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
     assert actual["exit"] == actual["root_exit"] == 0
     assert actual["groups"] == ["rule", "owner", "tool-rules"]
     # This checks that enabling the backend feature does not alter the
-    # pre-existing CLI surface. The tool-rules and owner commands are
+    # pre-existing CLI surface. The tool-rules, owner and convert commands are
     # independently added.
     added_lines = [
         line
         for line in actual["help"].splitlines(keepends=True)
-        if "│ tool-rules " in line or "│ owner " in line
+        if any(f"│ {name} " in line for name in ("tool-rules", "owner", "convert"))
     ]
-    assert len(added_lines) == 2
+    assert len(added_lines) == 3, f"one help line per added command: {added_lines}"
     assert (
         "".join(
             line for line in actual["help"].splitlines(keepends=True) if line not in added_lines
@@ -1082,64 +866,14 @@ async def test_direct_mcp_refuses_each_chat_credential_before_any_lookup(
     assert seam.calls == []
 
 
-async def test_discord_stale_selection_refuses_without_losing_details(seam):
-    seam.service.read_selection = AsyncMock(return_value=None)
-    view = discord_view(seam)
-    selected = SimpleNamespace(values=["openai"])
-    event = interaction()
-    view.swap_to = AsyncMock()
-    await view._on_backend_select(event, select=selected)
-    event.followup.send.assert_awaited_once()
-    assert "isn't available" in event.followup.send.await_args.kwargs["embed"].description
-    view.swap_to.assert_not_awaited()
-    assert seam.calls == []
-
-
-async def test_slack_stale_selection_refuses_without_mutating_or_replacing_modal(seam):
-    seam.service.read_selection = AsyncMock(return_value=None)
-    client = SimpleNamespace(views_update=AsyncMock())
-    await slack_dispatch(
-        seam,
-        client,
-        action_id=sv.ACTION_BACKEND_SELECT,
-        action={"selected_option": {"value": "openai"}},
-        meta=PanelMetadata(
-            team_id="T1",
-            channel_id="C1",
-            agent_name="analyst",
-            view="details",
-        ),
-    )
-    client.views_update.assert_not_awaited()
-    sa.post_ephemeral.assert_awaited_once()
-    assert "isn't available" in sa.post_ephemeral.await_args.kwargs["text"]
-    assert seam.calls == []
-
-
-async def test_teams_stale_selection_returns_toast_without_mutation(seam, monkeypatch):
-    seam.service.read_selection = AsyncMock(return_value=None)
-    actor = Actor(user_id="admin", tenant_id=TENANT, is_admin=True, conversation_id="conversation")
-    monkeypatch.setattr(tp, "card_actor", AsyncMock(return_value=actor))
-    ctx = SimpleNamespace(
-        activity=SimpleNamespace(
-            value=SimpleNamespace(
-                action=SimpleNamespace(
-                    data={"op": "backend_preview", "agent": "analyst", "model_backend": "openai"},
-                )
-            )
-        )
-    )
-    response = await tp.SetupPanel(seam.runtime)._act(ctx)
-    assert "isn't available" in str(response)
-    assert seam.calls == []
-
-
-async def test_details_hydration_hides_unavailable_backend_controls(seam, monkeypatch):
-    seam.service.read_selection = AsyncMock(return_value=None)
+async def test_details_hydration_hides_the_model_select_when_unreadable(seam, monkeypatch):
     seam.settings.github = SimpleNamespace(fallback_pat=None, app_id=None, app_private_key=None)
     seam.settings.mcp = SimpleNamespace(public_url=None, jwt_secret=None)
     for module in (dh, sa):
         monkeypatch.setattr(module, "identity_enabled_for", lambda *a: False)
+    # An agent that can't be read has no select on any panel.
+    for module in (dh, sa, tp):
+        monkeypatch.setattr(module, "read_picker", AsyncMock(return_value=None))
     monkeypatch.setattr(dh, "load_agent_details", AsyncMock(return_value=details()))
     state = PanelState(
         roster=[],
@@ -1147,7 +881,6 @@ async def test_details_hydration_hides_unavailable_backend_controls(seam, monkey
         account_id=ACCOUNT,
         guild_id=2001,
         is_admin=True,
-        backend_options=("openai",),
     )
     actual = await dh.load_details_for(
         seam.runtime,
@@ -1158,7 +891,7 @@ async def test_details_hydration_hides_unavailable_backend_controls(seam, monkey
         ),
     )
     assert actual.name == "analyst"
-    assert state.backend_options == () and state.backend_selection is None
+    assert state.model_picker is None
     monkeypatch.setattr(sa, "load_panel_roster", AsyncMock(return_value=object()))
     monkeypatch.setattr(sa, "load_panel_details", AsyncMock(return_value=details()))
     monkeypatch.setattr(sa, "resolve_attributions", AsyncMock(return_value={}))
@@ -1188,7 +921,7 @@ async def test_details_hydration_hides_unavailable_backend_controls(seam, monkey
     actor = Actor(user_id="admin", tenant_id=TENANT, is_admin=True, conversation_id="conversation")
     card = await panel._details(actor, "analyst", 0)
     assert card is not None and "analyst" in card.model_dump_json()
-    assert "model_backend" not in card.model_dump_json()
+    assert "model_pick" not in card.model_dump_json()
     assert seam.calls == []
 
 
@@ -1241,3 +974,159 @@ async def test_disabled_selection_read_does_not_touch_client_or_database():
 
     service = cb.AgentBackendService(refuse, enabled=False)
     assert await service.read_selection(object(), tenant_id=TENANT, agent_name="analyst") is None
+
+
+async def _gemini_value(persisted):
+    policy = await persisted.service.tenant_policy(persisted.tenant.id)
+    from daimon.core.models_catalog import list_model_choices
+
+    choices = list_model_choices(
+        tenant=policy, default=ModelRef(provider="anthropic", id="claude-opus-5-5")
+    )
+    return next(choice.value for choice in choices if choice.provider == "gemini")
+
+
+async def test_panel_pick_across_providers_applies_at_once(persisted):
+    """A cross-provider pick is written in one step, with what is off shown as information."""
+    trace = ScriptedTransport(router=persisted.router)
+    replies(trace, persisted.native, 12)
+    value = await _gemini_value(persisted)
+    async with trace.client() as client:
+        edit = panel_edit_deps(
+            persisted.settings,
+            client=client,
+            session_factory=persisted.sessions,
+            resolver_cache=new_resolver_cache(),
+            deployment_default=DeploymentDefault(agent_name="analyst", environment_name="default"),
+        )
+        # This fixture stores its write without a source capture.
+        service = cb.make_backend_service(
+            persisted.sessions, persisted.settings.turn, capture_source=None
+        )
+        actor = panel_actor(
+            tenant_id=persisted.tenant.id,
+            account_id=persisted.account.id,
+            subject=Subject(is_admin=True),
+        )
+        shown = await preview_model_switch(
+            service, edit, actor=actor, agent_name="analyst", value=value
+        )
+        assert shown.preview is not None, "a cross-provider pick is previewed"
+        done = await pick_or_refusal(
+            service, edit, actor=actor, agent_name="analyst", value=value, admin=True
+        )
+        assert not isinstance(done, SwitchRefusal), getattr(done, "line", "")
+        assert done.lines == shown.lines(), "the pick says what the preview showed is off"
+        agent = await cb.load_backend_agent(
+            client, persisted.sessions, tenant_id=persisted.tenant.id, agent_name="analyst"
+        )
+        current = await service.current(agent)
+    assert current is not None and current.backend == "gemini"
+
+
+def _picker():
+    from daimon.core.models_catalog import list_model_choices
+
+    current = ModelRef(provider="anthropic", id="claude-opus-5-5")
+    return ModelPicker(choices=list_model_choices(tenant=None, default=current), current=current)
+
+
+def test_each_panel_shows_one_model_select_with_the_current_pick(seam):
+    picker = _picker()
+    view = discord_view(seam, picker=picker)
+    selects = [i for i in view.walk_children() if isinstance(i, discord.ui.Select)]
+    assert [s.placeholder for s in selects] == ["Model"], "one select on the Discord panel"
+    assert any(option.default for option in selects[0].options)
+    slack = json.dumps(
+        sv.build_details_view(
+            details(),
+            meta=slack_meta(),
+            is_admin=True,
+            coding_tools_available=False,
+            channel_id="C1",
+            attribution=None,
+            model_picker=picker,
+        )
+    )
+    assert slack.count(sv.ACTION_BACKEND_SELECT) == 1, "one select on the Slack panel"
+    card = tc.details_card(
+        details(), here="chat", page=0, coding_tools=False, is_admin=True, model_picker=picker
+    ).model_dump_json()
+    assert card.count('"id":"model_pick"') == 1, "one select on the Teams card"
+
+
+def test_each_panel_offers_an_effort_select_only_where_the_provider_has_levels(seam):
+    picker = _picker()
+    assert picker.efforts == (), "Claude keeps its effort on the agent record"
+    openai = ModelPicker(
+        choices=picker.choices,
+        current=ModelRef(provider="openai", id="gpt-6-astra"),
+        efforts=("low", "medium", "high"),
+        effort="medium",
+    )
+
+    def discord_selects(shown: ModelPicker) -> list[str]:
+        view = discord_view(seam, picker=shown)
+        return [
+            str(s.placeholder) for s in view.walk_children() if isinstance(s, discord.ui.Select)
+        ]
+
+    def slack_view(shown: ModelPicker) -> str:
+        return json.dumps(
+            sv.build_details_view(
+                details(),
+                meta=slack_meta(),
+                is_admin=True,
+                coding_tools_available=False,
+                channel_id="C1",
+                attribution=None,
+                model_picker=shown,
+            )
+        )
+
+    def teams_card(shown: ModelPicker) -> str:
+        return tc.details_card(
+            details(), here="chat", page=0, coding_tools=False, is_admin=True, model_picker=shown
+        ).model_dump_json()
+
+    assert discord_selects(picker) == ["Model"]
+    assert discord_selects(openai) == ["Model", "Effort"]
+    assert sv.ACTION_EFFORT_SELECT not in slack_view(picker)
+    assert slack_view(openai).count(sv.ACTION_EFFORT_SELECT) == 1
+    assert '"id":"effort_pick"' not in teams_card(picker)
+    card = teams_card(openai)
+    assert card.count('"id":"effort_pick"') == 1 and '"effort_set"' in card
+
+
+@pytest.mark.parametrize(
+    "action,label",
+    [("switch_back_to_claude", "Switch back to Claude"), ("fresh_preview", "Try again")],
+)
+def test_a_refusal_offers_its_one_way_out_on_every_panel(seam, action, label):
+    from daimon.core.model_switch import SwitchRefusal
+
+    refusal = SwitchRefusal("It can't run right now.", action, "unsupported")
+    teams = tc.model_switch_card(
+        (refusal.line,), agent_name="analyst", value="gemini:x", action=action
+    ).model_dump_json()
+    slack = json.dumps(
+        sv.build_model_switch_view(
+            (refusal.line,),
+            meta=slack_meta(backend_target="gemini:x"),
+            action=action,
+        )
+    )
+    view = discord_view(seam, picker=_picker())
+    discord_labels = [
+        c.label
+        for c in dv.DetailsView(
+            view.state,
+            runtime=seam.runtime,
+            allowed_user_id=42,
+            details=details(),
+            refusal=refusal,
+            switch_value="gemini:x",
+        ).walk_children()
+        if isinstance(c, discord.ui.Button)
+    ]
+    assert label in teams and label in slack and label in discord_labels

@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger()
 
 #: A press by anyone but the requester: the card stays as it is.
-NOT_YOURS = "Only the person who asked can confirm this switch."
+NOT_YOURS = "Only the person who asked can use this switch."
 UNAVAILABLE = "This switch card is unavailable. Ask again to redo it."
 
 

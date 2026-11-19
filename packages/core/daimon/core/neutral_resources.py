@@ -26,6 +26,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
+from daimon.core.skills.latest_versions import LATEST_VERSIONS
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
@@ -49,7 +50,7 @@ from mux.profiles import native_agent_tools, neutral_catalog_profile_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    pass
+    from mux.state.lease import Slot
 
 AgentGate = Callable[[Agent], Awaitable[None]]
 PinResolver = Callable[[Scope, SkillRef], Awaitable[SkillRef]]
@@ -132,6 +133,7 @@ class NeutralResourceHost:
         resolve_pin: PinResolver | None = None,
         resource_catalog_enabled: bool = False,
         catalog_adapter: NativeCatalogReadback | None = None,
+        shared_slot: Slot | None = None,
     ) -> None:
         if (
             scope.is_platform
@@ -180,7 +182,10 @@ class NeutralResourceHost:
             raise UnsupportedCapability(("neutral_resource_host_profile",), capabilities.profile_id)
         self.sessions = sessions
         self.catalog = PostgresNeutralCatalog(
-            sessions, provider=profile.provider, account_scope_id=account_scope_id
+            sessions,
+            provider=profile.provider,
+            account_scope_id=account_scope_id,
+            shared_slot=shared_slot,
         )
 
     def check(self, agent: Agent) -> None:
@@ -408,8 +413,12 @@ class NeutralResourceHost:
                     ),
                     bundle=record.bundle,
                 )
-            except (ProviderError, SkillIngestError, CatalogConflict):
-                _log.warning("neutral_resources.skill_copy_failed")
+            except (ProviderError, SkillIngestError, CatalogConflict) as error:
+                from daimon.core.channel_backend import backend_refusal_causes
+
+                _log.warning(
+                    "neutral_resources.skill_copy_failed", causes=backend_refusal_causes(error)
+                )
                 dropped.append(record.bundle.preview.name)
                 continue
             kept.append(concrete)
@@ -584,6 +593,7 @@ class _NeutralSkillAddHost:
             skill_upload(bundle),
             key=self.host.operation_key + ":skill:publish",
         )
+        LATEST_VERSIONS.forget(skill_id)
         return UploadedSkill(native.ref.id, native.version)
 
     async def save_upload(self, bundle: SkillBundle, uploaded: UploadedSkill) -> None:

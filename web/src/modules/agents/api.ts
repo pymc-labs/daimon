@@ -5,7 +5,7 @@ import { toast } from "sonner"
 import { ApiError, api } from "@/lib/api"
 import type {
   Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, DataServerAgent, DataServerAgentPatch, DataServerScope, DataServerStatus,
-  DataServerToolPut, DataServerTools, Draft, Effect, ServerSkillMenu, Skill, SkillFiles, SkillFollow, Template,
+  DataServerToolPut, DataServerTools, Draft, Effect, ModelPreview, ServerSkillMenu, Skill, SkillFiles, SkillFollow, Template,
 } from "./types"
 
 export const useAgents = () => useQuery({ queryKey: ["agents"], queryFn: () => api.get<AgentSummary[]>("/api/agents") })
@@ -15,6 +15,18 @@ export const useDraft = (id: string, enabled = true) =>
 export const useVersions = (id: string, enabled = true) =>
   useQuery({ queryKey: ["agents", id, "versions"], queryFn: () => api.get<AgentVersion[]>(`/api/agents/${id}/versions`), enabled })
 export const useCatalog = () => useQuery({ queryKey: ["agents", "catalog"], queryFn: () => api.get<Catalog>("/api/agents/catalog"), staleTime: Infinity })
+/** A model pick as `provider:id`, the form the server's preview and create take. */
+export const modelValue = (m: { backend: Backend; id: string }) => `${m.backend}:${m.id}`
+
+/** What picking `value` changes for the agent, or why it can't be picked. */
+export const useModelPreview = (agentId: string, value: string, enabled = true) =>
+  useQuery({
+    queryKey: ["agents", agentId, "model-preview", value],
+    queryFn: () => api.get<ModelPreview>(`/api/agents/${agentId}/model-preview?value=${encodeURIComponent(value)}`),
+    enabled,
+    retry: false,
+  })
+
 export const useTemplates = () => useQuery({ queryKey: ["agents", "templates"], queryFn: () => api.get<Template[]>("/api/agents/templates"), staleTime: Infinity })
 
 /** The files of a custom skill at the version the config pins. */
@@ -67,7 +79,7 @@ export function useSetFollow(agentId: string) {
   })
 }
 
-/** Move the agent to the update its backend consent held back; the owner then re-confirms. */
+/** Move the agent to an update held back for it earlier. */
 export function useApplyUpdate(agentId: string) {
   const qc = useQueryClient()
   return useMutation({
@@ -222,7 +234,7 @@ export function useDiscard(id: string) {
 export function useApply(id: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (note: string) => api.post<Agent>(`/api/agents/${id}/apply`, { note }),
+    mutationFn: ({ note }: { note: string }) => api.post<Agent>(`/api/agents/${id}/apply`, { note }),
     onSuccess: (a) => {
       qc.setQueryData(["agents", id], a)
       qc.setQueryData(["agents", id, "draft"], null)

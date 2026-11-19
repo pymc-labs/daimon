@@ -54,3 +54,16 @@ def isolate_agent_faces() -> Iterator[None]:
 
     yield
     cancel_pending_agent_faces()
+
+
+@pytest.fixture(autouse=True)
+def isolate_skill_reads() -> Iterator[None]:
+    """Skill sizes are measured in the background and latest versions are remembered
+    process-wide; neither may carry one test's fakes into the next."""
+    from daimon.core.skills.latest_versions import LATEST_VERSIONS
+    from daimon.core.turn.session_skills import cancel_pending_measures
+
+    LATEST_VERSIONS.clear()
+    yield
+    cancel_pending_measures()
+    LATEST_VERSIONS.clear()

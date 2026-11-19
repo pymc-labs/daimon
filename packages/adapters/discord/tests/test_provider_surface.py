@@ -37,7 +37,6 @@ from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.provider_events import ProviderDraft
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_totals import ProviderUsageTotals
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle
@@ -165,18 +164,14 @@ async def test_default_managed_profile_keeps_neutral_drafts_out_of_legacy_render
     assert lifecycle._state.text_preview is None
 
 
-@pytest.mark.parametrize("log_on", [True, False])
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-async def test_a_new_provider_message_joins_the_card_log_whatever_the_switch(
-    provider: Provider, log_on: bool
-) -> None:
-    with status_log_override(log_on):
-        lifecycle = Posts().lifecycle()
-        await lifecycle.on_provider_event(preview(provider, "first ", item="one"))
-        await lifecycle.on_provider_event(preview(provider, "second", item="two"))
-        await lifecycle.on_provider_event(preview(provider, " more", item="two", sequence=1))
+async def test_a_new_provider_message_joins_the_card_log(provider: Provider) -> None:
+    lifecycle = Posts().lifecycle()
+    await lifecycle.on_provider_event(preview(provider, "first ", item="one"))
+    await lifecycle.on_provider_event(preview(provider, "second", item="two"))
+    await lifecycle.on_provider_event(preview(provider, " more", item="two", sequence=1))
     assert lifecycle._state.text_preview == "second more"
-    assert lifecycle._state.earlier_drafts == ("first",), "the card logs either way"
+    assert lifecycle._state.earlier_drafts == ("first",), "the card logs the earlier message"
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])

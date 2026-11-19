@@ -30,12 +30,18 @@ NOTIFICATION_TEXT: Final = "Settings"
 IN_A_CHANNEL: Final = "Settings belong to a channel. Run `/settings` in a channel."
 
 
+def is_settings_action(action_id: str) -> bool:
+    """Whether a block action is a press on the settings panel, a paging button included."""
+    return action_id == ACTION_ID or action_id.startswith(f"{ACTION_ID}:")
+
+
 def _text(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}}
 
 
 def build_settings_blocks(screen: PanelScreen) -> list[dict[str, Any]]:
-    """A screen as Block Kit: its title and lines, a select per control, a Back button."""
+    """A screen as Block Kit: its title and lines, a select per control, a Back button and,
+    on a long list, Previous and Next."""
     blocks = [_text(f"*{screen.title}*\n" + "\n".join(screen.lines))]
     for index, control in enumerate(screen.selects):
         select: dict[str, Any] = {
@@ -53,14 +59,19 @@ def build_settings_blocks(screen: PanelScreen) -> list[dict[str, Any]]:
             ],
         }
         blocks.append({"type": "actions", "block_id": f"settings_{index}", "elements": [select]})
-    if screen.back is not None:
-        back = {
-            "type": "button",
-            "action_id": ACTION_ID,
-            "text": {"type": "plain_text", "text": screen.back.label},
-            "value": screen.back.value,
-        }
-        blocks.append({"type": "actions", "block_id": "settings_back", "elements": [back]})
+    buttons = [(ACTION_ID, screen.back)] if screen.back is not None else []
+    buttons += [(f"{ACTION_ID}:{n}", option) for n, option in enumerate(screen.paging)]
+    if buttons:
+        elements = [
+            {
+                "type": "button",
+                "action_id": action_id,
+                "text": {"type": "plain_text", "text": option.label},
+                "value": option.value,
+            }
+            for action_id, option in buttons
+        ]
+        blocks.append({"type": "actions", "block_id": "settings_back", "elements": elements})
     return blocks
 
 
@@ -104,7 +115,7 @@ async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]
             runtime.settings,
             actor,
             FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
-            agents=tenant_agents(runtime.anthropic, actor.tenant_id),
+            agents=tenant_agents(runtime.anthropic, actor.tenant_id, records=runtime.sessionmaker),
         )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -151,7 +162,7 @@ async def handle_settings_change(runtime: SlackRuntime, payload: dict[str, Any])
         actor,
         raw,
         FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
-        agents=tenant_agents(runtime.anthropic, actor.tenant_id),
+        agents=tenant_agents(runtime.anthropic, actor.tenant_id, records=runtime.sessionmaker),
     )
     if screen is not None:
         await AsyncWebhookClient(response_url).send_dict(

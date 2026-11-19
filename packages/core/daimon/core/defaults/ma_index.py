@@ -11,7 +11,7 @@ others are left alone and a warning is logged.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from typing import Literal
 
 import sentry_sdk
@@ -27,8 +27,10 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    SEEDED_AGENT_RENAME,
     find_conflicting_skill_body,
     find_mount_collision,
+    is_renamed_seeded_agent,
     strip_tenant_prefix,
 )
 from daimon.core.errors import DaimonError, SkillsListTruncatedError
@@ -43,6 +45,7 @@ from daimon.core.mux_compat import (
 )
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import names_skill_version
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -67,11 +70,12 @@ _SKILLS_PAGE_LIMIT = 1000
 
 
 async def find_agents_by_daimon_tag(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     *,
     tenant_id: uuid.UUID,
     name: str,
     include_archived: bool = False,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> list[BetaManagedAgentsAgent]:
     """Return all MA agents tagged `(tenant_id, name)`, canonical first.
 
@@ -83,34 +87,73 @@ async def find_agents_by_daimon_tag(
     `include_archived=True` lifts the archived filter — useful for `daimon
     agents get --include-archived` when an operator needs to inspect an
     archived row. Defaults to False so reconcile + the resolver never adopt
-    archived agents.
+    archived agents. `records` adds the tenant's Daimon-owned agents.
     """
-    matches: list[BetaManagedAgentsAgent] = []
-    async for ag in list_agents(
-        client, include_archived=include_archived, scope=resource_scope(tenant_id=str(tenant_id))
-    ):
-        if (
-            ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
-            and ag.metadata.get(MA_METADATA_KEY_NAME) == name
-        ):
-            matches.append(ag)
+    agents = [
+        ag
+        async for ag in list_agents(
+            client,
+            include_archived=include_archived,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=records,
+        )
+    ]
+    return match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=name)
+
+
+def match_agents_by_daimon_tag(
+    agents: Iterable[BetaManagedAgentsAgent], *, tenant_id: uuid.UUID, name: str
+) -> list[BetaManagedAgentsAgent]:
+    """`find_agents_by_daimon_tag` over an already listed view: matches, canonical first."""
+    matches = [
+        ag
+        for ag in agents
+        if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
+        and ag.metadata.get(MA_METADATA_KEY_NAME) == name
+    ]
     if len(matches) > 1:
         _log.warning("ma_index.multi_match", kind="agents", count=len(matches))
     matches.sort(key=lambda m: m.created_at, reverse=True)
     return matches
 
 
+async def find_seeded_agents(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> tuple[list[BetaManagedAgentsAgent], BetaManagedAgentsAgent | None]:
+    """From one live listing: the tenant's `daimon` matches (canonical first) and the
+    seeded agent renamed to `default`, if any (`SEEDED_AGENT_RENAME`)."""
+    agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+    matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=SEEDED_AGENT_RENAME[0])
+    return matches, pick_renamed_seeded_agent(agents)
+
+
 async def find_agent_by_daimon_tag(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     *,
     tenant_id: uuid.UUID,
     name: str,
     include_archived: bool = False,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
-    """Read-only adapter for the resolver: canonical match only, no side effects."""
-    matches = await find_agents_by_daimon_tag(
-        client, tenant_id=tenant_id, name=name, include_archived=include_archived
-    )
+    """Read-only adapter for the resolver: canonical match only, no side effects.
+
+    A miss on the seeded name falls back to the tenant's seeded agent renamed in
+    place (`SEEDED_AGENT_RENAME`); never to a workspace's own agent of that name.
+    """
+    renamed = None
+    if name == SEEDED_AGENT_RENAME[0] and not include_archived:
+        matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id, records=records)
+    else:
+        matches = await find_agents_by_daimon_tag(
+            client,
+            tenant_id=tenant_id,
+            name=name,
+            include_archived=include_archived,
+            records=records,
+        )
     if len(matches) > 1:
         # Account-aware tripwire. The ambiguous state is degraded but not
         # an outage — adoption still proceeds with the newest match. The warning
@@ -124,16 +167,46 @@ async def find_agent_by_daimon_tag(
             adopted_account=matches[0].metadata.get(MA_METADATA_KEY_ACCOUNT),
             duplicate_accounts=[m.metadata.get(MA_METADATA_KEY_ACCOUNT) for m in matches[1:]],
         )
-    return matches[0] if matches else None
+    return matches[0] if matches else renamed
+
+
+def pick_renamed_seeded_agent(
+    agents: Iterable[BetaManagedAgentsAgent],
+) -> BetaManagedAgentsAgent | None:
+    """The newest of one tenant's `agents` that is the seeded agent after its rename."""
+    renamed = [ag for ag in agents if is_renamed_seeded_agent(ag.metadata)]
+    return max(renamed, key=lambda ag: ag.created_at, default=None)
+
+
+async def find_renamed_seeded_agent(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> BetaManagedAgentsAgent | None:
+    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None.
+
+    `records` adds the Daimon-owned records, for an install with no Anthropic key.
+    """
+    return pick_renamed_seeded_agent(
+        await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+    )
 
 
 async def find_environments_by_daimon_tag(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> list[BetaEnvironment]:
     """Parity with `find_agents_by_daimon_tag` — canonical first, duplicates follow."""
     matches: list[BetaEnvironment] = []
     async for env in list_environments(
-        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
+        client,
+        include_archived=False,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=records,
     ):
         if (
             env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id)
@@ -147,24 +220,51 @@ async def find_environments_by_daimon_tag(
 
 
 async def find_environment_by_daimon_tag(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment | None:
     """Read-only adapter for the resolver: canonical match only, no side effects."""
-    matches = await find_environments_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    matches = await find_environments_by_daimon_tag(
+        client, tenant_id=tenant_id, name=name, records=records
+    )
     return matches[0] if matches else None
 
 
 async def list_agents_by_tenant(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> list[BetaManagedAgentsAgent]:
-    """Return all non-archived MA agents tagged with tenant_id."""
+    """Return all non-archived agents tagged with tenant_id; `records` adds Daimon-owned ones."""
     results: list[BetaManagedAgentsAgent] = []
     async for ag in list_agents(
-        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
+        client,
+        include_archived=False,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=records,
     ):
         if ag.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(ag)
     return results
+
+
+async def agent_id_in_tenant(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    ref: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> str | None:
+    """The id of the tenant's agent `ref` names (its id or its name), or None when it has none."""
+    if ref.startswith("agent_"):
+        known = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+        return ref if any(a.id == ref for a in known) else None
+    agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=ref, records=records)
+    return None if agent is None else agent.id
 
 
 async def list_agents_for_privacy_deletion(
@@ -204,7 +304,11 @@ async def list_agents_by_tenants(
 
 
 async def find_agent_by_derived_uuid(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
     """Return the tenant's MA agent whose derived uuid5 is ``agent_id``, or None.
 
@@ -213,7 +317,7 @@ async def find_agent_by_derived_uuid(
     derived id (rows in ``credential_requests`` and other daimon-side tables
     key on it, never on the MA id) but must act on the MA agent itself.
     """
-    for agent in await list_agents_by_tenant(client, tenant_id=tenant_id):
+    for agent in await list_agents_by_tenant(client, tenant_id=tenant_id, records=records):
         if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)) == agent_id:
             return agent
     return None
@@ -258,12 +362,18 @@ async def list_agents_referencing_skill(
 
 
 async def list_environments_by_tenant(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> list[BetaEnvironment]:
-    """Return all non-archived MA environments tagged with tenant_id."""
+    """Return all non-archived environments tagged with tenant_id."""
     results: list[BetaEnvironment] = []
     async for env in list_environments(
-        client, include_archived=False, scope=resource_scope(tenant_id=str(tenant_id))
+        client,
+        include_archived=False,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=records,
     ):
         if env.metadata.get(MA_METADATA_KEY_TENANT) == str(tenant_id):
             results.append(env)

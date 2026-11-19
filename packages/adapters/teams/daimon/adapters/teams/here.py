@@ -19,11 +19,11 @@ from daimon.adapters.teams.billing_panel import plain_name
 from daimon.adapters.teams.card_actions import (
     heading,
     open_in_web,
-    web_links,
 )
 from daimon.adapters.teams.commands import CommandContext
 from daimon.core.agent_details import GitHubDeploymentFacts
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.here_card import (
     HereCard,
@@ -32,6 +32,7 @@ from daimon.core.here_card import (
     render_here_card,
 )
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.web_links import panel_links
 from microsoft_teams.cards import ActionSet, AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
@@ -88,7 +89,6 @@ async def _load(context: CommandContext) -> HereCard:
                 app_configured=runtime.settings.github_app.app_id is not None
                 and runtime.settings.github_app.private_key is not None,
             ),
-            gate_overrides_active=runtime.settings.tool_safety.gate_overrides_active,
             public_mcp_url=str(public_url) if public_url is not None else None,
             # Only the caller sees the answer, so an admin may see admin views.
             is_admin=context.is_admin,
@@ -96,9 +96,11 @@ async def _load(context: CommandContext) -> HereCard:
             visible_channel_ids={asked.channel_id},
             bot_can_view=True,
             caller_can_view=True,
-            web=web_links(
-                runtime, context.tenant_id, admin=context.is_admin, foreign=asked.is_foreign
-            ),
+            web=None
+            if asked.is_foreign
+            else panel_links(runtime.settings.web, context.tenant_id, admin=context.is_admin),
+            settings=runtime.settings,
+            records=runtime.sessionmaker,
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
     return for_foreign_sender(card) if asked.is_foreign else card
@@ -108,7 +110,7 @@ async def show_here(context: CommandContext) -> None:
     try:
         card = here_card(await _load(context))
     except (DaimonError, anthropic.APIError) as exc:
-        log.warning("teams.here.failed", exc_info=exc)
+        log.warning("teams.here.failed", exc_info=exc, causes=backend_refusal_causes(exc))
         text = str(exc) if isinstance(exc, DaimonError) else _FAILED
         card = AdaptiveCard(body=[heading(TITLE), TextBlock(text=text, wrap=True)])
     await context.send_card(card)

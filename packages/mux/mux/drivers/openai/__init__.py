@@ -12,9 +12,10 @@ from mux.contracts.profile import Profile
 from mux.drivers.openai._common import Authorization, Context
 from mux.drivers.openai.agents import OpenAIAgents
 from mux.drivers.openai.artifacts import OpenAIArtifacts
-from mux.drivers.openai.deployment import configured_transport
+from mux.drivers.openai.completions import OpenAICompletions
+from mux.drivers.openai.deployment import configured_completions, configured_transport
 from mux.drivers.openai.environments import OpenAIEnvironments
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
+from mux.drivers.openai.mcp_auth import MCPSecretResolver, fits_shared_credential
 from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
@@ -68,10 +69,12 @@ class OpenAIDriver:
         self.sessions = OpenAISessions(
             context, binding_lookup, controls=session_controls, mcp_secrets=mcp_secrets
         )
-        self.events: Events = (
-            events if events is not None else OpenAIEvents(context, self.sessions, journal)
-        )
         self.usage = OpenAIUsage(context, usage_revisions)
+        self.events: Events = (
+            events
+            if events is not None
+            else OpenAIEvents(context, self.sessions, journal, self.usage.note_terminal)
+        )
         self._artifacts = artifacts if artifacts is not None else OpenAIArtifacts(context)
         self._skills = skills if skills is not None else OpenAISkills(context)
         self._models = models
@@ -120,6 +123,7 @@ if TYPE_CHECKING:
     _checked_factory: Callable[..., ManagedAgents] = OpenAIDriver
 
 __all__ = [
+    "OpenAICompletions",
     "Authorization",
     "BindingLookup",
     "Context",
@@ -142,7 +146,9 @@ __all__ = [
     "Transport",
     "UsageRevisions",
     "bundle_digest",
+    "configured_completions",
     "configured_transport",
+    "fits_shared_credential",
     "merge_history",
     "object_json",
 ]

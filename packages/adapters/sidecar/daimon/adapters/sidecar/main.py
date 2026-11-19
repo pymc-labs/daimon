@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import structlog
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
@@ -14,6 +15,7 @@ from daimon.adapters.sidecar.settings import SidecarSettings
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.page_events import MAX_EVENT_BYTES, SignedPageEvent
 from daimon.core.stores.watches import (
+    accept_callback_event,
     accept_page_event,
     audit_sidecar_identity,
     claim_poll_watches,
@@ -26,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 log = structlog.get_logger()
 
+TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,128}")
+
 
 def create_app(
     sessions: async_sessionmaker[AsyncSession],
@@ -34,11 +38,33 @@ def create_app(
     max_concurrent: int = 8,
     request_timeout_s: float = 10,
     max_requests_per_minute: int = 1200,
+    max_watch_requests_per_minute: int = 120,
 ) -> web.Application:
-    """Only callback POST paths accept input; health is private at the proxy."""
-    app = web.Application(client_max_size=MAX_EVENT_BYTES)
+    """Only callback POST paths accept input; health is private at the proxy.
+
+    A token post may carry up to the deployment's `callback_max_body_bytes`, the one value
+    the HTTP read and the database port both use; a signed page event keeps its own
+    smaller limit.
+    """
+    callback_cap = load_watches_settings().callback_max_body_bytes
+    app = web.Application(client_max_size=max(MAX_EVENT_BYTES, callback_cap))
     active = 0
     recent: deque[float] = deque()
+    per_watch: dict[uuid.UUID, deque[float]] = {}
+
+    def watch_limited(watch_id: uuid.UUID) -> bool:
+        """One watch cannot use the whole shared budget; guesses count like posts."""
+        now = time.monotonic()
+        if len(per_watch) > 4096:
+            for key in [k for k, v in per_watch.items() if not v or v[-1] <= now - 60]:
+                del per_watch[key]
+        window = per_watch.setdefault(watch_id, deque())
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= max_watch_requests_per_minute:
+            return True
+        window.append(now)
+        return False
 
     async def health(_: web.Request) -> web.Response:
         try:
@@ -48,85 +74,137 @@ def create_app(
         except (TimeoutError, DBAPIError):
             return web.json_response({"status": "unavailable"}, status=503)
 
-    async def callback(request: web.Request) -> web.Response:
-        nonlocal active
-        if not load_watches_settings().enabled:
-            return web.Response(status=503)
-        now = time.monotonic()
-        while recent and recent[0] <= now - 60:
-            recent.popleft()
-        if len(recent) >= max_requests_per_minute:
-            return web.Response(status=429)
-        recent.append(now)
-        # No wait queue: requests awaiting body reads also consume a slot.
-        if active >= max_concurrent:
-            return web.Response(status=429)
-        active += 1
+    def guarded(
+        inner: Callable[[web.Request], Awaitable[web.Response]],
+    ) -> Callable[[web.Request], Awaitable[web.Response]]:
+        """Switch, rate and slot limits, a deadline and uniform error codes for one route."""
+
+        async def handler(request: web.Request) -> web.Response:
+            nonlocal active
+            if not load_watches_settings().enabled:
+                return web.Response(status=503)
+            now = time.monotonic()
+            while recent and recent[0] <= now - 60:
+                recent.popleft()
+            if len(recent) >= max_requests_per_minute:
+                return web.Response(status=429)
+            recent.append(now)
+            # No wait queue: requests awaiting body reads also consume a slot.
+            if active >= max_concurrent:
+                return web.Response(status=429)
+            active += 1
+            try:
+                async with asyncio.timeout(request_timeout_s):
+                    return await inner(request)
+            except DBAPIError as exc:
+                # Never log exception text/parameters, authorization headers or bodies.
+                state = getattr(exc.orig, "sqlstate", None)
+                if state == "55000":
+                    # A valid link whose watch awaits confirmation: senders retry.
+                    return web.Response(status=503, headers={"Retry-After": "300"})
+                return web.Response(
+                    status=409
+                    if state == "23505"
+                    else 429
+                    if state == "54000"
+                    else 403
+                    if state in ("42501", "22023")
+                    else 503
+                )
+            except (ValueError, UnicodeError):
+                return web.Response(status=403)
+            except TimeoutError:
+                return web.Response(status=503)
+            finally:
+                active -= 1
+
+        return handler
+
+    async def read_body(request: web.Request, limit: int) -> bytes | None:
+        """The whole body, or None past `limit`. Streaming bounds work without Content-Length."""
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(4096):
+            body.extend(chunk)
+            if len(body) > limit:
+                return None
+        return bytes(body)
+
+    async def signed_callback(request: web.Request) -> web.Response:
         try:
-            async with asyncio.timeout(request_timeout_s):
-                try:
-                    watch_id = uuid.UUID(request.match_info["watch_id"])
-                except ValueError:
-                    return web.Response(status=404)
+            watch_id = uuid.UUID(request.match_info["watch_id"])
+        except ValueError:
+            return web.Response(status=404)
 
-                def header(name: str) -> str:
-                    values = request.headers.getall(name, [])
-                    if len(values) != 1:
-                        raise ValueError("Missing or duplicate signed header")
-                    return values[0]
+        def header(name: str) -> str:
+            values = request.headers.getall(name, [])
+            if len(values) != 1:
+                raise ValueError("Missing or duplicate signed header")
+            return values[0]
 
-                try:
-                    page = uuid.UUID(header("X-Page-ID"))
-                    event = uuid.UUID(header("X-Event-ID"))
-                    stamp = int(header("X-Timestamp"))
-                    key_id = header("X-Watch-Key-ID")
-                    signature = header("X-Signature")
-                except ValueError:
-                    return web.Response(status=400)
-                key = (signing_keys or {}).get(key_id)
-                if key is None or request.headers.get("Content-Encoding", "identity") != "identity":
-                    return web.Response(status=403)
-                # Streaming bounds work without Content-Length, including chunked senders.
-                body = bytearray()
-                async for chunk in request.content.iter_chunked(4096):
-                    body.extend(chunk)
-                    if len(body) > MAX_EVENT_BYTES:
-                        return web.Response(status=413)
-                try:
-                    body.decode("utf-8")
-                except UnicodeDecodeError:
-                    return web.Response(status=400)
-                delivery = SignedPageEvent(
-                    watch_id, page, key_id, stamp, event, bytes(body), signature
-                )
-                async with sessions.begin() as session:
-                    key = await accept_page_event(session, delivery, key=key.get_secret_value())
-                # The context commits before success is observable by the sender.
-                return web.json_response(
-                    {"accepted": key is not None, "wake_id": None if key is None else str(key)},
-                    status=202,
-                )
-        except DBAPIError as exc:
-            # Never log exception text/parameters, authorization headers or bodies.
-            state = getattr(exc.orig, "sqlstate", None)
-            return web.Response(
-                status=409
-                if state == "23505"
-                else 429
-                if state == "54000"
-                else 403
-                if state in ("42501", "22023")
-                else 503
-            )
-        except (ValueError, UnicodeError):
+        try:
+            page = uuid.UUID(header("X-Page-ID"))
+            event = uuid.UUID(header("X-Event-ID"))
+            stamp = int(header("X-Timestamp"))
+            key_id = header("X-Watch-Key-ID")
+            signature = header("X-Signature")
+        except ValueError:
+            return web.Response(status=400)
+        key = (signing_keys or {}).get(key_id)
+        if key is None or request.headers.get("Content-Encoding", "identity") != "identity":
             return web.Response(status=403)
-        except TimeoutError:
-            return web.Response(status=503)
-        finally:
-            active -= 1
+        body = await read_body(request, MAX_EVENT_BYTES)
+        if body is None:
+            return web.Response(status=413)
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            return web.Response(status=400)
+        delivery = SignedPageEvent(watch_id, page, key_id, stamp, event, body, signature)
+        async with sessions.begin() as session:
+            accepted = await accept_page_event(session, delivery, key=key.get_secret_value())
+        # The context commits before success is observable by the sender.
+        return web.json_response(
+            {
+                "accepted": accepted is not None,
+                "wake_id": None if accepted is None else str(accepted),
+            },
+            status=202,
+        )
+
+    async def token_callback(request: web.Request) -> web.Response:
+        """A post to a secret link. Every refusal of the link itself is the same 403."""
+        try:
+            watch_id = uuid.UUID(request.match_info["watch_id"])
+        except ValueError:
+            return web.Response(status=404)
+        token = request.match_info["token"]
+        if TOKEN_SHAPE.fullmatch(token) is None:
+            return web.Response(status=403)
+        if watch_limited(watch_id):
+            return web.Response(status=429)
+        if request.headers.get("Content-Encoding", "identity") != "identity":
+            return web.Response(status=400)
+        body = await read_body(request, callback_cap)
+        if body is None:
+            return web.Response(status=413)
+        if not body:
+            return web.Response(status=400)
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            return web.Response(status=400)
+        # The database cannot hold a NUL in text.
+        if b"\x00" in body:
+            return web.Response(status=400)
+        async with sessions.begin() as session:
+            await accept_callback_event(
+                session, watch_id=watch_id, token=token, body=body, max_body_bytes=callback_cap
+            )
+        return web.json_response({"accepted": True}, status=202)
 
     app.router.add_get("/healthz", health)
-    app.router.add_post("/callbacks/watches/{watch_id}", callback)
+    app.router.add_post("/callbacks/watches/{watch_id}", guarded(signed_callback))
+    app.router.add_post("/callbacks/watches/{watch_id}/{token}", guarded(token_callback))
     return app
 
 

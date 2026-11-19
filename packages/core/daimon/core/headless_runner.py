@@ -8,20 +8,21 @@ the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
-(`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
+(`daimon.core.turn.ceiling`: 45 minutes, or a shorter unattended run limit set at the run's
+place): one shared deadline covers BOTH
 session assembly (the `agent`/`environment` retrieve calls plus
 `create_session`) and the delegated drain, mirroring how the chat path
 splits its own ceiling coverage between `bind_session` and
 `run_prepared_turn`. `deadline` is fail-safe like those two sites: a caller
 that passes none (every caller today, including the scheduler's `_fire`)
-still gets `turn_deadline(now=datetime.now(UTC))` computed here. A breach
+still gets that deadline computed here (`unattended_ceiling_s`). A breach
 during assembly is raised as `TurnError(kind="ceiling")`; a breach during
 the drain comes back the same way via the driver's own `state.error` and
 this function's existing `if state.error is not None: raise state.error`.
 Either way it reaches the scheduler's `_fire_guarded` boundary as
 `"TurnError: ceiling: ..."` via `_record_fire_error`, not the adapter's own
 bespoke `"timeout: exceeded Ns"` string — the scheduler's `dispatch_timeout_s`
-is now strictly above `TURN_CEILING_S` and exists only as an outer process
+is strictly above `LONGEST_TURN_CEILING_S` and exists only as an outer process
 guard that this ceiling always fires ahead of.
 
 Used by `daimon.adapters.scheduler` for routine fires and by
@@ -71,7 +72,7 @@ from daimon.core.config import (
     load_turn_settings,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
-from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.model_input import DEFAULT_TOOLSET, turn_limit_minutes
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
@@ -86,7 +87,13 @@ from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.approvals import daimon_rule_tools_for
-from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
+from daimon.core.turn.ceiling import (
+    TURN_CEILING_S,
+    ceiling_error,
+    limit_ceiling_s,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -95,9 +102,15 @@ from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture, ExemptReason
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import session_gate, unattended_posture
+from daimon.core.turn.unattended import (
+    owner_principal_check,
+    session_gate,
+    unattended_posture,
+)
 from daimon.core.turn.unattended_capabilities import protected_tools
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.turn_hold import TurnHold
+from daimon.core.usage_recording import WebSearchCall
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
@@ -108,6 +121,8 @@ from mux.state.mutation_retry import MutationRetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.membership import MembershipResolver
+
     pass
 
 log = structlog.get_logger(__name__)
@@ -156,6 +171,35 @@ def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
 _assert_satisfies_turn_lifecycle(_NoOpLifecycle())
 
 
+async def unattended_ceiling_s(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    feature_settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    agent_id: str,
+    platform: str | None,
+    channel_id: str | None,
+    thread_id: str | None,
+) -> float:
+    """How long an unattended run may take: the unattended run limit at its place, else the
+    built-in 45 minutes (a run without a workspace has no place to read one), never past
+    `LONGEST_TURN_CEILING_S`."""
+    if session_factory is None or tenant_id is None:
+        return TURN_CEILING_S
+    place = FeaturePlace.of(
+        tenant_id,
+        platform or "routine",
+        channel_id,
+        thread_id,
+        agent_id=agent_id,
+        backend=MANAGED_AGENTS.provider,
+    )
+    snapshot = await resolve_features(
+        session_factory, feature_settings, place, keys=("unattended_time_limit",)
+    )
+    return limit_ceiling_s(turn_limit_minutes(snapshot, unattended=True))
+
+
 async def run_turn(
     *,
     anthropic: AsyncAnthropic,
@@ -189,6 +233,9 @@ async def run_turn(
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -227,6 +274,9 @@ async def run_turn(
             turn_path=turn_path,
             personal_memory=personal_memory,
             feature_settings=feature_settings,
+            runs_as_user=runs_as_user,
+            membership_resolver=membership_resolver,
+            routine_id=routine_id,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -265,6 +315,9 @@ async def run_turn(
                 turn_path=turn_path,
                 personal_memory=personal_memory,
                 feature_settings=feature_settings,
+                runs_as_user=runs_as_user,
+                membership_resolver=membership_resolver,
+                routine_id=routine_id,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -347,6 +400,9 @@ async def run_turn_impl(
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -456,7 +512,24 @@ async def run_turn_impl(
             authorization_id="headless-turn",
         )
 
-    effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    effective_deadline = (
+        deadline
+        if deadline is not None
+        else turn_deadline(
+            now=datetime.now(UTC),
+            ceiling_s=await unattended_ceiling_s(
+                session_factory,
+                feature_settings,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                channel_id=origin_place.channel_id
+                if origin_place is not None
+                else budget_channel_id,
+                thread_id=origin_place.thread_id if origin_place is not None else None,
+            ),
+        )
+    )
     public_url = (
         str(mcp_settings.public_url)
         if mcp_settings is not None and mcp_settings.public_url is not None
@@ -479,8 +552,21 @@ async def run_turn_impl(
         else frozenset[str]()
     )
 
+    principal_check = owner_principal_check(
+        session_factory,
+        membership_resolver,
+        tenant_id=tenant_id,
+        owner_user_id=runs_as_user,
+    )
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
+
+    # Older MCP images reject the claim keys, so only a deployment that opted in sends them.
+    relay_routine = (
+        origin == "routine"
+        and feature_settings is not None
+        and feature_settings.mcp_identity.names_requester
+    )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
         nonlocal fragments, memory_on
@@ -512,7 +598,9 @@ async def run_turn_impl(
 
             async with session_factory() as db:
                 access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
-            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+            ref = build_agent_ref(agent.name, agent.metadata)
+            if agent_invoker_roles(access, ref.names) and not await principal_check(access, ref):
+                # Unattended: only a run-as owner freshly verified to hold the roles.
                 raise AdmissionDenied(reason="invoker_not_allowed")
         environment = sdk_environment(
             await legacy_call(
@@ -575,6 +663,8 @@ async def run_turn_impl(
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
+            relay_routine_id=routine_id if relay_routine else None,
+            relay_owner=runs_as_user if relay_routine and routine_id else None,
             identity=identity,
         )
 
@@ -626,7 +716,7 @@ async def run_turn_impl(
         sandbox_tools = False
         if sandbox is not None:
             sandbox_tools = await run_matches_pin(
-                anthropic, sandbox.pin, session, tenant_id=tenant_id
+                anthropic, sandbox.pin, session, tenant_id=tenant_id, records=session_factory
             )
             if not sandbox_tools:
                 log.warning(
@@ -647,7 +737,9 @@ async def run_turn_impl(
         if usage_record is not None:
             _bound_usage_record = usage_record
 
-            async def _record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+            async def _record(
+                *, event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall
+            ) -> None:
                 await _bound_usage_record(event=event)
 
             billing = Billed(record=_record)
@@ -729,6 +821,7 @@ async def run_turn_impl(
                     tenant_id=tenant_id,
                     entry_point="routine",
                     routine_sandbox_tools=sandbox_tools,
+                    principal_check=principal_check,
                 )
             ),
         ):
@@ -739,6 +832,14 @@ async def run_turn_impl(
                 session_id=session.id,
                 user_message=(
                     context_prompt(origin, fragments=fragments, system=session.agent.system)
+                    # Built-ins, search included, run only with the routine's sandbox
+                    # opt-in; the gate above disables them otherwise.
+                    + sources_prefix(
+                        on=sandbox_tools
+                        and claude_searches(
+                            [tool.model_dump(mode="json") for tool in session.agent.tools]
+                        )
+                    )
                     + routine_memory
                     + trigger_message
                 ),

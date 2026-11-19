@@ -79,10 +79,16 @@ class CatalogSkill(NativeConfig):
     version: str | None = None
 
 
+class ModelConfig(NativeConfig):
+    id: str
+    speed: str | None = None
+    effort: str | None = None
+
+
 class AgentOverrides(NativeConfig):
     type: Literal["agent_with_overrides"]
     id: str
-    model: str | None = None
+    model: str | ModelConfig | None = None
     system: str | None = None
     mcp_servers: list[MCPServer] | None = None
     tools: list[AgentTool] | None = None
@@ -291,6 +297,9 @@ class AnthropicSessions:
             raise ValueError("Anthropic sessions require an environment")
         self._check(scope, spec.environment, "environment")
         check_record(scope, spec.agent.id, spec.metadata)
+        if spec.skills:
+            # Its sessions take skills through the agent; never drop a session's own.
+            raise UnsupportedCapability(("session_skills",), "anthropic.managed_agents")
         config = SessionCreateConfig()
         for namespace, extension in spec.extensions.items():
             if namespace != "anthropic.session_create":

@@ -1,19 +1,29 @@
 """Switch previews use the worker preservation rule, without worker authority."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from daimon.core.channel_backend import AgentSettings
+from daimon.core.stores.domain import SourceRepresentation
 from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
     preview_source_drops,
     source_preservation_pin,
+    unavailable_line,
 )
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, SkillRef
-from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec, WorkspaceSource
+from mux.contracts.resources import (
+    AgentSpec,
+    MCPConnection,
+    NetworkPolicy,
+    ResourceBinding,
+    ToolSpec,
+    WorkspaceSource,
+)
 from mux.errors import UnsupportedCapability
-from pydantic import ValidationError
 
 from .source_projection_support import captured_source
 
@@ -230,8 +240,6 @@ def test_dropping_a_connection_or_attachment_never_drops_unknown_resources(captu
         "tools",
         "system",
         "environment",
-        "memory_store_id",
-        "resource_generations",
     ],
 )
 def test_pin_detects_drift_even_when_the_loss_labels_are_unchanged(captured, field):
@@ -295,20 +303,51 @@ def test_pin_detects_drift_even_when_the_loss_labels_are_unchanged(captured, fie
                 )
             }
         )
-    elif field == "memory_store_id":
-        source = source.model_copy(update={"memory_store_id": "different-store"})
-    else:
-        from datetime import UTC, datetime
-
-        source = source.model_copy(
-            update={"resource_generations": (("resource", datetime(2026, 10, 14, tzinfo=UTC)),)}
-        )
     model = ModelRef(provider="openai", id="gpt-6-luna")
     assert (
         preview_source_drops(before, model).declared_drops
         == preview_source_drops(source, model).declared_drops
     )
     assert source_preservation_pin(source) != source_preservation_pin(before)
+
+
+@pytest.mark.parametrize(
+    "place",
+    [
+        {"memory_store_id": "held-channel-store"},
+        {"memory_read_only": False},
+        {"memory_instructions": "Memory is read-only here."},
+        {"resource_generations": (("agent-env:key", datetime(2026, 10, 14, tzinfo=UTC)),)},
+    ],
+)
+def test_pin_leaves_out_a_place_and_a_credential_rewrite(captured, place):
+    """Held or read-only memory is the place's, and rewriting a credential keeps its
+    setup: neither asks to confirm a switch again; what they cost is checked per turn."""
+    assert source_preservation_pin(captured.model_copy(update=place)) == (
+        source_preservation_pin(captured)
+    ), f"{sorted(place)} is not the owner's setup"
+
+
+def test_pin_keeps_the_owner_spec_and_accepts_the_stricter_pin_before_it(captured):
+    """A channel's skills sit only on the turn's spec; a pin stored with them still holds."""
+    from daimon.core.turn.runtime_manifest import _gated_pin, source_pin_matches
+
+    channel = captured.effective_spec.model_copy(
+        update={"skills": (SkillRef(id="channel-skill", version="1"),)}
+    )
+    placed = captured.model_copy(
+        update={"effective_spec": channel, "owner_spec": captured.effective_spec}
+    )
+    assert source_preservation_pin(placed) == source_preservation_pin(captured), (
+        "a channel skill is not in the owner's setup"
+    )
+    assert source_pin_matches(placed, _gated_pin(placed, readdress=True)), (
+        "a pin stored before places left it is stricter and still holds"
+    )
+    edited = placed.model_copy(update={"owner_spec": channel})
+    assert source_preservation_pin(edited) != source_preservation_pin(placed), (
+        "an owner's own skill is part of the setup"
+    )
 
 
 def test_pin_normalizes_caller_address_but_preserves_source_ownership(captured):
@@ -340,58 +379,6 @@ def test_pin_normalizes_caller_address_but_preserves_source_ownership(captured):
         }
     )
     assert source_preservation_pin(foreign) != source_preservation_pin(captured)
-
-
-@pytest.fixture
-def preview(captured):
-    from daimon.core.channel_backend import compatibility_preview
-    from daimon.core.stores.domain import TenantBackendPolicy
-
-    return compatibility_preview(
-        captured, "openai", TenantBackendPolicy(tenant_id=captured.tenant_id, revision="policy")
-    )
-
-
-def test_public_preview_consent_uses_the_existing_canonical_drop_domain(preview):
-    original = preview.model_dump(mode="json")
-    assert "drop_consent" not in original
-    parsed = type(preview).model_validate(
-        {
-            **original,
-            "drop_consent": {
-                "declared_drops": ["sandbox", "memory"],
-                "source_pin": "a" * 64,
-                "target_digest": "b" * 64,
-            },
-        }
-    )
-    assert parsed.declared_drops == ("memory", "sandbox")
-    assert parsed.model_dump(mode="json")["drop_consent"] == {
-        "declared_drops": ["memory", "sandbox"],
-        "source_pin": "a" * 64,
-        "target_digest": "b" * 64,
-    }
-    assert preview.declared_drops == () and preview.model_dump(mode="json") == original
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"declared_drops": ["instructions"]},
-        {"declared_drops": ["source_definition"]},
-        {"declared_drops": ["memory", "memory"]},
-        {"declared_drops": "memory"},
-        {"source_pin": "caller supplied"},
-        {"target_digest": None},
-        {"unknown": True},
-    ],
-)
-def test_public_preview_refuses_unclosed_or_nondroppable_consent(preview, change):
-    consent = {"declared_drops": ["memory"], "source_pin": "a" * 64, "target_digest": "b" * 64}
-    with pytest.raises(ValidationError):
-        type(preview).model_validate(
-            {**preview.model_dump(), "drop_consent": {**consent, **change}}
-        )
 
 
 def test_source_provider_identity_retains_its_full_existing_spec(captured):
@@ -591,21 +578,32 @@ def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provide
         assert "tools" not in classify_source_obligations(source, native_retained, environment=None)
 
 
+def test_the_agent_is_told_the_exact_model_setting_that_is_off():
+    line = unavailable_line(("effort_setting", "fast_mode", "sandbox"))
+    assert line == "Unavailable capabilities: effort setting, fast mode, sandbox.", line
+
+
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 @pytest.mark.parametrize(
-    "controls,required",
+    "controls,expected",
     [
-        ({}, False),
-        ({"speed": None}, False),
-        ({"speed": "standard"}, True),
-        ({"speed": "fast"}, True),
-        ({"effort": None}, True),
-        ({"effort": "low"}, True),
-        ({"effort": {"type": "medium"}, "speed": "standard"}, True),
+        ({}, ()),
+        ({"speed": None}, ()),
+        # Claude's defaults, as the model panel saves them, are no loss.
+        ({"speed": "standard"}, ()),
+        ({"effort": None}, ()),
+        ({"effort": "high", "speed": "standard"}, ()),
+        ({"effort": {"type": "high"}}, ()),
+        ({"speed": "fast"}, ("fast_mode",)),
+        ({"inference_geo": "us"}, ("inference_region",)),
+        # An effort the target offers carries over; Gemini offers none, so it is a loss.
+        ({"effort": "low"}, ("effort_setting",)),
+        ({"effort": {"type": "medium"}, "speed": "standard"}, ("effort_setting",)),
+        ({"effort": "low", "speed": "fast"}, ("effort_setting", "fast_mode")),
     ],
 )
-def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
-    captured, provider, controls, required
+def test_each_unrepresented_model_control_is_named_on_its_own(
+    captured, provider, controls, expected
 ):
     extension = ExtensionConfig(
         namespace="anthropic.model_config",
@@ -622,12 +620,22 @@ def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
     model = ModelRef(
         provider=provider, id="gpt-6-luna" if provider == "openai" else "gemini-3.8-flash"
     )
-    target = preview_source_drops(source, model)
-    assert target.declared_drops == (("model_controls", "sandbox") if required else ("sandbox",))
-    assert classify_source_obligations(source, target, environment=None) == frozenset()
-    if required:
-        omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
-        assert classify_source_obligations(source, omitted, environment=None) == {"model_controls"}
+    effort = AgentSettings().for_backend(provider, source).effort
+    if "effort_setting" in expected:
+        assert (effort is not None) == (provider == "openai"), "effort carries where offered"
+    lost = tuple(d for d in expected if effort is None or d != "effort_setting")
+    target = preview_source_drops(source, model, effort=effort)
+    assert target.declared_drops == tuple(sorted((*lost, "sandbox"))), (
+        "each lost control is named once"
+    )
+    assert (
+        classify_source_obligations(source, target, environment=None, target_effort=effort)
+        == frozenset()
+    )
+    omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
+    assert classify_source_obligations(
+        source, omitted, environment=None, target_effort=effort
+    ) == set(lost)
 
 
 @pytest.mark.parametrize(
@@ -792,3 +800,118 @@ def test_a_declared_credentials_loss_never_covers_a_credential_its_kept_connecti
         }
     )
     assert "credentials" in classify_source_obligations(source, retained, environment=None)
+
+
+def test_a_source_effort_is_carried_only_when_the_target_states_one(captured):
+    """Effort is dropped no longer when the target declares it; Fast stays dropped."""
+    spec = captured.effective_spec
+    extension = ExtensionConfig(
+        namespace="anthropic.model_config",
+        version=1,
+        value={"model": {"id": "claude-haiku-5-5", "effort": "low"}},
+    )
+    source = captured.model_copy(
+        update={"effective_spec": spec.model_copy(update={"extensions": (extension,)})}
+    )
+    ref = ModelRef(provider="openai", id="gpt-6-luna")
+    unstated = preview_source_drops(source, ref)
+    stated = preview_source_drops(source, ref, effort="low")
+    assert "effort_setting" in unstated.declared_drops, "an effort alone is its own loss"
+    assert "effort_setting" not in stated.declared_drops, "a stated effort is carried"
+    fast = ExtensionConfig(
+        namespace="anthropic.model_config",
+        version=1,
+        value={"model": {"id": "claude-haiku-5-5", "effort": "low", "speed": "fast"}},
+    )
+    still = source.model_copy(
+        update={"effective_spec": spec.model_copy(update={"extensions": (fast,)})}
+    )
+    assert "fast_mode" in preview_source_drops(still, ref, effort="low").declared_drops
+
+
+_FILES = (
+    WorkspaceSource(
+        kind="repository", target_path="/work/repo", repository_url="https://example.invalid/r.git"
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+@pytest.mark.parametrize(
+    "environment,lost",
+    [
+        ({}, ()),
+        ({"packages": {"pip": ("numpy",)}}, ("installed_packages",)),
+        ({"network": NetworkPolicy(mode="none")}, ("network_rules",)),
+        ({"network": NetworkPolicy(mode="limited", allowed_hosts=("a.test",))}, ("network_rules",)),
+        ({"sources": _FILES}, ("workspace_files",)),
+        (
+            {"packages": {"npm": ("left-pad",)}, "network": NetworkPolicy(mode="none")},
+            ("installed_packages", "network_rules"),
+        ),
+    ],
+)
+def test_a_provider_sandbox_is_kept_only_for_a_plain_environment(
+    captured, provider, model, environment, lost
+):
+    """The default sandbox keeps a plain environment; every other setting is a named loss."""
+    plain = {"network": NetworkPolicy(), "packages": None, "sources": None, "native_config": None}
+    spec = captured.environment.spec.model_copy(update={**plain, **environment})
+    source = captured.model_copy(
+        update={"environment": captured.environment.model_copy(update={"spec": spec})}
+    )
+    ref = ModelRef(provider=provider, id=model)
+    base = source.effective_spec
+    target = AgentSpec(
+        name=base.name,
+        description=base.description,
+        model=ref,
+        system=base.system,
+        tools=(),
+        skills=(),
+        mcp_servers=(),
+        metadata=base.metadata,
+    )
+    represented = SourceRepresentation(
+        source_pin=source_preservation_pin(source), target=target, provider_execution=True
+    )
+    source = source.model_copy(update={"representations": (represented,)})
+    drops = preview_source_drops(source, ref).declared_drops
+    assert drops == lost, "the sandbox is a loss only through the settings it cannot keep"
+    assert "sandbox" not in drops, "the whole sandbox is never named when finer words fit"
+    unaccepted = target.model_copy(update={"declared_drops": ()})
+    assert classify_source_obligations(source, unaccepted, environment=None) == set(lost), (
+        "preparation refuses a switch that did not accept each named loss"
+    )
+    old = target.model_copy(update={"declared_drops": ("sandbox",)})
+    assert classify_source_obligations(source, old, environment=None) == frozenset(), (
+        "a consent that accepted the sandbox covers its parts"
+    )
+
+
+def test_the_agents_own_line_names_a_lost_skill_not_its_id(captured):
+    plain = {"network": NetworkPolicy(), "packages": None, "sources": None, "native_config": None}
+    environment = captured.environment.model_copy(
+        update={"spec": captured.environment.spec.model_copy(update=plain)}
+    )
+    spec = captured.effective_spec.model_copy(
+        update={"skills": (SkillRef(id="skill_01a", version="1"),)}
+    )
+    source = captured.model_copy(update={"effective_spec": spec, "environment": environment})
+    model = ModelRef(provider="openai", id="gpt-6-luna")
+    target = AgentSpec(
+        name=spec.name, model=model, system=spec.system, tools=(), skills=(), mcp_servers=()
+    )
+    pinned = SourceRepresentation(
+        source_pin=source_preservation_pin(source),
+        target=target,
+        provider_execution=True,
+        unavailable_capabilities=("skill:skill_01a",),
+        skill_names={"skill_01a": "pdf-tools"},
+    )
+    source = source.model_copy(update={"representations": (pinned,)})
+    previewed = preview_source_drops(source, model)
+    assert previewed.declared_drops == ("skill:skill_01a",), "the loss stays keyed by id"
+    assert previewed.system.endswith("\n\nUnavailable capabilities: skill:pdf-tools.")

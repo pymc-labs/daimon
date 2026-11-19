@@ -51,6 +51,7 @@ from daimon.core.agent_pins import (
     agent_pin_names,
     request_pin_refusal,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_requests import (
@@ -240,6 +241,7 @@ async def _dispatch_pending(trigger: ContinuationTrigger, *, kind: str) -> None:
             "credential_request.continuation_dispatch_failed",
             kind=kind,
             err_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
         )
 
 
@@ -267,7 +269,10 @@ async def _replacement_refused_at_submit(
     facts = TargetFacts(is_daimon_managed=False, is_reachable_in_tenant=False)
     if not is_admin:
         agent = await find_agent_by_derived_uuid(
-            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=runtime.sessionmaker,
         )
         if agent is None:
             log.warning(
@@ -306,7 +311,10 @@ async def _decide_mcp_connect_at_submit(
     nothing may be replaced for it.
     """
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        runtime.anthropic,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     if agent is None or row.mcp_server_url is None:
         return McpConnectDecision(replaces=False, replace_allowed=False)
@@ -370,6 +378,7 @@ async def _validate_submission(
         runtime.anthropic,
         tenant_id=row.tenant_id,
         agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     if agent is None:
         await post_ephemeral(
@@ -1254,7 +1263,7 @@ async def _attach_skills_to_requested_agent(
             note="Nothing new to attach.", attached=False, agent_name=None, skill_count=0
         )
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         return SkillAttachOutcome(
@@ -1289,17 +1298,23 @@ async def _attach_skills_to_requested_agent(
             version=fresh.version,
             payload={"skills": merged},
             scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
 
     try:
         await update_agent_with_version_retry(
-            runtime.anthropic, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
     except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
         log.warning(
             "credential_request.skill_repo_attach_failed",
             agent_id=str(agent_id),
             err_type=type(err).__name__,
+            causes=backend_refusal_causes(err),
         )
         return SkillAttachOutcome(
             note="Attaching them did not finish. Try again using the same form.",

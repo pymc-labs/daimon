@@ -18,6 +18,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -97,7 +98,7 @@ async def _resolve_agent(
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
+        runtime.anthropic, tenant_id=tenant_id, name=config.agent_name, records=runtime.sessionmaker
     )
     if agent is None:
         log.warning("discord.memory.agent_missing", configured_name=config.agent_name)
@@ -283,7 +284,9 @@ class MemoryCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            log.warning("memory.handler.failed", rid=rid, error=str(exc))
+            log.warning(
+                "memory.handler.failed", rid=rid, error=str(exc), causes=backend_refusal_causes(exc)
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,

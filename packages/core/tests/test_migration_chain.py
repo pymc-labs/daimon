@@ -153,6 +153,26 @@ TAIL = (
     "0188_eval_key",
     "0189_workspace_feature_values",
     "0190_long_job_features",
+    "0191_drop_dev_toggle_values",
+    "0192_reset_allow_writes",
+    "0193_deployment_identity",
+    "0194_host_call_cards",
+    "0195_agent_record_versions",
+    "0196_connector_tokens",
+    "0197_thread_model_consents",
+    "0198_agent_backend_effort",
+    "0199_self_helpers",
+    "0200_skill_copies",
+    "0202_agent_backend_environment",
+    "0203_pending_carry_overs",
+    "0204_shared_agent_copies",
+    "0205_web_search_usage",
+    "0206_support_plans",
+    "0207_skill_manifest_bytes",
+    "0208_active_turn_deadline",
+    "0209_thread_model_effort",
+    "0210_dm_access",
+    "0211_callback_watch_imports",
 )
 HEAD = TAIL[-1]
 
@@ -203,6 +223,9 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
+    ("thread_model_settings", "provider"),
+    ("thread_model_settings", "effort"),
+    ("thread_model_settings", "model"),
 }
 
 
@@ -481,6 +504,20 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and name in {"human_invocation", "memory_read_only"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected not in TOP
+        ):
+            return False
+        if (
+            kind == "column"
+            and name in {"effort", "environment"}
+            and getattr(getattr(obj, "table", None), "name", None) == "agent_backend_revision"
+            and expected != HEAD
+        ):
+            return False
+        if (
+            kind == "column"
+            and name in {"self_helpers", "helper_key"}
+            and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
+            and expected != HEAD
         ):
             return False
         if kind == "column" and expected not in (

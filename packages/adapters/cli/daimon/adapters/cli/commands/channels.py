@@ -13,6 +13,11 @@ from typing import Annotated, Any, Literal, cast
 import httpx
 import typer
 from cryptography.fernet import InvalidToken
+from daimon.adapters.cli.channel_lookup import (
+    discord_parent_channel,
+    fetch_discord_channel,
+    split_thread,
+)
 from daimon.adapters.cli.commands.channels_answerable import channels_answerable_command
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import JSON_OPTION
@@ -87,10 +92,6 @@ agent_rule_app = typer.Typer(help="An agent's rule: which channels it runs in.")
 
 _PLATFORMS = ("discord", "slack", "teams")
 _CHANNEL_HELP = "Channel id; a thread budgets against its parent channel."
-_TEAMS_THREAD = ";messageid="
-_DISCORD_API = "https://discord.com/api/v10"
-_DISCORD_THREAD_TYPES = frozenset({10, 11, 12})
-_DISCORD_MISSING = frozenset({403, 404})  # the bot cannot see the channel, or it is gone
 _SLACK_CONVERSATIONS_INFO = "https://slack.com/api/conversations.info"
 
 
@@ -109,80 +110,6 @@ def _validate_platform(value: str) -> Platform:
     if value in _PLATFORMS:
         return value  # type: ignore[return-value]
     raise typer.BadParameter(f"unsupported platform {value!r}; valid: {', '.join(_PLATFORMS)}")
-
-
-def _channel(platform: str, value: str) -> str:
-    """A thread id budgets against its channel.
-
-    Slack threads are `<channel>:<thread ts>`, Teams threads
-    `<channel>;messageid=<root>`; a Teams channel id itself contains ":".
-    """
-    separator = _TEAMS_THREAD if platform == "teams" else ":"
-    channel_id = value.strip().partition(separator)[0].strip()
-    if not channel_id:
-        raise typer.BadParameter("channel id must not be empty")
-    return channel_id
-
-
-async def _fetch_discord_channel(
-    token: str, *, channel_id: str, transport: httpx.AsyncBaseTransport | None
-) -> dict[str, Any] | None:
-    """The channel as Discord returns it to the bot; None when the bot cannot see it."""
-    try:
-        async with httpx.AsyncClient(
-            base_url=_DISCORD_API,
-            headers={"Authorization": f"Bot {token}"},
-            timeout=10.0,
-            transport=transport,
-        ) as http:
-            response = await http.get(f"/channels/{channel_id}")
-    except httpx.HTTPError as exc:
-        raise DaimonError(f"could not reach Discord to look up channel {channel_id}") from exc
-    if response.status_code in _DISCORD_MISSING:
-        return None
-    if not response.is_success:
-        raise DaimonError(
-            f"Discord returned HTTP {response.status_code} looking up channel {channel_id}"
-        )
-    return cast("dict[str, Any]", response.json())
-
-
-async def _discord_budget_channel(
-    rt: CliRuntime,
-    *,
-    guild_id: str,
-    channel_id: str,
-    transport: httpx.AsyncBaseTransport | None,
-    missing_ok: bool = False,
-) -> str:
-    """The server channel a Discord id budgets against: a thread's parent.
-
-    Spend is attributed to parent channels, so a budget saved on a thread id
-    would never gate anything; the id is looked up with the bot token. With
-    `missing_ok`, an id the bot cannot see (403 or 404), or any id when no bot
-    token is set, is returned as given, so the budget of a deleted channel can
-    still be cleared.
-    """
-    if not channel_id.isdigit():
-        raise typer.BadParameter(f"{channel_id!r} is not a Discord channel id")
-    if rt.settings.discord is None:
-        if missing_ok:
-            return channel_id
-        raise DaimonError(
-            "DAIMON_DISCORD__BOT_TOKEN is not set; it is needed to look the channel up"
-        )
-    channel = await _fetch_discord_channel(
-        rt.settings.discord.bot_token.get_secret_value(), channel_id=channel_id, transport=transport
-    )
-    if channel is None:
-        if missing_ok:
-            return channel_id
-        raise DaimonError(f"Discord channel {channel_id} is not visible to daimon")
-    if str(channel.get("guild_id")) != guild_id:
-        raise DaimonError(f"channel {channel_id} is not in server {guild_id}")
-    if channel.get("type") in _DISCORD_THREAD_TYPES:
-        return str(channel["parent_id"])
-    return channel_id
 
 
 async def _existing_tenant_id(rt: CliRuntime, *, platform: str, workspace_id: str) -> uuid.UUID:
@@ -247,10 +174,10 @@ async def budget_set(
         spec = parse_budget_spec(limit_usd=usd, window=window, starts_at=starts_at, ends_at=ends_at)
     except ChannelBudgetError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    target = _channel(platform, channel_id)
+    target = split_thread(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     if platform == "discord":
-        target = await _discord_budget_channel(
+        target = await discord_parent_channel(
             rt, guild_id=workspace_id, channel_id=target, transport=discord_transport
         )
     budget = await set_budget(
@@ -267,7 +194,10 @@ async def budget_set(
 def _operator(tenant_id: uuid.UUID) -> ChannelActor:
     """The host operator: trusted as an admin, with no account behind it."""
     return ChannelActor(
-        tenant_id=tenant_id, account_id=None, subject=Subject(is_admin=True), surface="cli"
+        tenant_id=tenant_id,
+        account_id=None,
+        subject=Subject(is_admin=True, operator=True),
+        surface="cli",
     )
 
 
@@ -326,10 +256,10 @@ async def budget_clear(
     channel_id: str,
     discord_transport: httpx.AsyncBaseTransport | None = None,
 ) -> None:
-    target = _channel(platform, channel_id)
+    target = split_thread(platform, channel_id)
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
     if platform == "discord":
-        target = await _discord_budget_channel(
+        target = await discord_parent_channel(
             rt,
             guild_id=workspace_id,
             channel_id=target,
@@ -585,7 +515,7 @@ async def channels_skills_list(
             session,
             tenant_id=tenant_id,
             platform=platform,
-            channel_id=_channel(platform, channel_id) if channel_id else None,
+            channel_id=split_thread(platform, channel_id) if channel_id else None,
         )
     emit_rows(console, rows, columns=_SKILL_COLUMNS, as_json=as_json)
 
@@ -626,7 +556,7 @@ async def channels_skills_add(
     skill: str,
 ) -> None:
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel = _channel(platform, channel_id)
+    channel = split_thread(platform, channel_id)
     async with rt.sessionmaker() as session, session.begin():
         added = await add_skill_to_channel(
             session,
@@ -641,6 +571,7 @@ async def channels_skills_add(
                 rt.settings.defaults_root, features=rt.settings.configured_features
             ),
             surface="cli",
+            records=rt.sessionmaker,
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])
@@ -684,7 +615,7 @@ async def channels_skills_remove(
     skill: str,
 ) -> None:
     tenant_id = await _existing_tenant_id(rt, platform=platform, workspace_id=workspace_id)
-    channel = _channel(platform, channel_id)
+    channel = split_thread(platform, channel_id)
     async with rt.sessionmaker() as session, session.begin():
         rows = await list_channel_skills(
             session, tenant_id=tenant_id, platform=platform, channel_id=channel
@@ -754,7 +685,7 @@ async def _channel_label(
     if rt.settings.discord is None:
         return None
     try:
-        found = await _fetch_discord_channel(
+        found = await fetch_discord_channel(
             rt.settings.discord.bot_token.get_secret_value(),
             channel_id=channel_id,
             transport=discord_transport,
@@ -901,7 +832,7 @@ async def channels_rule_set(
     kind = "category" if category else "thread" if thread else "channel"
     where = f"{platform}:{workspace_id} {kind}"
     # The CLI is the deployment operator.
-    subject = Subject(is_admin=True)
+    subject = Subject(is_admin=True, operator=True)
     if category:
         try:
             changed = await set_category_rule(
@@ -1048,7 +979,7 @@ async def agents_rule_set(
             agent_name=agent_name.strip(),
             runs_in=channels,
             # The CLI is the deployment operator.
-            subject=Subject(is_admin=True),
+            subject=Subject(is_admin=True, operator=True),
             surface="cli",
             default=rt.deployment_default,
         )
@@ -1115,6 +1046,6 @@ async def agents_rule_invoker_roles(
         platform=platform,
         agent_name=agent_name.strip(),
         role_ids=cleaned,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
     )
     console.print(f"{platform}:{workspace_id} {escape(agent_name)} invoker roles updated.")

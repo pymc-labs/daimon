@@ -13,6 +13,7 @@ from anthropic.types.beta import BetaEnvironment
 from anthropic.types.beta.beta_cloud_config_params import BetaCloudConfigParams
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
@@ -23,6 +24,7 @@ from daimon.adapters.mcp.tools._words import space_noun
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_environments import (
     archive_needs_confirm,
+    archive_sealed_refusal,
     build_archive_environment_note,
     build_limited_channels_confirm,
     update_needs_confirm,
@@ -74,7 +76,9 @@ async def _list_environments_impl(
 ) -> list[EnvironmentInfo]:
     del page
     require_scope(auth, "tenant:read")
-    rows = await list_environments_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    rows = await list_environments_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     hidden = await load_caller_hidden_environments(runtime, auth)
     return [
         EnvironmentInfo.from_ma(e)
@@ -88,7 +92,9 @@ async def _get_environment_impl(
     auth: AuthIdentity,
     name: str,
 ) -> EnvironmentInfo:
-    env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
+    )
     if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     return EnvironmentInfo.from_ma(env)
@@ -106,7 +112,7 @@ async def _reject_environment_name_collision(
     matching the agents' _reject_guild_name_collision).
     """
     matches = await find_environments_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=name
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
     )
     if matches:
         raise ToolError(f"environment '{name}' already exists in this server — pick another name")
@@ -132,6 +138,7 @@ async def _create_environment_impl(
         runtime.client,
         payload,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     return EnvironmentInfo.from_ma(ma_env)
 
@@ -161,7 +168,9 @@ async def _update_environment_impl(
     patch: dict[str, Any] = {k: v for k, v in maybe_fields.items() if v is not None}
     if not patch:
         raise ToolError("update_environment: at least one field is required")
-    env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
+    )
     if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
@@ -186,6 +195,7 @@ async def _update_environment_impl(
         env.id,
         patch,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     return EnvironmentInfo.from_ma(updated)
 
@@ -210,13 +220,24 @@ async def _archive_environment_impl(
 ) -> ArchiveEnvironmentResult:
     """Archive the environment, then clear every pick of it so those channels fall through."""
     _require_admin(auth, action=DelegatedAction.ENVIRONMENTS)
-    env = await find_environment_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
+    )
     if env is None or name in await load_caller_hidden_environments(runtime, auth):
         raise ToolError(f"environment '{name}' not found")
     _reject_managed_environment(
         env,
         refusal="built-in agents run in it, so chat tools cannot archive it. Nothing changed.",
     )
+    async with runtime.session_factory() as session:
+        refusal = await archive_sealed_refusal(
+            session,
+            tenant_id=auth.tenant_id,
+            environment_name=name,
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.ENVIRONMENTS)),
+        )
+    if refusal is not None:
+        raise ToolError(f"{refusal} Do not retry.")
     if not confirm_open_network:
         async with runtime.session_factory() as session:
             confirm = await archive_needs_confirm(
@@ -225,6 +246,7 @@ async def _archive_environment_impl(
                 tenant_id=auth.tenant_id,
                 environment_name=name,
                 default=runtime.deployment_default,
+                records=runtime.session_factory,
             )
         if confirm:
             raise ToolError(
@@ -234,6 +256,7 @@ async def _archive_environment_impl(
         runtime.client,
         env.id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     async with runtime.session_factory.begin() as session:
         cleared = await clear_environment_references(

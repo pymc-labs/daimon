@@ -38,7 +38,7 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
-from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.channel_backend import BackendUnsupported, backend_refusal_causes
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
@@ -48,9 +48,14 @@ from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_to
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
 from daimon.core.memory_resource import memory_scope
-from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
+from daimon.core.mux_backend import (
+    TurnRuntime,
+    managed_agents,
+    owner_turn_scope,
+    resource_ref,
+    resource_scope,
+)
 from daimon.core.mux_compat import legacy_call
-from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
@@ -145,6 +150,8 @@ class ContinuityOutcome:
     transfer_kind: TransferKind | None = None
     user_prefix: str = ""
     system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = ()
+    # The replaced session, whose framing may still wait for its first send.
+    predecessor_session_id: str | None = None
 
     def session_state(self) -> SessionState:
         """This bind as `<turn_controls>` facts.
@@ -215,7 +222,6 @@ class PreparedTurn:
     backend: ManagedAgents | None = None
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
-    native_footer_cost: NativeFooterCostContext | None = None
     native_chat_session_id: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
     _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
@@ -245,6 +251,9 @@ class ProviderPreparationRequest:
     # The tenant's hosted OpenAI environment, created or reused for this turn by
     # `openai_environment.tenant_environment`; the code-default GPT row uses it.
     openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
+    # A channel-less preview: every platform the agent answers on. Per-platform
+    # features resolve as the strictest across them; empty reads `platform` alone.
+    answers_on: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]
@@ -490,6 +499,7 @@ async def create_ma_session(
             on_app_access=capture_app_access,
             channel_skills=identity.extra_skills(skills, admission.platform_skill_ids),
             model_override=admission.model_override,
+            model_effort=admission.model_effort,
             system_override=identity.system(admission.agent.system, platform),
             relay_session_key=mapping_id,
             identity=identity,
@@ -572,6 +582,7 @@ async def create_ma_session(
             mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
             memory_scope=memory_scope(admission.hold),
             identity_features=identity.stored(),
+            model_effort=admission.model_effort,
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,
@@ -818,9 +829,9 @@ async def bind_session(
                         persisted_origin = await mux_state.config_origin(
                             session, shared.revision.channel, shared.revision.local
                         )
-                    if persisted_origin not in ("channel", "channel_clear", "agent"):
+                    if persisted_origin not in ("channel", "channel_clear", "agent", "thread"):
                         raise AdmissionDenied(reason="backend_unsupported")
-                    origin = "agent" if persisted_origin == "agent" else "channel"
+                    origin = "agent" if persisted_origin in ("agent", "thread") else "channel"
                 admission = replace(
                     admission,
                     shared_owner=shared.owner,
@@ -919,6 +930,7 @@ async def _shared_thread(
                 platform=platform,
                 channel_id=channel_id,
                 thread_id=thread_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=admission.agent.id),
             )
         except BackendUnsupported as err:
             raise AdmissionDenied(reason="backend_unsupported") from err
@@ -969,7 +981,13 @@ def admitted_session_scope(
         if (
             prepared.is_platform
             or prepared.is_legacy_host_authorized
-            or (prepared.tenant_id, prepared.account_id) != (scope.tenant_id, scope.account_id)
+            or prepared.tenant_id != scope.tenant_id
+            # A shared thread's provider state runs as the thread's own owner.
+            or prepared.account_id
+            not in (
+                scope.account_id,
+                *((str(admission.shared_owner),) if admission.shared_owner is not None else ()),
+            )
         ):
             raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
         return prepared
@@ -1058,7 +1076,11 @@ async def stamp_session_seal(
         # other refusal fails the turn rather than running it unstamped.
         if error.status_code != 409 and "while session is running" not in str(error):
             raise
-        log.info("turn.seal_stamp_busy", ma_session_id=ma_session_id)
+        log.info(
+            "turn.seal_stamp_busy",
+            ma_session_id=ma_session_id,
+            causes=backend_refusal_causes(error),
+        )
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
         ) from error
@@ -1177,6 +1199,14 @@ async def bind_session_impl(
             prepare = _PROVIDER_PREPARATIONS.get(profile)
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
+        if admission.shared_owner is not None and admission.backend_revision_origin == "agent":
+            # A shared thread's agent copy, environment and session are its owner's;
+            # each asker's own MCP credential is minted from the admission.
+            from daimon.core.turn.runtimes import shares_agent_threads
+
+            if not shares_agent_threads(profile):
+                raise AdmissionDenied(reason="backend_unsupported")
+            request = replace(request, scope=owner_turn_scope(scope, str(admission.shared_owner)))
         request, runtimes = scope_channel_runtimes(request)
 
         async def _prepare_provider() -> PreparedTurn:
@@ -1196,6 +1226,11 @@ async def bind_session_impl(
             result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend
+            # A shared thread's session may belong to the thread's owner or carry
+            # the caller (a channel's own OpenAI deployment); never anyone else.
+            ref_accounts = {scope.account_id}
+            if admission.shared_owner is not None:
+                ref_accounts.add(str(admission.shared_owner))
             if ref is None or (
                 _admitted_profile(result.admission) != profile
                 or result.admission.backend_revision != admission.backend_revision
@@ -1205,7 +1240,7 @@ async def bind_session_impl(
                 or ref.id != result.ma_session_id
                 or ref.kind != "session"
                 or ref.tenant_id != scope.tenant_id
-                or ref.account_id != scope.account_id
+                or ref.account_id not in ref_accounts
                 or result.admission.account_id != admission.account_id
                 or result.session_account_id != session_account_id
             ):
@@ -1254,8 +1289,45 @@ async def bind_session_impl(
             platform=platform,
             channel_id=admission.budget_channel_id,
             turn_path=deps.turn_path,
-            checkpoint=admission.feature_on("checkpoint_prompt"),
         )
+
+        async def find_carry_over() -> Callable[[str], Awaitable[ContinuityOutcome]] | None:
+            # A thread moved here from another provider starts with its conversation.
+            from daimon.core.stores.mux_state import PostgresStateStore
+            from daimon.core.turn.carry_over import (
+                adoption_predecessor,
+                carry_into_managed_agents,
+                carry_over_channel,
+            )
+            from mux.contracts.ids import ThreadRef
+            from mux.state.lease import Slot
+
+            channel = carry_over_channel(current, tenant_id=tenant_id, platform=platform)
+            if channel is None or not deps.channel_backends:
+                return None
+            carrying = replace(request, admission=current)
+            store = deps.state_store or PostgresStateStore(deps.sessionmaker)
+            slot = Slot(
+                thread=ThreadRef(channel=channel, thread_id=thread_id),
+                account_id=str(session_account_id),
+            )
+            predecessor = await adoption_predecessor(carrying, store, slot)
+            if predecessor is None:
+                return None
+
+            async def seed(session_id: str) -> ContinuityOutcome:
+                carried = await carry_into_managed_agents(
+                    carrying,
+                    store=store,
+                    slot=slot,
+                    predecessor=predecessor,
+                    session_id=session_id,
+                    model_id=current.agent.model.id,
+                    agent_name=current.agent.name,
+                )
+                return carried.continuity
+
+            return seed
 
         # `SessionOps` is built here rather than at import time so that
         # `create_session` and the store helpers resolve from this module's
@@ -1278,6 +1350,7 @@ async def bind_session_impl(
             transfer=effective_transfer,
             deadline=effective_deadline,
             now=now,
+            find_carry_over=find_carry_over,
         )
         if isinstance(outcome, PreparationDeferred):
             prepared_turn = await _decide_reuse_again(deps, outcome.prepared, now=now)

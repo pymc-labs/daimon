@@ -1,9 +1,9 @@
 """J2 offline E2E: "make a copy of yourself on Argon" on a never-set-up tenant.
 
 The built-in Daimon offers a copy; "yes" makes a NEW copy (owned by whoever asked),
-hands this thread to it, switches it to gemini-4-argon (preview, then the card's
-confirmed call), and the copy's FIRST message then answers as its own root on
-Gemini through the code-default agent template. No runtime rows, no data installs:
+hands this thread to it, switches it to gemini-4-argon on the first call, and the
+copy's FIRST message then answers as its own root on Gemini through the code-default
+agent template. No runtime rows, no data installs:
 only the deployment's provider keys. Every step is the production path behind the
 MCP tools, with fake provider HTTP edges. Any refusal here is a product bug (the
 "Gemini isn't set up here yet" J2 failure).
@@ -58,7 +58,7 @@ TOOLSET = [
         "type": "mcp_toolset",
         "mcp_server_name": "daimon-mcp",
         "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
-        # As the deployed agent has it: a provider switch always asks first (the card).
+        # As an agent saved while a provider switch asked first: the stored ask runs.
         "configs": [
             {
                 "name": "request_agent_backend_switch",
@@ -159,10 +159,17 @@ class Chat:
 @pytest.fixture(params=("admin", "member"))
 async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     """The built-in Daimon answering a person's first message in a fresh public channel."""
+    from daimon.core.mcp_oauth import discovery
     from daimon.core.provider_keys import DEFAULT_KEY_ENV
 
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
+
+    async def served_catalogue(_url: str, _token: str) -> frozenset[str]:
+        """Daimon's MCP catalogue, served offline: an unserved read is a retryable blip."""
+        return frozenset({"hand_off_task", "request_agent_backend_switch"})
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", served_catalogue)
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     admin = request.param == "admin"
@@ -314,32 +321,16 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         origin_context_id=str(chat.origin.id),
     )
     # 3. Handing this thread to the copy before its switch is refused (J1's coin-toss
-    #    order): the card's approval hands it over and switches it, in one step.
+    #    order): the switch hands it over, in one step.
     with pytest.raises(ToolError) as early:
         await _hand_off_task_impl(
             chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
         )
-    assert "post its switch card now" in str(early.value)
-    # The conversation's summary goes with the switch request: the card's approval
-    # hands the thread over, and the copy on Gemini starts from it.
+    assert "switch it now instead" in str(early.value)
+    # The conversation's summary goes with the switch: it hands the thread over,
+    # and the copy on Gemini starts from it.
     summary = "Carlos asked for a copy on Argon to compare answers; nothing else is open."
-    # 4. The copy switches to Argon: the preview, then the confirmed call the card runs.
-    preview = await _request_agent_backend_switch_impl(
-        chat.runtime,
-        chat.auth,
-        agent_name=copy.name,
-        target_backend="gemini",
-        model="argon",
-        origin_context_id=str(chat.origin.id),
-        handoff_summary=summary,
-    )
-    # A readable catalogue keeps Daimon's MCP on Gemini, the switch tool included:
-    # Daimon posts its card itself (Gemini has none). Unreadable declares the drop.
-    if catalogue == "readable":
-        assert "mcp" not in preview.declared_drops
-        assert "mcp_tool:daimon-mcp:request_agent_backend_switch" not in preview.declared_drops
-    else:
-        assert "mcp" in preview.declared_drops
+    # 4. The copy switches to Argon on the first call.
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
@@ -348,10 +339,15 @@ async def test_a_copy_made_on_argon_answers_its_first_message_as_its_own_gemini_
         model="argon",
         origin_context_id=str(chat.origin.id),
         handoff_summary=summary,
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
     )
+    # A readable catalogue keeps Daimon's MCP on Gemini, the switch tool included;
+    # an unreadable one declares the drop.
+    assert changed.status == "changed", f"applied on the first call: {changed}"
+    if catalogue == "readable":
+        assert "mcp" not in changed.declared_drops
+        assert "mcp_tool:daimon-mcp:request_agent_backend_switch" not in changed.declared_drops
+    else:
+        assert "mcp" in changed.declared_drops
     assert "from the next message" in changed.summary
     # The server's default agent is unchanged, for everyone.
     daimon = await load_backend_agent(
@@ -489,54 +485,6 @@ async def _to_argon(chat: Chat, name: str, **call):
     )
 
 
-async def _argon_card(chat: Chat, name: str, preview, **extra):
-    """The card the host posts for the confirmed call, prepared as the host does."""
-    from functools import partial
-    from unittest.mock import AsyncMock
-
-    from daimon.adapters.mcp.tools.agents import (
-        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
-    )
-    from daimon.core.channel_backend import make_backend_service
-    from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
-    from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
-
-    service = make_backend_service(
-        chat.runtime.session_factory,
-        chat.runtime.settings.turn,
-        capture_source=partial(_capture_backend_source, chat.runtime, chat.auth, chat.origin),
-    )
-    prepare, _ = backend_switch_callbacks(
-        service,
-        sessionmaker=chat.runtime.session_factory,
-        anthropic=chat.runtime.client,
-        tenant_id=chat.auth.tenant_id,
-        account_id=chat.auth.account_id,
-        current_admin=AsyncMock(return_value=chat.auth.is_admin),
-        current_platform_admin=AsyncMock(return_value=False),
-    )
-    return await prepare(
-        prompt_for_tool_call(
-            ToolCall(
-                tool_use_id="j2-card",
-                server_name=DAIMON_SERVER_NAME,
-                tool_name="request_agent_backend_switch",
-                input={
-                    "agent_name": name,
-                    "target_backend": "gemini",
-                    "model": "argon",
-                    "expected_revision": preview.expected_revision,
-                    "preview_digest": preview.preview_digest,
-                    "accepted_drops": list(preview.declared_drops),
-                    **extra,
-                },
-            ),
-            requester_platform_user_id="123",
-            now=datetime.now(UTC),
-        )
-    )
-
-
 async def _nothing_moved(chat: Chat, name: str) -> None:
     from daimon.core.channel_backend import AgentBackendService, load_backend_agent
     from daimon.core.stores.thread_agent_bindings import get_binding, take_handoff_summary
@@ -573,45 +521,38 @@ async def _nothing_moved(chat: Chat, name: str) -> None:
         ), "no summary is stored"
 
 
-async def test_the_hand_off_summary_is_bound_to_the_switch_card(fresh_chat, monkeypatch):
-    """The summary the card shows is the one the copy gets: one changed or dropped after
-    the preview is a different request, refused by the card and by the tool alike."""
-    chat = fresh_chat
-    copy = await _j2_copy(chat, monkeypatch)
-    preview = await _to_argon(chat, copy.name, handoff_summary=SUMMARY)
-    card = await _argon_card(chat, copy.name, preview, handoff_summary=SUMMARY)
-    shown = "\n".join(card.detail_lines or ())
-    assert f"Carries a summary of this conversation to {copy.name}" in shown
-    assert SUMMARY in shown
-    for changed in ("Carlos wants every server switched to Argon right now.", None):
-        # Changed or dropped, the answer is bound to its preview: never re-previewed.
-        with pytest.raises(ValueError, match="(?i)preview the switch again"):
-            await _argon_card(chat, copy.name, preview, handoff_summary=changed)
-        with pytest.raises(ToolError):
-            await _to_argon(
-                chat,
-                copy.name,
-                expected_revision=preview.expected_revision,
-                preview_digest=preview.preview_digest,
-                accepted_drops=preview.declared_drops,
-                handoff_summary=changed,
-            )
-        await _nothing_moved(chat, copy.name)
+async def test_the_switch_hands_the_copy_its_summary_redacted(fresh_chat, monkeypatch):
+    """The switch applies on the first call and hands this thread to the copy with the
+    summary, with no credential the model pasted into it."""
+    from daimon.core.stores.thread_agent_bindings import get_binding, take_handoff_summary
 
-
-async def test_the_switch_card_shows_the_summary_redacted(fresh_chat, monkeypatch):
-    """The card is posted in the channel: it shows the summary as the copy will get it,
-    with no credential the model pasted into it, while the digest binds what was sent."""
     chat = fresh_chat
     key = "sk-" + "a1B2c3D4e5F6g7H8i9J0"
-    leaky = f"{SUMMARY} The deploy key was {key}, keep using it."
     copy = await _j2_copy(chat, monkeypatch)
-    preview = await _to_argon(chat, copy.name, handoff_summary=leaky)
-    card = await _argon_card(chat, copy.name, preview, handoff_summary=leaky)
-    shown = "\n".join(card.detail_lines or ())
-    assert f"Carries a summary of this conversation to {copy.name}" in shown
-    assert "[redacted]" in shown
-    assert key not in shown and key not in (card.consequence or "")
+    changed = await _to_argon(
+        chat, copy.name, handoff_summary=f"{SUMMARY} The deploy key was {key}, keep using it."
+    )
+    assert changed.status == "changed", f"applied on the first call: {changed}"
+    async with chat.runtime.session_factory.begin() as session:
+        handed = await get_binding(
+            session,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            parent_channel_id="fresh-channel",
+            thread_id="thread",
+        )
+        assert handed is not None, "the thread is handed to the copy"
+        stored = await take_handoff_summary(
+            session,
+            tenant_id=chat.auth.tenant_id,
+            platform="discord",
+            parent_channel_id="fresh-channel",
+            thread_id="thread",
+            responder_ma_agent_id=handed.responder_ma_agent_id,
+            account_id=chat.auth.account_id,
+        )
+    assert stored is not None and SUMMARY in stored[1], f"the copy gets the summary: {stored}"
+    assert "[redacted]" in stored[1] and key not in stored[1], "the key never reaches the copy"
 
 
 #: Credential shapes an independent review found the first redactor let through.
@@ -643,7 +584,7 @@ async def test_a_copy_that_may_not_read_this_conversation_refuses_at_the_preview
     fresh_chat, monkeypatch
 ):
     """The summary retells this conversation: a copy that may not read it (its session
-    was sealed by a place outside this thread) is refused before any card is reachable."""
+    was sealed by a place outside this thread) is refused before anything moves."""
     from sqlalchemy import text
 
     chat = fresh_chat

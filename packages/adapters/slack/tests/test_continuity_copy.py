@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -38,6 +39,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -60,6 +62,7 @@ from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1008,17 +1011,13 @@ async def test_the_dispatcher_is_told_a_turn_is_running_when_the_row_still_says_
     )
 
 
-async def test_mention_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_mention_turn_admin_cards_read_no_agent_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ordinary mention turn's Confirm card reads the switched agent's source as
-    that turn's own admitted caller. Built without the admission, every
-    backend-switch card on this call site refuses `source_unavailable`
-    (packages/core/daimon/core/turn/admission.py:capture_admitted_backend_source).
-    """
+    """A mention turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -1051,9 +1050,6 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patch(
@@ -1081,23 +1077,17 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
         await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "slack",
-        channel,
-        thread_ts,
-    )
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
-def test_selfhosted_tool_turn_skips_output_sweep(
+def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A self-hosted tool turn with an outputs runtime sweeps its files like any provider."""
+    from collections.abc import Coroutine
+
     from daimon.core.turn.state import ToolUseBlock
 
     app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
@@ -1112,8 +1102,16 @@ def test_selfhosted_tool_turn_skips_output_sweep(
         "sh_session_test",
         None,
         False,
+        outputs=MagicMock(session_id="sh_session_test"),
     )
-    with patch.object(app, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+    spawned: list[str] = []
+
+    def spawn(work: Coroutine[object, object, None]) -> MagicMock:
+        spawned.append(work.cr_code.co_name)
+        work.close()
+        return MagicMock()
+
+    with patch.object(app, "_spawn", side_effect=spawn):
         app._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
             outcome,
             MagicMock(),
@@ -1121,8 +1119,8 @@ def test_selfhosted_tool_turn_skips_output_sweep(
             thread_id="1.2",
             team_id="T_TEST",
             requester_user_id="U_TEST",
-            selfhosted=True,
         )
+    assert spawned == ["_sweep_session_outputs"], spawned
 
 
 async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_unpinged(
@@ -1138,7 +1136,11 @@ async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_un
         await app._sweep_session_outputs(  # pyright: ignore[reportPrivateUsage]
             None,
             MagicMock(),
-            session_id="sesn_1",
+            outputs=AnthropicOutputRuntime(
+                AsyncAnthropic(api_key="test-key"),
+                "sesn_1",
+                scope=Scope.legacy_host_authorized(call_site="test_slack_continuity"),
+            ),
             channel_id="C_TEST",
             thread_ts="1.2",
             team_id="T_TEST",

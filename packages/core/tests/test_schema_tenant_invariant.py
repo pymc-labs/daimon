@@ -86,6 +86,9 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # File-GC queue keyed by server-minted file_id; rows are transient and
     # reference no tenant-owned data beyond the opaque handle.
     "pending_file_deletes": "keyed by server-minted file_id; transient GC queue",
+    "web_search_allowances": (
+        "keyed by provider account and month; a deployment-wide count with no tenant data"
+    ),
     "usage_reconcile_progress": (
         "keyed by MA session id (globally unique); a read cursor holding no tenant data"
     ),
@@ -111,6 +114,7 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     # Promo codes are created by the operator for the whole deployment and hold
     # no tenant data; each tenant's use of one is a promo_redemptions row, which
     # carries tenant_id.
+    "deployment_identity": "one row naming this install; holds no tenant data",
     "promo_codes": "deployment-level operator codes; per-tenant redemptions carry tenant_id",
 }
 

@@ -28,6 +28,7 @@ from daimon.core.defaults.ma_index import (
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
+    is_renamed_seeded_agent,
     strip_tenant_prefix,
 )
 from daimon.core.defaults.report import Action, ResourceOutcome
@@ -64,7 +65,8 @@ async def sweep_removed_agents(
         if not _is_defaults_managed(ag.metadata):
             continue
         name = ag.metadata.get(MA_METADATA_KEY_NAME, "")
-        if name in present_names:
+        if name in present_names or is_renamed_seeded_agent(ag.metadata):
+            # The renamed seeded agent is spared: see `SEEDED_AGENT_RENAME`.
             continue
         if dry_run:
             outcomes.append(

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Final, cast, get_args
 
 import anthropic
@@ -36,6 +37,7 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import load_answering_map
 from daimon.core.authz import Subject, build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     authorize_environment_pick,
@@ -142,7 +144,7 @@ class ChannelSettingsDialog:
 
     async def _subject(self, actor: Actor) -> Subject:
         async with self._runtime.sessionmaker() as session:
-            return await load_live_subject(
+            subject = await load_live_subject(
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
@@ -151,6 +153,7 @@ class ChannelSettingsDialog:
                 ),
                 action=DelegatedAction.CHANNEL_PERMISSIONS,
             )
+        return replace(subject, origin_channel_ids=actor.origin)
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:
         async with self._runtime.sessionmaker() as session:
@@ -213,10 +216,17 @@ class ChannelSettingsDialog:
                         default=self._runtime.deployment_default,
                     )
                 names = await list_environment_names(
-                    self._runtime.anthropic, tenant_id=tenant_id, hidden=hidden
+                    self._runtime.anthropic,
+                    tenant_id=tenant_id,
+                    records=self._runtime.sessionmaker,
+                    hidden=hidden,
                 )
-            except anthropic.APIError:
-                log.warning("teams.channel_settings.environments_unlisted", exc_info=True)
+            except anthropic.APIError as error:
+                log.warning(
+                    "teams.channel_settings.environments_unlisted",
+                    exc_info=True,
+                    causes=backend_refusal_causes(error),
+                )
                 names = []
             picker = plan_environment_picker(
                 answering_map,
@@ -226,11 +236,12 @@ class ChannelSettingsDialog:
                 max_value_length=_MAX_OPTION_VALUE,
             )
         name = (await self._listed(tenant_id)).get(channel_id)
-        web = web_links(
+        web = await web_links(
             self._runtime,
             tenant_id,
             admin=actor.admin_for(DelegatedAction.CHANNEL_PERMISSIONS),
             foreign=actor.foreign,
+            channel_id=channel_id,
         )
         settings = cards.ChannelSettings(
             channel_id=channel_id,
@@ -314,6 +325,7 @@ class ChannelSettingsDialog:
                 channel_id=channel_id,
                 environment_name=name,
                 default=self._runtime.deployment_default,
+                records=self._runtime.sessionmaker,
             )
         if not pick.decision:
             await self._audit(
@@ -389,7 +401,11 @@ class ChannelSettingsDialog:
                 readers=None if readers == current.readers else readers,
                 writers=None if writers == current.writers else writers,
                 # Only an admin reaches this, re-checked by the caller.
-                subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
+                subject=build_subject(
+                    is_admin=True,
+                    platform_user_id=actor.user_id,
+                    origin_channel_ids=actor.origin,
+                ),
                 surface="panel",
                 default=self._runtime.deployment_default,
                 actor_account_id=await get_or_create_account(self._runtime, actor),
@@ -456,6 +472,7 @@ class ChannelSettingsDialog:
                     actor_account_id=account_id,
                     platform_skills=self._runtime.turn_deps.platform_skills,
                     surface="panel",
+                    records=self._runtime.sessionmaker,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await self._audit(actor, "channel_skills", outcome="error", reason="skills_unreadable")

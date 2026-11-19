@@ -536,6 +536,8 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         here_card_module, "get_discord_principal_for_account", AsyncMock(return_value="123")
     )
     resolve_display = AsyncMock(return_value="Alex @team <@123>")
+    links_at = AsyncMock(return_value=None)
+    monkeypatch.setattr(here_card_module, "links_at", links_at)
     card = await load_here_card(
         MagicMock(),
         MagicMock(),
@@ -551,8 +553,11 @@ async def test_loader_filters_setup_thread_for_non_admin_inside_own_readers_chan
         resolve_setter_display=resolve_display,
         visible_channel_ids={"private", "outside"},
         category_channels_bot_can_view=(("private", "#private: yes"), ("outside", "#outside: yes")),
+        web=MagicMock(),
+        records=MagicMock(),
     )
     assert card.agent_name == "daimon"
+    assert links_at.await_args.args[2].agent_id == "agent-id", "web follows the answering agent"
     setup_agent.assert_awaited_once()
     assert (
         here_card_module.load_agent_details.await_args.kwargs["preloaded_agent"]
@@ -648,7 +653,6 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
             github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
             public_mcp_url=None,
             is_admin=True,
-            gate_overrides_active=True,
             is_dm=False,
             caller_account_id=None,
         )

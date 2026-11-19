@@ -27,6 +27,7 @@ from daimon.core.stores.domain import RecordVoteResult
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_platform_principal, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _BOT_USER_ID = 999999999999999999
@@ -249,13 +250,12 @@ def _fake_bot(
 ) -> Any:
     """Minimal DaimonBot stand-in: only user/runtime/get_channel/fetch_channel/
     get_user/fetch_user are read."""
+    settings = mock_settings()
+    settings.support = support or SupportSettings()
     return SimpleNamespace(
         user=SimpleNamespace(id=_BOT_USER_ID),
         application_id=_BOT_USER_ID,
-        runtime=SimpleNamespace(
-            sessionmaker=sessionmaker,
-            settings=SimpleNamespace(support=support or SupportSettings()),
-        ),
+        runtime=SimpleNamespace(sessionmaker=sessionmaker, settings=settings),
         get_channel=get_channel or MagicMock(return_value=None),
         fetch_channel=fetch_channel or AsyncMock(),
         get_user=get_user or MagicMock(return_value=None),

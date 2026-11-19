@@ -9,6 +9,7 @@ from typing import Literal
 from daimon.core.agent_detail_lists import DetailListName
 from daimon.core.agent_details import AgentDetails
 from daimon.core.answering_map import AnsweringMap
+from daimon.core.model_switch import ModelPicker
 from daimon.core.roster import RosterAgent
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -17,7 +18,6 @@ from daimon.core.scope import (
     pick_agent,
 )
 from daimon.core.specs import AgentSpec
-from mux.contracts.ids import Provider
 
 
 @dataclasses.dataclass
@@ -149,8 +149,8 @@ class PanelState:
     routing_page: int = 0
     expanded_detail: DetailListName | None = None
     details: AgentDetails | None = None
-    backend_options: tuple[Provider, ...] = ()
-    backend_selection: Provider | None = None
+    # The model select's choices and current model; None when the viewer can't switch it.
+    model_picker: ModelPicker | None = None
     # Public URLs for agents whose Details have been loaded in this panel.
     avatar_urls: dict[str, str | None] = dataclasses.field(default_factory=dict[str, str | None])
     answering_map: AnsweringMap | None = None

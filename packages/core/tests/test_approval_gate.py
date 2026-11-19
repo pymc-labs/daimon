@@ -26,7 +26,7 @@ from daimon.core.turn.posture import PolicyApproval
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ON = ToolSafetyPolicy(enabled=True, allow_gate_overrides=True)
+ON = ToolSafetyPolicy(enabled=True)
 OFF = ApprovalGate("off", "thread:123", "admin-1")
 TRUSTED = frozenset({"daimon-mcp"})
 WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_issue")
@@ -34,15 +34,14 @@ WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_
 
 ADMIN_INPUTS: dict[str, dict[str, object]] = {
     "approve_reach": {"threads": 2, "places": 0, "people": 0, "where": "#general"},
-    "request_agent_backend_switch": {
-        "agent_name": "agent",
-        "target_backend": "anthropic",
-        "expected_revision": 1,
-        "preview_digest": "a" * 64,
-    },
     "request_provider_allowlist": {
         "providers": ["anthropic"],
         "expected_revision": "policy-revision",
+        "preview_digest": "a" * 64,
+    },
+    "request_channel_pin": {
+        "model": "openai:gpt-6",
+        "expected_revision": 0,
         "preview_digest": "a" * 64,
     },
     "request_channel_pin_clear": {
@@ -111,20 +110,15 @@ async def test_admin_prompt_still_asks() -> None:
         requester_platform_user_id="requester",
         confirm=card,
         trusted_servers=TRUSTED,
-        confirmed_tools=frozenset({"request_agent_backend_switch"}),
+        confirmed_tools=frozenset({"request_provider_allowlist"}),
         approval_gate_for=AsyncMock(return_value=OFF),
         server_urls={"third-party": "https://third.example/mcp"},
     )(
         ToolCall(
             tool_use_id="t1",
             server_name="daimon-mcp",
-            tool_name="request_agent_backend_switch",
-            input={
-                "agent_name": "agent",
-                "target_backend": "anthropic",
-                "expected_revision": 1,
-                "preview_digest": "a" * 64,
-            },
+            tool_name="request_provider_allowlist",
+            input=ADMIN_INPUTS["request_provider_allowlist"],
         )
     )
     assert not result.allow
@@ -141,20 +135,6 @@ async def test_only_off_bypasses_card(value: Approvals) -> None:
             requester_platform_user_id="requester",
             confirm=card,
             approval_gate_for=AsyncMock(return_value=ApprovalGate(value, "server", "admin")),
-            server_urls={"third-party": "https://third.example/mcp"},
-        )(WRITE)
-    ).allow
-    card.assert_awaited_once()
-
-
-async def test_operator_disabled_ignores_stored_off() -> None:
-    card = AsyncMock(return_value="denied")
-    assert not (
-        await interactive_decider(
-            ToolSafetyPolicy(enabled=True),
-            requester_platform_user_id="requester",
-            confirm=card,
-            approval_gate_for=AsyncMock(return_value=OFF),
             server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     ).allow
@@ -406,7 +386,7 @@ async def test_missing_or_unreadable_live_gate_never_uses_cached_off(read_failur
 
 @pytest.mark.parametrize("own_endpoint", [False, True])
 @pytest.mark.parametrize(
-    "tool", ["microsoft_write", "publish_report", "request_agent_backend_switch"]
+    "tool", ["microsoft_write", "publish_report", "request_provider_allowlist"]
 )
 async def test_fixed_gate_names_ask_on_own_endpoint_aliases_and_unrelated_servers(
     own_endpoint: bool,

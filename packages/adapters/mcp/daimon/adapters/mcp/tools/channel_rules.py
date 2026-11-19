@@ -119,7 +119,7 @@ async def _channel_label(runtime: McpRuntime, auth: AuthIdentity, channel_id: st
 
 
 def _refused(exc: DaimonError, action: Action) -> ToolError:
-    if isinstance(exc, ChannelRuleRefused) and exc.reason == "admin_required":
+    if isinstance(exc, ChannelRuleRefused) and exc.reason in ("admin_required", "sealed_channel"):
         record_authz_denial(action, exc.reason)
     return ToolError(f"{exc} Nothing was changed. Tell the caller.")
 
@@ -276,7 +276,9 @@ def _widens(before: tuple[str, ...] | None, after: tuple[str, ...] | None) -> bo
 
 
 async def _has_repos(runtime: McpRuntime, *, tenant_id: uuid.UUID, agent_name: str) -> bool:
-    agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        runtime.client, tenant_id=tenant_id, name=agent_name, records=runtime.session_factory
+    )
     if agent is None:
         return False
     async with runtime.session_factory() as session:

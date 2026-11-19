@@ -18,11 +18,14 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.scope_cascade import CascadeMode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
 from .test_thread_participation_routing import (
     GUILD_ID,
+    PARENT_ID,
     THREAD_ID,
     _FakeClassifier,  # pyright: ignore[reportPrivateUsage]
     _follow_thread,  # pyright: ignore[reportPrivateUsage]
@@ -156,3 +159,28 @@ async def test_typed_name_takes_a_pending_participation_batch(
     assert bot._participation_pending == {}, "the typed name took the batch"  # pyright: ignore[reportPrivateUsage]
     assert turns == [(named, False)], "one addressed turn, never a second unprompted one"
     assert classifier.calls == [], "the taken batch is never judged separately"
+
+
+async def test_a_channel_setting_applies_inside_its_threads(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    classifier: _FakeClassifier,
+) -> None:
+    """The lookup uses the parent channel plus the thread, not the thread id as a channel."""
+    async with db_session_factory() as session, session.begin():
+        await set_feature_value(
+            session,
+            tenant_id=tenant_id,
+            target=FeatureTarget("channel", channel_id=str(PARENT_ID)),
+            key="plain_text_mentions",
+            value="on",
+            set_by=None,
+            surface="web",
+        )
+    bot = _bot(db_session_factory)
+    turns = _stub_turn(bot)
+    message = _thread_message(_make_thread(), content="@Daimon what do you think?")
+
+    await bot.on_message(message)
+
+    assert turns == [(message, False)], "a setting on the parent channel must reach its threads"

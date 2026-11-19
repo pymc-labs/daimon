@@ -22,6 +22,7 @@ from mux.drivers.gemini import GeminiCatalogAdapter, GeminiManagedAgents
 from mux.drivers.gemini.core import GeminiAgents
 from mux.drivers.gemini.transport import Object
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.gemini.catalog_wire import (
     SCOPE,
@@ -286,16 +287,20 @@ async def test_unsupported_authored_intent_refuses_before_native_post(case: Case
     assert not case.wire.requests
 
 
-async def test_argon_is_an_allowed_native_catalog_model(case: Case) -> None:
-    argon = spec().model_copy(update={"model": ModelRef(provider="gemini", id="gemini-4-argon")})
-    made = await case.driver.agents.create(SCOPE, argon, key="create:argon")
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+async def test_opt_in_model_is_an_allowed_native_catalog_model(case: Case, model: str) -> None:
+    requested = spec().model_copy(update={"model": ModelRef(provider="gemini", id=model)})
+    made = await case.driver.agents.create(SCOPE, requested, key=f"create:{model}")
     posted = _OBJECT.validate_json(case.wire.requests[0].content, strict=True)
-    assert posted["agent_config"] == {"type": "antigravity", "model": "gemini-4-argon"}
-    assert made.spec.model.id == "gemini-4-argon"
+    assert posted["agent_config"] == {"type": "antigravity", "model": model}
+    assert made.spec.model.id == model
 
 
-@pytest.mark.parametrize("near", ["gemini-4-argon-preview", "gemini-4", "gemini-4-argon-latest"])
-async def test_argon_near_miss_ids_refuse_before_native_post(case: Case, near: str) -> None:
+@pytest.mark.parametrize(
+    "near",
+    ["gemini-4-argon-preview", "gemini-4", "gemini-4-carbon-latest", "gemini-4-hydrogen-preview"],
+)
+async def test_opt_in_near_miss_ids_refuse_before_native_post(case: Case, near: str) -> None:
     requested = spec().model_copy(update={"model": ModelRef(provider="gemini", id=near)})
     with pytest.raises(UnsupportedCapability):
         await case.driver.agents.create(SCOPE, requested, key="near")

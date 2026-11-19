@@ -178,7 +178,9 @@ async def mint_agent_token(
         account_id = principal.account_id
     # Session closed. MA call below.
 
-    ma_agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent)
+    ma_agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent, records=rt.sessionmaker
+    )
     if ma_agent is None:
         raise ConfigError(f"no agent named {agent!r} in tenant {tenant_id}.")
 

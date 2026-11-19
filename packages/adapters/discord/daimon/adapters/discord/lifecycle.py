@@ -49,7 +49,7 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
-from daimon.core.native_footer_cost import native_footer_text
+from daimon.core.features.model_input import ANSWER_MESSAGES
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -66,7 +66,6 @@ from daimon.core.turn.state import (
     final_answer_texts,
     join_messages,
 )
-from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
@@ -116,8 +115,6 @@ _REPAIR_EDIT_S = 120.0
 # ephemeral draft on the status card. Calibrated on real sessions: the
 # largest narration block was 429 chars, the smallest swallowed answer 542.
 _SEALED_RESPONSE_MIN_CHARS = 500
-# Reserve one of the five answer messages for the terminal answer/card.
-_MAX_ANSWER_MESSAGES = 5
 _OUTPUT_COLLAPSED_NOTICE = "Additional output was combined into the attached answer.txt."
 _STOPPED_TITLE = "Stopped."
 _STOPPED_NEXT_STEP = "Send a message to start again."
@@ -388,6 +385,8 @@ class DiscordTurnLifecycle(OutputGate):
         notify_on_completion: bool = False,
         acknowledgment_managed: bool = False,
         render_tables: bool = False,
+        answer_message_cap: int = ANSWER_MESSAGES,
+        model_marks: tuple[str, ...] = (),
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -401,7 +400,6 @@ class DiscordTurnLifecycle(OutputGate):
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
-        waiting_for_tenant_slot: Callable[[], bool] | None = None,
         thread_stopped: Callable[[], bool] | None = None,
     ) -> None:
         # Once the turn's thread is gone or closed, nothing more is written:
@@ -418,6 +416,10 @@ class DiscordTurnLifecycle(OutputGate):
         self._notify_on_completion = notify_on_completion
         self._acknowledgment_managed = acknowledgment_managed
         self._render_tables = render_tables
+        # The terminal answer/card takes one of these messages.
+        self._answer_message_cap = answer_message_cap
+        self._model_marks = model_marks
+        self._model_marked = False
         self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
@@ -425,8 +427,6 @@ class DiscordTurnLifecycle(OutputGate):
         self._budget_channel_id = budget_channel_id
         self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
-        self._waiting_for_tenant_slot = waiting_for_tenant_slot
-        self._queue_card_shown = False
         self._edit = self.guarded_output(edit)
         self._urgent_edit = self.guarded_output(urgent_edit) if urgent_edit is not None else None
         self._delete = delete
@@ -445,7 +445,6 @@ class DiscordTurnLifecycle(OutputGate):
         self._state = EmbedState(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
-            platform="discord",
             started_at=self._clock(),
         )
         # Seeded only by dead-session recovery, which hands over the message the
@@ -587,25 +586,25 @@ class DiscordTurnLifecycle(OutputGate):
         """
         if self._unprompted:
             return
+        await self._mark_model()
         await self._maybe_flush(initial=True)
 
-    async def on_slot_started(self) -> None:
-        """Clear opted-in queue wording on the existing card after the real wait."""
-        if not self._queue_card_shown or self._terminal or self._message_ref is None:
+    async def _mark_model(self) -> None:
+        """React on the trigger message with the model and effort emoji the bot asked for."""
+        if not self._model_marks or self._trigger_message is None:
             return
-        self._waiting_for_tenant_slot = None
-        now = self._clock()
-        try:
-            await self._edit_message(
-                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
-            )
-        except Exception:
-            # Cosmetic wording must not prevent an admitted turn from running.
-            # The ordinary render/terminal path will try this same card again.
-            log.info("turn.queue_card_clear_failed", exc_info=True)
-            return
-        self._last_flush = now
-        self._queue_card_shown = False
+        for mark in self._model_marks:
+            try:
+                await self._trigger_message.add_reaction(mark)
+            except discord.HTTPException:
+                log.warning("turn.model_reaction_failed", exc_info=True)
+                return
+        self._model_marked = True
+
+    @property
+    def model_marked(self) -> bool:
+        """Every model and effort emoji landed on the trigger message."""
+        return self._model_marked
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -953,9 +952,6 @@ class DiscordTurnLifecycle(OutputGate):
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, the last few draft lines, plan and tool lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
-        if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
-            embed.title = "Queued — waiting for a free slot…"
-            self._queue_card_shown = True
         return [embed]
 
     async def _maybe_flush(self, *, initial: bool = False) -> None:
@@ -1098,9 +1094,8 @@ class DiscordTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Only an opted-in, authorized host attempt supplies a complete
-            # native cost. Compatibility counters never become an MA meter.
-            self._state = dataclasses.replace(self._state, cost_str=native_footer_text(t))
+            # Compatibility counters never become an MA meter: no cost shown.
+            self._state = dataclasses.replace(self._state, cost_str=None)
             return
         cost = cost_of_totals(
             state.usage_totals,
@@ -1210,7 +1205,7 @@ class DiscordTurnLifecycle(OutputGate):
                 # thread and attachment. Count actual Discord messages.
                 if (
                     self._deferred_sealed_text
-                    or self._sealed_message_count + len(chunks) >= _MAX_ANSWER_MESSAGES
+                    or self._sealed_message_count + len(chunks) >= self._answer_message_cap
                 ):
                     self._deferred_sealed_text.append(text)
                     self._log_output_limit()
@@ -1230,7 +1225,7 @@ class DiscordTurnLifecycle(OutputGate):
             log.warning(
                 "turn.answer_message_limit",
                 turn_id=str(self._turn_id),
-                limit=_MAX_ANSWER_MESSAGES,
+                limit=self._answer_message_cap,
             )
 
     @staticmethod
@@ -1239,14 +1234,7 @@ class DiscordTurnLifecycle(OutputGate):
 
     def _final_response(self, state: TurnState) -> str:
         messages = final_answer_texts(state.content)
-        if status_log_enabled():
-            # Compare like with like: the final messages joined, against the
-            # last sealed run, which was joined the same way.
-            text = join_messages(_without_adjacent_repeats(messages, None))
-            if text.strip() == self._last_sealed_text:
-                text = ""
-        else:
-            text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
+        text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
             self._tool_markup_only = not self._unprompted
@@ -1381,7 +1369,7 @@ class DiscordTurnLifecycle(OutputGate):
         if use_name_prefix:
             collapsed_notice = fallback_name_prefix(self._agent_name, collapsed_notice)
         overflow_files: list[discord.File] = []
-        remaining = _MAX_ANSWER_MESSAGES - self._sealed_message_count
+        remaining = self._answer_message_cap - self._sealed_message_count
         preview_chunks = (
             _split_with_name_prefix(response_text, self._agent_name)
             if use_name_prefix

@@ -92,7 +92,10 @@ async def provision_configured_tenant(
             reason = compose_failure_reason(report)
         elif deployment_default.agent_name is not None:
             agent = await find_agent_by_daimon_tag(
-                anthropic, tenant_id=tenant_id, name=deployment_default.agent_name
+                anthropic,
+                tenant_id=tenant_id,
+                name=deployment_default.agent_name,
+                records=sessionmaker,
             )
             if agent is None:
                 reason = (
