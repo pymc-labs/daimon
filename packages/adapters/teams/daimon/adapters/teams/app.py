@@ -1765,7 +1765,7 @@ class TeamsApp:
         if bare and self._reader is None:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,
@@ -1815,6 +1815,7 @@ class TeamsApp:
                     active_turn_message_id=lifecycle.message_id,
                     active_turn_channel_id=inbound.conversation_id,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
 

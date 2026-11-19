@@ -185,6 +185,30 @@ def require_registered_guild(  # noqa: UP047  -- ParamSpec used for decorator ge
     return wrapper
 
 
+def require_registered_guild_or_dm(  # noqa: UP047  -- ParamSpec used for decorator generics; PEP 695 syntax not adopted here
+    func: Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]],
+) -> Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]]:
+    """`require_registered_guild`, letting a direct message through.
+
+    A DM has no guild to register; the handler finds its own conversation.
+    """
+    guarded = require_registered_guild(func)
+
+    @functools.wraps(func)
+    async def wrapper(
+        self: Any,  # noqa: ANN401
+        interaction: Interaction[commands.Bot],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> None:
+        if interaction.guild_id is None:
+            await func(self, interaction, *args, **kwargs)
+            return
+        await guarded(self, interaction, *args, **kwargs)
+
+    return wrapper
+
+
 def require_manage_guild(  # noqa: UP047  -- ParamSpec used for decorator generics; PEP 695 syntax not adopted here
     func: Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]],
 ) -> Callable[Concatenate[Any, Interaction[commands.Bot], P], Coroutine[Any, Any, None]]:

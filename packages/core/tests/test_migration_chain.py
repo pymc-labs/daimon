@@ -169,9 +169,11 @@ TAIL = (
     "0205_web_search_usage",
     "0206_support_plans",
     "0207_skill_manifest_bytes",
-    "0208_outbox_attribution",
-    "0209_provider_key_gate",
-    "0210_gemini_records",
+    "0208_active_turn_deadline",
+    "0209_thread_model_effort",
+    "0210_outbox_attribution",
+    "0211_provider_key_gate",
+    "0212_gemini_records",
 )
 HEAD = TAIL[-1]
 
@@ -223,6 +225,8 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
     ("thread_model_settings", "provider"),
+    ("thread_model_settings", "effort"),
+    ("thread_model_settings", "model"),
 }
 
 

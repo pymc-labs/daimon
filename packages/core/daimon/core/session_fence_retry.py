@@ -46,12 +46,17 @@ async def try_fence(
     schema_scoped: bool = False,
 ) -> None:
     # turn.__init__ imports preparation and mutation; keep this import lazy.
-    from daimon.core.turn.ceiling import TURN_CEILING_S
+    from daimon.core.turn.ceiling import TURN_CEILING_S, current_turn_deadline, remaining_s
 
     acquisitions = _acquisitions.get()
-    deadline = asyncio.get_running_loop().time() + (
-        TURN_CEILING_S if timeout_s is None else timeout_s
-    )
+    if timeout_s is None:
+        # A holder is at most as long-lived as a turn: the standard ceiling, or the running
+        # turn's own deadline when its time limit allows longer.
+        timeout_s = TURN_CEILING_S
+        turn_deadline = current_turn_deadline.get()
+        if turn_deadline is not None:
+            timeout_s = max(timeout_s, remaining_s(turn_deadline, now=datetime.now(UTC)))
+    deadline = asyncio.get_running_loop().time() + timeout_s
     if acquisitions is not None:
         deadline = acquisitions.setdefault(key, deadline)
     try:

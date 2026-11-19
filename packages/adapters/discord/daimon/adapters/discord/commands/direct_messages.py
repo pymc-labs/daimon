@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
@@ -12,6 +13,7 @@ from weakref import WeakValueDictionary
 import anthropic
 import structlog
 from cachetools import TTLCache
+from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.bot import (
     GLOBAL_CAP_NOTICE,
     DaimonBot,
@@ -24,6 +26,12 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.adapters.discord.context import (
+    compose_queued_content,
+    forwarded_lines,
+    forwarded_names,
+    input_context,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
@@ -50,6 +58,7 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
+from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -103,6 +112,9 @@ _DM_FAILURES = (
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 _BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
+_DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
+_EMPTY_NOTICE = "Send a text message to continue this conversation."
+_SEEN_REACTION = "👀"
 
 
 @dataclass(frozen=True)
@@ -113,6 +125,15 @@ class _DmRequest:
     author: discord.User | discord.Member
     channel: discord.DMChannel
     content: str = ""
+
+
+def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
+    """The files a message carries that an agent can use; a voice message is not one."""
+    return [
+        a
+        for a in getattr(message, "attachments", None) or ()
+        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
+    ]
 
 
 @dataclass
@@ -140,6 +161,7 @@ class DirectMessageCog(commands.Cog):
         self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
+        self._bursts = DmBursts[tuple[int, int], discord.Message](lambda m: m.content)
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
@@ -147,6 +169,7 @@ class DirectMessageCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._unloaded = True
+        self._bursts.stop()
         for view in self._switch_views.values():
             view.stop()
         self._switch_views.clear()
@@ -768,6 +791,11 @@ class DirectMessageCog(commands.Cog):
             await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
 
     @commands.Cog.listener()
+    async def on_drain(self) -> None:
+        """The process is stopping: answer what is held without waiting for more."""
+        self._bursts.stop()
+
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if (
             self._unloaded
@@ -776,27 +804,92 @@ class DirectMessageCog(commands.Cog):
             or not isinstance(message.channel, discord.DMChannel)
         ):
             return
+        key = (message.author.id, message.channel.id)
+        if (burst := self._bursts.join(key, message)) is not None:
+            # The turn waiting or running here answers this message too.
+            await burst.mark(message, self._react)
+            return
         # The whole accepted DM -- slot wait, preparation, the turn and its
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
-            key = (message.author.id, message.channel.id)
-            async with self._lock(key):
-                pending = self._pending.get(key)
-                if pending is not None:
-                    if monotonic() < pending.expires_at:
-                        self._suppress(message, "selection_pending")
-                        return
-                    del self._pending[key]
-                try:
-                    await self._reply(message)
-                except _DM_FAILURES as exc:
-                    log.warning(
-                        "discord.dm.discovery_failed",
-                        causes=backend_refusal_causes(exc),
-                        error_type=type(exc).__name__,
-                        user_id=str(message.author.id),
-                        reason="discovery_unavailable",
-                    )
+            burst = self._bursts.open(key, message)
+            try:
+                async with self._lock(key):
+                    found = await self._conversation(message)
+                    seconds = 0.0
+                    scope_id = None if found is None else found.scope_id
+                    if found is not None:
+                        seconds = await debounce_seconds(
+                            self.bot.runtime.sessionmaker,
+                            self.bot.runtime.settings,
+                            found.tenant_id,
+                            "discord",
+                        )
+
+                    async def answer(group: list[discord.Message]) -> None:
+                        nonlocal scope_id
+                        scope_id = await self._answer(group, scope_id)
+
+                    await burst.answer(seconds, self._react, answer)
+            finally:
+                # An error no turn handled, or a cancellation: nothing left goes unheard.
+                if await self._bursts.end(key, burst):
+                    await self._tell_dropped(message.channel)
+
+    async def _conversation(self, message: discord.Message | _DmRequest) -> DirectMessageRow | None:
+        async with self.bot.runtime.sessionmaker() as session:
+            return await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(message.channel.id),
+                external_user_id=str(message.author.id),
+            )
+
+    async def _react(self, message: discord.Message, on: bool) -> None:
+        """Put the mark that says a message is held on, or take it off."""
+        with contextlib.suppress(discord.HTTPException):
+            if on:
+                await message.add_reaction(_SEEN_REACTION)
+            elif self.bot.user is not None:
+                await message.remove_reaction(_SEEN_REACTION, self.bot.user)
+
+    async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
+        """One turn for `group`, sent into `scope_id`; the conversation the next one goes to.
+
+        While a server pick is pending, the pick answers instead.
+        """
+        first = group[0]
+        key = (first.author.id, first.channel.id)
+        pending = self._pending.get(key)
+        if pending is not None and monotonic() < pending.expires_at:
+            for message in group:
+                self._suppress(message, "selection_pending")
+            return scope_id
+        self._pending.pop(key, None)
+        try:
+            return await self._reply(first, expected_scope_id=scope_id, batch=tuple(group))
+        except _DM_FAILURES as exc:
+            log.warning(
+                "discord.dm.discovery_failed",
+                causes=backend_refusal_causes(exc),
+                error_type=type(exc).__name__,
+                user_id=str(first.author.id),
+                reason="discovery_unavailable",
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await first.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            return scope_id
+
+    async def _tell_dropped(self, channel: discord.abc.Messageable) -> None:
+        """Tell the person messages taken in for a turn that will not run were not sent."""
+        log.info("discord.dm.dropped")
+        with contextlib.suppress(discord.HTTPException):
+            await channel.send(
+                embed=build_notice_embed(_DROPPED_NOTICE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def _explain_no_private_chat(
         self,
@@ -836,7 +929,8 @@ class DirectMessageCog(commands.Cog):
         someone who loses access mid-turn sees no more of it. A failed membership
         lookup proves nothing: the write goes ahead if the previous check (or the
         admission) verified the person, and is refused otherwise, with the next
-        write checking again.
+        write checking again. `conversation` is the claimed one, so a later claim
+        closes the card too.
         """
         runtime = self.bot.runtime
         channel = message.channel
@@ -891,6 +985,7 @@ class DirectMessageCog(commands.Cog):
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
                 budget_channel_id=admission.budget_channel_id,
@@ -935,27 +1030,41 @@ class DirectMessageCog(commands.Cog):
         )
 
     async def _reply(
-        self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None
-    ) -> None:
-        assert isinstance(message.channel, discord.DMChannel)
-        runtime = self.bot.runtime
-        cards: list[DiscordTurnLifecycle] = []
-        async with runtime.sessionmaker() as session:
-            conversation = await get_conversation(
-                session,
-                platform="discord",
-                route_key=str(message.channel.id),
-                external_user_id=str(message.author.id),
-            )
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        expected_scope_id: str | None = None,
+        batch: tuple[discord.Message, ...] = (),
+    ) -> str | None:
+        """Answer `message`, or the held `batch` it opens, in one turn.
+
+        The conversation it answered in, or that replaced `expected_scope_id`.
+        """
+        conversation = await self._conversation(message)
         if expected_scope_id is not None and (
             conversation is None or conversation.scope_id != expected_scope_id
         ):
-            self._suppress(message, "selection_superseded")
-            return
+            # A stale server pick, or messages sent before /dm-me moved the conversation.
+            self._suppress(message, "conversation_moved" if batch else "selection_superseded")
+            if batch:
+                await self._tell_dropped(message.channel)
+            return None if conversation is None else conversation.scope_id
         if conversation is None:
             conversation = await self._discover(message)
             if conversation is None:
-                return
+                return None
+        await self._turn(message, conversation, batch)
+        return conversation.scope_id
+
+    async def _turn(
+        self,
+        message: discord.Message | _DmRequest,
+        conversation: DirectMessageRow,
+        batch: tuple[discord.Message, ...],
+    ) -> None:
+        assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
+        runtime = self.bot.runtime
+        cards: list[DiscordTurnLifecycle] = []
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
@@ -976,10 +1085,13 @@ class DirectMessageCog(commands.Cog):
                 self._suppress(message, "active_access_revoked")
                 return
             role = Role.ADMIN if subject.is_admin else Role.USER
-            if not message.content.strip():
-                await message.channel.send(
-                    embed=build_notice_embed("Send a text message to continue this conversation.")
-                )
+            # The stand-in after a server pick has no content, files or snapshots.
+            messages = batch or (() if isinstance(message, _DmRequest) else (message,))
+            text = compose_queued_content(list(messages))
+            files = [a for held in messages for a in _attachments(held)]
+            forwards = forwarded_names(messages)
+            if not (text.strip() or files or forwarded_lines(messages)):
+                await message.channel.send(embed=build_notice_embed(_EMPTY_NOTICE))
                 return
             # A DM has no card: over the cap it waits under the typing
             # indicator. Only the process-wide cap applies, as before; a
@@ -1012,14 +1124,51 @@ class DirectMessageCog(commands.Cog):
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
+                    discord_settings = runtime.settings.discord
+                    prefix, image_blocks = await prepare_attachments(files)
+                    context = await input_context(
+                        message.channel,
+                        messages,
+                        bot_user_id=self.bot.user.id if self.bot.user else None,
+                        bot_display_name=(
+                            discord_settings.bot_display_name if discord_settings else "daimon"
+                        ),
+                    )
+
+                    async def reseed_prefix(
+                        messages: Sequence[discord.Message] = messages,
+                        channel: discord.abc.Messageable = message.channel,
+                        prefix: str = prefix,
+                    ) -> str:
+                        # No link to an oversized image: it may be what ended the session.
+                        again = await input_context(
+                            channel,
+                            messages,
+                            bot_user_id=self.bot.user.id if self.bot.user else None,
+                            bot_display_name=(
+                                discord_settings.bot_display_name if discord_settings else "daimon"
+                            ),
+                            omit_oversized_image_urls=True,
+                        )
+                        return "\n".join(part for part in (again, prefix) if part)
+
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         platform="discord",
                         route_key=str(message.channel.id),
                         external_user_id=str(message.author.id),
                         message_id=str(message.id),
+                        merged_message_ids=tuple(str(held.id) for held in messages[1:]),
                         expected_scope_id=conversation.scope_id,
-                        text=message.content,
+                        text=text,
+                        prefix="\n".join(part for part in (context, prefix) if part),
+                        reseed_prefix=reseed_prefix,
+                        image_blocks=image_blocks,
+                        history_notes=[
+                            *(f"[attachment: {a.filename}]" for a in files),
+                            *(f"[attachment: {name}]" for name in forwards),
+                            *(["[forwarded message]"] if forwarded_lines(messages) else []),
+                        ],
                         role=role,
                         role_ids=subject.role_ids,
                         verified_membership=subject.verified_membership,
@@ -1030,7 +1179,7 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=self._turn_card(message, conversation, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:

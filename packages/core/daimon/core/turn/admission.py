@@ -47,6 +47,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
     build_turn_place,
+    holds_agent_roles,
 )
 from daimon.core.channel_backend import (
     BackendUnsupported,
@@ -66,14 +67,18 @@ from daimon.core.features.model_input import (
     CHAT_KEYS,
     HIDING_KEYS,
     HISTORY_KEYS,
+    LIMIT_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
     TOOL_KEYS,
     TURN_KEYS,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     agent_toolset,
+    answer_message_cap,
     builtins_of,
+    turn_limit_minutes,
 )
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
@@ -136,6 +141,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
+from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -145,6 +151,7 @@ from daimon.core.turn.errors import (
     MissingTurnConfigError,
     SessionBusyError,
 )
+from daimon.core.turn.invocation import unattended_invocation
 from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
@@ -466,6 +473,8 @@ class Admission:
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
+    # The effort that session runs at when the people chose one; None keeps the agent's.
+    model_effort: str | None = None
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
@@ -491,6 +500,28 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def dm_history(self) -> DmHistoryCap:
+        """How much of a DM conversation a reply at this place carries."""
+        return DmHistoryCap.of(self.features)
+
+    @property
+    def answer_message_cap(self) -> int:
+        """The most messages one answer may post here before it is attached as a file."""
+        return answer_message_cap(self.features)
+
+    @property
+    def turn_ceiling_s(self) -> float:
+        """How long a turn here may run before it is stopped, never past
+        `LONGEST_TURN_CEILING_S`: a person's message reads the turn time limit set at this
+        place, a turn nobody waits on (`unattended_invocation`) the unattended run limit, and a
+        hand-built admission or a missing setting the built-in 45 minutes. A turn allowed
+        past 45 minutes stores its deadline for the stale-turn and lock-wait checks."""
+        unattended = self.request is not None and unattended_invocation(
+            self.request.origin, self.request.attended
+        )
+        return limit_ceiling_s(turn_limit_minutes(self.features, unattended=unattended))
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
@@ -1985,6 +2016,7 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
         model_override=thread_model.model_override,
+        model_effort=thread_model.model_effort,
         model_fell_back=thread_model.fell_back,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
@@ -2100,9 +2132,12 @@ def _require_turn_start(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
-    if (grant.act_for_creator or not grant.human_invocation) and agent_invoker_roles(
-        policy, grant.agent.names
+    if (
+        (grant.act_for_creator or not grant.human_invocation)
+        and agent_invoker_roles(policy, grant.agent.names)
+        and not holds_agent_roles(policy, grant.agent.names, grant.subject)
     ):
+        # Unattended: only a freshly verified owner holding every required role.
         raise AdmissionDenied(reason="invoker_not_allowed")
     subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
     if grant.cold_dm and not authorize(
@@ -2852,7 +2887,15 @@ async def capture_agent_source(
 
 _TURN_FEATURE_KEYS: Final = tuple(
     dict.fromkeys(
-        (*TURN_KEYS, *SESSION_KEYS, *PER_TURN_KEYS, *IDENTITY_KEYS, *HISTORY_KEYS, *CHAT_KEYS)
+        (
+            *TURN_KEYS,
+            *SESSION_KEYS,
+            *PER_TURN_KEYS,
+            *IDENTITY_KEYS,
+            *HISTORY_KEYS,
+            *LIMIT_KEYS,
+            *CHAT_KEYS,
+        )
     )
 )
 

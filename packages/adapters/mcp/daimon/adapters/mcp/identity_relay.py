@@ -18,20 +18,29 @@ import httpx
 import structlog
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.core.config import SignedIdentityServer
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
+    REQUESTER_PLATFORMS,
     IdentityTokenCache,
     RelayBinding,
+    RequesterBodyError,
+    RequesterKind,
     caller_claims,
     matching_turn,
     origin_turn_place,
     parse_relay_claim,
+    requester_conversation,
+    routine_conversation,
+    stamp_requester,
 )
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import RoutineRow, TurnOriginRow
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -126,15 +135,47 @@ async def _session_turn(
     return matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
 
 
+async def _routine_run(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> RoutineRow | None:
+    """The routine a scheduled run's credential names, or None.
+
+    Only a routine of this tenant that runs this agent (by id) and is still owned by
+    the user the run started for counts; a routine since deleted, handed to someone
+    else or aimed at another agent names nobody.
+    """
+    if binding.routine_id is None:
+        return None
+    async with sessionmaker() as session:
+        row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
+    if (
+        row is None
+        or not row.created_by_user_id
+        or row.created_by_user_id != binding.owner
+        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+    ):
+        return None
+    return row
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
     auth: TokenVerifier,
     sessionmaker: async_sessionmaker[AsyncSession],
-    tokens: IdentityTokenCache,
+    tokens: IdentityTokenCache | None,
     clients: Mapping[str, httpx.AsyncClient],
     clock: Callable[[], datetime],
+    bearers: Mapping[str, SecretStr] | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
+    """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
+    the key of each server whose auth is bearer. A server with neither is refused (503)."""
+    keys = bearers or {}
+
     async def handler(request: Request) -> Response:
         server = servers.get(request.path_params["name"])
         if server is None:
@@ -162,6 +203,15 @@ def build_identity_relay_route(
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
             return Response(status_code=403)
+        # An allowlist names the agents that may use a server (a bearer server always has one).
+        if server.agents and binding.agent_name not in server.agents:
+            return Response(status_code=403)
+        bearer = keys.get(server.name)
+        if (server.auth == "bearer" and bearer is None) or (
+            server.auth == "signed" and tokens is None
+        ):
+            log.error("mcp_identity.relay_unconfigured", server=server.name)
+            return Response(status_code=503)
         person = claims.get("platform_user_id")
         body = await read_capped_body(request)
         if body is None:
@@ -180,22 +230,66 @@ def build_identity_relay_route(
         # people: the server must not apply a member's permissions to them.
         if origin is not None and (origin.sender_foreign or FOREIGN_HOME_CLAIM in claims):
             origin = None
-        identity = caller_claims(
-            issuer=server.issuer,
-            audience=server.audience,
-            agent_id=str(agent_id),
-            platform=platform,
-            workspace_id=workspace,
-            platform_user_id=person if isinstance(person, str) else None,
-            agent_name=origin.responder_name if origin is not None else binding.agent_name,
-            place=origin_turn_place(origin) if origin is not None else None,
-        )
         headers = {
             name: value
             for name in _REQUEST_HEADERS
             if (value := request.headers.get(name)) is not None
         }
-        headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
+        if server.auth == "bearer":
+            assert bearer is not None
+            headers["authorization"] = f"Bearer {bearer.get_secret_value()}"
+        else:
+            assert tokens is not None
+            identity = caller_claims(
+                issuer=server.issuer,
+                audience=server.audience,
+                agent_id=str(agent_id),
+                platform=platform,
+                workspace_id=workspace,
+                platform_user_id=person if isinstance(person, str) else None,
+                agent_name=origin.responder_name if origin is not None else binding.agent_name,
+                place=origin_turn_place(origin) if origin is not None else None,
+            )
+            headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
+        if request.method in ("GET", "DELETE"):
+            # Neither carries a message; a body on one is dropped, not forwarded.
+            body = b""
+        if server.requester_meta and request.method == "POST":
+            # A turn a person started names that person. An unattended run names who
+            # it acts for, as kind "routine": a routine's owner and delivery place, or
+            # the person and place of a wake (watch, timer, continuation). A foreign
+            # sender, a replaced session and two turns at once match neither and
+            # carry no requester fields.
+            named: str | None = None
+            conversation: dict[str, str | None] | None = None
+            kind: RequesterKind | None = None
+            if (
+                origin is not None
+                and platform in REQUESTER_PLATFORMS
+                and isinstance(person, str)
+                and person
+            ):
+                kind = "person" if origin.human_invocation is True else "routine"
+                named = person
+                conversation = requester_conversation(origin, unattended=kind == "routine")
+            elif (
+                binding.routine_id is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                routine = await _routine_run(
+                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
+                )
+                if routine is not None:
+                    named, conversation, kind = (
+                        routine.created_by_user_id,
+                        routine_conversation(routine),
+                        "routine",
+                    )
+            try:
+                body = stamp_requester(body, person=named, conversation=conversation, kind=kind)
+            except RequesterBodyError:
+                return Response(status_code=400)
         http = clients[server.name]
         upstream = http.build_request(
             request.method,
@@ -223,7 +317,8 @@ def build_identity_relay_route(
             "mcp_identity.request_relayed",
             server=server.name,
             status=response.status_code,
-            person=identity.sub is not None,
+            person=origin is not None,
+            auth=server.auth,
         )
         return StreamingResponse(
             response.aiter_bytes(),

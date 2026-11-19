@@ -6,7 +6,9 @@ import uuid
 
 import pytest
 from daimon.core.features.model_input import (
+    DEFAULT_DM_HISTORY,
     FULL_HISTORY,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     guidance_applies,
@@ -87,6 +89,20 @@ def test_chat_history_takes_the_smallest_setting_and_caps_the_channel() -> None:
     assert all(int(value) >= 0 for value in spec.values), "limit values are counts"
 
 
+def test_channel_background_follows_its_setting_and_chat_history_still_caps_it() -> None:
+    """`channel_history` raises the channel read past 25; `history_depth` stays a ceiling."""
+    spec = FEATURES["channel_history"]
+    assert spec.default == "25", "the channel read stays 25 messages until someone raises it"
+    found = resolve_feature(spec, [TierValue("workspace", "25"), TierValue("agent", "50")])
+    assert (found.value, found.tier) == ("50", "agent"), "the most specific tier decides"
+    fifty = HistoryDepth.of(_snapshot(found))
+    assert (fifty.replay, fifty.backfill) == (100, 50), "50 reads 50 channel messages"
+    capped = HistoryDepth.of(_snapshot(found, ResolvedFeature("history_depth", "25", "workspace")))
+    assert capped.backfill == 25, "chat history at 25 caps the channel read at 25"
+    assert HistoryDepth.of(_snapshot()).backfill == 25, "the default reads 25"
+    assert HistoryDepth.of(None).backfill == 25, "a hand-built admission reads 25"
+
+
 def test_a_limit_is_a_finite_number_read_the_same_way_everywhere() -> None:
     spec = FEATURES["outbound_people"]
     assert spec.accepts("12.0", "deployment") and spec.accepts("0", "deployment")
@@ -99,3 +115,15 @@ def test_a_limit_is_a_finite_number_read_the_same_way_everywhere() -> None:
         HistoryDepth.of(_snapshot(ResolvedFeature("history_depth", "12.0", "deployment"))).replay
         == 12
     )
+
+
+def test_dm_memory_defaults_to_twelve_and_scales_its_characters() -> None:
+    """The default keeps today's 12 messages and 16,000 characters; a raise scales both."""
+    spec = FEATURES["dm_history_depth"]
+    assert spec.default == "12"
+    assert (DEFAULT_DM_HISTORY.turns, DEFAULT_DM_HISTORY.chars) == (12, 16_000)
+    assert DmHistoryCap.of(None) == DEFAULT_DM_HISTORY, "a hand-built admission keeps the default"
+    found = resolve_feature(spec, [TierValue("workspace", "100"), TierValue("agent", "50")])
+    assert (found.value, found.tier) == ("50", "agent"), "a lower tier can only shrink it"
+    cap = DmHistoryCap.of(_snapshot(found))
+    assert (cap.turns, cap.chars) == (50, 50_000)

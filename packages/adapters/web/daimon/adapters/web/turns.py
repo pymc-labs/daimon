@@ -385,7 +385,7 @@ class WebTurns:
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,
@@ -414,6 +414,7 @@ class WebTurns:
                     active_turn_message_id=str(lifecycle.reply_id),
                     active_turn_channel_id=key,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
         prefix, images = await attachment_prompt(
@@ -461,7 +462,8 @@ class WebTurns:
                     if m.seq < message.seq and m.content
                 ]
                 history = render_previous_session(
-                    bounded_turns(previous), from_agent_name=admission.agent.name
+                    bounded_turns(previous, admission.dm_history),
+                    from_agent_name=admission.agent.name,
                 )
                 return f"{controls}\n{history}\n\n{prefix}{message.content}"
 

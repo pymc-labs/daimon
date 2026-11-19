@@ -12,8 +12,8 @@ downgrade: safe
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0208_outbox_attribution"
-down_revision: str | None = "0207_skill_manifest_bytes"
+revision: str = "0210_outbox_attribution"
+down_revision: str | None = "0209_thread_model_effort"
 branch_labels: str | None = None
 depends_on: str | None = None
 

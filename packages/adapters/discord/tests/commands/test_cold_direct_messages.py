@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -787,7 +788,8 @@ async def test_dm_settings_outside_dms_or_without_conversation_shows_no_controls
 async def _card_from_turn(cog, msg, reply, admission):
     await cog.on_message(msg)
     card_for = reply.await_args.kwargs["card_for"]
-    return card_for(admission, asyncio.Event())
+    claimed = await conversation(cog.bot.runtime.sessionmaker)
+    return card_for(claimed)(admission, asyncio.Event())
 
 
 async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
@@ -805,6 +807,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
         grant=row_reply.grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -829,6 +832,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -870,6 +874,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -894,6 +899,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
         grant=private_reply(await conversation(db_session_factory)).grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -915,6 +921,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
         grant=grant,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
+        answer_message_cap=5,
         is_admin=False,
         budget_channel_id=None,
     )
@@ -954,11 +961,12 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
     )
 
     async def answer(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -985,11 +993,12 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
     )
 
     async def fail(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -1058,11 +1067,12 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
     monkeypatch.setattr(module, "DiscordTurnLifecycle", lifecycle)
 
     async def answer(deps, **kwargs):
-        kwargs["card_for"](
+        kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
+                answer_message_cap=5,
                 is_admin=False,
                 budget_channel_id=None,
             ),
@@ -1076,3 +1086,377 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
     sent.edit = AsyncMock()
     await built["edit"](sent, content="x", _allow_replacement=False)
     sent.edit.assert_awaited_once_with(content="x")
+
+
+def dm_message(message_id=101, content="hello", attachments=(), snapshots=()):
+    msg = message(message_id)
+    msg.content = content
+    msg.attachments = list(attachments)
+    msg.message_snapshots = list(snapshots)
+    msg.reference = None
+    msg.add_reaction = AsyncMock()
+    msg.remove_reaction = AsyncMock()
+    return msg
+
+
+def attachment(filename="photo.png", *, voice=False):
+    att = MagicMock(spec=discord.Attachment)
+    att.filename = filename
+    att.is_voice_message.return_value = voice
+    return att
+
+
+def snapshot(content="forwarded words"):
+    snap = MagicMock(spec=discord.MessageSnapshot)
+    snap.content = content
+    snap.embeds = []
+    snap.attachments = [
+        SimpleNamespace(filename="doc.pdf", url="https://cdn/doc", size=3, content_type=None)
+    ]
+    snap.created_at = datetime(2026, 4, 28, tzinfo=UTC)
+    return snap
+
+
+async def test_a_recovery_reseed_withholds_an_oversized_forwarded_image(
+    db_session_factory, monkeypatch
+):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    snap = snapshot()
+    snap.attachments = [
+        SimpleNamespace(
+            filename="huge.jpg",
+            url="https://cdn/huge.jpg",
+            size=3,
+            content_type="image/jpeg",
+            width=12000,
+            height=4000,
+        )
+    ]
+    msg = dm_message(content="", snapshots=[snap])
+    await cog.on_message(msg)
+    kwargs = reply.await_args.kwargs
+    assert 'oversized="true"' in kwargs["prefix"] and "https://cdn/huge.jpg" in kwargs["prefix"]
+    again = await kwargs["reseed_prefix"]()
+    assert 'oversized="true"' in again, "the agent still learns the image exists"
+    assert "https://cdn/huge.jpg" not in again, "a replayed turn never carries the huge image"
+    await cog.cog_unload()
+
+
+async def test_an_image_only_dm_is_answered_with_the_picture(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    prepare = AsyncMock(return_value=("[attachment] photo.png", ["BLOCK"]))
+    monkeypatch.setattr(module, "prepare_attachments", prepare)
+    msg = dm_message(content="", attachments=[attachment()])
+    await cog.on_message(msg)
+    kwargs = reply.await_args.kwargs
+    assert kwargs["image_blocks"] == ["BLOCK"], "the picture reaches the turn"
+    assert kwargs["prefix"] == "[attachment] photo.png"
+    assert kwargs["history_notes"] == ["[attachment: photo.png]"], "history keeps the name only"
+    assert not any(
+        sent_text(call) == module._EMPTY_NOTICE for call in msg.channel.send.await_args_list
+    ), "a picture is something to answer"
+    await cog.cog_unload()
+
+
+async def test_a_data_file_dm_carries_its_link_without_blocks(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    monkeypatch.setattr(
+        module, "prepare_attachments", AsyncMock(return_value=("[attachment] sales.csv", None))
+    )
+    await cog.on_message(dm_message(content="chart this", attachments=[attachment("sales.csv")]))
+    kwargs = reply.await_args.kwargs
+    assert kwargs["text"] == "chart this" and kwargs["image_blocks"] is None
+    assert "sales.csv" in kwargs["prefix"]
+    await cog.cog_unload()
+
+
+async def test_a_forwarded_dm_passes_the_forward_as_untrusted(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(dm_message(content="", snapshots=[snapshot()]))
+    kwargs = reply.await_args.kwargs
+    assert 'trust="untrusted"' in kwargs["prefix"] and "forwarded words" in kwargs["prefix"]
+    assert kwargs["history_notes"] == ["[attachment: doc.pdf]", "[forwarded message]"]
+    assert "https://cdn/doc" not in "".join(kwargs["history_notes"]), "history keeps no URLs"
+    await cog.cog_unload()
+
+
+async def test_a_reply_to_an_earlier_message_carries_that_message(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    earlier = MagicMock(spec=discord.Message)
+    earlier.id = 50
+    earlier.content = "the earlier answer"
+    earlier.author = SimpleNamespace(id=1, bot=True, display_name="daimon")
+    earlier.created_at = datetime(2026, 4, 28, tzinfo=UTC)
+    earlier.attachments = []
+    earlier.embeds = []
+    earlier.message_snapshots = []
+    earlier.jump_url = "https://discord.com/channels/@me/555/50"
+    msg = dm_message(content="and then?")
+    msg.reference = discord.MessageReference(
+        message_id=50, channel_id=555, type=discord.MessageReferenceType.reply
+    )
+    msg.reference.resolved = earlier
+    await cog.on_message(msg)
+    assert "the earlier answer" in reply.await_args.kwargs["prefix"]
+    await cog.cog_unload()
+
+
+@pytest.mark.parametrize("kind", ["nothing", "voice"])
+async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch, kind):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    files = [attachment("voice.ogg", voice=True)] if kind == "voice" else []
+    msg = dm_message(content="", attachments=files)
+    await cog.on_message(msg)
+    assert [sent_text(call) for call in msg.channel.send.await_args_list][
+        -1
+    ] == module._EMPTY_NOTICE
+    reply.assert_not_awaited()
+    await cog.cog_unload()
+
+
+async def hold_first_reply(db_session_factory, reply):
+    """Make the first turn wait until released, recording every turn's inputs."""
+    gate, started = asyncio.Event(), asyncio.Event()
+    turns = []
+
+    async def answer(deps, **kwargs):
+        turns.append(kwargs)
+        if len(turns) == 1:
+            started.set()
+            await gate.wait()
+        return private_reply(await conversation(db_session_factory))
+
+    reply.side_effect = answer
+    return gate, started, turns
+
+
+async def test_messages_sent_during_a_reply_are_answered_in_one_turn(
+    db_session_factory, monkeypatch
+):
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.05)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    first = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(first))
+    await asyncio.wait_for(started.wait(), 5)
+    second, third = dm_message(102, "two"), dm_message(103, "three")
+    await asyncio.wait_for(cog.on_message(second), 1)
+    await asyncio.wait_for(cog.on_message(third), 1)
+    second.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one", "two\n\nthree"], "the burst is one turn"
+    assert turns[1]["message_id"] == "102" and turns[1]["merged_message_ids"] == ("103",)
+    second.remove_reaction.assert_awaited_once()
+    await cog.cog_unload()
+
+
+async def test_a_held_message_is_dropped_when_dm_me_moved_the_conversation(
+    db_session_factory, monkeypatch
+):
+    from daimon.core.stores.direct_messages import DirectMessageConversation
+    from sqlalchemy import update
+
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.05)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    running = asyncio.create_task(cog.on_message(dm_message(101, "one")))
+    await asyncio.wait_for(started.wait(), 5)
+    held = dm_message(102, "two")
+    await cog.on_message(held)
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            update(DirectMessageConversation)
+            .where(DirectMessageConversation.route_key == "555")
+            .values(scope_id="private-moved")
+        )
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one"], "nothing is answered in the new conversation"
+    assert sent_text(held.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    held.remove_reaction.assert_awaited_once()
+    await cog.cog_unload()
+
+
+async def test_an_approval_reply_in_a_burst_stands_alone(db_session_factory, monkeypatch):
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.05)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    running = asyncio.create_task(cog.on_message(dm_message(101, "one")))
+    await asyncio.wait_for(started.wait(), 5)
+    for number, text in ((102, "two"), (103, "yes"), (104, "three")):
+        await cog.on_message(dm_message(number, text))
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one", "two", "yes", "three"]
+    await cog.cog_unload()
+
+
+async def test_a_cancelled_burst_is_dropped_with_a_notice(db_session_factory, monkeypatch):
+    """A turn cut off at the end of the shutdown grace window tells its burst."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.05)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    first = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(first))
+    await asyncio.wait_for(started.wait(), 5)
+    held = dm_message(102, "two")
+    await cog.on_message(held)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert sent_text(first.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    held.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    assert [t["text"] for t in turns] == ["one"], "nothing runs after the cancel"
+    await cog.cog_unload()
+
+
+async def known_burst(db_session_factory, monkeypatch, seconds):
+    """A cog whose person already has a conversation open, and a wait of `seconds`."""
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(dm_message(100, "hi"))
+    assert reply.await_count == 1, "the conversation opened with one answered turn"
+    monkeypatch.setattr(module, "debounce_seconds", AsyncMock(return_value=seconds))
+    return cog, reply
+
+
+def assert_eyes_off(cog, *messages):
+    for msg in messages:
+        msg.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
+        msg.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    assert not cog._bursts._open, "no burst is left open"
+
+
+async def in_its_wait(msg):
+    """Let the burst `msg` opened reach its wait, so a later message joins it there."""
+    for _ in range(200):
+        if msg.add_reaction.await_count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the first message never started waiting")
+
+
+async def test_an_unhandled_error_tells_the_rest_of_the_burst_it_was_not_sent(
+    db_session_factory, monkeypatch
+):
+    """An error no turn handles ends the burst; every message left is told, eyes off."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.3)
+    reply.side_effect = RuntimeError("a bug in the turn")
+    one, approval = dm_message(101, "one"), dm_message(102, "yes")
+    running = asyncio.create_task(cog.on_message(one))
+    await in_its_wait(one)
+    await cog.on_message(approval)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(running, 5)
+    assert reply.await_count == 2, "the approval's own turn never ran after the error"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert_eyes_off(cog, one, approval)
+    await cog.cog_unload()
+
+
+async def test_a_failed_lookup_tells_the_burst_it_was_not_sent(db_session_factory, monkeypatch):
+    """The conversation read before the wait fails after a second message joined."""
+    from sqlalchemy.exc import OperationalError
+
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 3)
+    release = asyncio.Event()
+
+    async def unreachable(session, **kwargs):
+        await release.wait()
+        raise OperationalError("select", {}, Exception("database unreachable"))
+
+    monkeypatch.setattr(module, "get_conversation", unreachable)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    release.set()
+    with pytest.raises(OperationalError):
+        await asyncio.wait_for(running, 5)
+    assert reply.await_count == 1, "no turn ran"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert one.channel.send.await_count == 1, "one notice for both messages"
+    await cog.cog_unload()
+
+
+@pytest.mark.parametrize("stop", ["drain", "unload"])
+async def test_a_shutdown_mid_wait_answers_the_burst_at_once(db_session_factory, monkeypatch, stop):
+    """A deploy goes unnoticed: a drain or an unload ends the wait and answers the burst."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 5)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await in_its_wait(one)
+    await cog.on_message(two)
+    if stop == "drain":
+        await cog.on_drain()
+    else:
+        await cog.cog_unload()
+    await asyncio.wait_for(running, 2)
+    assert reply.await_count == 2 and reply.await_args.kwargs["text"] == "one\n\ntwo"
+    assert all(sent_text(c) != module._DROPPED_NOTICE for c in one.channel.send.await_args_list)
+    assert_eyes_off(cog, one, two)
+    await cog.cog_unload()
+
+
+async def test_a_burst_sent_before_dm_me_moved_the_conversation_is_dropped(
+    db_session_factory, monkeypatch
+):
+    """/dm-me during the wait: the burst is not answered in the new conversation."""
+    from daimon.core.stores.direct_messages import DirectMessageConversation
+    from sqlalchemy import update
+
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.3)
+    one = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(one))
+    await in_its_wait(one)
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            update(DirectMessageConversation)
+            .where(DirectMessageConversation.route_key == "555")
+            .values(scope_id="private-moved")
+        )
+    await asyncio.wait_for(running, 5)
+    assert reply.await_count == 1, "nothing is answered in the new conversation"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert_eyes_off(cog, one)
+    await cog.cog_unload()
+
+
+async def test_a_failed_turn_takes_the_eyes_off_the_burst(db_session_factory, monkeypatch):
+    """A turn that fails with its own error notice still clears the burst's reactions."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.2)
+    reply.side_effect = DaimonError("the turn failed")
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await in_its_wait(one)
+    await cog.on_message(two)
+    await asyncio.wait_for(running, 5)
+    assert reply.await_count == 2, "the burst ran as one turn"
+    assert sent_text(one.channel.send.await_args_list[-1]) != module._DROPPED_NOTICE, (
+        "the turn's own error is the notice"
+    )
+    assert_eyes_off(cog, one, two)
+    await cog.cog_unload()
+
+
+async def test_with_the_wait_off_a_message_sent_during_the_lookup_gets_its_own_turn(
+    db_session_factory, monkeypatch
+):
+    """Off answers each message in its own turn; one that arrived meanwhile is only briefly marked."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0)
+    looked_up = asyncio.Event()
+    real_read = module.get_conversation
+
+    async def slow_read(session, **kwargs):
+        if not looked_up.is_set():
+            await looked_up.wait()
+        return await real_read(session, **kwargs)
+
+    monkeypatch.setattr(module, "get_conversation", slow_read)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    looked_up.set()
+    await asyncio.wait_for(running, 5)
+    assert [c.kwargs["text"] for c in reply.await_args_list[1:]] == ["one", "two"], "a turn each"
+    one.add_reaction.assert_not_awaited()
+    two.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
+    two.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    await cog.cog_unload()

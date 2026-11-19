@@ -254,7 +254,6 @@ class SlackTurnLifecycle(OutputGate):
         self._state: State = State(
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
-            platform="slack",
             header_customized=header_customized,
             started_at=self._clock(),
         )

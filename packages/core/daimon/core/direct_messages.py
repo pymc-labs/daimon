@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import anthropic
 import structlog
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
@@ -27,6 +28,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
+from daimon.core.features.model_input import DEFAULT_DM_HISTORY, DmHistoryCap
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
@@ -42,13 +44,16 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.direct_messages import (
     COLD_DM_ORIGIN,
     DirectMessageRow,
+    OwnerDmFence,
     claim_message,
     dm_enabled,
+    fence_held,
     finish_message,
     get_conversation,
     get_dm_agent_name,
     holds_claim,
     lock_route,
+    owner_dm_fence,
     quarantine_conversation,
     start_conversation,
 )
@@ -64,9 +69,10 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     mark_dead,
     retire_dm_scope,
+    update_watermark,
 )
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
-from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionBusyError
 from daimon.core.turn.io import turn_io
@@ -78,6 +84,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
@@ -92,6 +99,13 @@ class DirectMessageAccessRevoked(UserFacingError):
         self.reason = reason
 
 
+class DirectMessageClaimLost(UserFacingError):
+    """The turn's owner fence dropped, so a later message may own the conversation."""
+
+    def __init__(self) -> None:
+        super().__init__("This reply was interrupted.\n\nSend your message again.")
+
+
 class DirectMessageMembershipUnknown(DirectMessageAccessRevoked):
     """The recipient's membership lookup failed; nothing proved their access gone."""
 
@@ -104,7 +118,9 @@ class DirectMessageReply:
     """Text and the exact agent authority used for this private model turn.
 
     ``outputs`` is the session whose saved files the adapter delivers after
-    the answer; None when the turn has none (self-hosted).
+    the answer; None when the turn has none (self-hosted). A reply under way
+    carries the claimed ``conversation``, so a later claim stops its output;
+    a finished reply's has its claim released.
     """
 
     text: str
@@ -141,7 +157,7 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
     A failed membership lookup is decided on the roles and admin standing the
     turn was admitted with: any refusal on those is proved revocation, and
     only when everything else passes does it raise `DirectMessageMembershipUnknown`.
-    Both refuse this output.
+    Both refuse this output, as does a claim the conversation no longer holds.
     """
     conversation = reply.conversation
     subject = await resolve_subject(
@@ -172,6 +188,8 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         raise DirectMessageAccessRevoked(
             "delivery_access_revoked", message="Private access revoked."
         )
+    if conversation.claimed_at is not None and current.claimed_at != conversation.claimed_at:
+        raise DirectMessageAccessRevoked("claim_superseded", message="This reply was replaced.")
     membership_unknown = subject.verified_membership is None
     if membership_unknown:
         admitted = reply.grant.subject
@@ -271,11 +289,13 @@ def dm_permission_text(platform: ChatPlatform) -> str:
     )
 
 
-def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
-    """Keep a small text-only context, newest selected, oldest rendered first."""
-    remaining = 16_000
+def bounded_turns(
+    turns: Sequence[TranscriptTurn], cap: DmHistoryCap = DEFAULT_DM_HISTORY
+) -> list[TranscriptTurn]:
+    """Keep a bounded text-only context, newest selected, oldest rendered first."""
+    remaining = cap.chars
     selected: list[TranscriptTurn] = []
-    for turn in reversed(turns[-12:]):
+    for turn in reversed(turns[-cap.turns :]):
         if remaining <= 0:
             break
         text = turn.text[:remaining]
@@ -422,16 +442,19 @@ async def start_dm(
         source_thread_id=source_thread_id,
         source_thread_keys=sorted(set(source_thread_keys)),
         context=render_previous_session(
-            [TranscriptTurn(role="user", text=f"Source: {source_url}"), *bounded_turns(context)],
+            [
+                TranscriptTurn(role="user", text=f"Source: {source_url}"),
+                *bounded_turns(context, admission.dm_history),
+            ],
             from_agent_name="source conversation",
         ),
         memory_read_only=admission.memory_read_only,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     async with deps.sessionmaker.begin() as session:
-        await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+        await start_conversation(session, conversation=conversation)
         await set_fields(
             session,
             scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
@@ -517,7 +540,7 @@ async def start_cold_dm(
         memory_read_only=admission.memory_read_only,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     async with deps.sessionmaker.begin() as session:
         await lock_route(
@@ -533,7 +556,7 @@ async def start_cold_dm(
             or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
-        await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+        await start_conversation(session, conversation=conversation)
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
             await retire_dm_scope(
@@ -603,6 +626,21 @@ async def _dm_destination(
                 await delete_slack_turn_context(session, id=context.id)
 
 
+async def _reseed_prompt(context: str, prefix: Callable[[], Awaitable[str]], text: str) -> str:
+    part = await prefix()
+    return f"{context}\n\n{part}\n{text}" if part else f"{context}\n\n{text}"
+
+
+@dataclass(frozen=True)
+class _DmTurn:
+    """A finished private turn: its text, and the session and mapping that answered."""
+
+    text: str
+    session_id: str
+    mapping_id: uuid.UUID | None
+    outputs: OutputRuntime | None
+
+
 async def _run_admitted_dm_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -624,7 +662,9 @@ async def _run_admitted_dm_turn(
     request_text: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
-) -> tuple[str, str, OutputRuntime | None]:
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    reseed_prompt: Callable[[], Awaitable[str]] | None = None,
+) -> _DmTurn:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
@@ -665,7 +705,8 @@ async def _run_admitted_dm_turn(
         user_message = f"{controls}\n{prompt}"
 
         async def reseed() -> str:
-            return user_message
+            # A recovery rebuilds the prompt, without what ended the dead session.
+            return f"{controls}\n{await reseed_prompt()}" if reseed_prompt else user_message
 
         cancel = asyncio.Event()
         lifecycle = (
@@ -681,6 +722,7 @@ async def _run_admitted_dm_turn(
                 external_user_id=external_user_id,
                 user_message=user_message,
                 request_text=request_text,
+                image_blocks=image_blocks,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -704,7 +746,7 @@ async def _run_admitted_dm_turn(
             "execution_incomplete", message="The run did not complete."
         )
     answer = extract_final_response(outcome.state.content) or "The reply finished without text."
-    return answer, outcome.ma_session_id, outcome.outputs
+    return _DmTurn(answer, outcome.ma_session_id, outcome.mapping_id, outcome.outputs)
 
 
 async def reply_to_dm(
@@ -718,6 +760,7 @@ async def reply_to_dm(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     platform_channel_id: str | None = None,
@@ -729,6 +772,7 @@ async def reply_to_dm(
         route_key=route_key,
         external_user_id=external_user_id,
         message_id=message_id,
+        merged_message_ids=merged_message_ids,
         expected_scope_id=expected_scope_id,
         text=text,
         role=role,
@@ -751,41 +795,56 @@ async def reply_to_dm_result(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
+    prefix: str = "",
+    reseed_prefix: Callable[[], Awaitable[str]] | None = None,
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    history_notes: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
-    card_for: DmTurnCard | None = None,
+    card_for: Callable[[DirectMessageRow], DmTurnCard] | None = None,
     platform_channel_id: str | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     `platform_channel_id` is the DM channel as the platform's API names it, recorded
-    on the turn's origin with `message_id`.
+    on the turn's origin with `message_id`. A turn that merges several messages
+    names the others in `merged_message_ids`.
+
+    `text` is the person's own words. `prefix` is what the adapter adds before it
+    (attachment lines, quoted or forwarded content) and `image_blocks` are inline
+    images; both go to this turn only. The stored history keeps `text` and
+    `history_notes` (such as `[attachment: name]`), never the prefix, whose
+    signed links expire. `reseed_prefix` builds the prefix again when a dead
+    session is rebuilt, so it can leave out what ended that session (an
+    oversized image's link).
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
     authorize a private turn. Platform API errors must fail that check closed.
     `confirmation_for` builds the approval-card hook for the admitted turn; an
     adapter that cannot show a card in a DM omits it and approvals are refused.
-    `card_for` shows the turn's progress; the card must recheck delivery access
-    before each write, as the adapter does before sending the answer.
+    `card_for` builds the turn's progress card for the claimed conversation; the
+    card must recheck delivery for it before each write, as the adapter does before
+    sending the answer. A turn whose fence drops raises `DirectMessageClaimLost`.
     """
-    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
+    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True) as fence:
         now = datetime.now(UTC)
         async with deps.sessionmaker.begin() as session:
             conversation = await claim_message(
                 session,
-                platform=platform,
+                fence=fence,
                 route_key=route_key,
-                external_user_id=external_user_id,
-                message_id=message_id,
+                message_ids=(message_id, *merged_message_ids),
                 expected_scope_id=expected_scope_id,
-                now=now,
-                active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
+                # Old images read this as a deadline: keep it live for them, and unique per claim.
+                claimed_at=now + timedelta(seconds=LONGEST_TURN_CEILING_S + 60),
             )
         if conversation is None:
             return None
         history: list[dict[str, str]] | None = None
+        answered: uuid.UUID | None = None
         bound = False
         try:
             async with deps.sessionmaker() as session:
@@ -849,7 +908,7 @@ async def reply_to_dm_result(
                 if admission.grant is not None
                 else None,
             )
-            deadline = turn_deadline(now=now)
+            deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
             try:
                 prepared = await bind_session(
                     deps,
@@ -878,10 +937,25 @@ async def reply_to_dm_result(
                 conversation.context
                 + "\n"
                 + render_previous_session(
-                    bounded_turns(previous), from_agent_name="private conversation"
+                    bounded_turns(previous, prepared.admission.dm_history),
+                    from_agent_name="private conversation",
                 )
             )
-            answer, _session_id, outputs = await _run_admitted_dm_turn(
+            whole = f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}"
+            # A session that answered a turn here (its watermark) holds the earlier turns;
+            # a new or replaced one, or one whose first turn never got through, has seen
+            # none, and a recovery rebuilds `whole` for the same reason.
+            holds_history = (
+                prepared.reused
+                and prepared.watermark is not None
+                and prepared.continuity.state in ("continued", "updated")
+            )
+            sent = (f"{prefix}\n{text}" if prefix else text) if holds_history else whole
+
+            async def reseed_whole() -> str:
+                return whole
+
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
@@ -890,49 +964,64 @@ async def reply_to_dm_result(
                 scope_id=conversation.scope_id,
                 external_user_id=external_user_id,
                 role=role,
-                prompt=f"{context}\n\n{text}",
+                prompt=sent,
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
                 confirm_write=(
                     confirmation_for(prepared.admission) if confirmation_for is not None else None
                 ),
-                card_for=card_for,
+                card_for=card_for(conversation) if card_for is not None else None,
                 request_text=text,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
+                image_blocks=image_blocks,
+                reseed_prompt=(
+                    reseed_whole
+                    if reseed_prefix is None
+                    else lambda: _reseed_prompt(context, reseed_prefix, text)
+                ),
             )
             turns = bounded_turns(
                 [
                     *previous,
-                    TranscriptTurn(role="user", text=text),
-                    TranscriptTurn(role="agent", text=answer),
-                ]
+                    TranscriptTurn(role="user", text="\n".join([text, *history_notes]).strip()),
+                    TranscriptTurn(role="agent", text=done.text),
+                ],
+                prepared.admission.dm_history,
             )
             history = [{"role": turn.role, "text": turn.text} for turn in turns]
+            answered = done.mapping_id
             grant = prepared.admission.grant
             if grant is None:
                 raise DirectMessageAccessRevoked(
                     "authorization_missing", message="Private authority unavailable."
                 )
             revision = prepared.admission.backend_revision
-            return DirectMessageReply(
-                text=answer,
-                conversation=conversation,
+            reply = DirectMessageReply(
+                text=done.text,
+                conversation=conversation.model_copy(update={"claimed_at": None}),
                 grant=grant,
                 outputs=None
                 if revision is not None and revision.backend == "selfhosted"
-                else outputs,
+                else done.outputs,
             )
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
         except asyncio.CancelledError:
-            if bound and deps.running_turns.is_drain_cancel():
-                await _settle_shutdown_cancelled_dm(deps, conversation)
+            if bound and (deps.running_turns.is_drain_cancel() or fence.lost.is_set()):
+                await _settle_cancelled_dm(deps, conversation)
             raise
         finally:
             async with deps.sessionmaker.begin() as session:
-                await finish_message(session, conversation=conversation, history=history)
+                finished = await finish_message(session, conversation=conversation, history=history)
+                if finished and history is not None and answered is not None:
+                    # The session now holds this conversation; its next turn sends only new words.
+                    await update_watermark(session, id=answered, watermark_message_id=message_id)
+        if not finished:
+            # A later message took the claim over: this turn's fence dropped mid-turn.
+            raise DirectMessageClaimLost()
+        return reply
 
 
 @dataclass(frozen=True)
@@ -1028,7 +1117,7 @@ async def _run_dm_fire(
     budget_channel_id: str | None,
     watch_row: TaskContinuationRow | None = None,
 ) -> DmRoutineReply:
-    async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
+    async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False) as fence:
         now = datetime.now(UTC)
         async with deps.sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=tenant_id)
@@ -1087,7 +1176,7 @@ async def _run_dm_fire(
                         MANAGED_AGENTS_ONLY,
                         message="DM routines require a gateable Managed Agents runtime.",
                     ) from error
-            deadline = turn_deadline(now=now)
+            deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
             prepared = await bind_session(
                 deps,
                 admission,
@@ -1128,7 +1217,7 @@ async def _run_dm_fire(
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
         try:
-            text, session_id, _outputs = await _run_admitted_dm_turn(
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=tenant_id,
@@ -1144,8 +1233,8 @@ async def _run_dm_fire(
                 watch_row=watch_row,
             )
         except asyncio.CancelledError:
-            if deps.running_turns.is_drain_cancel():
-                await _settle_shutdown_dm_scope(
+            if deps.running_turns.is_drain_cancel() or fence.lost.is_set():
+                await _settle_cancelled_dm_scope(
                     deps,
                     tenant_id=tenant_id,
                     platform="discord",
@@ -1154,8 +1243,8 @@ async def _run_dm_fire(
                 )
             raise
         return DmRoutineReply(
-            text=text,
-            session_id=session_id,
+            text=done.text,
+            session_id=done.session_id,
             producing_agent_id=prepared.admission.agent.id,
         )
 
@@ -1173,13 +1262,13 @@ def _revoked(
 _SHUTDOWN_INTERRUPT_TIMEOUT_S = 3.0
 
 
-async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMessageRow) -> None:
-    """Interrupt the MA turn a shutdown cancelled, marking it dead if unconfirmed.
+async def _settle_cancelled_dm(deps: TurnDeps, conversation: DirectMessageRow) -> None:
+    """Interrupt the MA turn a shutdown or a lost fence cancelled, marking it dead if unconfirmed.
 
     Only while this delivery still holds the conversation's claim, so the live
     mapping is this turn's own. Best effort: a database failure is only logged.
     """
-    await _settle_shutdown_dm_scope(
+    await _settle_cancelled_dm_scope(
         deps,
         tenant_id=conversation.tenant_id,
         platform=conversation.platform,
@@ -1189,7 +1278,7 @@ async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMess
     )
 
 
-async def _settle_shutdown_dm_scope(
+async def _settle_cancelled_dm_scope(
     deps: TurnDeps,
     *,
     tenant_id: uuid.UUID,
@@ -1198,7 +1287,7 @@ async def _settle_shutdown_dm_scope(
     account_id: uuid.UUID,
     conversation: DirectMessageRow | None = None,
 ) -> None:
-    """Live-DM best-effort drain, scoped to the claim/owner guard's own mapping."""
+    """Best-effort settle of a cancelled DM turn, scoped to the claim/owner guard's own mapping."""
     try:
         async with deps.sessionmaker.begin() as session:
             if conversation is not None and not await holds_claim(
@@ -1220,19 +1309,19 @@ async def _settle_shutdown_dm_scope(
                 scope=resource_scope(
                     tenant_id=str(tenant_id),
                     account_id=str(account_id),
-                    authorization_id="dm-shutdown-drain",
+                    authorization_id="dm-cancelled-turn",
                 ),
                 timeout_s=_SHUTDOWN_INTERRUPT_TIMEOUT_S,
             )
             if not interrupted:
                 await mark_dead(session, id=mapping.id)
             _log.info(
-                "dm.shutdown_turn_settled",
+                "dm.cancelled_turn_settled",
                 session_id=mapping.ma_session_id,
                 interrupted=interrupted,
             )
     except SQLAlchemyError as err:
-        _log.warning("dm.shutdown_settle_failed", error_type=type(err).__name__)
+        _log.warning("dm.cancelled_settle_failed", error_type=type(err).__name__)
 
 
 async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:
@@ -1242,18 +1331,61 @@ async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:
         raise UserFacingError("Daimon DMs are off here.\n\nAsk an admin to run /dm-me enable.")
 
 
+#: How often a held owner fence is checked: a turn whose fence dropped stops within it.
+_FENCE_CHECK_S = 15.0
+
+
+async def _watch_fence(deps: TurnDeps, fence: OwnerDmFence, stop: asyncio.Timeout) -> None:
+    """Stop the holder's turn once its fence is gone, so a waiting turn never runs beside it."""
+    failed_pings = 0
+    while True:
+        await asyncio.sleep(_FENCE_CHECK_S)
+        if fence.db is not None:
+            # The fence connection idles in its transaction all turn, so an infrastructure
+            # idle drop would end it; a ping keeps it alive and proves it is still up.
+            try:
+                async with asyncio.timeout(_FENCE_CHECK_S):
+                    await fence.db.execute(text("SELECT 1"))
+                failed_pings = 0
+            except Exception as err:
+                # Boundary: a driver reports a dropped connection in many types. One slow or
+                # failed ping under load proves little; two in a row mean the hold is unusable.
+                failed_pings += 1
+                _log.warning(
+                    "dm.owner_fence_ping_failed", error_type=type(err).__name__, count=failed_pings
+                )
+                if failed_pings >= 2:
+                    fence.lost.set()
+                    stop.reschedule(asyncio.get_running_loop().time())
+                    return
+        try:
+            async with deps.sessionmaker() as session:
+                held = await fence_held(session, fence)
+        except (SQLAlchemyError, OSError) as err:
+            # An unread lock table proves nothing; the turn's own writes need the database too.
+            _log.warning("dm.owner_fence_check_failed", error_type=type(err).__name__)
+            continue
+        if not held:
+            _log.warning("dm.owner_fence_lost", platform=fence.platform)
+            fence.lost.set()
+            stop.reschedule(asyncio.get_running_loop().time())
+            return
+
+
 @asynccontextmanager
 async def owner_dm_turn(
     deps: TurnDeps, *, platform: str, owner: str, wait: bool
-) -> AsyncIterator[None]:
-    """Serialize local owner turns across tenants and adapter processes.
+) -> AsyncIterator[OwnerDmFence]:
+    """Serialize local owner turns across tenants and adapter processes; yield the held fence.
 
     An existing transaction advisory lock is sufficient: no persistent turn
     outcome or promise about remote activity after process loss is introduced.
-    Failed tries release their connection before live-DM queue retries.
+    Failed tries release their connection before live-DM queue retries. If the
+    fence drops while held (its connection lost), the body is cancelled and
+    `DirectMessageClaimLost` raised: a waiting turn may already own the owner's DMs.
     """
 
-    async def acquire() -> AsyncExitStack:
+    async def acquire() -> tuple[AsyncExitStack, OwnerDmFence]:
         stack = AsyncExitStack()
         try:
             bind = deps.sessionmaker.kw.get("bind")
@@ -1263,24 +1395,51 @@ async def owner_dm_turn(
             connection = await stack.enter_async_context(engine.connect())
             db = await stack.enter_async_context(AsyncSession(bind=connection))
             await stack.enter_async_context(db.begin())
-            await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
+            # The holder may run for hours; a sender waits at most the standard window.
+            await try_fence(
+                db,
+                owner_dm_fence(platform, owner),
+                schema_scoped=True,
+                timeout_s=TURN_CEILING_S,
+            )
+            pid: int = (await db.execute(text("SELECT pg_backend_pid()"))).scalar_one()
             # Detach so the lock does not hold a work-pool slot; closing the
             # detached connection releases the lock on every local exit.
             await connection.run_sync(lambda sync: sync.detach())
         except BaseException:
             await stack.aclose()
             raise
-        return stack
+        return stack, OwnerDmFence(platform, owner, pid, db)
 
     if wait:
-        stack = await retry_fences(acquire)
+        stack, fence = await retry_fences(acquire)
     else:
         try:
-            stack = await acquire()
+            stack, fence = await acquire()
         except FenceUnavailable as error:
             raise DirectMessageAccessRevoked(
                 "owner_busy",
                 message="The owner already has a DM turn running; this slot was skipped.",
             ) from error
-    async with stack:
-        yield
+    try:
+        async with asyncio.timeout(None) as stop:
+            watch = asyncio.create_task(_watch_fence(deps, fence, stop), name="dm.owner_fence")
+            try:
+                yield fence
+            finally:
+                watch.cancel()
+                await asyncio.wait({watch})
+    except TimeoutError:
+        if not fence.lost.is_set():
+            raise
+    finally:
+        if fence.lost.is_set():
+            # Cleanup boundary (guideline:architecture): the connection is already gone, and
+            # closing it fails in driver-specific ways or never answers; none of it matters.
+            with suppress(Exception):
+                async with asyncio.timeout(_FENCE_CHECK_S):
+                    await stack.aclose()
+        else:
+            await stack.aclose()
+    if fence.lost.is_set():
+        raise DirectMessageClaimLost()
