@@ -14,7 +14,7 @@ from contextlib import (
     suppress,
 )
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import anthropic
 import structlog
@@ -69,7 +69,7 @@ from daimon.core.stores.thread_sessions import (
     retire_dm_scope,
 )
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
-from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionBusyError
 from daimon.core.turn.io import turn_io
@@ -795,7 +795,8 @@ async def reply_to_dm_result(
                 route_key=route_key,
                 message_id=message_id,
                 expected_scope_id=expected_scope_id,
-                claimed_at=now,
+                # Old images read this as a deadline: keep it live for them, and unique per claim.
+                claimed_at=now + timedelta(seconds=LONGEST_TURN_CEILING_S + 60),
             )
         if conversation is None:
             return None

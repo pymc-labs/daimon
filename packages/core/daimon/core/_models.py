@@ -4311,8 +4311,9 @@ class DirectMessageConversation(Base):
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    # Set while a delivery's turn holds the conversation: its claim time, only an
-    # identity compared on finish and delivery (the column keeps its first name).
+    # Set while a delivery's turn holds the conversation: an identity compared on finish
+    # and delivery, written as a time past the longest turn so an older image, which reads
+    # it as a deadline (the column keeps its first name), still sees the claim live.
     claimed_at: Mapped[datetime | None] = mapped_column(
         "active_until", DateTime(timezone=True), nullable=True
     )

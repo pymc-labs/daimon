@@ -572,6 +572,12 @@ async def test_dm_turn_renders_through_the_adapters_card(
         assert admitted is admission
         assert seen["cancel"] is cancel, "the card's Stop button cancels this turn"
         assert claims[0] is not None, "the card checks delivery against the turn's own claim"
+        from datetime import UTC, datetime, timedelta
+
+        from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+
+        live_until = datetime.now(UTC) + timedelta(seconds=LONGEST_TURN_CEILING_S)
+        assert claims[0] > live_until, "an older image reading the claim as a deadline sees it live"
     else:
         assert type(seen["lifecycle"]).__name__ == "_CollectReply", "no card renders nothing"
 
