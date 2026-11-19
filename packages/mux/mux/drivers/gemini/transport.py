@@ -20,7 +20,7 @@ from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
-from mux.contracts.errors import ProviderErrorCategory
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
 from mux.drivers.gemini.mcp_auth import (
     RedactedCredential,
     contains_secret,
@@ -436,8 +436,43 @@ def high_demand(error: Exception) -> bool:
 
 
 _QUOTA_FAILURE = "type.googleapis.com/google.rpc.QuotaFailure"
+_RETRY_INFO = "type.googleapis.com/google.rpc.RetryInfo"
+_RETRY_DELAY = re.compile(r"(\d+(?:\.\d+)?)s")
 # "limit: 0" wherever the line ends: before ", model:", a newline or the end.
 _ZERO_LIMIT = re.compile(r"limit: 0\b")
+
+
+def _error_payload(error: Exception) -> dict[str, object] | None:
+    """The `error` object of Google's JSON error body, wherever the SDK kept the body."""
+    body: object = getattr(error, "body", None) or getattr(error, "details", None)
+    if not isinstance(body, dict):
+        return None
+    outer = cast(dict[str, object], body)
+    nested: object = outer.get("error", outer)
+    return cast(dict[str, object], nested) if isinstance(nested, dict) else None
+
+
+def _error_details(payload: dict[str, object]) -> list[dict[str, object]]:
+    details = payload.get("details")
+    return [
+        cast(dict[str, object], item)
+        for item in (cast(list[object], details) if isinstance(details, list) else [])
+        if isinstance(item, dict)
+    ]
+
+
+def retry_delay(error: Exception) -> float | None:
+    """Seconds Google's `RetryInfo.retryDelay` asks a 429 to wait, if it names one."""
+    payload = _error_payload(error)
+    for detail in _error_details(payload) if payload is not None else []:
+        delay = detail.get("retryDelay")
+        if (
+            detail.get("@type") == _RETRY_INFO
+            and isinstance(delay, str)
+            and (match := _RETRY_DELAY.fullmatch(delay)) is not None
+        ):
+            return float(match.group(1))
+    return None
 
 
 def quota_failure(error: Exception) -> tuple[str, str | None] | None:
@@ -449,20 +484,11 @@ def quota_failure(error: Exception) -> tuple[str, str | None] | None:
     quota is a rate limit that refills within minutes. Only Google's own structured fields are
     read; the message is checked for its "limit: 0" line alone.
     """
-    body: object = getattr(error, "body", None) or getattr(error, "details", None)
-    if not isinstance(body, dict):
+    payload = _error_payload(error)
+    if payload is None:
         return None
-    outer = cast(dict[str, object], body)
-    nested: object = outer.get("error", outer)
-    if not isinstance(nested, dict):
-        return None
-    payload = cast(dict[str, object], nested)
-    details = payload.get("details")
     violations: list[dict[str, object]] = []
-    for item in cast(list[object], details) if isinstance(details, list) else []:
-        if not isinstance(item, dict):
-            continue
-        detail = cast(dict[str, object], item)
+    for detail in _error_details(payload):
         if detail.get("@type") == _QUOTA_FAILURE:
             found = detail.get("violations")
             violations += [
@@ -541,6 +567,7 @@ def normalize_error(error: Exception) -> ProviderError:
             native_code=code,
             native_error_code=http,
             native_param=model,
+            retry_after_s=None if code == "quota_zero" else bounded_retry_after(retry_delay(error)),
         )
     category = categories.get(status or 0, "upstream")
     return ProviderError(
@@ -548,6 +575,7 @@ def normalize_error(error: Exception) -> ProviderError:
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
         native_error_code=http,
+        retry_after_s=bounded_retry_after(retry_delay(error)) if status == 429 else None,
     )
 
 

@@ -518,22 +518,44 @@ def _quota_body(
 
 
 @pytest.mark.parametrize(
-    ("body", "native_code", "retryable", "model"),
+    ("body", "native_code", "retryable", "model", "wait"),
     [
-        (_quota_body(0), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(10), "quota_daily", False, "gemini-4-argon"),
-        (_quota_body(10, window="Minute"), "quota_exhausted", True, "gemini-4-argon"),
-        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon"),
-        (_quota_body(100), "quota_daily", False, "gemini-4-argon"),
-        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None),
-        ({"error": {"code": 429, "message": "slow down"}}, None, True, None),
+        (_quota_body(0), "quota_zero", False, "gemini-4-argon", None),
+        # RetryInfo asks for 62776 s; the wait is capped at 10 minutes.
+        (_quota_body(10), "quota_daily", False, "gemini-4-argon", 600.0),
+        (_quota_body(10, window="Minute"), "quota_exhausted", True, "gemini-4-argon", 600.0),
+        (_quota_body(0, line_end="\n"), "quota_zero", False, "gemini-4-argon", None),
+        (_quota_body(100), "quota_daily", False, "gemini-4-argon", 600.0),
+        (_quota_body(0, also="gemini-3.8-flash"), "quota_zero", False, None, None),
+        ({"error": {"code": 429, "message": "slow down"}}, None, True, None, 30.0),
+        (
+            {
+                "error": {
+                    "code": 429,
+                    "details": [
+                        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7.5s"}
+                    ],
+                }
+            },
+            None,
+            True,
+            None,
+            7.5,
+        ),
     ],
 )
 async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
-    body: dict[str, JsonValue], native_code: str | None, retryable: bool, model: str | None
+    body: dict[str, JsonValue],
+    native_code: str | None,
+    retryable: bool,
+    model: str | None,
+    wait: float | None,
 ) -> None:
     """A model the plan gives no quota is never retried, nor is a spent daily one; a
-    per-minute quota refills."""
+    per-minute quota refills.
+
+    A 429 other than a zero quota carries its wait: Google's hint, else 30 s, at most 10 minutes.
+    """
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -554,6 +576,7 @@ async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
         assert error.retryable is retryable
         assert error.native_param == model
         assert error.native_error_code == "http_429"
+        assert error.retry_after_s == wait, "the 429 carries its bounded wait"
         assert len(calls) == 1
         await client.aio.aclose()
 
