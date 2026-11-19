@@ -48,7 +48,6 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
@@ -634,6 +633,7 @@ def _make_lifecycle(
     in_dm: bool | None = None,
     clock: Callable[[], float] = time.monotonic,
     requester_is_admin: bool = True,
+    answer_message_cap: int = 5,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -657,6 +657,7 @@ def _make_lifecycle(
         requester_id=123,
         requester_is_admin=requester_is_admin,
         render_tables=render_tables,
+        answer_message_cap=answer_message_cap,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -3201,6 +3202,47 @@ async def test_long_final_answer_is_attached_instead_of_flooding(notify):
     assert text in files[0].fp.read().decode()
 
 
+async def test_answer_message_cap_decides_inline_or_attached():
+    """Seven chunks stay inline under a cap of 10 and become answer.txt under the default 5."""
+    text = " ".join(["word"] * 3600)  # about 18000 characters: seven chunks
+    for cap, attached in ((10, False), (5, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=cap)
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+        posted = [s for s in sends if s.get("content")]
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"answer.txt only past the cap of {cap}"
+        if attached:
+            assert not posted, "the whole answer moves to the file"
+        else:
+            assert len(posted) >= 6, f"the answer stays inline under a cap of {cap}"
+
+
+async def test_sealed_posts_shrink_the_answer_message_budget():
+    """Two sealed posts leave room for 3 of a cap of 5: a 4-chunk final answer is attached."""
+    text = " ".join(["word"] * 1700)  # about 8500 characters: four chunks
+    for sealed, attached in ((0, False), (2, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=5)
+        state = TurnState()
+        for index in range(sealed):
+            state.content.extend(
+                [
+                    TextBlock(kind="text", text=f"Step {index}: " + "x" * 600),
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id=str(index),
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                ]
+            )
+            await lc.on_render(state)
+        state.content.append(TextBlock(kind="text", text=text))
+        await lc.on_terminal_success(state)
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"{sealed} sealed posts and a four-chunk answer"
+
+
 async def test_huge_sealed_block_is_deferred_without_using_message_budget():
     lc, sends, edits = _make_lifecycle()
     text = "Useful prose. " * 1000
@@ -3433,39 +3475,6 @@ async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
         )
     assert count() - before == 1
     assert guard.failed
-
-
-class TestOtherAppsNeverNamed:
-    """What a person on Discord reads never names Slack or Teams."""
-
-    async def test_draft_tool_lines_and_answer_are_posted_without_other_apps(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        await lc.on_sse_event(_message_event("Checking Slack and Microsoft Teams for it"))
-        tool = ToolUseBlock(
-            kind="tool_use", id="t1", type="agent.tool_use", name="slack_search", input={}
-        )
-        await lc.on_render(TurnState(content=[tool]))
-        card_text = sends[0]["embeds"][0].description
-        assert "Slack" not in card_text and "Teams" not in card_text
-        assert "> Checking other apps for it" in card_text
-
-        reply = "Use Discord, not Slack or Teams. See https://acme.slack.com/archives/C1."
-        await lc.on_terminal_success(_make_success_state(reply))
-        posted = "\n".join(
-            str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
-        )
-        assert "Use Discord, not another app. See another app." in posted
-        assert "Slack" not in posted and "Teams" not in posted
-
-    async def test_a_sealed_answer_before_a_tool_call_is_scrubbed(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        sealed = "Here is the longer answer, which names Slack so that it is long enough. " * 10
-        tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
-        await lc.on_render(TurnState(content=[TextBlock(kind="text", text=sealed), tool]))
-        posted = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
-        assert "another app" in posted and "Slack" not in posted
 
 
 async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged() -> None:

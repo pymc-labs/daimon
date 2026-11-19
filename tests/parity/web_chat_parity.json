@@ -1,5 +1,8 @@
 {
  "routes": {
+  "DELETE /api/admin/dm/rules/{position}": {
+   "tool": "change_workspace_settings"
+  },
   "DELETE /api/admin/invites/{invite_id}": {
    "tool": "revoke_web_link"
   },
@@ -65,6 +68,12 @@
   "PATCH /api/admin/agent-access/{agent_id}": {
    "tool": "set_agent_web_access"
   },
+  "PATCH /api/admin/dm": {
+   "tool": "change_workspace_settings"
+  },
+  "PATCH /api/admin/dm/rules/{position}": {
+   "tool": "change_workspace_settings"
+  },
   "PATCH /api/admin/invites/{invite_id}": {
    "tool": "set_web_invite_files"
   },
@@ -91,6 +100,9 @@
   },
   "PATCH /{path:path}": {
    "exempt": "serves the web app's own pages"
+  },
+  "POST /api/admin/dm/rules": {
+   "tool": "change_workspace_settings"
   },
   "POST /api/admin/invites": {
    "tool": "create_web_invite"
@@ -270,6 +282,12 @@
   "POST /api/routines/{routine_id}/run": {
    "tool": "run_routine"
   },
+  "POST /api/support/requests/{request_id}/decline": {
+   "tool": "support_requests_settle"
+  },
+  "POST /api/support/requests/{request_id}/settle": {
+   "tool": "support_requests_settle"
+  },
   "POST /api/workspaces/switch": {
    "exempt": "web workspace switch"
   },
@@ -343,6 +361,18 @@
     "slack": "daimon.adapters.slack.settings",
     "teams": "daimon.adapters.teams.settings"
    }
+  },
+  "PUT /api/support/channel": {
+   "tool": "support_channel_set"
+  },
+  "PUT /api/support/limits": {
+   "tool": "support_limit_set"
+  },
+  "PUT /api/support/menus/use": {
+   "tool": "support_menu_use"
+  },
+  "PUT /api/support/menus/{key}": {
+   "tool": "support_menu_set"
   },
   "PUT /{path:path}": {
    "exempt": "serves the web app's own pages"

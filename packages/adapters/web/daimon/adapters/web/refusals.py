@@ -64,12 +64,6 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
                 "Switch back to Claude, or finish setting it up." if admin else ask,
                 way_back,
             )
-        case "re_confirm":
-            return _refusal(
-                f"{who}'s model switch needs to be confirmed again.",
-                _NO_ANSWER,
-                "Ask an admin or an owner to apply it again.",
-            )
         case "no_credit_yet":
             return _refusal(
                 "Your team has no credit yet.", _NO_ANSWER, "Ask an admin to add credit."

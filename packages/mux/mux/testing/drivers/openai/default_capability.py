@@ -25,6 +25,7 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import objects
 from mux.drivers.openai.agents import agent_spec
 from mux.drivers.openai.skill_bindings import decode
+from mux.drivers.openai.skills import plain_bundle
 from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
@@ -89,7 +90,13 @@ class OpenAIDefaultCapabilityTransport:
         self._session: Object | None = None
         self._steps: list[tuple[str, str]] = []
         for identity in self.skill_ids:
-            self._steps.extend((("POST", "/skills"), ("GET", "/skills/" + identity)))
+            self._steps.extend(
+                (
+                    ("POST", "/skills"),
+                    ("GET", f"/skills/{identity}/versions/1"),
+                    ("GET", "/skills/" + identity),
+                )
+            )
         versions = [("GET", f"/skills/{identity}/versions/1") for identity in self.skill_ids]
         self._steps.extend(versions)
         self._steps.extend(
@@ -267,6 +274,7 @@ class OpenAIDefaultCapabilityFactory:
             transport=script,
             builtin_mapping=BUILTIN_MAPPING,
             atomic_revision_pin=False,
+            uploaded=plain_bundle,
         )
 
     async def __aenter__(self) -> OpenAIDefaultCapabilityFactory:

@@ -135,12 +135,14 @@ import random
 import uuid
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core import platform_names
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import SessionDeletionReport, delete_sessions_for_account
 from daimon.core.memory_resource import (
@@ -153,11 +155,14 @@ from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
+from daimon.core.stores import dm_access as dm_access_store
+from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
+from daimon.core.stores import held_timers as held_timers_store
 from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
@@ -173,6 +178,7 @@ from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
@@ -216,11 +222,21 @@ class PurgeReport(BaseModel):
     slack_user_tokens: int = 0
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
+    dm_carry_overs: int = 0
+    held_timers: int = 0
     tag_opt_outs: int = 0
+    dm_picks: int = 0
+    dm_rules: int = 0
+    dm_grant_users: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    # Plan rows keep their charge with the person erased (decision 7).
+    support_requests_anonymized: int = 0
+    support_person_limits: int = 0
+    # Requests the person settled as staff: who settled is cleared, the charge kept.
+    support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
@@ -265,11 +281,21 @@ class PurgeReport(BaseModel):
             direct_message_conversations=(
                 self.direct_message_conversations + other.direct_message_conversations
             ),
+            dm_carry_overs=self.dm_carry_overs + other.dm_carry_overs,
+            held_timers=self.held_timers + other.held_timers,
             tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
+            dm_picks=self.dm_picks + other.dm_picks,
+            dm_rules=self.dm_rules + other.dm_rules,
+            dm_grant_users=self.dm_grant_users + other.dm_grant_users,
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            support_requests_anonymized=(
+                self.support_requests_anonymized + other.support_requests_anonymized
+            ),
+            support_person_limits=self.support_person_limits + other.support_person_limits,
+            support_settlers_cleared=self.support_settlers_cleared + other.support_settlers_cleared,
             daimon_admins=self.daimon_admins + other.daimon_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
@@ -361,6 +387,14 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # An imported earlier conversation is keyed by this same platform user.
+        dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
+            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
+        )
+        # An imported timer is keyed by the same platform user, and keeps who it was for.
+        held_timers_count = await held_timers_store.delete_for_users(
+            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
+        )
         # support_escalations carries the SAME (tenant, platform-user) key and
         # the same account_id = NULL hazard: somebody can ask for help without
         # ever having taken a turn, so an account-keyed pass alone would leave
@@ -373,6 +407,21 @@ async def _purge_principal_in_session(
                 tenant_id=principal.tenant_id,
                 platform_user_id=principal.external_id,
             )
+        )
+        # A limit row is the shared ledger too: the person leaves it, the charge stays.
+        support_anonymized_count = (
+            await support_escalation_store.anonymize_limit_requests_for_platform_user(
+                session,
+                tenant_id=principal.tenant_id,
+                platform_user_id=principal.external_id,
+            )
+        )
+        support_person_limits_count = await support_store.delete_person_limits_for_people(
+            session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
+        )
+        # A support post may sit in another tenant, so a settler matches in any.
+        support_settlers_count = await support_escalation_store.clear_settler(
+            session, settler_keys=[(principal.platform, principal.external_id)]
         )
         # A channel admin grant names the person by platform user id; the row
         # itself is the tenant's, so only their id leaves it.
@@ -433,11 +482,14 @@ async def _purge_principal_in_session(
         # no symmetric call here: os_user is not a reaction identity, and
         # running one would risk deleting an unrelated platform user's rows
         # that happen to share the string.
+        dm_carry_overs_count = 0
+        held_timers_count = 0
         message_feedback_count = 0
         # Escalation is a reaction-then-modal path in a guild, so a CLI
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        support_anonymized_count = support_person_limits_count = support_settlers_count = 0
         daimon_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
@@ -499,7 +551,12 @@ async def _purge_principal_in_session(
         credential_requests=credential_requests_count,
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
+        dm_carry_overs=dm_carry_overs_count,
+        held_timers=held_timers_count,
         support_escalations=support_escalations_count,
+        support_requests_anonymized=support_anonymized_count,
+        support_person_limits=support_person_limits_count,
+        support_settlers_cleared=support_settlers_count,
         daimon_admins=daimon_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
@@ -562,6 +619,7 @@ async def purge_principal(
                 tenant_id=str(tenant_id),
                 account_id=str(account_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             return PrincipalPurgeResult(
                 db=db_report, sessions=SessionDeletionReport(upstream_error=True)
@@ -680,6 +738,12 @@ async def _purge_account_transaction(
             session, account_id=account_id, platform_user_keys=platform_user_keys
         )
     )
+    support_anonymized_count = await support_escalation_store.anonymize_limit_requests_for_account(
+        session, account_id=account_id, platform_user_keys=platform_user_keys
+    )
+    support_settlers_count = await support_escalation_store.clear_settler(
+        session, account_id=account_id
+    )
 
     # slack_turn_contexts: keyed by (tenant_id, account_id), not
     # principal_id. Loop every tenant the account's principals belong to —
@@ -697,7 +761,23 @@ async def _purge_account_transaction(
     direct_message_count = await direct_messages_store.delete_conversations_for_account(
         session, account_id=account_id
     )
+    # Imported before the person had an account, so keyed by platform user, not account.
+    dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
+        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+    )
+    held_timers_count = await held_timers_store.delete_for_users(
+        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+    )
     tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
+    # The person's agent picks, personal routing rules and listed-grant entries.
+    dm_now = datetime.now(UTC)
+    dm_picks_count = await dm_access_store.delete_picks_for_account(session, account_id=account_id)
+    dm_rules_count = await dm_access_store.delete_user_rules(
+        session, keys=platform_user_keys, now=dm_now
+    )
+    dm_grant_users_count = await dm_access_store.scrub_user_from_grants(
+        session, keys=platform_user_keys, now=dm_now
+    )
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
     web_people_count = await web_people_store.delete_for_account(session, account_id=account_id)
@@ -739,12 +819,19 @@ async def _purge_account_transaction(
             github_connect_click_intents=github_connect_click_intents_count,
             message_feedback=message_feedback_count,
             support_escalations=support_escalations_count,
+            support_requests_anonymized=support_anonymized_count,
+            support_settlers_cleared=support_settlers_count,
             user_configs=user_cfg_count,
             accounts=account_count,
             github_user_links=github_user_links_count,
             slack_turn_contexts=slack_turn_contexts_count,
             direct_message_conversations=direct_message_count,
+            dm_carry_overs=dm_carry_overs_count,
+            held_timers=held_timers_count,
             tag_opt_outs=tag_opt_outs_count,
+            dm_picks=dm_picks_count,
+            dm_rules=dm_rules_count,
+            dm_grant_users=dm_grant_users_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,
             monitored_events=monitored_count,
@@ -897,6 +984,7 @@ async def _retry_account_session_delete_locked(
                 account_id=str(account_id),
                 tenant_id=str(tenant_id),
                 error=str(err),
+                causes=backend_refusal_causes(err),
             )
             upstream_error = True
             continue

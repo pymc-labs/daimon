@@ -23,6 +23,7 @@ from daimon.adapters.discord.privacy_panel.embeds import build_deleted_state_con
 from daimon.adapters.discord.privacy_panel.panel import PrivacyPanelView
 from daimon.adapters.discord.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.monitoring import monitors_any
 from daimon.core.platform_words import DESCRIPTIONS
@@ -111,7 +112,12 @@ class PrivacyCog(commands.Cog):
                 ephemeral=True,
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-            log.warning("privacy.handler.failed", rid=rid, error=str(exc))
+            log.warning(
+                "privacy.handler.failed",
+                rid=rid,
+                error=str(exc),
+                causes=backend_refusal_causes(exc),
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(exc, request_id=rid)),
                 ephemeral=True,

@@ -1,8 +1,8 @@
-"""Nothing a person sees, or the model reads, on one chat platform names another.
+"""Daimon's own wording on one chat platform names that platform, not another.
 
-People on one platform must never learn that Daimon runs on the others, so every
-text shown on platform P, and every text the model receives on a P turn, may name
-P and no other chat app. Two guards:
+Text Daimon ships for platform P, shown on P or given to the model on a P turn, is
+written in P's terms, so it may name P and no other chat app. What the model or a
+tenant writes is passed through as it is. Two guards:
 
 - renderers are called per platform and their output searched for a foreign name;
 - the source is scanned: a prose string literal that names a chat app has to sit in
@@ -196,6 +196,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/tools/long_jobs.py": frozenset({"discord"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py": frozenset({"slack"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/skill_uploads.py": frozenset(_APPS),
+    # The Teams-only service_url refusal, reached only when the channel is a Teams one.
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/support.py": frozenset({"teams"}),
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),
     "packages/core/daimon/core/agent_guidance.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),
@@ -205,6 +207,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/core/daimon/core/native_admins.py": frozenset({"discord"}),
     "packages/core/daimon/core/routine_delivery.py": frozenset(_APPS),
     "packages/core/daimon/core/skills/add.py": frozenset({"teams"}),
+    # A person id is checked, and its refusal worded, by the caller's platform.
+    "packages/core/daimon/core/support.py": frozenset(_APPS),
 }
 #: Other efforts' open work: their strings are listed in the W11 report, not guarded yet.
 _PENDING = (

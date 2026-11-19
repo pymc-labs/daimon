@@ -17,14 +17,12 @@ from daimon.adapters.web.chat_thread_model import (
     Picked,
     ThreadModels,
     keep_thread_model,
-    preview_thread,
     thread_models,
 )
 from daimon.adapters.web.control_cards import ControlRefused, is_control_card
 from daimon.adapters.web.credential_cards import CredentialRefused
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.files import PERSON_UPLOAD_QUOTA_BYTES, download, open_attachment
-from daimon.adapters.web.model_preview import ModelPreview
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.stream import OTHER_TURN, Event, sse_response
@@ -68,11 +66,9 @@ class Rename(BaseModel):
 
 
 class PickModel(BaseModel):
-    """A model as `provider:id` (or `default`), with the preview the person confirmed."""
+    """A model as `provider:id` (or `default`)."""
 
     value: str = Field(min_length=1, max_length=200)
-    preview_digest: str = ""
-    preview_revision: int = 0
 
 
 class NewMessage(BaseModel):
@@ -342,28 +338,12 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             thread = await thread_of(db, caller, session_id)
         return await thread_models(runtime, caller, thread)
 
-    @router.get("/sessions/{session_id}/model-preview")
-    async def model_preview(  # pyright: ignore[reportUnusedFunction]
-        session_id: uuid.UUID, caller: Caller, value: str
-    ) -> ModelPreview:
-        """What picking `value` (`provider:id`) changes for this chat, or why it can't."""
-        async with runtime.sessionmaker() as db:
-            thread = await thread_of(db, caller, session_id)
-        return await preview_thread(runtime, caller, thread, value)
-
     @router.put("/sessions/{session_id}/model")
     async def pick_model(session_id: uuid.UUID, body: PickModel, caller: Caller) -> Picked:  # pyright: ignore[reportUnusedFunction]
-        """Keep the pick the person confirmed for this chat; `default` is the agent's own."""
+        """Keep the pick for this chat; `default` is the agent's own."""
         async with runtime.sessionmaker() as db:
             thread = await thread_of(db, caller, session_id)
-        return await keep_thread_model(
-            runtime,
-            caller,
-            thread,
-            value=body.value,
-            digest=body.preview_digest,
-            revision=body.preview_revision,
-        )
+        return await keep_thread_model(runtime, caller, thread, value=body.value)
 
     @router.delete("/sessions/{session_id}")
     async def delete(session_id: uuid.UUID, caller: Caller) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]

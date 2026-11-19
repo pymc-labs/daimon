@@ -250,24 +250,13 @@ async def test_a_member_copies_the_answering_agent_and_switches_their_copy(fresh
         chat.runtime, chat.auth, origin_context_id=str(chat.origin.id), agent_id=copy.id
     )
     assert handed.destination_ma_agent_id == copy.id
-    # Switch the copy to GPT: preview, then the confirmed call (what the card runs).
-    preview = await _request_agent_backend_switch_impl(
-        chat.runtime,
-        chat.auth,
-        agent_name=copy.name,
-        target_backend="openai",
-        origin_context_id=str(chat.origin.id),
-    )
-    assert preview.status == "preview"
+    # Switch the copy to GPT: it applies on the first call.
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
         agent_name=copy.name,
         target_backend="openai",
         origin_context_id=str(chat.origin.id),
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
     )
     assert changed.status == "changed"
     # The thread is the copy's now, so the switch moves this very conversation.

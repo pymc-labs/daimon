@@ -25,6 +25,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
     BetaManagedAgentsSessionEvent,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime, resource_scope
@@ -68,6 +69,7 @@ from mux.drivers.gemini import (
     GeminiManagedAgents,
     MCPSecretResolver,
     SkillBundlePublisher,
+    SkillFiles,
     Storage,
     Transport,
     compile_agent,
@@ -178,8 +180,12 @@ def gemini_backend(
     scope: Scope,
     runtime: TurnRuntime,
     account_scope_id: str,
+    skill_files: SkillFiles | None = None,
 ) -> GeminiManagedAgents:
-    """Compose an explicit scoped runtime before a logical session exists."""
+    """Compose an explicit scoped runtime before a logical session exists.
+
+    `skill_files` lets a new session upload skills past the inline limits.
+    """
     required_model = _runtime_model(runtime)
     if config.profile != PROFILE or config.model != required_model:
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
@@ -231,6 +237,7 @@ def gemini_backend(
         mcp_secrets=supplied.mcp_secrets,
         gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,
+        skill_files=skill_files,
     )
 
 
@@ -647,6 +654,7 @@ class GeminiTurnIO:
                     "turn.usage_reconciliation_failed",
                     category=error.category,
                     error_class=type(error).__name__,
+                    causes=backend_refusal_causes(error),
                 )
                 # Local reads and validation are deliberately outside the
                 # native fetch handler. Their failures must still propagate.
@@ -725,6 +733,7 @@ class GeminiTurnIO:
         except Exception as error:
             log.warning(
                 "turn.gemini_native_abandon_failed",
+                causes=backend_refusal_causes(error),
                 session_id=self.session.id,
                 error_class=type(error).__name__,
                 category=getattr(error, "category", None),

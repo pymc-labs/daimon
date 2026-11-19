@@ -8,6 +8,7 @@ from collections.abc import Coroutine
 from typing import Any
 
 import httpx
+import pytest
 from daimon.adapters.teams.reactions import (
     CHECK,
     EYES,
@@ -196,14 +197,59 @@ async def test_a_removal_is_skipped_when_its_add_was_dropped_or_refused() -> Non
     assert removals == [], "a refused 👀 is not removed either"
 
 
-async def test_a_message_held_across_a_restart_loses_its_hourglass_once_picked_up() -> None:
+@pytest.mark.parametrize("kind", ["channel", "dm"])
+async def test_a_message_held_across_a_restart_loses_its_marks_once_picked_up(kind: Any) -> None:
     """This process never marked it, but the one before may have: the removal goes anyway."""
     calls = Calls()
     harness = Harness(calls)
-    held = make_inbound()
+    held = make_inbound(kind=kind)
     harness.reactions.clear_held([held])
     await harness.settle()
-    assert calls.made == [(held.activity_id, HOURGLASS, False)], "⌛ is taken off regardless"
+    key = held.activity_id
+    burst = [(key, EYES, False)] if kind == "dm" else []
+    assert calls.made == [(key, HOURGLASS, False), *burst], (
+        "⌛ is taken off regardless, and a personal chat's 👀 from its burst too"
+    )
+
+
+async def test_a_held_message_shows_one_eyes_that_its_answer_takes_off() -> None:
+    """The burst's 👀 is the turn's: not added twice, and gone with its ✅."""
+    calls = Calls()
+    harness = Harness(calls)
+    answered, other = make_inbound("answered"), make_inbound("other")
+    harness.reactions.mark_waiting(answered, on=True)
+    harness.reactions.mark_waiting(other, on=True)
+    acknowledge = harness.reactions.acknowledger(answered)
+    assert acknowledge is not None
+    acknowledge("accepted")
+    acknowledge("done")
+    harness.reactions.mark_waiting(answered, on=False)
+    harness.reactions.mark_waiting(other, on=False)
+    await harness.settle()
+    assert [c for c in calls.made if c[0] == answered.activity_id] == [
+        (answered.activity_id, EYES, True),
+        (answered.activity_id, CHECK, True),
+        (answered.activity_id, EYES, False),
+    ], "one 👀, then ✅ in its place; the burst's own removal is not sent again"
+    assert [c for c in calls.made if c[0] == other.activity_id] == [
+        (other.activity_id, EYES, True),
+        (other.activity_id, EYES, False),
+    ], "a held message the turn did not react on loses its 👀 when the burst lets go"
+
+
+async def test_a_refused_held_eyes_is_never_added_nor_removed() -> None:
+    """A person admission would refuse sees no 👀 from the burst either."""
+    calls = Calls()
+    harness = Harness(calls)
+    held = make_inbound()
+
+    async def refused() -> bool:
+        return False
+
+    harness.reactions.mark_waiting(held, on=True, allowed=refused)
+    harness.reactions.mark_waiting(held, on=False)
+    await harness.settle()
+    assert calls.made == [], "no 👀 promised, so none to take off"
 
 
 async def test_close_cancels_waiting_reactions_and_sends_no_more() -> None:

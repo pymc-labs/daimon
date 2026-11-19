@@ -67,7 +67,12 @@ from daimon.adapters.mcp.tools.agent_chat import (
 from daimon.adapters.mcp.tools.sessions import SessionEventOut
 from daimon.core import bundle_handle
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import GithubAppSettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    GithubAppSettings,
+    Settings,
+)
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -77,6 +82,9 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.features.model_input import DEFAULT_TOOLSET
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
+from daimon.core.features.snapshot import CACHE
+from daimon.core.features.tool_gate import gated_tools
+from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import prepare_app_access as mint_app_access
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
@@ -113,7 +121,7 @@ from mux.testing.drivers.anthropic.ma_models import (
     ma_model_usage,
     ma_session,
 )
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
@@ -151,6 +159,23 @@ def _claude_agents_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
         return await real(runtime, auth, **kwargs)
 
     monkeypatch.setattr(agent_chat, "_refuse_another_provider", guard)
+
+
+@pytest.fixture(autouse=True)
+def _default_run_limit_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests built on a MagicMock session factory have no place settings: their
+    worker runs to the built-in 45 minutes, as a run without a workspace does."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    real = _agent_chat_safety.unattended_ceiling_s
+
+    async def ceiling(session_factory: Any, *args: Any, **kwargs: Any) -> float:
+        if isinstance(session_factory, MagicMock):
+            return TURN_CEILING_S
+        return await real(session_factory, *args, **kwargs)
+
+    monkeypatch.setattr(_agent_chat_safety, "unattended_ceiling_s", ceiling)
 
 
 @pytest.fixture(autouse=True)
@@ -1475,18 +1500,8 @@ async def test_deliver_turn_charts_is_not_annotated_read_only() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_start_turn_resolves_env_from_deployment_default_when_no_tenant_row(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A tenant with NO tenant-scope config row still resolves environment_name
-    from ``runtime.deployment_default`` and creates a session (MPP-01).
-
-    Regression for the bug where ``_fetch_tenant_environment_name`` read only
-    the tenant-scope row and returned None for every tenant relying on the
-    deployment default, raising ``ToolError("environment not found")`` even
-    though the shared ``resolve()`` cascade (used by Discord) would have
-    found the environment via the bottom (deployment) tier.
-    """
+def _start_client() -> AsyncAnthropic:
+    """A fake MA that holds the tenant's agent and environment and takes the first message."""
     env_payload = {
         "id": _ENV_ID,
         "type": "environment",
@@ -1537,7 +1552,22 @@ async def test_start_turn_resolves_env_from_deployment_default_when_no_tenant_ro
             ]
         ),
     )
-    client = build_fake_anthropic(router.dispatch)
+    return build_fake_anthropic(router.dispatch)
+
+
+async def test_start_turn_resolves_env_from_deployment_default_when_no_tenant_row(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A tenant with NO tenant-scope config row still resolves environment_name
+    from ``runtime.deployment_default`` and creates a session (MPP-01).
+
+    Regression for the bug where ``_fetch_tenant_environment_name`` read only
+    the tenant-scope row and returned None for every tenant relying on the
+    deployment default, raising ``ToolError("environment not found")`` even
+    though the shared ``resolve()`` cascade (used by Discord) would have
+    found the environment via the bottom (deployment) tier.
+    """
+    client = _start_client()
     # No tenant-scope config row is ever written to db_session_factory's schema
     # — resolve() must fall through channel(None) -> tenant(None) -> deployment.
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
@@ -1556,6 +1586,38 @@ async def test_start_turn_resolves_env_from_deployment_default_when_no_tenant_ro
         "start_turn should resolve the deployment-default environment and create a "
         "session instead of raising 'environment not found'"
     )
+
+
+async def test_start_turn_without_the_servers_notebook_host_leaves_out_the_notebook_tools(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent chat runs in the MCP server, so it judges that server's own setup: without a
+    notebook host its session leaves out the notebook tools (`server_setup=True`)."""
+    monkeypatch.setattr("daimon.adapters.mcp.tools.agent_chat.place_session", place_session)
+    CACHE.clear()
+    settings = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@h/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "tool_safety": OPEN_TOOL_SAFETY,
+        }
+    )
+    runtime = replace(
+        _runtime(_start_client(), session_factory=db_session_factory, environment_name=_ENV_NAME),
+        settings=settings,
+    )
+    create = AsyncMock(
+        return_value=ma_session(
+            id="ses_test001", agent_id=_MA_AGENT_ID, environment_id=_ENV_ID, status="running"
+        )
+    )
+    with patch("daimon.adapters.mcp.tools.agent_chat.create_session", new=create):
+        await _start_turn_impl(runtime, _auth(), "Say hello")
+
+    assert create.await_args is not None, "start_turn creates a session"
+    hidden = create.await_args.kwargs["toolset"].hidden_daimon_tools
+    notebooks = gated_tools(("notebooks",))
+    assert notebooks <= hidden, f"notebook tools offered: {sorted(notebooks - hidden)}"
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from daimon.core import agent_changes, backend_capture
 from daimon.core.agent_changes import AgentChangeDeps, check_provider_switch
-from daimon.core.agent_editing import AgentActor, AgentEditError
+from daimon.core.agent_editing import AgentActor
 from daimon.core.authz import Subject, Surface
 from daimon.core.channel_backend import (
     NO_CAPTURE,
@@ -85,7 +85,12 @@ async def test_a_read_only_service_refuses_every_write() -> None:
     )
     actor = BackendActor(tenant, uuid.uuid4(), Subject(is_admin=True))
     with pytest.raises(AgentBackendRefused) as refused:
-        await service.set_backend(agent, "openai", 0, actor, expected_preview_digest="d")
+        await service.set_backend(
+            agent,
+            "openai",
+            0,
+            actor,
+        )
     assert refused.value.reason == "source_unavailable"
     with pytest.raises(AgentBackendRefused) as refused:
         await service.clear_backend(agent, 0, actor)
@@ -142,22 +147,11 @@ async def _check(deps: AgentChangeDeps, **kwargs: Any) -> Any:
     )
 
 
-async def test_declared_drops_need_acceptance_exactly_as_shown(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("drops", [(), ("memory",)])
+async def test_a_switch_is_checked_with_no_acceptance(
+    monkeypatch: pytest.MonkeyPatch, drops: tuple[str, ...]
 ) -> None:
-    deps = _switch_deps(monkeypatch, drops=("memory",))
-    with pytest.raises(AgentEditError):
-        await _check(deps)
-    with pytest.raises(AgentEditError):
-        await _check(deps, accepted_drops=("memory", "skills"))
-    switch = await _check(deps, accepted_drops=("memory",), expected_preview_digest="digest-1")
-    assert switch.accepted_drops == ("memory",)
-    with pytest.raises(AgentEditError):
-        await _check(deps, accepted_drops=("memory",), expected_preview_digest="digest-0")
-
-
-async def test_a_switch_without_drops_needs_no_acceptance(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    switch = await _check(_switch_deps(monkeypatch, drops=()))
-    assert switch.accepted_drops is None
+    """Losses or none, the check passes on its own; the preview says what is off."""
+    switch = await _check(_switch_deps(monkeypatch, drops=drops))
+    assert switch.preview.declared_drops == drops, "the preview carries what is off"
+    assert switch.expected_revision == 3, "the preview's revision guards the write"

@@ -1,50 +1,59 @@
-"""`/model` — show or switch the model this conversation runs on.
+"""`/model` — show or switch the model and effort this conversation runs on.
 
 PEP-563 deferred evaluation breaks discord.py 2.x slash-param introspection
 for some signatures, so this module does NOT enable annotations futures.
 
-Run inside a conversation thread. With no choice it names the thread's model;
-with one it keeps that choice for every later reply (`daimon.core.thread_models`).
+Run inside a conversation thread or a direct message. With no choice it names the
+conversation's model; with one it keeps that choice for every later reply
+(`daimon.core.thread_models`), and `effort` keeps a reasoning effort the same way.
 Anyone who may start a turn in the thread may switch it, decided by the same
 access policy check admission makes. Where provider choice is on, the choices are
-the catalog with prices, and a pick that loses something names it and asks once
-(`daimon.core.thread_model_switch.pick_thread_or_card`). Asking in words reaches the same
-setting through the agent's `set_thread_model` tool.
+the catalog with prices, and a pick applies at once; the reply names anything off on the
+new provider (`daimon.core.thread_model_switch.pick_thread`). Asking in words reaches the
+same setting through the agent's `set_thread_model` tool.
 """
 
 import uuid
-from typing import cast
+from dataclasses import dataclass
+from typing import Literal, cast
 
+from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import (
     is_guild_admin,
-    require_registered_guild,
+    require_registered_guild_or_dm,
     resolve_tenant_for_interaction,
 )
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.views import GuardedView
 from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.platform_words import DESCRIPTIONS
+from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
-from daimon.core.thread_model_flow import thread_pick_result
+from daimon.core.thread_model_flow import NO_AGENT, NOTHING_CHANGED, thread_pick_result
 from daimon.core.thread_model_switch import (
     ThreadPick,
-    confirm_thread_or_refusal,
-    pick_thread_or_card,
+    pick_thread,
     pick_value,
     thread_model_picker,
     thread_pick_for,
 )
 from daimon.core.thread_models import (
+    EFFORT_NOT_CLAUDE,
+    EFFORT_OFF_CLAUDE,
+    THREAD_MODEL_CHOICES,
+    ThreadModelChange,
+    ThreadModelRefused,
     choose_thread_model,
     describe_thread_model,
     may_choose_thread_model,
+    model_efforts,
+    model_label,
+    resolve_effort,
 )
+from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -53,82 +62,78 @@ from discord.ext import commands
 
 BotInteraction = Interaction[commands.Bot]
 
-_NOT_IN_THREAD = "Use /model inside a conversation thread."
+_NOT_IN_THREAD = "Use /model inside a conversation thread or a direct message."
+_NOT_HERE = "This bot isn't set up to answer in this server."
 _NOT_ALLOWED = "Only people who can start a conversation here can change its model."
 _LEGACY = (
     app_commands.Choice(name="Haiku", value="haiku"),
     app_commands.Choice(name="Sonnet", value="sonnet"),
     app_commands.Choice(name="Opus", value="opus"),
+    app_commands.Choice(name="Fable", value="fable"),
     app_commands.Choice(name="Agent default", value="default"),
 )
 _AUTOCOMPLETE_LIMIT = 25
-_CONFIRM_TIMEOUT_SECONDS = 300.0
-
-
-class _ConfirmView(GuardedView):
-    """Cancel, then Switch: the card for a pick that loses something."""
-
-    def __init__(
-        self,
-        *,
-        allowed_user_id: int,
-        pick: ThreadPick,
-        value: str,
-        shown: ModelSwitchPreview,
-        thread_id: str,
-        admin: bool,
-    ) -> None:
-        super().__init__(allowed_user_id=allowed_user_id, timeout=_CONFIRM_TIMEOUT_SECONDS)
-        self._pick = pick
-        self._value = value
-        self._shown = shown
-        self._thread_id = thread_id
-        self._admin = admin
-        self.confirm.disabled = not shown.allowed
-
-    @discord.ui.button(label=CANCEL_LABEL, style=discord.ButtonStyle.secondary)
-    async def cancel(
-        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
-    ) -> None:
-        self._finalize()
-        await interaction.response.edit_message(
-            content="Nothing changed.", view=None, allowed_mentions=discord.AllowedMentions.none()
-        )
-
-    @discord.ui.button(label=SWITCH_LABEL, style=discord.ButtonStyle.primary)
-    async def confirm(
-        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
-    ) -> None:
-        self._finalize()
-        await interaction.response.defer()
-        done = await confirm_thread_or_refusal(
-            self._pick,
-            self._value,
-            thread_id=self._thread_id,
-            digest=self._shown.digest,
-            revision=self._shown.revision,
-            admin=self._admin,
-        )
-        text = done.line if isinstance(done, SwitchRefusal) else done.note
-        if isinstance(done, SwitchRefusal):
-            text += " Nothing changed."
-        await interaction.edit_original_response(
-            content=text, view=None, allowed_mentions=discord.AllowedMentions.none()
-        )
 
 
 def _runtime_of(interaction: BotInteraction) -> DiscordRuntime:
     return cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
 
 
+@dataclass(frozen=True, slots=True)
+class _Place:
+    """Where a pick lands: a thread, or the one private conversation of a DM."""
+
+    tenant_id: uuid.UUID
+    channel_id: str
+    conversation_id: str
+    thread: discord.Thread | None
+
+
+async def _place_of(interaction: BotInteraction) -> _Place | None:
+    """The conversation this command ran in; None outside a thread or a DM with one."""
+    channel = interaction.channel
+    if isinstance(channel, discord.Thread):
+        tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
+        if tenant_id is None:
+            return None
+        return _Place(tenant_id, str(channel.parent_id), str(channel.id), channel)
+    if interaction.guild_id is not None or not isinstance(channel, discord.DMChannel):
+        return None
+    async with _runtime_of(interaction).sessionmaker() as session:
+        current = await get_conversation(
+            session,
+            platform="discord",
+            route_key=str(channel.id),
+            external_user_id=str(interaction.user.id),
+        )
+    if current is None:
+        return None
+    return _Place(current.tenant_id, current.channel_id, current.scope_id, None)
+
+
 async def thread_pick_of(
     interaction: BotInteraction, thread: discord.Thread, *, admin: bool
 ) -> ThreadPick | None:
     """The pick flow for this person in `thread`: their account, rights and agent."""
-    runtime = _runtime_of(interaction)
     tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
     if tenant_id is None:
         return None
+    return await _pick_of(
+        interaction,
+        _Place(tenant_id, str(thread.parent_id), str(thread.id), thread),
+        admin=admin,
+    )
+
+
+async def _pick_in(interaction: BotInteraction, place: _Place, *, admin: bool) -> ThreadPick | None:
+    if place.thread is not None:
+        return await thread_pick_of(interaction, place.thread, admin=admin)
+    return await _pick_of(interaction, place, admin=admin)
+
+
+async def _pick_of(interaction: BotInteraction, place: _Place, *, admin: bool) -> ThreadPick | None:
+    runtime = _runtime_of(interaction)
+    tenant_id = place.tenant_id
     async with runtime.sessionmaker() as session:
         principal = await get_or_create_platform_principal(
             session,
@@ -156,10 +161,16 @@ async def thread_pick_of(
         default=runtime.deployment_default,
         actor=actor,
         platform="discord",
-        channel_id=str(thread.parent_id),
-        thread_id=str(thread.id),
+        channel_id=place.channel_id,
+        thread_id=place.conversation_id,
         platform_user_id=str(interaction.user.id),
     )
+
+
+async def _off_claude(pick: ThreadPick) -> bool:
+    """Whether the conversation's agent runs on another provider, so it takes no effort."""
+    revision = await pick.service.current(pick.agent)
+    return revision is not None and revision.backend not in (None, DEFAULT_BACKEND)
 
 
 async def may_switch_thread(
@@ -183,39 +194,52 @@ async def may_switch_thread(
     )
 
 
-@app_commands.guild_only()
+_Effort = Literal["low", "medium", "high", "xhigh", "max", "default"]
+
+
 class ModelCog(commands.Cog):
     """Per-conversation model choice."""
 
-    def __init__(self, bot: commands.Bot) -> None:
+    def __init__(self, bot: DaimonBot) -> None:
         super().__init__()
         self.bot = bot
 
     @app_commands.command(name="model", description=DESCRIPTIONS["model"])
-    @app_commands.describe(choice="Leave empty to see the current model")
-    @require_registered_guild
-    async def model(self, interaction: BotInteraction, choice: str | None = None) -> None:
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
+    @app_commands.describe(
+        choice="Leave empty to see the current model", effort="How hard the model thinks"
+    )
+    @require_registered_guild_or_dm
+    async def model(
+        self,
+        interaction: BotInteraction,
+        choice: str | None = None,
+        effort: _Effort | None = None,
+    ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        view: discord.ui.View | None = None
         try:
+            if not self.bot._allows_guild(interaction.guild_id):  # pyright: ignore[reportPrivateUsage]
+                raise UserFacingError(_NOT_HERE)
             runtime = _runtime_of(interaction)
-            tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
-            thread = interaction.channel
-            if tenant_id is None or not isinstance(thread, discord.Thread):
+            place = await _place_of(interaction)
+            if place is None:
                 raise UserFacingError(_NOT_IN_THREAD)
-            if choice is None:
+            if choice is None and effort is None:
                 text = await describe_thread_model(
                     runtime.sessionmaker,
-                    tenant_id=tenant_id,
+                    tenant_id=place.tenant_id,
                     platform="discord",
-                    thread_id=str(thread.id),
+                    thread_id=place.conversation_id,
                 )
             else:
-                if not await may_switch_thread(interaction, tenant_id, thread):
+                # A direct message is the person's own conversation: no one else may switch it.
+                if place.thread is not None and not await may_switch_thread(
+                    interaction, place.tenant_id, place.thread
+                ):
                     raise UserFacingError(_NOT_ALLOWED)
-                text, view = await self._pick(interaction, tenant_id, thread, choice)
+                text = await self._pick(interaction, place, choice, effort)
             await interaction.edit_original_response(
-                content=text, view=view, allowed_mentions=discord.AllowedMentions.none()
+                content=text, allowed_mentions=discord.AllowedMentions.none()
             )
         except (DaimonError, discord.HTTPException, SQLAlchemyError) as exc:
             await interaction.edit_original_response(
@@ -225,41 +249,75 @@ class ModelCog(commands.Cog):
             )
 
     async def _pick(
-        self, interaction: BotInteraction, tenant_id: uuid.UUID, thread: discord.Thread, choice: str
-    ) -> tuple[str, discord.ui.View | None]:
-        """Keep a pick that loses nothing; otherwise show the card that asks once."""
+        self, interaction: BotInteraction, place: _Place, choice: str | None, effort: str | None
+    ) -> str:
+        """Keep the pick at once; the note names anything off on the new provider."""
         runtime = _runtime_of(interaction)
-        word = choice.strip().lower()
-        legacy = word == "default" or not channel_backend.backend_selection_enabled(
-            runtime.settings.turn
+        sessionmaker = runtime.sessionmaker
+        word = (choice or "").strip().lower()
+        legacy = (
+            choice is None
+            or word == "default"
+            or not channel_backend.backend_selection_enabled(runtime.settings.turn)
         )
         if legacy:
+            off = False
+            if effort is not None and channel_backend.backend_selection_enabled(
+                runtime.settings.turn
+            ):
+                admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
+                pick = await _pick_in(interaction, place, admin=admin)
+                off = pick is not None and await _off_claude(pick)
+                if off and choice is None:
+                    raise UserFacingError(f"{EFFORT_OFF_CLAUDE} {NOTHING_CHANGED}")
             change = await choose_thread_model(
-                runtime.sessionmaker,
-                tenant_id=tenant_id,
+                sessionmaker,
+                tenant_id=place.tenant_id,
                 platform="discord",
-                thread_id=str(thread.id),
+                thread_id=place.conversation_id,
                 choice=choice,
+                effort=None if off else effort,
             )
-            return change.note, None
+            return f"{change.note} {EFFORT_OFF_CLAUDE}" if off else change.note
+        assert choice is not None
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
-        pick = await thread_pick_of(interaction, thread, admin=admin)
+        pick = await _pick_in(interaction, place, admin=admin)
         if pick is None:
-            raise UserFacingError("No agent answers in this conversation yet.")
-        value = pick_value(choice)
-        done = await pick_thread_or_card(pick, value, thread_id=str(thread.id), admin=admin)
-        result = thread_pick_result(value, done)
-        if not isinstance(done, ModelSwitchPreview):
-            return result.text, None
-        view = _ConfirmView(
-            allowed_user_id=interaction.user.id,
-            pick=pick,
-            value=value,
-            shown=done,
-            thread_id=str(thread.id),
-            admin=admin,
+            raise UserFacingError(NO_AGENT)
+        off = False
+        if effort is not None:
+            # Refuse before the pick is kept: a refusal changes nothing.
+            chosen, _reset = resolve_effort(effort)
+            model_id = THREAD_MODEL_CHOICES.get(word)
+            off = await _off_claude(pick)
+            if (
+                chosen is not None
+                and model_id is not None
+                and chosen not in model_efforts(model_id)
+                and not off
+            ):
+                raise ThreadModelRefused(
+                    f"{model_label(model_id)} doesn't take an effort. {NOTHING_CHANGED}"
+                )
+        done = await pick_thread(
+            pick, pick_value(choice), thread_id=place.conversation_id, admin=admin
         )
-        return "\n".join(result.lines), view
+        text = thread_pick_result(done)
+        if effort is None or not isinstance(done, ThreadModelChange):
+            return text
+        picked = done.model_id or "default"
+        if ":" in picked and not picked.startswith(f"{DEFAULT_BACKEND}:"):
+            return f"{text} {EFFORT_NOT_CLAUDE}"
+        if off:
+            return f"{text} {EFFORT_OFF_CLAUDE}"
+        kept = await choose_thread_model(
+            sessionmaker,
+            tenant_id=place.tenant_id,
+            platform="discord",
+            thread_id=place.conversation_id,
+            effort=effort,
+        )
+        return kept.note
 
     @model.autocomplete("choice")
     async def _choices(
@@ -273,10 +331,10 @@ class ModelCog(commands.Cog):
             return legacy
         try:
             admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
-            thread = interaction.channel
-            if not isinstance(thread, discord.Thread):
+            place = await _place_of(interaction)
+            if place is None:
                 return legacy
-            pick = await thread_pick_of(interaction, thread, admin=admin)
+            pick = await _pick_in(interaction, place, admin=admin)
             if pick is None:
                 return legacy
             picker = await thread_model_picker(pick)

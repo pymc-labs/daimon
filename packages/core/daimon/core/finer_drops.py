@@ -23,7 +23,15 @@ FINER_DROPS: Final[Mapping[str, str]] = {
     "network_rules": "sandbox",
     "workspace_files": "sandbox",
     "effort_setting": "model_controls",
+    "fast_mode": "model_controls",
+    "inference_region": "model_controls",
 }
+
+
+#: A model's own settings, whole and in parts.
+MODEL_SETTING_DROPS: Final[frozenset[str]] = frozenset(
+    {"model_controls", *(d for d, whole in FINER_DROPS.items() if whole == "model_controls")}
+)
 
 
 def finer_parts(whole: str, drops: frozenset[str] | set[str]) -> frozenset[str]:

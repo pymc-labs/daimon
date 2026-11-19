@@ -36,8 +36,10 @@ from daimon.core.channel_budget import (
 )
 from daimon.core.channel_changes import ChannelActor, clear_budget, set_budget
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_budgets as store
+from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import get_source_channel
 from daimon.core.stores.turn_origins import get_active_origin
 from fastmcp import Context, FastMCP
@@ -99,14 +101,18 @@ def _needs_budget_admin(auth: AuthIdentity) -> str:
     )
 
 
-def require_budget_write(auth: AuthIdentity, channel_id: str) -> None:
+async def require_budget_write(runtime: McpRuntime, auth: AuthIdentity, channel_id: str) -> None:
     """Raise ``ToolError`` unless the caller may set, clear or raise ``channel_id``'s budget."""
     _require_platform_admin(auth)
+    async with runtime.session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=auth.tenant_id)
     decision = may_set_channel_budget(
-        mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
+        policy, mcp_subject(auth, is_admin=auth.is_platform_admin), channel_id
     )
     if not decision:
         record_authz_denial(Action.SET_CHANNEL_BUDGET, decision.reason)
+        if decision.reason == "sealed_channel":
+            raise ToolError(f"{SEALED_REFUSAL} Nothing was changed. Do not retry.")
         raise ToolError(_needs_budget_admin(auth))
     record_policy_decision(Action.SET_CHANNEL_BUDGET, "allow")
 
@@ -328,7 +334,7 @@ async def _set_channel_budget_impl(
     except ChannelBudgetError as err:
         raise ToolError(f"{err}. Nothing was saved.") from err
     target = await _budget_channel(runtime, auth, _require_channel_id(channel_id))
-    require_budget_write(auth, target)
+    await require_budget_write(runtime, auth, target)
     budget = await set_budget(
         runtime.session_factory,
         _actor(auth),
@@ -354,7 +360,7 @@ async def _clear_channel_budget_impl(
     target = (
         await resolve_channel(runtime, auth, _require_channel_id(channel_id), lenient=True)
     ).channel_id
-    require_budget_write(auth, target)
+    await require_budget_write(runtime, auth, target)
     cleared = await clear_budget(
         runtime.session_factory, _actor(auth), platform=platform, channel_id=target
     )

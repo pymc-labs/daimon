@@ -9,47 +9,114 @@ There are three ways into a DM:
 | Way in | Platforms | Starts with |
 | --- | --- | --- |
 | `/dm-me` in a channel | Discord, Slack | that channel's recent text and a link back |
-| A cold DM to the bot | Discord | an empty conversation with the server's DM agent |
+| A cold DM to the bot | Discord, Slack, Teams | an empty conversation with the agent chosen below |
 | A routine or watch that reports by DM | Discord | a fresh private turn per run |
 
-All three need the server's DMs turned on (`/dm-me enable`) and a recipient
-policy that allows the person.
+All three need the server's DMs turned on (`/dm-me enable`, or `daimon features
+set direct_messages on`) and a recipient policy that allows the person.
 
 ## Turn on cold DMs
 
-A cold DM is a first message sent straight to the bot, with no `/dm-me`.
-Cold DMs stay off until a server names its DM agent. The agent must already
-exist in that server; Daimon never falls back to the default agent.
+A cold DM is a first message sent straight to the bot, with no `/dm-me`. It needs
+the server's DMs on and an agent that has DMs on and admits the person, chosen
+as [below](#choose-who-may-dm-which-agent). Until the server has a rule or a
+narrower grant, only the default agent answers.
 
 ```bash
-daimon tenants dm-policy discord GUILD_ID --agent AGENT_NAME --enabled
-daimon tenants dm-policy discord GUILD_ID --json
-daimon tenants dm-policy discord GUILD_ID --clear-agent
+daimon features --guild GUILD_ID set direct_messages on
+daimon dm --guild GUILD_ID default AGENT_NAME     # who answers by default
+daimon dm --guild GUILD_ID default                # show it; --clear unsets it
 ```
 
 An admin can do the same in Discord with `/dm-me action:enable`, then
-`/dm-me action:agent agent_name:AGENT_NAME`. Clearing the agent stops cold DMs
-without closing existing conversations or `/dm-me` moves.
+`/dm-me action:agent agent_name:AGENT_NAME` (`clear-agent` unsets it). The
+default agent is one value for cold DMs, `/dm-me`, the picker and agent-sent
+notices. The CLI, Discord, the web app and MCP all set it through one writer
+that checks the name and audits the change. Once the server has rules or
+narrower grants, clearing it does not stop cold DMs: turn DMs off for that.
 
-Upgrade every Discord process before naming an agent, since older ones do not
-recognise a conversation with no source channel. The bot token must be set on
-the scheduler and MCP processes too, for the membership checks below.
+A Slack or Teams DM belongs to one workspace, so a cold DM there starts at
+once with the agent chosen below. Teams personal chats have DMs on unless an
+admin turns them off. With no default, rules or narrower grants, Slack sends the
+`/dm-me` guidance and a Teams personal chat is answered by the chat's own agent.
+
+Upgrade every Discord process before turning cold DMs on, since older ones do
+not recognise a conversation with no source channel. The bot token must be set
+on the scheduler and MCP processes too, for the membership checks below.
+
+## Choose who may DM which agent
+
+Each agent has a DM grant, and each server has a default agent, ordered rules
+and, per person, an optional pick. Until the server has a rule or a grant other
+than `members`, only the default agent starts a private conversation, if it
+admits the person. After that, it starts with the first agent that has DMs on
+and admits them, chosen like this:
+
+1. **Grants.** An agent admits `members` (the default: every member), only
+   those `listed`, or everyone `excluded` (all but those listed). A grant
+   lists people and groups: Discord roles, Slack user groups, or Teams teams
+   the app is installed in. If a group lookup fails, the agent is treated as
+   closed for that person.
+2. **Rules.** The first rule that matches the person (by user, group or
+   everyone) names an agent. A **locked** rule decides alone: the person's pick
+   is ignored, and if its agent is unavailable to them they are refused.
+3. **Pick, rule agent, default.** Otherwise the first available of the person's
+   pick, the rule's agent and the server default. When several agents remain, a
+   picker (a dropdown, or buttons on Teams) lets the person choose, and the choice is
+   remembered for the next conversation. Messages sent before the choice wait for
+   it, up to five minutes, and are answered in one turn. A refused choice ends the
+   wait at once.
+
+`/dm-me` in a channel follows the same rules and refuses a locked-out person
+with a private note. Handing a DM to another agent in the conversation is
+held to the same grant. Agents that send a DM by themselves (the
+`send_direct_message` tool, watches, routines and budget notices) are held to
+the sending agent's grant only; locks do not apply.
+
+```bash
+daimon features --guild GUILD_ID set direct_messages on   # or off; `default` clears it
+daimon dm --guild GUILD_ID default AGENT                  # the default agent
+daimon dm --guild GUILD_ID access AGENT --mode listed --user 123 --group 456
+daimon dm --guild GUILD_ID rule add --group 456 --agent AGENT --locked
+daimon dm --guild GUILD_ID rule list | move | remove
+daimon dm --guild GUILD_ID explain 123   # who would answer, and why (groups read live)
+daimon dm import-policies --dry-run      # DAIMON_DIRECT_MESSAGE_POLICIES as stored access
+```
+
+`--guild GUILD_ID` (or `--tenant TENANT_UUID`) picks the server and goes after
+`dm` or `features`, before the command; without it the CLI's own tenant is used. As
+in the web app, an unknown agent name is refused and each change is in the
+audit log, under the CLI's local user. Erasing a person removes their pick,
+their unlocked personal rules and their entry in any listed grant. Locked rules
+and exclusions stay, so erasing someone never lifts a restriction.
+
+`DAIMON_DIRECT_MESSAGE_POLICIES` is deprecated. While it is set it applies with
+the stored access to Discord DMs and every message an agent sends, `dm explain`
+and "Check a person" included, so the stricter wins; the Discord service logs a
+warning. `daimon dm import-policies` stores it: an allowlist becomes a listed
+grant on every agent and `disabled` turns DMs off. The setting can then be removed.
+
+A notice no agent sends, such as a budget notice, is held to the default agent's
+grant, so an allowlist is not imported until a default agent is set (`daimon dm
+default`). An agent created after the import has no grant, so it admits every
+member: list people on it too.
 
 ## What a person sees
 
 When someone DMs the bot, Daimon looks for servers where they are a current
-member, pass the invoker policy and may use the DM agent.
+member, pass the invoker policy and have an agent that admits them.
 
 - **One server** starts a conversation and answers the message.
-- **Several servers** show a server picker only that person can use. It keeps
-  the message for five minutes and checks access again on the pick.
-- **None** runs no turn. A member refused by the invoker policy or the agent's
-  role requirement is told they may not DM Daimon. Anyone else gets the
-  `/dm-me` guidance, which names no server.
+- **Several servers** show a server picker only that person can use. It holds
+  their messages for five minutes and checks access again on the pick.
+- **None** runs no turn. A member refused by the invoker policy, a locked rule
+  or the default agent is told they may not DM Daimon. Anyone else gets the
+  `/dm-me` guidance, which names no server: for example a person no agent
+  admits, or a server with DMs off or no agent to route to.
 
 The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
-starts an empty conversation with the same server and its current DM agent.
+starts an empty conversation with the same server and the agent routing picks.
 Buttons expire after fifteen minutes, and only the latest set works. When
 workspace admins [monitor](features.md#monitor-direct-messages) the agent, a
 card tells the person once, at their first message after it starts.
@@ -87,6 +154,10 @@ A positive answer is cached for at most 30 seconds and a negative one for
 five. Private delivery always does a live lookup. A failed or slow lookup
 never grants access; discovery asks the person to try again instead.
 
+Slack user groups need the `usergroups:read` scope, so reinstall the app
+after adding it. Teams teams are read from the team's roster. A group lookup
+is fresh when a conversation starts and cached for 60 seconds after.
+
 The stock Discord service does not request the privileged Server Members
 intent, so it relies on that short cache. A gateway that turns the intent on
 gets role changes and departures at once.
@@ -95,8 +166,13 @@ gets role changes and departures at once.
 
 - Discovery and server switching share three attempts per person, refilling
   one every 20 seconds. Running out is silent.
-- Pickers and buttons live in one process. A restart drops them, and the
-  person sends a new message.
+- A picker carries its own expiry: a late pick is refused, and the person sends
+  a new message. A process that stops while a pick is open says the held
+  messages were not sent, except on Teams, which takes them up after the restart.
+- Discord DMs reach one process. On Slack and Teams, a pick made on another
+  process is found within seconds; if two processes each offer a picker, the
+  first pick wins. A pick refused on another process ends the wait only when the
+  picker expires.
 - Routine and watch reports never pick a server or join the active
   conversation's history.
 - Turning DMs off stops new turns and, on Discord, the delivery of answers

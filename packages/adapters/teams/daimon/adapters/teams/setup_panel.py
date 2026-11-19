@@ -63,6 +63,7 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
@@ -76,16 +77,13 @@ from daimon.core.mcp_auth import (
 )
 from daimon.core.model_switch import (
     ModelPicker,
-    ModelSwitchPreview,
     SwitchRefusal,
     back_to_claude,
-    confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
     pick_or_refusal,
     read_picker,
     set_effort,
-    switch_card_text,
 )
 from daimon.core.models_catalog import (
     ModelChoice,
@@ -325,8 +323,12 @@ class SetupPanel:
             return dialog_message(exc.refusal)
         except SkillIngestError as exc:
             return dialog_message(f"{exc} Nothing was added.")
-        except (DaimonError, anthropic.APIError):
-            log.exception("teams.agent_setup.skill_add_failed", agent_name=agent.name)
+        except (DaimonError, anthropic.APIError) as error:
+            log.exception(
+                "teams.agent_setup.skill_add_failed",
+                agent_name=agent.name,
+                causes=backend_refusal_causes(error),
+            )
             return dialog_message(
                 f"Adding {bundle.preview.name} to {agent.name} failed. Try again."
             )
@@ -586,11 +588,14 @@ class SetupPanel:
                 public_mcp_url=str(mcp.public_url) if mcp.public_url is not None else None,
                 is_admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                 channel_label=None,
-                web=web_links(
+                web=await web_links(
                     self._runtime,
                     actor.tenant_id,
                     admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                     foreign=actor.foreign,
+                    channel_id=actor.channel_thread[0],
+                    thread_id=actor.channel_thread[1],
+                    agent_id=match.ma_agent_id,
                 ),
                 records=self._runtime.sessionmaker,
             )
@@ -657,9 +662,10 @@ class SetupPanel:
         data: Mapping[str, object],
         page: int,
     ) -> AdaptiveCardInvokeResponse:
-        """Pick a model, review it, confirm once; or step back, or switch back to Claude.
+        """Pick a model and it applies; or step back, or switch back to Claude.
 
-        Who may change the agent is decided by the write (admin or owner), not by the card.
+        Switch on a card from before picks applied at once applies its pick. Who may
+        change the agent is decided by the write (admin or owner), not by the card.
         """
         name = str(data.get("agent") or "")
         admin = actor.admin_for(DelegatedAction.AGENT_SETTINGS)
@@ -692,7 +698,9 @@ class SetupPanel:
             )
 
         account_id = await get_or_create_account(self._runtime, actor)
-        subject = build_subject(is_admin=admin, platform_user_id=actor.user_id)
+        subject = build_subject(
+            is_admin=admin, platform_user_id=actor.user_id, origin_channel_ids=actor.origin
+        )
         service = channel_backend.make_backend_service(
             self._runtime.sessionmaker,
             self._runtime.settings.turn,
@@ -731,45 +739,19 @@ class SetupPanel:
                 return refused(done)
             await audit("allowed", "effort_set")
             return await details()
-        if op == "backend_confirm":
-            local, digest = data.get("revision"), data.get("digest")
-            if isinstance(local, bool) or not isinstance(local, int) or local < 0:
-                return toast("That preview is no longer available. Pick the model again.")
-            if not isinstance(digest, str):
-                return toast("That preview is no longer available. Pick the model again.")
-            done = await confirm_or_refusal(
-                service,
-                edit,
-                actor=who,
-                agent_name=name,
-                value=value,
-                digest=digest,
-                revision=local,
-                admin=admin,
-            )
-            if isinstance(done, SwitchRefusal):
-                await audit("denied", done.reason)
-                return refused(done)
-            await audit("allowed", "completed")
-            return await details()
-        shown = await pick_or_refusal(
+        if not value:
+            return toast("That pick is no longer on the card.\nChoose a model again.")
+        done = await pick_or_refusal(
             service, edit, actor=who, agent_name=name, value=value, admin=admin
         )
-        if isinstance(shown, SwitchRefusal):
-            await audit("denied", shown.reason)
-            return refused(shown)
-        if not isinstance(shown, ModelSwitchPreview):
-            await audit("allowed", "completed")
+        if isinstance(done, SwitchRefusal):
+            await audit("denied", done.reason)
+            return refused(done)
+        await audit("allowed", "completed")
+        if not done.lines:
             return await details()
         return replace_card(
-            cards.model_switch_card(
-                switch_card_text(shown, agent_name=name),
-                agent_name=name,
-                value=value,
-                revision=shown.revision,
-                digest=shown.digest,
-                confirm=shown.allowed,
-            )
+            cards.model_switch_card(done.lines, agent_name=name, value=value, refused=False)
         )
 
     async def _act(

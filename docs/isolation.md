@@ -56,8 +56,8 @@ A thread has one live session per caller, not one session in all. Two people
 in one thread never share an MA session, sandbox, transcript or output
 listing. Each session is stamped with its tenant and owner, and the transcript
 tools open only the caller's own sessions. The exception is a server admin
-reading a channel conversation through the hub, never a private DM and never
-to continue it.
+reading an open channel's conversation through the hub. It never covers a
+private DM, a sealed or limited channel, or continuing the conversation.
 
 When a session is replaced, for example after a configuration change, the
 carried work comes only from the caller's own previous session.
@@ -159,6 +159,21 @@ personal, redacted. Nothing is moved automatically.
 A member may add a new key name to an agent. Replacing or removing a key on an
 agent other people use needs an admin.
 
+## Settings of a private channel
+
+A channel with `readers: own`, or limited readers, changes only from inside it.
+This holds for admins too. The channel's own agent follows the same rule. The
+rule covers permissions, prompt, tools and connections, budget, skills,
+environments, feature switches including memory, and coding keys. It also covers
+the agent's memory text. The panel in the channel and the chat tool in the
+channel count as inside. The web app, the hub, a DM, an agent key, a resumed turn
+and a routine do not. The web app still shows the channel read-only. The
+operator CLI is the recovery path.
+
+Archiving an agent or an environment clears every channel that picks it. So the
+archive is refused while a private channel picks it, unless you are inside that
+channel. Pick another one in the channel first.
+
 ## Agents, forks and skills
 
 Agents are tenant objects, and one tenant's agent cannot be resolved by
@@ -213,7 +228,9 @@ bots, inactive, external and anonymous users are rejected. It sends at most
 19,000 characters as plain text, with no attachments and no cross-tenant
 delivery. The default policy is tenant members. Set a tenant to `allowlist`
 (with `recipient_ids`) or `disabled` in `DAIMON_DIRECT_MESSAGE_POLICIES`
-([configuration.md](configuration.md#daimon_direct_message_policies)).
+([configuration.md](configuration.md#daimon_direct_message_policies)). The
+sending agent's DM grant must also admit the recipient; an unknown role lookup
+refuses ([direct messages](direct-messages.md#choose-who-may-dm-which-agent)).
 
 ### Opt-in DM conversations
 

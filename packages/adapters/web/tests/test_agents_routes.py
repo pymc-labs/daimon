@@ -25,7 +25,7 @@ from mux.testing.drivers.anthropic.ma import json_body
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .agent_support import NOW, consent_body, provider_choice
+from .agent_support import NOW, provider_choice
 from .agent_support import OWN as _OWN
 from .agent_support import Agents as _Agents
 from .agent_support import agent_client as _client
@@ -304,9 +304,7 @@ async def test_an_owner_switches_the_agent_to_another_providers_model(
         draft = await client.patch(
             "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
         )
-        applied = await client.post(
-            "/api/agents/ag_w/apply", json=await consent_body(client), headers=_OWN
-        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
         after = (await client.get("/api/agents/ag_w")).json()
     offered = {(m["backend"], m["id"]): m for m in catalog["models"]}
     assert ("openai", "gpt-6-astra") in offered, "an allowed provider's models are offered"
@@ -433,9 +431,7 @@ async def test_a_failed_later_step_leaves_the_provider_unchanged(
         draft = await client.patch(
             "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
         )
-        applied = await client.post(
-            "/api/agents/ag_w/apply", json=await consent_body(client), headers=_OWN
-        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
         after = (await client.get("/api/agents/ag_w")).json()
     assert draft.status_code == 200, draft.text
     assert applied.status_code == 409, applied.text
@@ -471,9 +467,7 @@ async def test_a_failed_provider_write_keeps_the_saved_change_and_says_so(
         await client.patch(
             "/api/agents/ag_w/draft", json={"base_version": 3, "config": config}, headers=_OWN
         )
-        applied = await client.post(
-            "/api/agents/ag_w/apply", json=await consent_body(client), headers=_OWN
-        )
+        applied = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
         after = (await client.get("/api/agents/ag_w")).json()
         draft = await client.get("/api/agents/ag_w/draft")
     assert applied.status_code == 409, applied.text
@@ -516,9 +510,7 @@ async def test_a_draft_is_stale_once_the_provider_moved(
         await client.patch(
             "/api/agents/ag_w/draft", json={"base_version": 3, "config": moved}, headers=_OWN
         )
-        switched = await client.post(
-            "/api/agents/ag_w/apply", json=await consent_body(client), headers=_OWN
-        )
+        switched = await client.post("/api/agents/ag_w/apply", json={}, headers=_OWN)
     async with _client(
         agents, owner.tenant_id, db_session_factory, owner_token, settings=settings, with_turns=True
     ) as client:

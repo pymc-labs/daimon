@@ -26,6 +26,7 @@ import { usePendingPreview } from "../usePendingPreview"
 import { unsupportedOf } from "../unsupported"
 import { nodeUi } from "../nodes/registry"
 import { FeatureSettings } from "@/modules/features/Settings"
+import { SUPPORT_KEYS } from "@/modules/admin/support/lib"
 
 const TITLES: Record<string, string> = {
   agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels", helpers: "Helpers",
@@ -62,7 +63,7 @@ export function Inspector(props: Props) {
   else if (node === "mcp:new") body = <NewServer {...p} />
   else if (server) body = <ServerEditor {...p} server={server} />
   else if (node === "history") body = <History agent={agent} />
-  else if (node === "features") body = <FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} />
+  else if (node === "features") body = <FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} hide={SUPPORT_KEYS} />
   else if (platform) {
     const { Panel } = nodeUi(platform.kind)
     body = <Panel agent={agent} node={platform} ro={p.ro} select={select} />

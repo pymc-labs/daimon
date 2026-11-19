@@ -1780,15 +1780,12 @@ async def test_wizard_origin_controls_the_actual_memory_mount(
     assert stream_hits == ["ses_wizard_policy"]
 
 
-async def test_a_wizard_turns_backend_switch_card_captures_through_its_own_admission(
+async def test_a_wizard_turns_admin_cards_read_no_agent_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A wizard-submitted turn's Confirm card reads the switched agent's source
-    as that turn's admitted caller, exactly like a mention turn's card. Built
-    without the admission, every backend-switch card refused `source_unavailable`.
-    """
+    """A wizard-submitted turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
     from daimon.core.errors import TurnError
@@ -1813,9 +1810,6 @@ async def test_a_wizard_turns_backend_switch_card_captures_through_its_own_admis
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
     outcome = RunOutcome(
         state=TurnState(error=TurnError(kind="ceiling", message="stopped")),
         ma_session_id="sess_wizard_card",
@@ -1841,17 +1835,6 @@ async def test_a_wizard_turns_backend_switch_card_captures_through_its_own_admis
         await asyncio.gather(*bot._bg_tasks)  # pyright: ignore[reportPrivateUsage]
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    async with db_session_factory() as session:
-        account = await get_account(session, account_id=context.account_id)
-    assert account is not None and account.tenant_id == tenant.id
-    assert (context.tenant_id, context.platform) == (tenant.id, "discord")
-    assert (context.channel_id, context.thread_id) == ("4011", "5011")
-    assert kwargs["subject"].platform_user_id == _REQUESTER_ID
-    assert kwargs["is_dm"] is False
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]

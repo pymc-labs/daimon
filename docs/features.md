@@ -13,6 +13,10 @@ Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
+A chat conversation picks up a change to a feature that hides tools at its next message.
+A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
+with; Daimon refuses a tool turned Off since then.
+
 ## All features
 
 Where each feature can be set, and its default.
@@ -20,6 +24,8 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
+| Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -29,7 +35,7 @@ Where each feature can be set, and its default.
 | Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -40,12 +46,16 @@ Where each feature can be set, and its default.
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
+| Answer messages | `answer_messages` | Chat | 5 messages | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord |
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  | Only Discord |
+| Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -53,7 +63,7 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
-| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  | On by default on Teams |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -68,19 +78,24 @@ Where each feature can be set, and its default.
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Feedback to support | `support_feedback` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| Callback watch lifetime | `callback_watch_lifetime` | Limit | 30 days | ✓ | ✓ |  |  |  |  |
+| Answer time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
+| Unattended run time limit | `unattended_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
-| Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
@@ -92,7 +107,7 @@ Where each feature can be set, and its default.
 
 ## Approvals
 
-Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it.
+Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it, or the operator at the command line, who gives a reason that is audited.
 
 | | |
 | --- | --- |
@@ -168,7 +183,7 @@ A context provider set up for this channel or agent adds what it knows to each m
 
 ## Chat history
 
-How many earlier chat messages a new conversation reads, up to 100 from the thread and 25 from the channel around it. The smallest setting wins.
+How many earlier chat messages a new conversation reads, up to 100 from the thread and from the channel around it. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -177,6 +192,42 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 | Default | `100` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
+
+## Direct message memory
+
+Earlier direct messages each reply carries; more costs more. The smallest wins.
+
+| | |
+| --- | --- |
+| Key | `dm_history_depth` |
+| Values | `12` (12 messages), `25` (25 messages), `50` (50 messages), `100` (100 messages) |
+| Default | `12` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Lowest wins |
+
+## Channel background
+
+How many recent channel messages a new thread reads for background when a message in the channel starts it. Chat history still caps it.
+
+| | |
+| --- | --- |
+| Key | `channel_history` |
+| Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
+| Default | `25` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Answer messages
+
+The most messages one answer may post in a thread. A longer answer is attached as a single file instead.
+
+| | |
+| --- | --- |
+| Key | `answer_messages` |
+| Values | `1000` (1000 messages), `100` (100 messages), `25` (25 messages), `10` (10 messages), `5` (5 messages), `3` (3 messages), `1` (1 message) |
+| Default | `5` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
 
 ## Setup guidance
 
@@ -302,9 +353,9 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Web app links
+## Web app
 
-Each message tells the agent the web app's address and the pages it may link to.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
 
 | | |
 | --- | --- |
@@ -479,6 +530,30 @@ The person who asked is pinged when a long answer is finished.
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_COMPLETION_PINGS` |
 
+## Model reactions
+
+The first message in a thread, and the first after the model or effort changes, gets an emoji for the model and one for the effort it runs on.
+
+| | |
+| --- | --- |
+| Key | `model_reactions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Tool server names
+
+Tool lines on the working card name the connected server each tool belongs to.
+
+| | |
+| --- | --- |
+| Key | `tool_server_names` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
 ## Table images
 
 Tables in an answer are drawn as an image or a native table instead of text.
@@ -532,15 +607,27 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Direct messages
 
-Conversations may move to a direct message with the agent. The agent that answers there is the team's DM agent, which is chosen apart from this.
+People may message the agent directly; on for the team, every agent takes part unless it opts out. Who may message which agent is set apart from this.
 
 | | |
 | --- | --- |
 | Key | `direct_messages` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
+
+## Direct message wait
+
+Holds a direct message for more, so a burst gets one reply; at most ten seconds, and never an approval reply.
+
+| | |
+| --- | --- |
+| Key | `dm_debounce_seconds` |
+| Values | `0` (Off), `1` (1 second), `3` (3 seconds), `5` (5 seconds) |
+| Default | `0` |
+| Levels | Deployment, Workspace |
+| Combines | Most specific wins |
 
 ## Read-only memory in direct messages
 
@@ -737,14 +824,39 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
+Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
 
 | | |
 | --- | --- |
 | Key | `support_escalation` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Feedback to support
+
+A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+
+| | |
+| --- | --- |
+| Key | `support_feedback` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` |
+
+## Own support channel
+
+An admin may send Ask a person requests to a channel of their own instead of the default one; whoever runs Daimon then no longer sees them. Off sends every request to the default channel.
+
+| | |
+| --- | --- |
+| Key | `support_own_channel` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment |
 | Combines | Off above is a ceiling |
 
 ## GitHub access
@@ -796,6 +908,42 @@ The longest one long job may run. The smallest setting wins.
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Callback watch lifetime
+
+How long a callback watch lasts, new or moved in, before it must be renewed. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `callback_watch_lifetime` |
+| Values | `0` (Permanent), `90` (90 days), `30` (30 days), `7` (7 days) |
+| Default | `30` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
+
+## Answer time limit
+
+The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, or shorter. The smallest setting wins. Routines and watches use the unattended run limit.
+
+| | |
+| --- | --- |
+| Key | `turn_time_limit` |
+| Values | `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
+| Default | `45` |
+| Levels | Workspace, Agent |
+| Combines | Lowest wins |
+
+## Unattended run time limit
+
+The longest a run nobody is watching may take before it is stopped: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter. The smallest setting wins. Chats use the answer time limit.
+
+| | |
+| --- | --- |
+| Key | `unattended_time_limit` |
+| Values | `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
+| Default | `45` |
+| Levels | Workspace, Agent |
+| Combines | Lowest wins |
 
 ## Posting to others
 

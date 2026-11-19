@@ -56,7 +56,8 @@ RULES: tuple[tuple[str, str], ...] = (
     # Read only by the repo tests (tests/test_*.py), which run in the core suite.
     (".github/workflows/", "repo"),
     ("deploy/azure/", "repo"),
-    ("deploy/lanes/", "repo"),
+    # The lane proxy tests (sidecar suite) read the lane files as well.
+    ("deploy/lanes/", "lanes"),
     ("scripts/azure/", "repo"),
     # The Teams package builder is tested beside the manifest it fills in.
     ("scripts/teams/", "teams-builder"),
@@ -110,6 +111,7 @@ SUITES: dict[str, tuple[str, ...]] = {
     "tooling": ("lint",),
     "repo": ("core", "lint", "shard-check"),
     "deploy-workflow": ("core", "lint", "shard-check"),
+    "lanes": ("core", "lint", "shard-check", "sidecar-mux"),
     "mcp-catalogue": ("lint", "core", "mux"),
     "slack-manifest": ("slack", "slack-mux", "parity", "parity-mux"),
     "teams-manifest": ("teams", "teams-mux", "parity", "parity-mux"),

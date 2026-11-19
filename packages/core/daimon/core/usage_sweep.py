@@ -67,6 +67,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core import monitoring
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -723,8 +724,12 @@ async def settle_finished_turn(
         result = None  # out of budget; the request stays for the next read or the drain
     except _anthropic.RateLimitError:
         raise
-    except (_anthropic.APIError, SQLAlchemyError):
-        log.exception("billing.settle_failed", managed_session_id=session.id)
+    except (_anthropic.APIError, SQLAlchemyError) as error:
+        log.exception(
+            "billing.settle_failed",
+            managed_session_id=session.id,
+            causes=backend_refusal_causes(error),
+        )
         result = None
     return result
 
@@ -766,8 +771,12 @@ async def sweep_headless_usage(
             continue
         except _anthropic.RateLimitError:
             raise
-        except _anthropic.APIError:
-            log.exception("usage_sweep.session_failed", managed_session_id=session_id)
+        except _anthropic.APIError as error:
+            log.exception(
+                "usage_sweep.session_failed",
+                managed_session_id=session_id,
+                causes=backend_refusal_causes(error),
+            )
         else:
             result = await settle_finished_turn(
                 client,

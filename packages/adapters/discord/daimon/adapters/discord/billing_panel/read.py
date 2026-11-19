@@ -61,6 +61,12 @@ def invoking_channel_id(interaction: BotInteraction) -> str | None:
     return str(interaction.channel_id) if interaction.channel_id is not None else None
 
 
+def invoking_thread_id(interaction: BotInteraction) -> str | None:
+    """The invoking thread, or None outside one."""
+    channel = interaction.channel
+    return str(channel.id) if isinstance(channel, discord.Thread) else None
+
+
 def _snowflake(user_id: str) -> int | None:
     try:
         return int(user_id)

@@ -22,6 +22,7 @@ from daimon.core.anthropic_guard import (
     guard_selfhosted_channel,
     independent_wake_provider_context,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.continuation import (
     ContinuationDecision,
     ContinuationRequest,
@@ -33,6 +34,7 @@ from daimon.core.continuity.wakes import (
     WakeClaim,
     busy_retry_at,
     claim_wake,
+    keep_wake,
     list_dispatchable_wakes,
     release_wake,
     settle_wake,
@@ -264,11 +266,12 @@ async def dispatch_pending_continuations(
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
             try:
-                if run_decision is not None:
-                    await run_decision(row, decision)
-                else:
-                    assert run_follow_up is not None and seed is not None
-                    await run_follow_up(row, seed)
+                async with keep_wake(sessionmaker, claim, now=now):
+                    if run_decision is not None:
+                        await run_decision(row, decision)
+                    else:
+                        assert run_follow_up is not None and seed is not None
+                        await run_follow_up(row, seed)
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
@@ -296,7 +299,12 @@ async def dispatch_pending_continuations(
                 retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
                 await release_wake(sessionmaker, claim, retry_at=retry_at)
             except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
-                log.warning("continuation.dispatch_failed", row_id=str(row.id), error=str(exc))
+                log.warning(
+                    "continuation.dispatch_failed",
+                    row_id=str(row.id),
+                    error=str(exc),
+                    causes=backend_refusal_causes(exc),
+                )
                 await _settle(sessionmaker, claim, "dispatch_failed", now)
             else:
                 await _settle(sessionmaker, claim, None, now)

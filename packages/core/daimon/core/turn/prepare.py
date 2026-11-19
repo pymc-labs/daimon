@@ -38,7 +38,7 @@ from anthropic.types.beta.session_create_params import Resource
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
-from daimon.core.channel_backend import BackendUnsupported
+from daimon.core.channel_backend import BackendUnsupported, backend_refusal_causes
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import get_repo_memory_settings, load_turn_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
@@ -499,6 +499,7 @@ async def create_ma_session(
             on_app_access=capture_app_access,
             channel_skills=identity.extra_skills(skills, admission.platform_skill_ids),
             model_override=admission.model_override,
+            model_effort=admission.model_effort,
             system_override=identity.system(admission.agent.system, platform),
             relay_session_key=mapping_id,
             identity=identity,
@@ -581,6 +582,7 @@ async def create_ma_session(
             mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
             memory_scope=memory_scope(admission.hold),
             identity_features=identity.stored(),
+            model_effort=admission.model_effort,
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,
@@ -928,6 +930,7 @@ async def _shared_thread(
                 platform=platform,
                 channel_id=channel_id,
                 thread_id=thread_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=admission.agent.id),
             )
         except BackendUnsupported as err:
             raise AdmissionDenied(reason="backend_unsupported") from err
@@ -1073,7 +1076,11 @@ async def stamp_session_seal(
         # other refusal fails the turn rather than running it unstamped.
         if error.status_code != 409 and "while session is running" not in str(error):
             raise
-        log.info("turn.seal_stamp_busy", ma_session_id=ma_session_id)
+        log.info(
+            "turn.seal_stamp_busy",
+            ma_session_id=ma_session_id,
+            causes=backend_refusal_causes(error),
+        )
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=5)
         ) from error

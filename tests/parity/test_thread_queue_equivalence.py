@@ -17,6 +17,7 @@ from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.reactions import TeamsReactions
+from daimon.core.dm_debounce import DmBursts
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import HeldThreads, ThreadQueue
 from daimon.core.turn_queue import TurnQueue
@@ -30,6 +31,9 @@ def base(platform):
     namespace = dict(vars(MODULES[platform]))
     # The frozen base predates the turn queue and calls the old pure gate.
     namespace["should_admit_turn"] = lambda *, current_in_flight, cap: current_in_flight < cap
+    if platform == "discord":
+        # The frozen base predates the shared compose helper.
+        namespace["_compose_queued_content"] = discord.compose_queued_content
     path = Path(__file__).with_name("thread_queue_base") / f"{platform}.txt"
     exec(compile(path.read_text(), str(path), "exec"), namespace)
     return namespace["Base"], namespace
@@ -65,9 +69,10 @@ class Replay:
             _recovery=None,
             _participation=None,
             draining=draining,
-            runtime=SimpleNamespace(sessionmaker=None),
+            runtime=SimpleNamespace(sessionmaker=None, settings=None),
             _processing_tasks={},
             _track_processing_task=lambda thread_id: None,
+            _dm_bursts=DmBursts(lambda item: item.text),
         )
         self.obj._thread_queue = ThreadQueue(
             self.obj._processing, self.obj._pending, start_turn=self.obj._processing.start_turn
@@ -89,7 +94,8 @@ class Replay:
                 "_release_thread",
                 "dispatch_continuations_in_thread",
             ],
-            "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"],
+            "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"]
+            + ([] if old else ["_answer_burst", "_burst_mark"]),
         }[platform]
         if platform == "discord" and not old:
             names += [
@@ -248,8 +254,9 @@ class Replay:
                 channel="channel",
                 files=[dict(id=f"F{number}")],
             )
+        # A group chat: a personal chat's queued messages open a DM burst, which the base predates.
         return TeamsInbound(
-            kind="dm",
+            kind="group",
             entra_tenant_id=str(TENANT),
             user_id=str(author),
             conversation_id="chat",
@@ -339,6 +346,11 @@ def route_without_io(monkeypatch):
         return item
 
     monkeypatch.setattr(teams, "route_to_setup", route)
+
+    async def no_dm_wait(*_args):
+        return 0.0  # the frozen base predates the DM wait; off, a chat runs as before
+
+    monkeypatch.setattr(teams, "debounce_seconds", no_dm_wait)
 
 
 async def replay(platform, old, authors, pause_at, fault, cancel, draining):

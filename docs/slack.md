@@ -39,6 +39,7 @@ then reinstall the app so the workspace approves the scopes:
 | `/github` command | The command from the manifest |
 | Private conversations | `im:history` and `im:write` scopes, the `message.im` event, the App Home messages tab |
 | Direct messages from agents | `im:write` scope |
+| [DM access](direct-messages.md) by user group | `usergroups:read` scope |
 | Slack Connect channels | The `channel_shared`, `channel_unshared` and `member_joined_channel` events |
 | Web access that follows workspace membership | The `team_join` and `user_change` events |
 | Channel lifecycle tracking | The `message.channels`, `message.groups` and channel archive, unarchive and delete events |
@@ -168,17 +169,16 @@ not copied.
 ### Ask a person
 
 Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person**
-button beside 👍 and 👎. Each send spends one support credit, and sends one
-request to that channel. The post carries the requester and a link, never
+button beside 👍 and 👎. Each send spends the credits its
+[limits and menu](support.md) set, one by default, and sends one request to
+that channel. The post carries the requester and a link, never
 answer text. The bot must be in the channel. Leave it unset to hide the
 button. External Slack Connect members cannot use it.
 
 [`DAIMON_SUPPORT__CREDITS_PER_USER`](configuration.md#daimon_support__credits_per_user)
-sets the credits, 20 per person per workspace by default and shared across
-platforms. Zero turns the button off.
-
-In a channel with its own admins, the request goes to them by DM first, then
-to the server admins. The support channel gets it only if no DM landed.
+sets the credits each person gets where no support limit applies, 20 per
+workspace by default and shared across platforms. 0 leaves Ask a person to
+places with a support limit.
 
 Multi-platform deployments set one channel per platform: Discord uses
 `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID` and Teams its own channel. No request

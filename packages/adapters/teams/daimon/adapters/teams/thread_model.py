@@ -1,17 +1,15 @@
 """The `model` command: one conversation's model, as a card with a button per choice.
 
-The buttons list the agent's catalog with prices; a pick that loses something asks once and
-names it, any other pick applies at once. The same card is posted in the conversation when an
-agent edit leaves its consent stale (`daimon.core.thread_model_reask`). The shared flow is
-`daimon.core.thread_model_flow`; a press re-verifies the clicker (`card_actor`) and takes the
-conversation from the activity, never from the button.
+The buttons list the agent's catalog with prices; a pick applies at once and the reply names
+anything off on the new provider. The shared flow is `daimon.core.thread_model_flow`; a press
+re-verifies the clicker (`card_actor`) and takes the conversation from the activity, never
+from the button.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import replace
-from typing import Final, cast
+from typing import Final
 
 import structlog
 from daimon.adapters.teams.card import notice_adaptive_card, notice_card
@@ -25,29 +23,19 @@ from daimon.adapters.teams.card_actions import (
     toast,
 )
 from daimon.adapters.teams.commands import CommandContext
-from daimon.adapters.teams.direct_chats import DirectChats
-from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.thread_model_flow import (
     NOTHING_CHANGED,
-    ThreadConfirm,
     ThreadOption,
     build_thread_pick,
     confirm_thread_pick,
     pick_thread_model,
     thread_options,
 )
-from daimon.core.thread_model_reask import ThreadReask, ThreadReaskNotifier
 from daimon.core.thread_models import may_choose_thread_model
-from daimon.core.turn.deps import TurnDeps
-from microsoft_teams.api import (
-    AdaptiveCardInvokeActivity,
-    AdaptiveCardInvokeResponse,
-    MessageActivityInput,
-)
+from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import Action, ActionSet, AdaptiveCard, CardElement
 from sqlalchemy.exc import SQLAlchemyError
@@ -77,24 +65,6 @@ def options_card(options: tuple[ThreadOption, ...]) -> AdaptiveCard:
         for start in range(0, len(buttons), _BUTTONS_PER_ROW)
     ]
     return AdaptiveCard(body=body, fallback_text=TITLE)
-
-
-def confirm_card(lines: tuple[str, ...], confirm: ThreadConfirm | None) -> AdaptiveCard:
-    """The switch card: its title, what stops working, then Cancel and Switch if it may go."""
-    title, *facts = lines or (TITLE,)
-    body: list[CardElement] = [heading(title), *text_lines(*facts)]
-    if confirm is not None:
-        yes = button(
-            VERB,
-            SWITCH_LABEL,
-            "confirm",
-            style="positive",
-            v=confirm.value,
-            d=confirm.digest,
-            r=confirm.revision,
-        )
-        body.append(ActionSet(actions=[button(VERB, CANCEL_LABEL, "cancel"), yes]))
-    return AdaptiveCard(body=body, fallback_text=title)
 
 
 def _done(text: str) -> AdaptiveCardInvokeResponse:
@@ -190,7 +160,7 @@ async def show_model(context: CommandContext) -> None:
 
 
 class ThreadModelActions:
-    """Applies a pressed choice, Confirm or Cancel for the verified clicker."""
+    """Applies a pressed choice for the verified clicker; also Switch and Cancel on old cards."""
 
     def __init__(self, runtime: TeamsRuntime) -> None:
         self.runtime = runtime
@@ -229,7 +199,7 @@ class ThreadModelActions:
                 conversation_id=conversation_id,
             )
             if op.startswith(_PICK):
-                result = await pick_thread_model(
+                note = await pick_thread_model(
                     sessionmaker=self.runtime.sessionmaker,
                     settings=self.runtime.settings,
                     pick=pick,
@@ -239,17 +209,13 @@ class ThreadModelActions:
                     choice=op.removeprefix(_PICK),
                     admin=admin,
                 )
-                if result.confirm is not None:
-                    return replace_card(confirm_card(result.lines, result.confirm))
-                if result.lines:
-                    return _done("\n\n".join((*result.lines, NOTHING_CHANGED)))
-                return _done(result.text)
+                return _done(note)
             if op == "confirm":
-                confirm = _read_confirm(data)
-                if confirm is None or pick is None:
+                value = _read_confirm(data)
+                if value is None or pick is None:
                     return toast(CANNOT_VERIFY)
                 note = await confirm_thread_pick(
-                    pick, confirm, conversation_id=conversation_id, admin=admin
+                    pick, value, conversation_id=conversation_id, admin=admin
                 )
                 return _done(note)
         except (DaimonError, SQLAlchemyError) as exc:
@@ -258,37 +224,7 @@ class ThreadModelActions:
         return toast(CANNOT_VERIFY)
 
 
-def _read_confirm(data: object) -> ThreadConfirm | None:
-    fields = submitted_fields(data)
-    value, digest, revision = fields.get("v"), fields.get("d"), fields.get("r")
-    if not isinstance(value, str) or not isinstance(digest, str):
-        return None
-    try:
-        return ThreadConfirm(value, digest, int(cast(int, revision)))
-    except (TypeError, ValueError):
-        return None
-
-
-def teams_thread_reask_notifier(direct: DirectChats) -> ThreadReaskNotifier:
-    """Post the card in the conversation; a failed post raises so a later message retries."""
-
-    async def send(ask: ThreadReask) -> None:
-        card = confirm_card(ask.lines, ask.confirm)
-        try:
-            await direct.post_card(ask.conversation_id, MessageActivityInput().add_card(card))
-        except TEAMS_SEND_ERRORS as exc:
-            log.info("teams.thread_model.reask_undelivered", err_type=type(exc).__name__)
-            raise
-
-    return send
-
-
-def with_thread_reask_notifier(runtime: TeamsRuntime, direct: DirectChats | None) -> TeamsRuntime:
-    """`runtime` whose turns post the card; unchanged without a way to post or for a stand-in."""
-    real = cast(object, runtime)
-    deps = cast(object, runtime.turn_deps)
-    if direct is None or not isinstance(real, TeamsRuntime) or not isinstance(deps, TurnDeps):
-        return runtime
-    return replace(
-        real, turn_deps=replace(deps, thread_reask_notifier=teams_thread_reask_notifier(direct))
-    )
+def _read_confirm(data: object) -> str | None:
+    """The pick on a Switch from before picks applied at once."""
+    value = submitted_fields(data).get("v")
+    return value if isinstance(value, str) else None

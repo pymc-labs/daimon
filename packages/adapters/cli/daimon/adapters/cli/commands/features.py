@@ -1,8 +1,8 @@
 """`daimon features list | get | set | diff`: every feature at a place, over the core service.
 
-The operator acts as an admin with no chat identity, so approvals (a chat admin's call)
-are refused here as everywhere else. The agent tier of a `tool.*` writes the agent's own
-built-in tool config.
+The operator acts as an admin with no chat identity. Approvals, a chat admin's call, need
+`--reason` and are audited under the operator's name, `cli.local_user`. The agent tier of a
+`tool.*` writes the agent's own built-in tool config.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from daimon.core.features.registry import DEFAULT, FEATURES, Tier
 from daimon.core.features.service import (
     FeatureActor,
     FeatureView,
+    OperatorActor,
     change_feature,
     import_env,
     read_features,
@@ -101,7 +102,7 @@ def _agent_actor(target: _Target) -> AgentActor:
     return AgentActor(
         tenant_id=target.tenant_id,
         account_id=target.account_id,
-        subject=Subject(is_admin=True),
+        subject=Subject(is_admin=True, operator=True),
         surface=Surface.CONFIG,
     )
 
@@ -195,7 +196,16 @@ async def features_set(
     thread: str | None,
     locked: bool = False,
     expected: str | None = None,
+    reason: str | None = None,
 ) -> None:
+    spec = FEATURES[key]
+    reason = (reason or "").strip()
+    if spec.authority.native and not reason:
+        raise StoreError(f"{spec.name} is set from the CLI only with --reason.")
+    if not spec.authority.native and reason:
+        raise StoreError(f"{spec.name} records no reason; --reason is only for approvals.")
+    if spec.authority.native and not rt.settings.cli.local_user.strip():
+        raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
     agent_id = await _agent_id(rt, target, agent) if agent else None
     if thread and not channel:
@@ -207,19 +217,21 @@ async def features_set(
     async def is_admin(_: object) -> bool:
         return True
 
-    actor = FeatureActor(
-        target.tenant_id,
-        target.account_id,
-        "cli",
-        None,
-        is_admin,
-        write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
-        if builtin and agent_id
-        else None,
-        read_builtins=builtin_reader(edit, actor=agent_actor, ma_agent_id=agent_id)
-        if builtin and agent_id
-        else None,
-    )
+    actor: FeatureActor
+    who = (target.tenant_id, target.account_id, "cli", None, is_admin)
+    if spec.authority.native:
+        actor = OperatorActor(*who, operator_name=rt.settings.cli.local_user, reason=reason)
+    else:
+        actor = FeatureActor(
+            *who,
+            operator=True,
+            write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
+            if builtin and agent_id
+            else None,
+            read_builtins=builtin_reader(edit, actor=agent_actor, ma_agent_id=agent_id)
+            if builtin and agent_id
+            else None,
+        )
     try:
         change = await change_feature(
             rt.sessionmaker,
@@ -367,6 +379,10 @@ def features_set_command(
             "`<value>:locked`), as `features get` showed it.",
         ),
     ] = None,
+    reason: Annotated[
+        str | None,
+        typer.Option("--reason", help="Why; required for approvals, and only for them. Audited."),
+    ] = None,
 ) -> None:
     """Set (or clear) one feature at one tier."""
     _check_key(key)
@@ -388,6 +404,7 @@ def features_set_command(
                 thread=thread,
                 locked=lock,
                 expected=expected,
+                reason=reason,
             )
 
     run_cli(run(), console=console)

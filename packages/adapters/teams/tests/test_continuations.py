@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from daimon.adapters.teams import app as app_module
@@ -527,15 +527,10 @@ async def test_a_handoff_refused_at_re_admission_is_not_marked_delivered(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
-async def test_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_turn_admin_cards_read_no_agent_source(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ordinary turn's Confirm card reads the switched agent's source as that
-    turn's own admitted caller, exactly like a Discord mention/Slack mention
-    turn's card. Built without the admission, every backend-switch card on this
-    call site (shared by mention and continuation turns) refuses
-    `source_unavailable`.
-    """
+    """An ordinary turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
     from daimon.core.turn.admission import Admission
@@ -585,9 +580,6 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patched_admission(),
@@ -610,14 +602,9 @@ async def test_turn_backend_switch_card_captures_through_its_own_admission(
         )
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert context.platform == "teams"
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("attended", [False, True])

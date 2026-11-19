@@ -112,6 +112,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.platform_words import words_for
@@ -639,6 +640,7 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
@@ -708,7 +710,7 @@ async def run_wizard_submit_turn_observed(
         # site had NO timeout of any kind before this phase -- the old
         # 45-minute wait_for lived only in bot.py's mention path, so a
         # wizard-submit turn could hang forever.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
 
         # --- Stage two: bind_session -- bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation
@@ -757,6 +759,7 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_card_intent.id),
                 edit=_edit_message,
                 agent_name=agent.name,
@@ -790,6 +793,7 @@ async def run_wizard_submit_turn_observed(
                         now=datetime.now(UTC),
                         # A successor's orphan sweep leaves a live owner's marker alone.
                         owner_key=bot.runtime.owner_key,
+                        deadline=turn_deadline_at,
                     )
                     await marker_session.commit()
 
@@ -877,7 +881,12 @@ async def run_wizard_submit_turn_observed(
                     )
                     await wm_session.commit()
     except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
-        _log.warning("wizard_submit.turn_failed", error=str(exc), short_id=row.id)
+        _log.warning(
+            "wizard_submit.turn_failed",
+            error=str(exc),
+            short_id=row.id,
+            causes=backend_refusal_causes(exc),
+        )
         finish_with_error(exc)
         await _render_wizard_turn_error(
             interaction, tenant_id=row.tenant_id, rid=rid, exc=exc, post_state=post_state

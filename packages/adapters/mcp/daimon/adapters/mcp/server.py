@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -26,6 +27,7 @@ from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.adapters.mcp.hub.app import mount_hub_apps
+from daimon.adapters.mcp.middleware.call_origin import CallOriginMiddleware
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
@@ -106,6 +108,7 @@ from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
+from daimon.adapters.mcp.tools.support import register_support_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
@@ -189,10 +192,19 @@ def _validate_settings(
             "DAIMON_MCP__PUBLIC_URL is required — use the URL MA will dial, "
             "e.g. https://daimon-mcp.example.com/mcp"
         )
-    if settings.mcp_identity.servers and settings.mcp_identity.signing_key is None:
+    if settings.mcp_identity.needs_signing_key and settings.mcp_identity.signing_key is None:
         raise BootstrapError(
             "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
-            "when DAIMON_MCP_IDENTITY__SERVERS is set"
+            "when DAIMON_MCP_IDENTITY__SERVERS has a signed server"
+        )
+    missing = [
+        server.name
+        for server in settings.mcp_identity.servers
+        if server.auth == "bearer" and server.name not in settings.mcp_identity.bearers
+    ]
+    if missing:
+        raise BootstrapError(
+            f"DAIMON_MCP_IDENTITY__BEARERS needs a key for bearer servers: {', '.join(missing)}"
         )
 
 
@@ -296,6 +308,9 @@ def create_mcp_app(
     validation is skipped; PUBLIC_URL is still enforced because
     `ensure_mcp_vault` needs it on the session-create side.
     """
+    # A switch preview's first use imports the OpenAI SDK: seconds of CPU on the
+    # event loop, stalling every request. Paid here, at startup, instead.
+    import_module("mux.drivers.openai")
     effective_settings = settings or load_settings()
     # The JSON chain and stdlib redaction before the first log line (uvicorn
     # has configured its loggers by the time it calls this factory); without
@@ -542,6 +557,7 @@ def create_mcp_app(
     identity_middleware.attach_host_call_gate(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
+    mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
     mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
@@ -615,6 +631,7 @@ def create_mcp_app(
     register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
+    register_support_tools(mcp, runtime)  # support limits for Ask a person
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read
@@ -699,7 +716,6 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:
-        assert identity.signing_key is not None
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,
@@ -713,9 +729,12 @@ def create_mcp_app(
                 servers={server.name: server for server in identity.servers},
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
-                tokens=IdentityTokenCache(
-                    load_signing_key(identity.signing_key.get_secret_value())
+                tokens=(
+                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    if identity.signing_key is not None
+                    else None
                 ),
+                bearers=identity.bearers,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),

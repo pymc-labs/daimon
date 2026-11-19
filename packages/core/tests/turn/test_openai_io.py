@@ -655,3 +655,21 @@ def test_usage_past_the_priced_limit_when_no_long_rate_then_counts_at_the_base_r
         "the tariff itself stays unpriced past its limit"
     )
     assert priced_cents([observation], price) == Decimal(200), "base rate: 2M at $1/M"
+
+
+@pytest.mark.asyncio
+async def test_usage_when_the_turn_resource_lacks_it_then_the_terminal_event_prices_the_turn(host):
+    """A completed turn whose resource reports no usage is billed from its terminal event."""
+    _, backend, wire, persistence = host
+    unmetered = {**turn("root"), "usage": None}
+    wire.turns.append(unmetered)
+    wire.live = [wire.event("turn.completed", "done", turn=unmetered, usage=turn("root")["usage"])]
+    wire.eof = True
+    io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
+    source = await io.open_stream(read_timeout_s=2)
+    frame = await source.__anext__()
+    await source.close()
+    assert frame.normalized is not None and frame.normalized.type == "session.turn_ended", frame
+    usage = await io.replay_usage()
+    assert [(u.input_tokens, u.output_tokens) for u in usage] == [(100, 20)], usage
+    assert priced_cents(usage, _price()) is not None, "the spend cap can price the turn"

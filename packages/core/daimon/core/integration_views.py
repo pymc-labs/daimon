@@ -22,6 +22,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_mcp_oauth_auth_response imp
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import UserFacingError
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.mux_backend import platform_scope, resource_scope
@@ -301,7 +302,11 @@ async def check_mcp_expiry(
                 if oldest is None or vault.created_at < oldest.created_at:
                     vaults[vault.display_name] = vault
     except APIError as exc:
-        log.warning("integrations.vault_list_failed", error_type=type(exc).__name__)
+        log.warning(
+            "integrations.vault_list_failed",
+            error_type=type(exc).__name__,
+            causes=backend_refusal_causes(exc),
+        )
         return [], False
 
     by_pair: dict[tuple[uuid.UUID, uuid.UUID], set[str]] = {}
@@ -338,7 +343,11 @@ async def check_mcp_expiry(
                         )
             except APIError as exc:
                 seen_all = False
-                log.warning("integrations.vault_read_failed", error_type=type(exc).__name__)
+                log.warning(
+                    "integrations.vault_read_failed",
+                    error_type=type(exc).__name__,
+                    causes=backend_refusal_causes(exc),
+                )
 
     await asyncio.gather(*(read(account, agent) for account, agent in pairs))
     return expired, complete and seen_all

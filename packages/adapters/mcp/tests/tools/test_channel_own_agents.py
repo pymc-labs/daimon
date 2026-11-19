@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
+from collections.abc import Iterator
 from dataclasses import replace
 from typing import Any
 
@@ -21,6 +22,7 @@ from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _channel_target as channel_target
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
 from daimon.adapters.mcp.tools._channel_policy import (
     load_read_policy,
     require_channel_writable,
@@ -114,6 +116,17 @@ OTHER = "222222222222222222"
 NEW_ROOM = "333333333333333333"
 SETUP_THREAD = "555555555555555555"
 OWN = ChannelRule(readers="own", writers="own")
+
+
+@pytest.fixture(autouse=True)
+def _inside_the_channels() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """These calls come from inside the channels they change (a private channel is inside-only)."""
+    ids = frozenset(
+        v for v in globals().values() if isinstance(v, str) and re.fullmatch(r"\d{18}", v)
+    )
+    token = CALL_ORIGIN.set(ids)
+    yield
+    CALL_ORIGIN.reset(token)
 
 
 class _World:

@@ -1,18 +1,20 @@
-"""Pick one conversation's model on any provider; it applies, or asks once first.
+"""Pick one conversation's model on any provider; it applies at once.
 
-Every chat's thread pick and the MCP `set_thread_model` tool share these. Any pick is
-previewed like an agent switch (`pick_thread_or_card`): one that loses nothing is kept at
-once, one that does shows the short card. Keeping it stores this agent's consent with the
-conversation, which `thread_backend` reads on the next turn. A pick off the agent's
-provider also needs the agent's `thread_providers` feature on, or its owner or an admin.
+Every chat's thread pick and the MCP `set_thread_model` tool share `pick_thread`. Keeping
+a pick stores this agent's run on that provider with the conversation, which
+`thread_backend` reads on the next turn; what the provider can't carry is off there and
+named in the note. A pick off the agent's provider also needs the agent's
+`thread_providers` feature on, or its owner or an admin.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import TYPE_CHECKING
 
+import structlog
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_model_names import AmbiguousModel, model_name
 from daimon.core.channel_backend import (
@@ -36,14 +38,17 @@ from daimon.core.roster import load_roster
 from daimon.core.stores import security_audit
 from daimon.core.stores.thread_models import put_thread_consent, set_thread_model
 from daimon.core.thread_models import THREAD_MODEL_CHOICES, ThreadModelChange
+from daimon.core.turn.stage_timing import elapsed_ms, stage_timer
 from mux.contracts.config import DEFAULT_BACKEND
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
     from daimon.core.config import Settings
     from daimon.core.scope import DeploymentDefault
-    from daimon.core.stores.domain import BackendAgent, Platform
+    from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Platform
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -118,57 +123,63 @@ def pick_value(choice: str) -> str:
     return f"{DEFAULT_BACKEND}:{model_id}" if model_id is not None else choice.strip()
 
 
-async def preview_thread_or_refusal(
-    pick: ThreadPick, value: str, *, admin: bool
-) -> ModelSwitchPreview | SwitchRefusal:
-    """`preview_thread_model`, with a refusal returned as the words a chat shows."""
-    try:
-        return await preview_thread_model(pick, value)
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
-    except AmbiguousModel:
-        return _ambiguous(value)
-
-
 def _ambiguous(value: str) -> SwitchRefusal:
     return SwitchRefusal(
         f"{value} could mean more than one model. Pick one from the list.", None, "ambiguous"
     )
 
 
-async def pick_thread_or_card(
+async def pick_thread(
     pick: ThreadPick, value: str, *, thread_id: str, admin: bool
-) -> ThreadModelChange | ModelSwitchPreview | SwitchRefusal:
-    """A conversation's pick: kept at once when nothing stops working, else the card to show."""
-    try:
-        shown = await preview_thread_model(pick, value)
-        return (
-            shown if await thread_asks_first(pick, shown) else await _keep(pick, shown, thread_id)
-        )
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
-    except AmbiguousModel:
-        return _ambiguous(value)
-
-
-async def thread_asks_first(pick: ThreadPick, shown: ModelSwitchPreview) -> bool:
-    """Whether a conversation's pick shows the card: something stops working, or it leaves
-    the agent's provider for someone who may not edit the agent."""
-    return shown.asks_first or not (
-        shown.model.provider == shown.before or await pick.service.may_edit(pick.agent, pick.actor)
-    )
-
-
-async def confirm_thread_or_refusal(
-    pick: ThreadPick, value: str, *, thread_id: str, digest: str, revision: int, admin: bool
 ) -> ThreadModelChange | SwitchRefusal:
-    """`confirm_thread_model`, with a refusal returned as the words a chat shows."""
+    """A conversation's pick, kept at once like any model change, or refused with why.
+
+    Logs one `thread_model.pick_timing` line: its stages, outcome and providers.
+    """
+    started, stage_ms = perf_counter(), dict[str, float]()
+    mark = stage_timer(stage_ms)
+    done: ThreadModelChange | SwitchRefusal | None = None
+    shown: ModelSwitchPreview | None = None
     try:
-        return await confirm_thread_model(
-            pick, value, thread_id=thread_id, digest=digest, revision=revision
+        try:
+            shown, runs = await _gated(pick, value)
+            mark("gates")
+            run = None
+            if runs:
+                # One capture: the run's own preview is the one shown, not a second read.
+                claude = shown.model.provider == DEFAULT_BACKEND
+                run, preview = await pick.service.thread_revision(
+                    pick.agent,
+                    None if claude else shown.model.provider,
+                    None if claude else shown.model.id,
+                )
+                shown = replace(shown, preview=preview)
+                mark("capture_and_preview")
+            done = await _keep(pick, shown, run, thread_id)
+            mark("apply")
+        except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+            done = refusal_of(error, admin=admin)
+        except AmbiguousModel:
+            done = _ambiguous(value)
+        return done
+    finally:
+        _log.info(
+            "thread_model.pick_timing",
+            tenant_id=str(pick.agent.tenant_id),
+            agent_id=str(pick.agent.agent_id),
+            platform=pick.platform,
+            thread_id=thread_id,
+            backend_from=shown.before if shown is not None else None,
+            backend_to=shown.model.provider if shown is not None else None,
+            model=shown.model.id if shown is not None else None,
+            outcome="applied"
+            if isinstance(done, ThreadModelChange)
+            else done.reason
+            if done is not None
+            else "failed",
+            total_ms=elapsed_ms(started),
+            stage_ms=stage_ms,
         )
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
 
 
 async def thread_model_picker(pick: ThreadPick) -> ModelPicker:
@@ -194,11 +205,8 @@ async def may_pick_provider(pick: ThreadPick) -> bool:
     return await pick.service.may_edit(pick.agent, pick.actor)
 
 
-async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPreview:
-    """What picking `value` (`provider:id`) for one conversation would change.
-
-    No preview (None) for a Claude pick on a Claude agent, which needs no consent.
-    """
+async def _gated(pick: ThreadPick, value: str) -> tuple[ModelSwitchPreview, bool]:
+    """The pick past its gates, not yet previewed, and whether it needs a run (a preview)."""
     service = pick.service
     policy = await service.tenant_policy(pick.agent.tenant_id) if service.enabled else None
     model = catalog_model(value, tenant=policy, agent_id=pick.agent.agent_id)
@@ -206,45 +214,20 @@ async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPrevi
     before = revision.backend if revision is not None and revision.backend else DEFAULT_BACKEND
     claude = model.provider == DEFAULT_BACKEND
     label = model_name(model)
+    shown = ModelSwitchPreview(model=model, label=label, before=before, preview=None)
     if claude and before == DEFAULT_BACKEND:
-        return ModelSwitchPreview(model=model, label=label, before=before, preview=None)
+        return shown, False
     if not service.enabled:
         raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
     if model.provider != before and not await may_pick_provider(pick):
         raise AgentBackendRefused("owner_or_admin_required", provider=model.provider)
-    preview = await service.preview(
-        pick.agent, None if claude else model.provider, None if claude else model.id
-    )
-    return ModelSwitchPreview(model=model, label=label, before=before, preview=preview)
+    return shown, True
 
 
-async def confirm_thread_model(
-    pick: ThreadPick, value: str, *, thread_id: str, digest: str, revision: int
+async def _keep(
+    pick: ThreadPick, shown: ModelSwitchPreview, run: AgentBackendRevision | None, thread_id: str
 ) -> ThreadModelChange:
-    """Keep the pick the person confirmed for this conversation, with its losses accepted.
-
-    The preview is read again; if it no longer matches what was shown nothing changes.
-    """
-    shown = await preview_thread_model(pick, value)
-    if shown.digest != digest or shown.revision != revision:
-        raise AgentBackendRefused("stale_preview", provider=shown.model.provider)
-    return await _keep(pick, shown, thread_id)
-
-
-async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> ThreadModelChange:
-    """Store `shown` for the conversation, its declared losses accepted."""
-    consent = None
-    if shown.preview is not None:
-        if not shown.allowed:
-            raise AgentBackendRefused("backend_not_allowed", provider=shown.model.provider)
-        claude = shown.model.provider == DEFAULT_BACKEND
-        consent = await pick.service.thread_consent(
-            pick.agent,
-            None if claude else shown.model.provider,
-            None if claude else shown.model.id,
-            expected_preview_digest=shown.digest,
-            accepted_drops=shown.preview.declared_drops,
-        )
+    """Store `shown` and its `run` for the conversation; what it can't carry is off there."""
     tenant_id = pick.agent.tenant_id
     async with pick.sessionmaker.begin() as session:
         await set_thread_model(
@@ -255,9 +238,9 @@ async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> 
             model=shown.model.id,
             provider=shown.model.provider,
         )
-        if consent is not None:
+        if run is not None:
             await put_thread_consent(
-                session, platform=pick.platform, thread_id=thread_id, revision=consent
+                session, platform=pick.platform, thread_id=thread_id, revision=run
             )
         await security_audit.append_event(
             session,
@@ -275,6 +258,7 @@ async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> 
     note = f"This conversation runs on {shown.label} from the next reply."
     if shown.model.provider != shown.before:
         note += " Earlier messages carry over."
+    note = " ".join((note, *shown.lines()))
     return ThreadModelChange(model_id=shown.model.id, note=note)
 
 

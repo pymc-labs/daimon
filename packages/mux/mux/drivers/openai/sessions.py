@@ -297,7 +297,7 @@ class OpenAISessions:
             body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
         if managed is not None:
             body["vault_ids"] = [managed.vault.id]
-        with suppress_mcp_error_details(managed is not None):
+        with suppress_mcp_error_details(managed.secrets if managed else ()):
             try:
                 raw = await self._c.call("POST", "/agents/sessions", body=body, key=key)
             except BaseException as error:
@@ -423,6 +423,12 @@ class OpenAISessions:
         self._c.check(scope, plan.session, "session")
         raise self._c.unsupported("session_conditional_update")
 
+    def managed_vault(self, scope: Scope, ref: ResourceRef) -> session_mcp.SessionMCPVault | None:
+        """The session's own MCP vault, when this driver created one."""
+        binding = self._binding_lookup(scope, ref.id) if self._binding_lookup is not None else None
+        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, ref.id))
+        return session_mcp.from_binding(self._c, scope, binding)
+
     @owned
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         self._c.check(scope, ref, "session")
@@ -433,10 +439,9 @@ class OpenAISessions:
         self._c.check(scope, ref, "session")
         path = "/agents/sessions/" + segment(ref.id)
         deleting = False
-        binding = self._binding_lookup(scope, ref.id) if self._binding_lookup is not None else None
-        binding = binding or self._mcp_bindings.get((scope.tenant_id, scope.account_id, ref.id))
-        managed = session_mcp.from_binding(self._c, scope, binding)
-        with suppress_mcp_error_details(managed is not None):
+        managed = self.managed_vault(scope, ref)
+        # Wiped: the session's vault may hold bearers of turns this request never saw.
+        with suppress_mcp_error_details(None if managed else ()):
             try:
                 async with asyncio.timeout(_DELETE_TIMEOUT):
                     while True:

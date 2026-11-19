@@ -748,13 +748,26 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
 
 
 @pytest.mark.parametrize(
-    "mode", ["members", "disabled", "tenant_disabled", "blocked", "sealed", "revoked"]
+    "mode",
+    [
+        "members",
+        "disabled",
+        "tenant_disabled",
+        "blocked",
+        "sealed",
+        "revoked",
+        "unlisted",
+        "role_listed",
+        "role_missing",
+    ],
 )
 async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     mode: str,
 ) -> None:
+    from datetime import UTC, datetime
+
     from daimon.core.config import DirectMessagePolicy
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.stores.routines import update_routine
@@ -769,6 +782,15 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
             destination_kind="dm",
         )
         await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=mode != "tenant_disabled")
+        if mode in ("unlisted", "role_listed", "role_missing"):
+            from daimon.core.stores.dm_access import set_grant
+
+            # The routine's agent lists someone else, or a role: only its holders get the DM.
+            await set_grant(
+                session, tenant_id=row.tenant_id, agent_name=row.agent_name, who="listed",
+                user_ids=["424242"], group_ids=[] if mode == "unlisted" else ["R1"],
+                set_by=None, now=datetime.now(UTC),
+            )  # fmt: skip
     assert updated is not None
     if mode == "sealed":
         from daimon.core.access_policy import ChannelRule
@@ -792,7 +814,8 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     dms = _Dms(fail=mode == "blocked")
 
     async def membership(tenant_id, guild_id, user_id):
-        return Membership(is_member=mode != "revoked")
+        roles = ("R1",) if mode == "role_listed" else ()
+        return Membership(is_member=mode != "revoked", role_ids=roles)
 
     poster = make_discord_routine_poster(
         db_session_factory,
@@ -805,8 +828,9 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     )
     outcome = await poster(updated.model_copy(update={"delivery_payload": "private @everyone"}))
     fetch.assert_not_awaited()
-    assert outcome.status == ("delivered" if mode == "members" else "skipped")
-    assert bool(dms.sent) == (mode == "members")
+    delivered = mode in ("members", "role_listed")
+    assert outcome.status == ("delivered" if delivered else "skipped")
+    assert bool(dms.sent) == delivered
     if dms.sent:
         assert dms.sent[0][:2] == (_GUILD, 1)
         assert "private @everyone" in dms.sent[0][2]
@@ -955,6 +979,54 @@ async def test_dm_delivery_rechecks_all_live_agent_names(db_session_factory, age
     result = await poster(row.model_copy(update={"delivery_payload": "private"}))
     assert result.status == ("delivered" if agent_state == "unrelated_rule" else "skipped")
     assert bool(dms.sent) == (agent_state == "unrelated_rule")
+
+
+@pytest.mark.parametrize(("roles", "delivered"), [(("123",), True), ((), False)])
+async def test_dm_delivery_of_a_role_gated_alias_needs_the_owner_to_hold_its_roles(
+    db_session_factory, roles, delivered
+):
+    """The live names are checked against the owner's fresh roles, not an empty subject."""
+    from daimon.core.access_policy import AgentRule
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.stores.routines import update_routine
+
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        row = await update_routine(
+            session,
+            row.id,
+            edited_by=row.created_by_user_id,
+            tenant_id=row.tenant_id,
+            destination_kind="dm",
+        )
+        assert row is not None
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(
+                agent_rules={"pinned name": AgentRule(invoker_role_ids=("123",))}
+            ),
+        )
+    dms = _Dms()
+
+    async def member(*args):
+        return Membership(is_member=True, role_ids=roles)
+
+    async def names(_):
+        return ("daimon", "pinned name")
+
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=AssertionError("not a channel")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),
+        resolve_agent_names=names,
+    )
+    result = await poster(row.model_copy(update={"delivery_payload": "private"}))
+    assert result.status == ("delivered" if delivered else "skipped"), result.note
+    assert bool(dms.sent) == delivered, "only a role holder gets the private delivery"
 
 
 @pytest.mark.parametrize("destination", ["channel", "dm"])

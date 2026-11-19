@@ -34,6 +34,7 @@ from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.layout import hairline, header
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.roster import Page, RosterAgent, paginate
 from daimon.core.scope import ChannelConfigRow, ConfigTier, DeploymentDefault, TenantConfigRow
@@ -354,7 +355,10 @@ class RosterView(PanelViewBase):
         except (DaimonError, anthropic.APIError, discord.HTTPException) as error:
             request_id = generate_request_id()
             log.exception(
-                "agent_setup.details.failed", agent_name=agent.name, request_id=request_id
+                "agent_setup.details.failed",
+                agent_name=agent.name,
+                request_id=request_id,
+                causes=backend_refusal_causes(error),
             )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
@@ -406,7 +410,11 @@ class RosterView(PanelViewBase):
             )
         except (DaimonError, anthropic.APIError, discord.HTTPException) as error:
             request_id = generate_request_id()
-            log.exception("agent_setup.routing.failed", request_id=request_id)
+            log.exception(
+                "agent_setup.routing.failed",
+                request_id=request_id,
+                causes=backend_refusal_causes(error),
+            )
             await interaction.followup.send(
                 embed=build_notice_embed(render_error(error, request_id=request_id)), ephemeral=True
             )

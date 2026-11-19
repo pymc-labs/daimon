@@ -25,7 +25,13 @@ from daimon.core.answering_map import AnsweringMap
 from daimon.core.backend_refusals import RefusalAction
 from daimon.core.github_panel import GrantsPanel
 from daimon.core.github_repo_auth import normalize_owner_repo
-from daimon.core.model_switch import REVIEW_AGAIN_LABEL, SWITCH_BACK_LABEL, ModelPicker
+from daimon.core.model_switch import (
+    BACK_LABEL,
+    CANCEL_LABEL,
+    SWITCH_BACK_LABEL,
+    TRY_AGAIN_LABEL,
+    ModelPicker,
+)
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.platform_words import words_for
@@ -40,7 +46,6 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -334,29 +339,18 @@ def model_switch_card(
     *,
     agent_name: str,
     value: str,
-    revision: int = 0,
-    digest: str = "",
-    confirm: bool = False,
+    refused: bool = True,
     action: RefusalAction | None = None,
 ) -> AdaptiveCard:
-    """A pick's card or refusal: Cancel, then Switch or the one step the refusal offers."""
+    """A refused pick (Cancel, then the one step it offers), or what an applied
+    pick turned off (Back)."""
     fields: dict[str, str | int] = {"agent": agent_name, "target": value}
-    actions: list[Action] = [_button(CANCEL_LABEL, "backend_cancel", agent=agent_name)]
-    if confirm:
-        actions.append(
-            _button(
-                SWITCH_LABEL,
-                "backend_confirm",
-                "positive",
-                revision=revision,
-                digest=digest,
-                **fields,
-            )
-        )
-    elif action == "switch_back_to_claude":
+    label = CANCEL_LABEL if refused else BACK_LABEL
+    actions: list[Action] = [_button(label, "backend_cancel", agent=agent_name)]
+    if refused and action == "switch_back_to_claude":
         actions.append(_button(SWITCH_BACK_LABEL, "backend_back", "positive", **fields))
-    elif action in ("fresh_preview", "confirm_again"):
-        actions.append(_button(REVIEW_AGAIN_LABEL, "backend_again", "positive", **fields))
+    elif refused and action == "fresh_preview":
+        actions.append(_button(TRY_AGAIN_LABEL, "backend_again", "positive", **fields))
     return _card("Model", [_text("\n".join(lines)[:3000])], actions)
 
 

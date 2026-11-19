@@ -6,16 +6,19 @@ import { wait } from "./util"
 
 const ON_OFF = [{ value: "on", label: "On" }, { value: "off", label: "Off" }]
 const ALL: Tier[] = ["deployment", "workspace", "agent", "channel", "thread"]
-const schema = (key: string, name: string, tiers: Tier[] = ALL, more: Partial<FeatureSchema> = {}): FeatureSchema => ({
-  key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: "on", tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
+const schema = (key: string, name: string, tiers: Tier[] = ALL, fallback = "on", more: Partial<FeatureSchema> = {}): FeatureSchema => ({
+  key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: fallback, tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
   platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "", ...more,
 })
 const GUARDRAILS = { category: "guardrails", categoryName: "Guardrails", default: "off" }
 const KEPT: Tier[] = ["deployment", "workspace", "agent"]
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
-  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
-  schema("monitor_direct_messages", "Monitor direct messages", KEPT, GUARDRAILS), schema("monitor_mcp", "Monitor coding tools", KEPT, GUARDRAILS),
+  schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "Thumbs-down feedback", ["deployment", "workspace", "agent", "channel"], "off"),
+  schema("support_own_channel", "Own request channel", ["deployment"]),
+  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]),
+  schema("direct_messages", "Direct messages", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
+  schema("monitor_direct_messages", "Monitor direct messages", KEPT, "off", GUARDRAILS), schema("monitor_mcp", "Monitor coding tools", KEPT, "off", GUARDRAILS),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])
@@ -23,7 +26,9 @@ const locks = new Map<string, string>([["cost_footer", "off"]])
 const NO_SANDBOX = "c_general"
 const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
-const own = new Map<string, string>([[`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+const own = new Map<string, string>([["ag_review//|agent|direct_messages", "off"], ["//|workspace|support_escalation", "on"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+/** Set `?support=unmet` to see Ask a person without a request channel. */
+const flag = () => (typeof location === "undefined" ? "" : new URLSearchParams(location.search).get("support") ?? "")
 /** Monitoring on an agent's own tier: seeded for two agents so the admin pages have something to show. */
 const SEEDED: [string, string, string][] = [
   ["ag_pricing", "monitor_direct_messages", "on"], ["ag_pricing", "monitor_mcp", "on"], ["ag_mmm", "monitor_direct_messages", "on"],
@@ -32,21 +37,34 @@ for (const [agent, key, value] of SEEDED) own.set(`${agent}//|agent|${key}`, val
 /** Whether a monitoring key is on for an agent, as the features set it. */
 export const monitoringOn = (agent: string, key: "monitor_direct_messages" | "monitor_mcp") => (own.get(`${agent}//|agent|${key}`) ?? "off") === "on"
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
+/** The workspace tier is set once for the whole workspace; the others per place. */
+const at = (url: URL, tier: Tier) => (tier === "workspace" ? "//" : place(url))
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 
 function viewOf(url: URL, s: FeatureSchema): FeatureView {
   const lock = locks.get(s.key)
   const tiers = tiersOf(url).filter((t) => s.tiers.includes(t)).map((tier) => {
     if (tier === "workspace" && lock) return { tier, value: lock, locked: true, text: `${lock}:locked` }
-    const text = own.get(`${place(url)}|${tier}|${s.key}`) ?? "default"
+    const text = own.get(`${at(url, tier)}|${tier}|${s.key}`) ?? "default"
     return { tier, value: text.split(":")[0]!, locked: text.endsWith(":locked"), text }
   })
   const locked = tiers.find((t) => t.locked)
   const set = locked ?? [...tiers].reverse().find((t) => t.value !== "default")
   const value = set?.value ?? s.default
-  const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : null
-  return { key: s.key, tiers, value, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === value)?.label ?? value }
+  const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : s.key === "support_escalation" && flag() === "unmet" ? "Pick a support channel." : null
+  // An unmet requirement resolves to off, as the server does.
+  const shown = unavailable && s.key === "support_escalation" ? "off" : value
+  return { key: s.key, tiers, value: shown, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === shown)?.label ?? shown }
 }
+
+/** The agents and channels that have a value of their own for `key`, as `{ scope, id }`. */
+export const overridden = (key: string) => [...own].flatMap(([k, v]) => {
+  const [at, tier, name] = k.split("|")
+  const [agent, channel] = at!.split("/")
+  return name === key && v !== "default" && (tier === "agent" || tier === "channel") ? [{ scope: tier, id: (tier === "agent" ? agent : channel)! }] : []
+})
+/** What `?support=` asks the mock to show: `locked` (the deployment keeps its own request channel), `unmet`, `blocked` (Daimon can't post in the channel) or `unverified` (the check failed). */
+export const supportFlag = flag
 
 export const featuresHandlers: HttpHandler[] = [
   http.get("/api/features/schema", async () => { await wait(); return HttpResponse.json(SCHEMA) }),
@@ -65,7 +83,7 @@ export const featuresHandlers: HttpHandler[] = [
       if (b.locked) locks.set(b.key, b.value)
       else locks.delete(b.key)
     }
-    own.set(`${place(url)}|${b.tier}|${b.key}`, b.locked ? `${b.value}:locked` : b.value)
+    own.set(`${at(url, b.tier)}|${b.tier}|${b.key}`, b.locked ? `${b.value}:locked` : b.value)
     return HttpResponse.json(viewOf(url, s))
   }),
 ]

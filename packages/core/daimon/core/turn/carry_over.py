@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 
 import structlog
-from daimon.core.channel_backend import channel_ref
+from daimon.core.channel_backend import backend_refusal_causes, channel_ref
 from daimon.core.errors import DaimonError
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref
 from daimon.core.stores.thread_sessions import get_thread_session_at
@@ -191,7 +191,12 @@ async def _old_session(
             return unread
         return reader(_runtime(request, revision), revision, request.scope, binding, store)
     except (DaimonError, MuxError, KeyError) as error:
-        log.warning("carry_over.reader_unavailable", profile=binding.profile, error=str(error))
+        log.warning(
+            "carry_over.reader_unavailable",
+            profile=binding.profile,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         return unread
 
 
@@ -328,7 +333,12 @@ async def carry_into_managed_agents(
                 request.scope, session, mount, key=f"carry-over:{session_id}:{mount.id}"
             )
         except MuxError as error:
-            log.warning("carry_over.file_not_mounted", mount_id=mount.id, error=str(error))
+            log.warning(
+                "carry_over.file_not_mounted",
+                mount_id=mount.id,
+                error=str(error),
+                causes=backend_refusal_causes(error),
+            )
             continue
         mounted.append(mount)
     return replace(carried, mounts=tuple(mounted))

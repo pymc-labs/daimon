@@ -37,14 +37,23 @@ from typing import Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.agent_identity import (
     AgentIdentity,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_subject,
+    holds_agent_roles,
+)
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -53,7 +62,7 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
-from daimon.core.platform_words import scrub_other_platforms, turn_words
+from daimon.core.platform_words import turn_words
 from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -68,12 +77,15 @@ from daimon.core.stores.routines import (
     routine_platform,
     settle_routine_delivery,
 )
+from daimon.core.stores.routines import (
+    OWNER_LACKS_ROLE_ERROR as OWNER_LACKS_ROLE_ERROR,
+)
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import ROUTINE_WEB_SENTENCE, words_sentence
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import TenantLinks, links_at, panel_links
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
@@ -188,12 +200,25 @@ def teams_thread_id(target: DeliveryTarget) -> str:
 DirectPost = Literal["allowed", "protected", "unverified"]
 
 
+async def routine_links(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
+) -> TenantLinks | None:
+    """A routine fire's web links, with a member's access, where `web_awareness` is On where
+    it fires (`routine_feature_place`)."""
+    from daimon.core.rule_views import routine_feature_place  # imports this module
+
+    place = routine_feature_place(row, platform=platform)
+    return await links_at(
+        sessions, settings, place, panel_links(settings.web, row.tenant_id, admin=False)
+    )
+
+
 def render_routine_controls(
     row: RoutineRow,
     *,
     platform: str,
     direct_post: DirectPost = "allowed",
-    web: WebLinks | None = None,
+    web: TenantLinks | None = None,
     held: bool = False,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
@@ -203,9 +228,9 @@ def render_routine_controls(
     a routine with a destination: a routine without one sends its trigger
     message exactly as before. `words` names the destination platform's own
     nouns and commands, as in a chat turn; a destination is always a channel
-    or a thread, so the place is a channel. `web` adds the routine's own workspace
-    on the web, as a chat turn's controls do, for a reader with a member's access; a `held`
-    fire, into a channel shared with another organisation, gets none.
+    or a thread, so the place is a channel. `web` (`routine_links`) adds the routine's own
+    workspace on the web, as a chat turn's controls do; a `held` fire, into a channel shared
+    with another organisation, gets none.
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -234,7 +259,7 @@ def render_routine_controls(
     }
     if platform in CHAT_PLATFORMS:
         controls["words"] = turn_words(platform, place="channel")
-    links = None if web is None or held else web.for_tenant(row.tenant_id, admin=False)
+    links = None if held else web
     if links is not None:
         controls["web"] = {"url": links.root()}
     if row.destination_kind == "dm":
@@ -352,6 +377,32 @@ _TURN_NOTICE_FAILURES = (
 )
 
 
+def lapsed_role(
+    policy: TenantAccessPolicy, agent_names: tuple[str | None, ...], owner: Subject
+) -> bool:
+    """The owner is a freshly verified member missing a role the agent needs.
+
+    Such a routine is paused at fire time and listed by `daimon routines
+    check-roles`. An owner who left, or whose membership could not be read, is
+    not lapsed: their fire is refused and retried.
+    """
+    return (
+        bool(agent_invoker_roles(policy, agent_names))
+        and owner.membership_fresh
+        and not holds_agent_roles(policy, agent_names, owner)
+    )
+
+
+def lapsed_role_card(row: RoutineRow) -> tuple[str, str]:
+    """The error card DMed to a routine's owner when it was paused for a lapsed role."""
+    label = row.name or routine_phrase(row.cron_expr, row.timezone)
+    return (
+        f'Your routine "{label}" ({row.agent_name}) is paused: you no longer have a role'
+        " its agent needs.",
+        "Ask an admin for the role, then resume it from /routines.",
+    )
+
+
 def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
     """The notice a failed run posts to its destination.
 
@@ -434,14 +485,12 @@ def render_fallback_post(
 ) -> str:
     """The message posted for a routine whose agent did not post itself.
 
-    On a chat `platform` the result never names another chat app.
-
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
+    payload = decode_payload(payload_for(row)).text.strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -543,14 +592,13 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = None) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
-    The agent and schedule first, then why the result is here, then the result,
-    which on a chat `platform` never names another chat app.
+    The agent and schedule first, then why the result is here, then the result.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
+    payload = decode_payload(payload_for(row)).text.strip()
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
@@ -660,15 +708,6 @@ async def clear_creator(
                 thread_id=row.source_thread_id,
             ):
                 return "restricted_source"
-            if not authorize(
-                policy,
-                subject=Subject(),
-                action=Action.RUN_AGENT,
-                surface=Surface.ROUTINE,
-                agent=AgentRef.of(row.agent_name),
-                place=Place(),
-            ):
-                return "agent_not_allowed"
         is_admin = False
         if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(
@@ -692,6 +731,17 @@ async def clear_creator(
             policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         ):
             return "invoker_not_allowed"
+        # The owner's freshly resolved subject, so a role-gated agent still sends
+        # for an owner who holds its roles, and for nobody else.
+        if row.destination_kind == "dm" and not authorize(
+            policy,
+            subject=subject,
+            action=Action.RUN_AGENT,
+            surface=Surface.ROUTINE,
+            agent=AgentRef.of(row.agent_name),
+            place=Place(),
+        ):
+            return "agent_not_allowed"
         return policy
     refusal = creator_refusal_for(
         policy,

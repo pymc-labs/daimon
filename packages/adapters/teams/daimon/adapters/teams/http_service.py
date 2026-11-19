@@ -18,6 +18,7 @@ from daimon.adapters.teams import (
     card,
     credential_requests,
     own_cards,
+    personal_chat,
     privacy_card,
     provider_actions,
     routines_card,
@@ -61,7 +62,13 @@ from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
-from daimon.adapters.teams.team_owners import fetch_team_owner_ids
+from daimon.adapters.teams.support_menu_card import SETTLE_VERB as SUPPORT_SETTLE_VERB
+from daimon.adapters.teams.support_settle import TeamsSupportSettle
+from daimon.adapters.teams.team_owners import (
+    fetch_team_member_ids,
+    fetch_team_owner_ids,
+    team_member_lookup,
+)
 from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_model import VERB as THREAD_MODEL_VERB
 from daimon.adapters.teams.thread_model import ThreadModelActions, show_model
@@ -281,7 +288,11 @@ def create_teams_http_service(
         # `spawn` is bound below, before any read: the drain waits for a demotion.
         in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
-    runtime = dataclasses.replace(runtime, team_owners=owner_reads)
+    runtime = dataclasses.replace(
+        runtime,
+        team_owners=owner_reads,
+        team_members=runtime.team_members or functools.partial(fetch_team_member_ids, graph),
+    )
 
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
@@ -423,6 +434,7 @@ def create_teams_http_service(
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
             feed=feed,
+            team_members=team_member_lookup(runtime),
         ),
     )
 
@@ -459,6 +471,8 @@ def create_teams_http_service(
         reader=reader,
     )
     teams_app.on_card_action_execute(thread_handoff.VERB, handover.on_action)
+    dm_pick = personal_chat.TeamsDmPick(runtime, wake=turns.wake_dm, refuse=turns.refuse_dm)
+    teams_app.on_card_action_execute(personal_chat.VERB, dm_pick.on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
     teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
     teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
@@ -470,6 +484,9 @@ def create_teams_http_service(
         teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
         teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
         teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
+    # Always on: posts stay settleable where they were posted, whatever changed since.
+    settle = TeamsSupportSettle(runtime)
+    teams_app.on_card_action_execute(SUPPORT_SETTLE_VERB, settle.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)

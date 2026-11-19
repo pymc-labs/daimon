@@ -123,9 +123,16 @@ def _open(user: str) -> dict[str, object]:
     return make_invoke("task/fetch", {"data": {"dialog_id": CHANNEL_DIALOG}}, user=user)
 
 
-def _submit(user: str, op: str, **fields: str) -> dict[str, object]:
+def _submit(user: str, op: str, *, chat: str | None = None, **fields: str) -> dict[str, object]:
     data: Mapping[str, object] = {"action": CHANNEL_DIALOG, "op": op} | fields
-    return make_invoke("task/submit", {"data": dict(data)}, user=user)
+    invoke = make_invoke("task/submit", {"data": dict(data)}, user=user)
+    if chat is not None:  # a click from inside a channel, not the 1:1 chat
+        invoke["conversation"] = {
+            "id": chat,
+            "conversationType": "channel",
+            "tenantId": ENTRA_TENANT_ID,
+        }
+    return invoke
 
 
 async def _events(db_factory: async_sessionmaker[AsyncSession]) -> list[tuple[str, str, str]]:
@@ -213,7 +220,8 @@ async def test_a_server_admin_is_sent_to_chat_to_confirm_an_open_network(
         )
     async with _running(service_session_factory, teams_api_fake) as service:
         held = await post_activity(
-            service, _submit(ADMIN, "environment", channel=GROWTH, environment="env:science")
+            service,
+            _submit(ADMIN, "environment", chat=GROWTH, channel=GROWTH, environment="env:science"),
         )
 
     assert "Ask me in chat to make this change for #Growth, then confirm when I ask." in json.dumps(

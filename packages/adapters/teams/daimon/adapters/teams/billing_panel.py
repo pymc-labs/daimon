@@ -560,10 +560,14 @@ def checkout_card(url: str, amount: int, place: str | None = None) -> AdaptiveCa
     return AdaptiveCard(body=body, fallback_text="Complete payment")
 
 
-def _spend_url(
-    runtime: TeamsRuntime, tenant_id: uuid.UUID, admin: bool, foreign: bool
+async def _spend_url(
+    runtime: TeamsRuntime,
+    tenant_id: uuid.UUID,
+    admin: bool,
+    foreign: bool,
+    channel_id: str | None,
 ) -> str | None:
-    links = web_links(runtime, tenant_id, admin=admin, foreign=foreign)
+    links = await web_links(runtime, tenant_id, admin=admin, foreign=foreign, channel_id=channel_id)
     return links.spend() if links else None
 
 
@@ -663,7 +667,9 @@ class BillingPanel:
             channel_names=channel_names,
             place=place,
             lookup=lookup,
-            web_url=_spend_url(self._runtime, tenant_id, is_admin, foreign),
+            web_url=await _spend_url(
+                self._runtime, tenant_id, is_admin, foreign, self._channel_of(place, user_id)
+            ),
         )
 
     async def _named(

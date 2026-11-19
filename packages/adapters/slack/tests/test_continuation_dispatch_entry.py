@@ -1296,17 +1296,13 @@ async def test_continuation_admits_a_dm_scope_as_a_dm(
     assert admit.await_args.kwargs["is_dm"] is is_dm
 
 
-async def test_continuation_turn_backend_switch_card_captures_through_its_own_admission(
+async def test_continuation_turn_admin_cards_read_no_agent_source(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A follow-up (continuation) turn's Confirm card reads the switched agent's
-    source as that turn's own admitted caller, exactly like a mention turn's card.
-    Built without the admission, every backend-switch card on this call site
-    refuses `source_unavailable`.
-    """
+    """A continuation turn builds its admin cards once, and they read no agent source."""
     from daimon.core import confirmation
     from daimon.core.config import TurnSettings
 
@@ -1338,9 +1334,6 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         return real_callbacks(service, **kwargs)
 
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", spy_callbacks)
-    captured = MagicMock(name="captured_source")
-    capture_backend_source = AsyncMock(return_value=captured)
-    monkeypatch.setattr("daimon.core.turn.admission.capture_backend_source", capture_backend_source)
 
     with (
         patch(
@@ -1375,18 +1368,9 @@ async def test_continuation_turn_backend_switch_card_captures_through_its_own_ad
         )
 
     (service,) = services
-    source = MagicMock(name="source")
-    capture = service._capture_source  # pyright: ignore[reportPrivateUsage]
-    assert await capture(source) is captured
-    capture_backend_source.assert_awaited_once()
-    args, kwargs = capture_backend_source.await_args
-    assert args[1] is source
-    context = kwargs["context"]
-    assert (context.platform, context.channel_id, context.thread_id) == (
-        "slack",
-        _CHANNEL,
-        _THREAD_ID,
-    )
+    read_only = service._read_only  # pyright: ignore[reportPrivateUsage]
+    assert read_only, "an allowlist or pin card changes no agent"
+    assert service._capture_source is None, "and reads no agent source"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize("attended", [False, True])

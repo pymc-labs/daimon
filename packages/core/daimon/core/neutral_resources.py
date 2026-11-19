@@ -413,8 +413,12 @@ class NeutralResourceHost:
                     ),
                     bundle=record.bundle,
                 )
-            except (ProviderError, SkillIngestError, CatalogConflict):
-                _log.warning("neutral_resources.skill_copy_failed")
+            except (ProviderError, SkillIngestError, CatalogConflict) as error:
+                from daimon.core.channel_backend import backend_refusal_causes
+
+                _log.warning(
+                    "neutral_resources.skill_copy_failed", causes=backend_refusal_causes(error)
+                )
                 dropped.append(record.bundle.preview.name)
                 continue
             kept.append(concrete)

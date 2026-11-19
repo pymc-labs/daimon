@@ -734,7 +734,7 @@ def channel_refusals() -> Iterator[None]:
         )
         raise HTTPException(status, str(exc)) from exc
     except ChannelRuleRefused as exc:
-        status = 403 if exc.reason == "admin_required" else 422
+        status = 403 if exc.reason in ("admin_required", "sealed_channel") else 422
         raise HTTPException(status, str(exc)) from exc
     except AccessPolicyUnreadable as exc:
         raise HTTPException(503, _UNREADABLE) from exc

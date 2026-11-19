@@ -939,29 +939,26 @@ async def test_another_runtime_reads_a_pause_it_does_not_answer(
 
 
 @pytest.mark.parametrize("policy", [_ENABLED, _DISABLED], ids=["enabled", "disabled"])
-@pytest.mark.parametrize(
-    "call",
-    [
-        ("daimon-mcp", "request_agent_backend_switch", {"preview_digest": "d1", "revision": 3}),
-        ("daimon-mcp", "microsoft_send", {"action": "send_mail"}),
-    ],
-    ids=["backend_switch", "microsoft_send"],
-)
 async def test_a_protected_first_party_action_is_refused_unattended(
-    policy: ToolSafetyPolicy, call: Call, factory: async_sessionmaker[AsyncSession]
+    policy: ToolSafetyPolicy, factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """Review A, finding 1: nobody is here to press its card, policy on or off."""
+    """Review A, finding 1: nobody is here to press its card, policy on or off.
+
+    A provider switch is not protected: it applies like a model change.
+    """
+    call: Call = ("daimon-mcp", "microsoft_send", {"action": "send_mail"})
     fake = FakeSession(script=[[call]]).with_daimon()
     await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, policy, public_url=_PUBLIC)
     _restart()
     await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await _settle(runtime)
-    assert [c["result"] for c in fake.confirmations] == ["deny"]
+    assert [c["result"] for c in fake.confirmations] == ["deny"], "nobody is here to confirm"
     [(_, agent)] = [c for c in fake.calls if c[0] == "update"]
     daimon = next(t for t in agent["tools"] if t["mcp_server_name"] == "daimon-mcp")
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
-    assert {"request_agent_backend_switch", "microsoft_send"} <= asked
+    assert "microsoft_send" in asked, asked
+    assert "request_agent_backend_switch" not in asked, "a switch asks nobody"
 
 
 async def test_a_foreign_reserved_server_is_healed_with_safety_off(
@@ -1488,3 +1485,43 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
         )
         assert await asyncio.wait_for(worker, timeout=5) is False
     assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
+async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
+    monkeypatch: pytest.MonkeyPatch, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Nobody watches an agent-chat turn: its worker follows the unattended run limit."""
+    from daimon.core.features.service import set_workspace_feature
+
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+        await set_workspace_feature(
+            db,
+            None,
+            tenant_id=_TENANT_ID,
+            platform="discord",
+            key="unattended_time_limit",
+            value="30",
+            account_id=None,
+            surface="cli",
+        )
+    real = safety.unattended_ceiling_s
+    read: list[float] = []
+
+    async def bounded(*args: Any, **kwargs: Any) -> float:
+        read.append(await real(*args, **kwargs))
+        return 0.05
+
+    monkeypatch.setattr(safety, "unattended_ceiling_s", bounded)
+    fake = FakeSession(frozen="always_ask")
+    fake.pause()
+    runtime = _runtime(fake, factory, _DISABLED)
+    worker = safety.watch_turn(
+        runtime,
+        _auth(platform="discord"),
+        _SESSION,
+        turn_event_id="evt_never_listed",
+        rules_channel_id="C1",
+    )
+    assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
+    assert read == [30 * 60.0], "the worker reads the tenant's unattended run limit"

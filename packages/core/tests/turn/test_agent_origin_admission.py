@@ -99,13 +99,16 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
     # The refusal names the code site that raised it (SMOKE-1: 12+ candidate sites).
     assert first.pop("site").startswith("turn.runtime_manifest.read_preparation_counterpart:")
     assert first == {"type": "AdmissionDenied", "reason": "backend_unsupported"}
-    assert any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
+    # A component that isn't this agent's source is refused, as is a failed read.
+    drift = any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
+    assert drift is accepted
     assert "private" not in str(refused.value)
-    assert (refused.value.cause, refused.value.provider) == ("agent_backend", provider)
+    # The provider is set up; never say it isn't.
+    assert (refused.value.cause, refused.value.provider) == ("preparation_failed", provider)
     async with host.sessions() as db:
         assert await mux_state.latest_config_revision(db, REVISION.channel) is None
         assert await mux_state.next_config_local(db, REVISION.channel) == 1
-    assert reads == [], "refusal must precede native component readback and INSERT"
+    assert len(reads) == 1, "one readback, and the refusal precedes any INSERT"
     assert host.wire.requests == [] and host.created == []
 
 
@@ -139,6 +142,7 @@ async def test_prewrite_source_projection_receives_effective_seal_and_memory_pol
         assert captured.origin_channel_id == "channel" and captured.origin_thread_id == "new"
         assert captured.channel_skills == ()
         assert request.scope.account_id == str(captured.account_id)
+        assert captured.toolset.hidden_daimon_tools, "hides what its turn hides (capabilities Off)"
         seen.append(request)
         raise AdmissionDenied(reason="backend_unsupported")
 

@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
@@ -62,9 +62,6 @@ from mux.contracts.ports import ManagedAgents
 from mux.state.store import StateStore
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-if TYPE_CHECKING:
-    from daimon.core.thread_model_reask import ThreadReaskNotifier
 
 
 @dataclass(frozen=True)
@@ -110,8 +107,6 @@ class TurnDeps:
     preparation_gate: PreparationGate = field(default_factory=lambda: PreparationGate(1))
     # Sends the channel budget notice; set by an adapter with a platform client.
     budget_notifier: BudgetNotifier | None = None
-    # Posts a conversation's model card again when an agent edit left its consent stale.
-    thread_reask_notifier: ThreadReaskNotifier | None = None
     # The notice's server admins, where the stored role is not the source (Teams).
     server_admins: ServerAdminIds | None = None
     # Native MA client remains during the rollout; ancillary Messages calls
