@@ -102,8 +102,9 @@ async def test_a_fresh_install_answers_on_gemini(
                 await _idle(service.turns)
                 assert response.status_code == 200, f"{response.status_code}: {response.text}"
         shown, ids = bot.texts(), [i for i, _ in bot.activities]
-        assert shown[0].startswith("**Working on it"), f"the turn shows progress first: {shown}"
-        assert ids[1] == ids[0] and shown[1] == "Found the launch notes.", f"reply: {shown}"
+        card = [t for i, t in zip(ids, shown, strict=True) if i == ids[0]]
+        assert card[0].startswith("**Working on it"), f"the turn shows progress first: {shown}"
+        assert card[-1] == "Found the launch notes.", f"the reply replaces the card: {shown}"
         assert "used" in shown[-1] and "gemini" in shown[-1], f"the footer shows cost: {shown}"
         metered, billed = await metering(w, tenant_id, "gemini")
         assert metered == billed and w.gemini.reported, f"metered on Gemini: {metered} != {billed}"
