@@ -90,8 +90,10 @@ Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
-A routine whose channel selects the self-hosted backend stops with `last_error=selfhosted_routines_unsupported`, because headless routines
-need Anthropic Managed Agents. A thread destination with an unknown parent
+A routine whose agent, channel or thread is on another provider is not run. The
+self-hosted backend stops with `last_error=selfhosted_routines_unsupported`;
+OpenAI and Gemini stop with a message saying routines run only on Anthropic.
+Headless routines need Anthropic Managed Agents. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
 

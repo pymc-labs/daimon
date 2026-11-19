@@ -4155,6 +4155,71 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     assert after.last_error == "selfhosted_routines_unsupported"
 
 
+@pytest.mark.parametrize("pinned", ["channel", "agent"])
+async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    pinned: str,
+) -> None:
+    """A routine whose channel or agent is on Gemini records a plain refusal before any
+    Anthropic access, where it used to run on Claude unnoticed."""
+    from typing import cast
+
+    from daimon.core.channel_backend import channel_ref, record_born_backend, set_channel_backend
+    from mux.contracts.config import BackendConfig
+
+    class NoAnthropic:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"native routine accessed Anthropic.{name}")
+
+    tenant = await make_tenant(db_session)
+    if pinned == "channel":
+        await set_channel_backend(
+            db_session,
+            channel_ref(tenant.id, tenant.platform, "origin"),
+            BackendConfig(
+                backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
+            ),
+        )
+    else:
+        await record_born_backend(
+            db_session,
+            tenant_id=tenant.id,
+            record_id="agt_native",
+            agent_name="test",
+            provider="gemini",
+            model="gemini-3.8-flash",
+        )
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agt_native",
+        agent_name="test",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="scheduled content",
+        channel_id="origin",
+        destination_kind="channel",
+        destination_id="origin",
+    )
+    await db_session.commit()
+    fire = await _build_fire(
+        client=cast(AsyncAnthropic, NoAnthropic()),
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    await fire(row)
+    after = await get_routine(db_session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    assert after.last_error is not None and "set to Google" in after.last_error, (
+        "the refusal should name the provider the routine is set to"
+    )
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("backend_case", ["legacy", "current", "retained"])
 async def test_thread_routine_checks_parent_and_retained_backend_before_anthropic(

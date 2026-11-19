@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines no longer run on Claude when their agent or channel is on GPT or
+  Gemini.** The scheduler quietly ran them on Claude. A routine whose agent,
+  channel or thread is on another provider now stops with a message saying
+  routines run only on Anthropic.
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which
   roughly halves the longest event-loop pause on a 9 MB state. The scheduler's

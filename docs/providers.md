@@ -23,7 +23,7 @@ in one conversation.
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
-| Routines | Yes | Yes | Yes | Not supported |
+| Routines | Yes | Not supported | Not supported | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
 
@@ -35,7 +35,8 @@ A provider that cannot meet a channel's requirements refuses the reply.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
-- **OpenAI and Gemini:** an agent with an `ask` rule or a
+- **OpenAI and Gemini:** routines (one whose agent or channel is on them stops
+  with a message saying so), an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
   names clash with Gemini's own, is off there, and so is a web search that

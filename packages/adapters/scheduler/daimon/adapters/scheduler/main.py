@@ -52,9 +52,10 @@ from daimon.core.authz import (
 )
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_backend import (
+    agent_native_provider,
     backend_refusal_causes,
+    channel_provider,
     effective_thread_backend,
-    is_selfhosted_channel,
 )
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
@@ -186,7 +187,10 @@ from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
+from mux.profiles import PROVIDER_LABELS
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -358,6 +362,16 @@ async def _blocked(
 ) -> bool:
     """Whether one check of the spend gate stops this routine's fire."""
     return await _spend_block(sm, settings, row, platform=platform, check=check) is not None
+
+
+def routines_unsupported_error(provider: Provider) -> str:
+    """The `last_error` a routine records when its agent, channel or thread is not on Anthropic."""
+    if provider == "selfhosted":
+        return "selfhosted_routines_unsupported"
+    return (
+        f"Routines run only on Anthropic, and this one is set to {PROVIDER_LABELS[provider]}. "
+        "Switch its agent or channel back to Anthropic."
+    )
 
 
 async def _build_fire(
@@ -552,8 +566,9 @@ async def _build_fire(
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return
-            # Headless routines have no self-hosted runtime yet. Refuse before
-            # resolving agents, environments, defaults or credentials at Anthropic.
+            # Headless routines run only on Anthropic Managed Agents. A thread, channel
+            # or agent on another provider is refused before anything is resolved at
+            # Anthropic, never quietly run on Claude.
             target = delivery_target(row, platform=platform)
             if is_routine_parent_unknown(row):
                 await record_result(
@@ -565,31 +580,21 @@ async def _build_fire(
                 )
                 return
             parent_channel = routine_destination_channel(row)
+            provider: Provider | None = None
             if row.destination_kind == "thread" and parent_channel is not None:
                 thread_id = (
                     target.thread_ts
                     if platform == "slack" and target is not None
                     else row.destination_id
                 )
-                if (
-                    await effective_thread_backend(
-                        s,
-                        tenant_id=row.tenant_id,
-                        platform=platform,
-                        channel_id=parent_channel,
-                        thread_id=thread_id,
-                        caller_id=row.created_by_user_id,
-                    )
-                    == "selfhosted"
-                ):
-                    await record_result(
-                        s,
-                        row.id,
-                        tail=None,
-                        error="selfhosted_routines_unsupported",
-                        expected_row=row,
-                    )
-                    return
+                provider = await effective_thread_backend(
+                    s,
+                    tenant_id=row.tenant_id,
+                    platform=platform,
+                    channel_id=parent_channel,
+                    thread_id=thread_id,
+                    caller_id=row.created_by_user_id,
+                )
             channels = {
                 channel
                 for channel in (
@@ -600,17 +605,26 @@ async def _build_fire(
                 if channel is not None
             }
             for routine_channel in channels:
-                if await is_selfhosted_channel(
-                    s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
-                ):
-                    await record_result(
-                        s,
-                        row.id,
-                        tail=None,
-                        error="selfhosted_routines_unsupported",
-                        expected_row=row,
+                if provider in (None, DEFAULT_BACKEND):
+                    provider = await channel_provider(
+                        s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
                     )
-                    return
+            if provider in (None, DEFAULT_BACKEND):
+                provider = await agent_native_provider(
+                    s,
+                    tenant_id=row.tenant_id,
+                    agent_id=row.agent_id,
+                    agent_name=row.agent_name,
+                )
+            if provider is not None and provider != DEFAULT_BACKEND:
+                await record_result(
+                    s,
+                    row.id,
+                    tail=None,
+                    error=routines_unsupported_error(provider),
+                    expected_row=row,
+                )
+                return
             principal = await get_or_create_platform_principal(
                 s,
                 tenant_id=row.tenant_id,
