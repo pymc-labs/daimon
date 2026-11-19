@@ -227,9 +227,7 @@ async def test_unknown_first_revision_then_verified_correction_no_dropped_input(
     assert await balance(sessions) == Decimal("-0.001218")
     assert await record(sessions, observation(revision=3, output=110))
     assert await balance(sessions) == Decimal("-0.001118")
-    assert not await mux_state.PostgresStateStore(sessions).pending_outbox(limit=10), (
-        "a settled correction closes the unknown revision it replaces"
-    )
+    assert await mux_state.PostgresStateStore(sessions).pending_outbox(limit=10)
 
 
 async def test_signed_correction_and_actual_infrastructure_revision(sessions):
@@ -262,9 +260,9 @@ async def test_out_of_order_verified_rows_cannot_rewind_the_absolute_charge(sess
     store = mux_state.PostgresStateStore(sessions)
     first = await store.record_usage("binding", observation())
     second = await store.record_usage("binding", observation(revision=2, output=120))
-    for row, claimed in ((second, True), (first, False)):
+    for row in (second, first):
         async with sessions() as session, session.begin():
-            assert claimed == await accounting_outbox.apply_usage_outbox(
+            assert await accounting_outbox.apply_usage_outbox(
                 session,
                 row,
                 tenant_id=TENANT,
@@ -274,7 +272,7 @@ async def test_out_of_order_verified_rows_cannot_rewind_the_absolute_charge(sess
                 provider_price=price(),
                 infrastructure_usd=Decimal(0),
                 billing_grain="turn",
-            ), "settling the newer revision closed the older one"
+            )
     assert await balance(sessions) == Decimal("-0.001218")
 
 

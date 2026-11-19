@@ -128,8 +128,18 @@ async def test_pending_openai_workspace_usage_drains_at_zero_infrastructure(sm):
     assert await _pending(sm) == 0 and await _debited(sm) == -usd, "exactly once"
 
 
+_MEASURED = {"completeness": "measured", "input_tokens": 1000, "output_tokens": 100}
+_MEASURED |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0}
+
+
 async def _reread(
-    sm, monkeypatch, *, seen_ago: timedelta, budget_s: float = 10.0, stall: bool = False
+    sm,
+    monkeypatch,
+    *,
+    seen_ago: timedelta,
+    budget_s: float = 10.0,
+    stall: bool = False,
+    final: bool = True,
 ) -> tuple[int, list[str]]:
     """One durable re-read pass over an unknown OpenAI turn, answered as measured."""
     from daimon.core.turn import openai_deployment
@@ -152,8 +162,7 @@ async def _reread(
     async with sm() as db:
         row = (await mux_state.pending_outbox(db))[0]
     pending = row.observation
-    measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
-    measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
+    measured = _MEASURED | {"revision": 2, "final": final}
     reads = await DurableRereads(budget_s=budget_s).run(
         sm, markup=Decimal(1), now=datetime.now(UTC)
     )
@@ -186,6 +195,29 @@ async def test_a_turn_whose_usage_is_final_is_not_reread_by_a_later_pass(sm, mon
     assert later == 0 and read == ["turn"], "a final turn is never read again"
 
 
+async def test_a_billed_fallback_keeps_the_turn_reread_across_a_restart(sm, monkeypatch):
+    """A measured but non-final revision is billed, yet the unknown one stays pending, so
+    a restarted scheduler still reads the turn until a final revision closes it."""
+    from daimon.core.turn.openai_late_usage import DurableRereads
+    from mux.drivers.openai import OpenAIUsage
+
+    _, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3), final=False)
+    debited = await _debited(sm)
+    assert debited < 0 and await _pending(sm) == 1, "the fallback is billed, the turn stays open"
+    async with sm() as db:
+        pending = (await mux_state.pending_outbox(db))[0].observation
+
+    async def reconcile_turn(self, scope, session, turn_id):
+        read.append(turn_id)
+        return (pending.model_copy(update=_MEASURED | {"revision": 3, "final": True}),)
+
+    monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
+    assert await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC)) == 1
+    assert await _pending(sm) == 0 and await _debited(sm) == debited, "final closes, no recharge"
+    assert await DurableRereads().run(sm, markup=Decimal(1), now=datetime.now(UTC)) == 0
+    assert read == ["turn", "turn"], "read once more after the restart, then never"
+
+
 async def test_a_stalled_reread_ends_the_pass_at_its_time_budget(sm, monkeypatch):
     reads, read = await _reread(
         sm, monkeypatch, seen_ago=timedelta(hours=3), budget_s=0.05, stall=True
@@ -216,8 +248,7 @@ async def test_a_reread_cut_off_by_the_pass_budget_backs_off_and_the_next_row_is
         await pending_usage(sm, provider="openai", unknown=True)
     async with sm() as db:
         pending = (await mux_state.pending_outbox(db))[0].observation
-    measured = {"revision": 2, "completeness": "measured", "final": True, "input_tokens": 1000}
-    measured |= {"input_cached_tokens": 0, "input_cache_write_tokens": 0, "output_tokens": 100}
+    measured = _MEASURED | {"revision": 2, "final": True}
     rereads, now = DurableRereads(budget_s=1.0), datetime.now(UTC)  # room for a real read
     assert await rereads.run(sm, markup=Decimal(1), now=now) == 1, "the slow read is cut off"
     assert await _debited(sm) == 0, "nothing was read through"
