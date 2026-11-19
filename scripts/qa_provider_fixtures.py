@@ -37,7 +37,7 @@ VALUES = {
     "channel:A": "qa-channel-a",
     "channel:B": "qa-channel-b",
     "fork.name": "qa-channel-agent",
-    "env.default_agent": "daimon",
+    "env.default_agent": "default",
 }
 
 

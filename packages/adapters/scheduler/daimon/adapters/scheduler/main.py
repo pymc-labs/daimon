@@ -67,6 +67,7 @@ from daimon.core.config import (
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
@@ -822,7 +823,7 @@ async def _build_fire(
         # self-healing across MA archive/recreate. The environment follows the
         # routine's channel, then the tenant default, like a turn there would.
         # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
-        agent_tag = row.agent_name or deployment_default.agent_name or "daimon"
+        agent_tag = row.agent_name or deployment_default.agent_name or BUILTIN_AGENT_NAME
         _public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         resolved_agent_id = await resolve_agent(
             client,

@@ -8,7 +8,7 @@ variant, sent as the session's own `system` override (`agent_with_overrides`) an
 hashed the same way (`desired_snapshot`). A platform with no chat (the CLI, a
 headless run without one) runs the agent's own prompt.
 
-A variant swaps known passages of the shipped prompt (`defaults/agents/daimon.yaml`
+A variant swaps known passages of the shipped prompt (`defaults/agents/default.yaml`
 and `agent_guidance`) for wording that names only its platform. Every other line is
 kept as written.
 """

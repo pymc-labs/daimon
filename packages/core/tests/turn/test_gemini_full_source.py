@@ -64,7 +64,7 @@ from .test_gemini_codec import interaction
 from .test_gemini_runtime_transport import clients_for
 
 ROOT = Path(__file__).resolve().parents[4]
-DEFAULT = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+DEFAULT = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
 # Anthropic's built-in skills have no bytes to represent: Gemini runs without them.
 # A platform-limited custom skill (microsoft-365) is not on the seeded agent.
 CUSTOM = [s for s in DEFAULT["skills"] if s["type"] == "custom" and "platforms" not in s]

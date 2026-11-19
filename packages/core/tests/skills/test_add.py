@@ -126,6 +126,7 @@ async def _add(
     added_by: uuid.UUID | None = None,
     recheck: AgentRecheck | None = None,
     attach: bool = True,
+    agent_name: str = "agent",
 ):
     async def allow(_fresh: BetaManagedAgentsAgent) -> None:
         return None
@@ -135,7 +136,7 @@ async def _add(
         factory,
         tenant_id=tenant_id,
         agent=fake.agent,
-        agent_name="agent",
+        agent_name=agent_name,
         bundle=bundle_from_markdown(text or _md()),
         origin="pasted",
         added_by_account_id=added_by,
@@ -497,6 +498,20 @@ async def test_an_earlier_upload_is_adopted_only_when_no_other_agent_holds_it(
     fake.others = []
     adopted = await _add(fake, db_session_factory, tenant.id)
     assert (adopted.action, adopted.skill_id, fake.versions) == ("updated", "sk_old", ["sk_old"])
+
+
+async def test_a_builtin_skill_titled_under_its_old_name_is_versioned_not_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="notes", agent_name="daimon")
+    held = [{"type": "custom", "skill_id": "sk_old", "version": "1"}]
+    fake = _FakeMA(
+        agent=ma_agent(id="ag_1", name="default", tenant_id=tenant.id, skills=held),
+        skills=[_skill("sk_old", title)],
+    )
+    added = await _add(fake, db_session_factory, tenant.id, agent_name="default")
+    assert (added.action, added.skill_id) == ("updated", "sk_old"), "the renamed agent's own skill"
 
 
 async def test_a_skill_already_loading_under_that_name_is_refused_before_uploading(

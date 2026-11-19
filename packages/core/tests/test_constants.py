@@ -99,9 +99,9 @@ def test_default_agent_model_matches_the_seeded_agent() -> None:
     agent through chat or the panel produced one a generation behind the bot the
     same install already ran, with nothing surfacing the difference.
     """
-    seeded = yaml.safe_load((REPO_ROOT / "defaults" / "agents" / "daimon.yaml").read_text())
+    seeded = yaml.safe_load((REPO_ROOT / "defaults" / "agents" / "default.yaml").read_text())
     assert seeded["model"] == DEFAULT_AGENT_MODEL, (
-        f"defaults/agents/daimon.yaml pins {seeded['model']} but new agents default to "
+        f"defaults/agents/default.yaml pins {seeded['model']} but new agents default to "
         f"{DEFAULT_AGENT_MODEL} — the two must move together"
     )
 

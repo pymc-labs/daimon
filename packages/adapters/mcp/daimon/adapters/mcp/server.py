@@ -733,6 +733,7 @@ def create_mcp_app(
                     else None
                 ),
                 bearers=identity.bearers,
+                anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),

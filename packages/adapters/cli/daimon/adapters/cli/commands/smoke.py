@@ -10,6 +10,7 @@ import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.runtime import build_runtime
 from daimon.core.config import load_settings
+from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.smoke import SMOKE_TIMEOUT_S, run_smoke_check
 from rich.console import Console
 
@@ -46,7 +47,7 @@ def smoke_command(
 
     async def _with_smoke() -> None:
         async with build_runtime(settings) as rt:
-            agent_tag = rt.deployment_default.agent_name or "daimon"
+            agent_tag = rt.deployment_default.agent_name or BUILTIN_AGENT_NAME
             environment_tag = rt.deployment_default.environment_name or "default"
 
             # The ledger idempotency key must be unique per top-up opportunity —

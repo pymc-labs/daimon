@@ -9,7 +9,7 @@ const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 const ahead = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString()
 const GONE = () => HttpResponse.json({ detail: "That isn't here any more." }, { status: 404 })
 
-const daimon = { id: "ag_daimon", name: "Daimon" }
+const daimon = { id: "ag_default", name: "Daimon" }
 const mmm = { id: "ag_mmm", name: "MMM Analyst" }
 
 const state: Profile = {
