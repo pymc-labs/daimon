@@ -37,14 +37,23 @@ from typing import Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.agent_identity import (
     AgentIdentity,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_subject,
+    holds_agent_roles,
+)
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -67,6 +76,9 @@ from daimon.core.stores.routines import (
     record_result,
     routine_platform,
     settle_routine_delivery,
+)
+from daimon.core.stores.routines import (
+    OWNER_LACKS_ROLE_ERROR as OWNER_LACKS_ROLE_ERROR,
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
@@ -363,6 +375,32 @@ _TURN_NOTICE_FAILURES = (
     TerminationReason.ADMISSION_BALANCE_DEPLETED,
     TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
 )
+
+
+def lapsed_role(
+    policy: TenantAccessPolicy, agent_names: tuple[str | None, ...], owner: Subject
+) -> bool:
+    """The owner is a freshly verified member missing a role the agent needs.
+
+    Such a routine is paused at fire time and listed by `daimon routines
+    check-roles`. An owner who left, or whose membership could not be read, is
+    not lapsed: their fire is refused and retried.
+    """
+    return (
+        bool(agent_invoker_roles(policy, agent_names))
+        and owner.membership_fresh
+        and not holds_agent_roles(policy, agent_names, owner)
+    )
+
+
+def lapsed_role_card(row: RoutineRow) -> tuple[str, str]:
+    """The error card DMed to a routine's owner when it was paused for a lapsed role."""
+    label = row.name or routine_phrase(row.cron_expr, row.timezone)
+    return (
+        f'Your routine "{label}" ({row.agent_name}) is paused: you no longer have a role'
+        " its agent needs.",
+        "Ask an admin for the role, then resume it from /routines.",
+    )
 
 
 def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
@@ -670,15 +708,6 @@ async def clear_creator(
                 thread_id=row.source_thread_id,
             ):
                 return "restricted_source"
-            if not authorize(
-                policy,
-                subject=Subject(),
-                action=Action.RUN_AGENT,
-                surface=Surface.ROUTINE,
-                agent=AgentRef.of(row.agent_name),
-                place=Place(),
-            ):
-                return "agent_not_allowed"
         is_admin = False
         if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(
@@ -702,6 +731,17 @@ async def clear_creator(
             policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         ):
             return "invoker_not_allowed"
+        # The owner's freshly resolved subject, so a role-gated agent still sends
+        # for an owner who holds its roles, and for nobody else.
+        if row.destination_kind == "dm" and not authorize(
+            policy,
+            subject=subject,
+            action=Action.RUN_AGENT,
+            surface=Surface.ROUTINE,
+            agent=AgentRef.of(row.agent_name),
+            place=Place(),
+        ):
+            return "agent_not_allowed"
         return policy
     refusal = creator_refusal_for(
         policy,

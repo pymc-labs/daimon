@@ -161,7 +161,9 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
+    grant_owner_check,
     is_provider_turn,
+    native_owner_gate,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
@@ -1940,6 +1942,7 @@ async def run_prepared_turn_impl(
                                 tenant_id=tenant_id,
                                 read_session=read_session,
                                 entry_point=unattended_entry_point(origin),
+                                principal_check=grant_owner_check(deps, admission, tenant_id),
                             )
                         else:
                             from daimon.core.continuity.watch_turn import watch_capabilities
@@ -2036,8 +2039,12 @@ async def run_prepared_turn_impl(
 
                             native_check()
 
+                            owner_gate = native_owner_gate(deps, admission, tenant_id)
+
                             async def native_gate() -> None:
                                 native_check()
+                                if native_entry != "mcp_chat":
+                                    await owner_gate()
 
                             stack.enter_context(unattended_sends(native_gate))
                         else:

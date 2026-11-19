@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines can run role-gated agents for an owner who holds the role.**
+  Before, a routine on an agent limited to certain Discord roles was always
+  refused. Now it runs as its owner, whose membership is read live at each
+  run and each send; it needs every required role, and an admin without them
+  does not qualify. Saving or editing such a routine needs the same of the
+  person saving. If the owner loses a role the run is skipped, the owner gets
+  one direct message on Discord, and the routine is paused until someone
+  resumes it. `daimon routines check-roles` lists the routines whose owner
+  would be paused or refused. Long jobs are still refused.
+- **A remote MCP server can attribute writes to the person who asked.** An
+  identity relay server set to `"auth": "bearer"` is called with one key from
+  `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the
+  workspaces and agents that may use it. With `"requester_meta": true` Daimon
+  removes any `requester_platform_user_id`, `requester_conversation` or
+  `requester_kind` a tool call carries in `params._meta`, then sets them from
+  the person's own turn (their user id, where it runs, kind `"person"`) or any
+  unattended run such as a routine, watch, timer, wake or DM routine (the person
+  it runs for, its place, kind `"routine"`). A routine's owner is signed into
+  its credential and must still match at call time. Keys are removed under every
+  method's `_meta`. Senders from another organisation, replaced sessions and two
+  turns at once carry none. A body that is not strict JSON, or cannot be
+  re-encoded, is refused with a 400. Set `auth`, `requester_meta` and `agents`
+  in the servers JSON only after every service runs this release; older images
+  reject unknown keys.
 - **Other chat apps' names are no longer replaced.** Replies, status lines, routine
   posts, tool sends and edits, and Discord thread names keep whatever the model
   wrote. The instruction not to name another chat app, and the quote clause that
