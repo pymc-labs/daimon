@@ -60,14 +60,21 @@ from daimon.core import routine_service
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize, build_subject
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
+from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_delivery import discord_creator_may_post
 from daimon.core.routine_destinations import slack_may_deliver
-from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
+from daimon.core.routine_sandbox import (
+    change_sandbox,
+    current_pin,
+    opted_in_by_many,
+    routine_place,
+)
 from daimon.core.routine_service import (
     CallView,
     ChannelAgentName,
@@ -95,7 +102,6 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.teams_graph import GraphUnavailable
-from daimon.core.web_links import TenantLinks
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -690,56 +696,68 @@ async def _set_routine_sandbox_tools_impl(
     routine_id: UUID,
     enabled: bool,
 ) -> RoutineRow:
-    actor = await _sandbox_admin(runtime, auth)
+    await _sandbox_admin(runtime, auth)
     viewer = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
     if row is None or not routine_service.sees_routine(viewer, row):
         raise ToolError(routine_service.NOT_FOUND)
-    # The opt-in covers the agent version and environment the routine would
-    # run with now; the scheduler keeps built-ins off once either changes.
-    pin = None
-    if enabled:
-        try:
-            pin = await current_pin(
+
+    async def admin_for(_action: DelegatedAction | None) -> bool:
+        return True  # `_sandbox_admin` re-checked the live admin above
+
+    actor = FeatureActor(auth.tenant_id, auth.account_id, "chat", auth.platform_user_id, admin_for)
+    value = "on" if enabled else "off"
+    try:
+        pin = (
+            await current_pin(
                 runtime.client, runtime.session_factory, row, default=runtime.deployment_default
             )
-        except SandboxPinUnavailable as exc:
-            raise ToolError(routines_store.PIN_UNAVAILABLE_REFUSAL) from exc
-    async with runtime.session_factory.begin() as session:
-        try:
-            result = await routines_store.set_sandbox_tools(
-                session,
-                routine_id,
-                tenant_id=auth.tenant_id,
-                enabled=enabled,
-                set_by=str(auth.account_id),
-                actor=actor,
-                via="mcp",
-                pin=pin,
-            )
-        except StoreError as exc:
-            raise ToolError(str(exc)) from exc
-    if result is None:
-        raise ToolError(routine_service.NOT_FOUND)
-    return routine_for_reader(result[0], user_id=auth.platform_user_id)
+            if enabled
+            else None
+        )
+        await change_sandbox(
+            runtime.session_factory,
+            runtime.settings,
+            actor,
+            routine_place(row, auth.platform or ""),
+            value=value,
+            pin=pin,
+        )
+    except ChannelChangeRefused as exc:
+        raise ToolError(str(exc)) from exc
+    return routine_for_reader(row, user_id=auth.platform_user_id)
 
 
 class RoutineView(RoutineRow):
-    """A routine as the tools return it, with its page on the web when there is one."""
+    """A routine as the tools return it: its page on the web when there is one, and whether
+    it is opted in to built-in sandbox tools, by its own setting or its agent's."""
 
     web_url: WebUrl = None
+    sandbox_tools: bool = False
+
+
+async def _views(
+    runtime: McpRuntime, auth: AuthIdentity, rows: list[RoutineRow]
+) -> list[RoutineView]:
+    """`rows` with their drawers, from links resolved once for the whole call."""
+    links = await tenant_links(runtime, auth)
+    async with runtime.session_factory() as session:
+        sandbox = await opted_in_by_many(session, rows, auth.platform or "")
+    return [
+        RoutineView.model_validate(row, from_attributes=True).model_copy(
+            update={
+                "web_url": None if links is None else links.routine(row.id),
+                "sandbox_tools": sandbox[row.id] is not None,
+            }
+        )
+        for row in rows
+    ]
 
 
 async def _viewed(runtime: McpRuntime, auth: AuthIdentity, row: RoutineRow) -> RoutineView:
-    """`row` with its drawer on the web, when the workspace has one for this caller."""
-    return _with_link(row, await tenant_links(runtime, auth))
-
-
-def _with_link(row: RoutineRow, links: TenantLinks | None) -> RoutineView:
-    """`row` with its drawer, from links resolved once for the whole call."""
-    view = RoutineView.model_validate(row, from_attributes=True)
-    return view if links is None else view.model_copy(update={"web_url": links.routine(row.id)})
+    [view] = await _views(runtime, auth, [row])
+    return view
 
 
 def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -831,9 +849,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
         """List the routines you created (an admin sees every routine in the workspace)."""
         auth = await _auth(ctx)
-        rows = await _list_routines_impl(runtime, auth)
-        links = await tenant_links(runtime, auth)
-        return [_with_link(row, links) for row in rows]
+        return await _views(runtime, auth, await _list_routines_impl(runtime, auth))
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineView:  # pyright: ignore[reportUnusedFunction]
@@ -899,7 +915,7 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"admin"})
     async def set_routine_sandbox_tools(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, routine_id: UUID, enabled: bool
-    ) -> RoutineRow:
+    ) -> RoutineView:
         """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
 
@@ -909,13 +925,18 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
-        in. An opt-in covers exactly the routine's current agent version and environment:
-        once either changes, runs go without built-ins and the opt-in is cleared. Each
-        change records who made it and when, and ``get_routine``/``list_routines`` show it
-        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
-        the value a routine already has changes nothing. Timers, watches, agent chat,
+        in. Off is the routine's own Off, which also overrides an opt-in for its agent. An
+        opt-in covers exactly the routine's current agent version and environment: once
+        either changes, runs go without built-ins and the opt-in is cleared. This is the
+        routine's own value of the ``routine_sandbox_tools`` setting, so a lock above it
+        still wins, and the settings history records each change. It takes effect from
+        the routine's next run. Setting the value a routine already has changes nothing.
+        ``get_routine`` and ``list_routines`` show whether it is opted in, by its own setting
+        or its agent's, as ``sandbox_tools``. Timers, watches, agent chat,
         ``daimon run`` and checkpoints cannot be opted in.
         """
-        return await _set_routine_sandbox_tools_impl(
-            runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled
+        auth = await _auth(ctx)
+        row = await _set_routine_sandbox_tools_impl(
+            runtime, auth, routine_id=routine_id, enabled=enabled
         )
+        return await _viewed(runtime, auth, row)

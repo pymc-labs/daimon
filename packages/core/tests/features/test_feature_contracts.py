@@ -24,6 +24,7 @@ from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import HIDING_KEYS, SESSION_KEYS, TOOL_KEYS, SessionToolset
 from daimon.core.features.registry import (
     FEATURES,
+    TIER_ORDER,
     TIERS,
     WEB_MODULES,
     FeatureSpec,
@@ -71,7 +72,7 @@ def test_every_feature_is_well_formed(spec: FeatureSpec) -> None:
     assert spec is FEATURES[spec.key]
     assert spec.default in spec.values
     tiers = spec.tiers
-    assert list(tiers) == sorted(tiers, key=TIERS.index), "tiers broadest first"
+    assert list(tiers) == sorted(tiers, key=TIER_ORDER.index), "tiers broadest first"
     assert not spec.legacy_env or "deployment" in tiers
 
 
@@ -97,11 +98,13 @@ _NARROWED: dict[str, str] = {
     "mcp_connector_relay": "operator-only rollback switch",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
+    "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
+    "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",

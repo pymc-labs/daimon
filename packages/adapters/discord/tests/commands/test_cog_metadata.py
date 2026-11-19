@@ -101,23 +101,18 @@ def test_github_cog_registers_connect() -> None:
     assert GitHubCog.__cog_group_name__ == "github"
 
 
-def test_routines_slash_is_admin_gated() -> None:
-    """The /routines panel is admin-only and hidden from non-admins.
+def test_routines_slash_is_open_to_members() -> None:
+    """The /routines panel follows chat's permission, not Manage Server.
 
-    /routines is a pure-admin command: hidden in the Discord UI
-    via @app_commands.default_permissions(manage_guild=True) and hard-gated with
-    @require_manage_guild (defense in depth). It is NOT the DB-role @require_admin.
+    Members open it and see their own routines; the command is neither hidden
+    from them nor gated on server management. Admin-only actions are gated in
+    the panel, per click.
     """
     import daimon.adapters.discord.commands.routines as routines_module
 
     src = inspect.getsource(routines_module)
-    assert "require_manage_guild" in src, (
-        f"/routines must be admin-gated with @require_manage_guild; not found in source:\n{src}"
-    )
-    assert "default_permissions(manage_guild=True)" in src, (
-        "/routines must be hidden from non-admins via "
-        f"@app_commands.default_permissions(manage_guild=True); not found in source:\n{src}"
-    )
+    assert "require_manage_guild" not in src, "/routines must not need Manage Server"
+    assert "default_permissions" not in src, "/routines must be visible to every member"
 
 
 def test_routines_slash_uses_require_registered_guild() -> None:

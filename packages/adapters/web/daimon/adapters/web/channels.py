@@ -196,7 +196,7 @@ class HistoryEntryJson(BaseModel):
     before: object
     after: object
     actor: HistoryActorJson | None
-    surface: Literal["web", "chat", "panel", "cli"] | None
+    surface: Literal["web", "chat", "panel", "cli", "system"] | None
 
 
 class HistoryJson(BaseModel):

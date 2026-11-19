@@ -481,7 +481,7 @@ async def create_ma_session(
                 get_repo_memory_settings(deps).legacy_servers
             ),
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id, admission.agent.id),
             daimon_rule_tools=admission.daimon_rule_tools,
             toolset=admission.toolset,
             slack_turn_context_id=admission.slack_turn_context_id,

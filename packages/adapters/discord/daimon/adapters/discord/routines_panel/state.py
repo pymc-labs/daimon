@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import uuid
+from typing import Literal
 
 from daimon.adapters.discord import theme
 from daimon.core.routines import Glyph, derive_glyph
@@ -62,6 +63,8 @@ class RoutineEntry:
     glyph: Glyph
     color: int
     label: str
+    #: The opt-in that turns sandbox tools on for its runs, if any.
+    sandbox_by: Literal["agent", "routine"] | None = None
 
 
 @dataclasses.dataclass

@@ -1,8 +1,10 @@
 """Async store for `feature_values`: the features set at each tier of each place.
 
-Unused place columns hold ''; rows come back with them as stored. Every write bumps
-the tenant's `feature_revision`, which keys the resolver's cache. Callers own the
-transaction; every write ends with `await session.flush()`.
+Unused place columns hold '' (`routine_id` NULL); a routine row's `channel_id` is its
+routine id. Rows come back with them as stored. A
+pinned feature's On carries its `pin`, written with the value. Every write bumps the
+tenant's `feature_revision`, which keys the resolver's cache.
+Callers own the transaction; every write ends with `await session.flush()`.
 """
 
 from __future__ import annotations
@@ -13,32 +15,41 @@ from typing import Any, cast
 
 from daimon.core._models import FeatureValue, Tenant
 from daimon.core.stores.domain import FeatureSurface, FeatureTarget, FeatureValueRow
+from pydantic import JsonValue
 from sqlalchemy import CursorResult, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 
-def _ids(target: FeatureTarget) -> tuple[str, str, str]:
+def _ids(target: FeatureTarget) -> tuple[str, str, str, uuid.UUID | None]:
     channel = target.channel_id or ""
     thread = target.thread_key or ""
+    routine = target.routine_id
     if target.tier == "agent" and not target.agent_id:
         raise ValueError("the agent tier needs an agent_id")
     if target.tier == "channel" and not channel:
         raise ValueError("the channel tier needs a channel_id")
     if target.tier == "thread" and not thread:
         raise ValueError("the thread tier needs a thread_key")
-    return target.agent_id or "", channel if target.tier != "workspace" else "", thread
+    if target.tier == "routine":
+        if routine is None:
+            raise ValueError("the routine tier needs a routine_id")
+        # The id in `channel_id` keeps routine rows apart in `uq_feature_values_place`.
+        return "", str(routine), "", routine
+    return target.agent_id or "", channel if target.tier != "workspace" else "", thread, None
 
 
 def _match(target: FeatureTarget) -> ColumnElement[bool]:
-    agent, channel, thread = _ids(target)
+    agent, channel, thread, routine = _ids(target)
     if target.tier == "thread":
         return and_(
             FeatureValue.tier == "thread",
             FeatureValue.agent_id == agent,
             FeatureValue.thread_key == thread,
         )
+    if target.tier == "routine":
+        return and_(FeatureValue.tier == "routine", FeatureValue.routine_id == routine)
     return and_(
         FeatureValue.tier == target.tier,
         FeatureValue.agent_id == agent,
@@ -73,9 +84,10 @@ async def place_values(
     agent_id: str | None,
     channel_id: str | None,
     thread_key: str | None,
+    routine_id: uuid.UUID | None = None,
     keys: Collection[str] | None = None,
 ) -> list[FeatureValueRow]:
-    """One read for a place: its workspace, agent, channel and thread rows."""
+    """One read for a place: its workspace, agent, channel, thread and routine rows."""
     targets = [FeatureTarget("workspace")]
     if agent_id:
         targets.append(FeatureTarget("agent", agent_id=agent_id))
@@ -83,6 +95,8 @@ async def place_values(
         targets.append(FeatureTarget("channel", channel_id=channel_id))
     if thread_key:
         targets.append(FeatureTarget("thread", thread_key=thread_key))
+    if routine_id is not None:
+        targets.append(FeatureTarget("routine", routine_id=routine_id))
     stmt = select(FeatureValue).where(
         FeatureValue.tenant_id == tenant_id, or_(*(_match(t) for t in targets))
     )
@@ -90,6 +104,28 @@ async def place_values(
         stmt = stmt.where(FeatureValue.key.in_(keys))
     rows = (await session.scalars(stmt)).all()
     return [FeatureValueRow.model_validate(row) for row in rows]
+
+
+async def keyed_values(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    key: str,
+    agent_ids: Collection[str],
+    routine_ids: Collection[uuid.UUID],
+) -> list[FeatureValueRow]:
+    """One feature's rows at the workspace, at each of the agents and at each of the routines,
+    in one read, for a list of places."""
+    stmt = select(FeatureValue).where(
+        FeatureValue.tenant_id == tenant_id,
+        FeatureValue.key == key,
+        or_(
+            FeatureValue.tier == "workspace",
+            and_(FeatureValue.tier == "agent", FeatureValue.agent_id.in_(agent_ids)),
+            and_(FeatureValue.tier == "routine", FeatureValue.routine_id.in_(routine_ids)),
+        ),
+    )
+    return [FeatureValueRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
 
 
 async def get_feature_value(
@@ -113,18 +149,22 @@ async def set_feature_value(
     locked: bool = False,
     set_by: uuid.UUID | None,
     surface: FeatureSurface,
+    pin: dict[str, JsonValue] | None = None,
 ) -> FeatureValueRow:
-    """Upsert one tier's value; a thread row keeps its known channel when given none."""
-    agent, channel, thread = _ids(target)
+    """Upsert one tier's value and its pin; a thread row keeps its known channel when given
+    none."""
+    agent, channel, thread, routine = _ids(target)
     stmt = pg_insert(FeatureValue).values(
         tenant_id=tenant_id,
         tier=target.tier,
         agent_id=agent,
         channel_id=channel,
         thread_key=thread,
+        routine_id=routine,
         key=key,
         value=value,
         locked=locked,
+        pin=pin,
         set_by=set_by,
         surface=surface,
         set_at=func.now(),
@@ -133,6 +173,7 @@ async def set_feature_value(
     changes: dict[str, Any] = {
         "value": excluded.value,
         "locked": excluded.locked,
+        "pin": excluded.pin,
         "set_by": excluded.set_by,
         "surface": excluded.surface,
         "set_at": func.now(),
@@ -147,6 +188,8 @@ async def set_feature_value(
             index_where=text("tier = 'thread'"),
             set_=changes,
         )
+    elif target.tier == "routine":
+        stmt = stmt.on_conflict_do_update(index_elements=["routine_id", "key"], set_=changes)
     else:
         stmt = stmt.on_conflict_do_update(
             index_elements=["tenant_id", "tier", "agent_id", "channel_id", "key"],
