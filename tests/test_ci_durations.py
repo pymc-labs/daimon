@@ -21,7 +21,7 @@ def _load(name: str) -> ModuleType:
 generate = _load("generate_ci_durations")
 check = _load("check_ci_shards")
 
-_SUITES = {"core": 6, "discord": 2, "discord-mux": 2, "cli-run-mux": 1, "slack": 1}
+_SUITES = {"core": 6, "discord": 2, "discord-extra": 2, "cli-extra": 1, "slack": 1}
 
 
 @pytest.mark.parametrize(
@@ -29,8 +29,8 @@ _SUITES = {"core": 6, "discord": 2, "discord-mux": 2, "cli-run-mux": 1, "slack":
     [
         ("core-shard-2", "core"),
         ("discord-shard-1", "discord"),
-        ("discord-mux-shard-0", "discord-mux"),
-        ("cli-run-mux-shard-0", "cli-run-mux"),
+        ("discord-extra-shard-0", "discord-extra"),
+        ("cli-extra-shard-0", "cli-extra"),
         ("slack", "slack"),
         ("notebook-host-browser", None),
         ("discordian-shard-0", None),
@@ -48,7 +48,6 @@ def test_the_suite_names_cover_every_split_suite_of_the_workflow() -> None:
         "core",
         "mcp",
         "discord",
-        "discord-mux",
     }
     for suite in shards:
         assert generate.suite_of(f"{suite}-shard-0", shards) == suite
@@ -63,7 +62,7 @@ def _junit(path: Path, cases: dict[str, float]) -> Path:
     return path
 
 
-def test_build_keeps_discord_mux_apart_from_discord_and_skips_unsplit_suites(
+def test_build_keeps_discord_extra_apart_from_discord_and_skips_unsplit_suites(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pkg").mkdir()
@@ -71,13 +70,13 @@ def test_build_keeps_discord_mux_apart_from_discord_and_skips_unsplit_suites(
         (tmp_path / "pkg" / f"{name}.py").write_text("")
     files = [
         _junit(tmp_path / "discord-shard-0.xml", {"pkg.test_a": 1.0}),
-        _junit(tmp_path / "discord-mux-shard-1.xml", {"pkg.test_b": 2.0}),
-        _junit(tmp_path / "cli-run-mux-shard-0.xml", {"pkg.test_a": 3.0}),
+        _junit(tmp_path / "discord-extra-shard-1.xml", {"pkg.test_b": 2.0}),
+        _junit(tmp_path / "cli-extra-shard-0.xml", {"pkg.test_a": 3.0}),
     ]
 
     table, unresolved = generate.build(files, tmp_path, None, _SUITES)
 
-    assert table == {"discord": {"pkg/test_a.py": 1.0}, "discord-mux": {"pkg/test_b.py": 2.0}}
+    assert table == {"discord": {"pkg/test_a.py": 1.0}, "discord-extra": {"pkg/test_b.py": 2.0}}
     assert unresolved == 0
 
 
@@ -86,7 +85,7 @@ def test_the_guard_names_split_suites_missing_from_the_table() -> None:
 
     problems = check.unlisted_suites(_SUITES, table)
 
-    assert [problem.split(":")[0] for problem in problems] == ["discord", "discord-mux"]
+    assert [problem.split(":")[0] for problem in problems] == ["discord", "discord-extra"]
 
 
 def test_the_committed_table_lists_every_split_suite() -> None:
