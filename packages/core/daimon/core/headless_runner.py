@@ -125,6 +125,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+
 class _NoOpLifecycle(TurnLifecycle):
     """A headless turn has no surface to render to, so every delivery hook
     is a no-op. Inherits `TurnLifecycle`'s own default no-op bodies for the
@@ -759,8 +760,7 @@ async def run_turn_impl(
             source_agent_id=agent_id,
             retry=MutationRetry(
                 policy=MutationRetryPolicy(max_attempts=anthropic.max_retries + 1),
-                deadline=time.monotonic()
-                + remaining_s(effective_deadline, now=datetime.now(UTC)),
+                deadline=time.monotonic() + remaining_s(effective_deadline, now=datetime.now(UTC)),
                 cancel=cancel,
             ),
         )

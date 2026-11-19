@@ -241,11 +241,7 @@ async def run_conversation_observed(
             db, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
         account = await get_account(db, principal.account_id)
-        if (
-            principal.tenant_id != tenant_id
-            or account is None
-            or account.tenant_id != tenant_id
-        ):
+        if principal.tenant_id != tenant_id or account is None or account.tenant_id != tenant_id:
             raise ScopeViolation(session_id, "CLI turn identity does not belong to the tenant")
         await db.commit()
     scope = resource_scope(

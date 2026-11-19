@@ -939,7 +939,7 @@ class UsageEvent(Base):
     """Per-turn token row for billing/observability.
 
     UNIQUE (managed_session_id, event_id) ensures SSE-replay idempotency:
-    `replay_events` (turn/driver.py) refolds events on reconnect; without
+    the turn I/O replay (turn/driver.py) refolds events on reconnect; without
     this constraint, `record(...)` would double-insert.
     """
 
