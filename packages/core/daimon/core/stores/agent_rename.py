@@ -161,8 +161,12 @@ def _selfhosted_rows(tenant_id: uuid.UUID) -> Select[Any]:
     )
 
 
+def _metadata(spec: dict[str, Any]) -> dict[str, str]:
+    return cast("dict[str, str]", spec.get("metadata") or {})
+
+
 def _managed(spec: dict[str, Any]) -> bool:
-    return (spec.get("metadata") or {}).get(MA_METADATA_KEY_MANAGED) == "true"
+    return _metadata(spec).get(MA_METADATA_KEY_MANAGED) == "true"
 
 
 def _selfhosted_state(
@@ -214,7 +218,7 @@ async def rename_selfhosted_agent(
 
 def _renamed_spec(spec: dict[str, Any], new: str) -> dict[str, Any]:
     """`spec` under `new`, with the `daimon_name` its SDK-shaped view reports."""
-    metadata = {**(spec.get("metadata") or {}), MA_METADATA_KEY_NAME: new}
+    metadata = {**_metadata(spec), MA_METADATA_KEY_NAME: new}
     return {**spec, "name": new, "metadata": metadata}
 
 

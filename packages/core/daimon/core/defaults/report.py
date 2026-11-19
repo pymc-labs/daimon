@@ -18,6 +18,9 @@ class Action(StrEnum):
     SKIPPED = "skipped"
     ARCHIVED = "archived"
     RENAMED = "renamed"
+    # Could not run yet, for a reason `error` names; the next apply retries it.
+    # Neither a failure nor a change: the resources it touches are left as they are.
+    DEFERRED = "deferred"
     DELETED = "deleted"
     FAILED = "failed"
 
@@ -92,7 +95,7 @@ class ChangedResource:
 class VerificationOutcome:
     """Classification of a dry-run report comparing live resources to the shipped spec.
 
-    - "in_sync": every outcome was SKIPPED — a real reconcile would change nothing.
+    - "in_sync": every outcome was SKIPPED or DEFERRED — a real reconcile would change nothing.
     - "diverged": at least one outcome would create/update/archive/delete a resource;
       `changed` names each one.
     - "unverifiable": at least one outcome FAILED, meaning the comparison itself could
@@ -118,7 +121,7 @@ def classify_verification(report: ApplyReport) -> VerificationOutcome:
     changed = tuple(
         ChangedResource(kind=o.kind, name=o.name)
         for o in outcomes
-        if o.action is not Action.SKIPPED
+        if o.action not in (Action.SKIPPED, Action.DEFERRED)
     )
     if changed:
         return VerificationOutcome(status="diverged", changed=changed)

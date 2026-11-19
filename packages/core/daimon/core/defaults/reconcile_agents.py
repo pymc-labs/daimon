@@ -19,7 +19,12 @@ from anthropic.types.beta import (
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.anthropic_guard import AnthropicUnconfigured, anthropic_configured
 from daimon.core.config import Settings
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_seeded_agents
+from daimon.core.defaults.ma_index import (
+    find_agents_by_daimon_tag,
+    find_seeded_agents,
+    match_agents_by_daimon_tag,
+    pick_renamed_seeded_agent,
+)
 from daimon.core.defaults.mcp_merge import (
     is_corrupted_daimon_mcp_entry,
     merge_default_mcp_server,
@@ -67,8 +72,12 @@ async def reconcile_agent(
     create_only: bool = False,
     sessions: Sessions | None = None,
     settings: Settings | None = None,
+    agents: list[BetaManagedAgentsAgent] | None = None,
 ) -> ResourceOutcome:
     """Reconcile a single agent against MA.
+
+    `agents` is the tenant's live listing, read under the caller's reconcile
+    lock, to match against instead of listing again.
 
     With `sessions`, the agent's features (the `guidance` the prompt carries) are read
     from the store and `spec.features` is saved as the agent's own level.
@@ -133,7 +142,11 @@ async def reconcile_agent(
         skills_view=skills_view if dry_run else None,
     )
     renamed = None
-    if (managed or create_only) and spec.name == SEEDED_AGENT_RENAME[0]:
+    seeded_name = (managed or create_only) and spec.name == SEEDED_AGENT_RENAME[0]
+    if agents is not None:
+        matches = match_agents_by_daimon_tag(agents, tenant_id=tenant_id, name=spec.name)
+        renamed = pick_renamed_seeded_agent(agents) if seeded_name else None
+    elif seeded_name:
         matches, renamed = await find_seeded_agents(client, tenant_id=tenant_id)
     else:
         matches = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=spec.name)

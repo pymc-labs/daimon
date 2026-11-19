@@ -20,7 +20,7 @@ from daimon.adapters.cli.commands.defaults import (
 )
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import archive_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.errors import DefaultsError
@@ -140,7 +140,14 @@ def test_defaults_apply_with_no_provider_key_says_there_is_nothing_to_run_on(
     for env in DEFAULT_KEY_ENV.values():
         monkeypatch.delenv(env, raising=False)
 
-    out = _run_defaults_apply(_keyless_runtime())
+    async def no_renames(*_args: Any, **_kwargs: Any) -> ApplyReport:
+        return ApplyReport()
+
+    monkeypatch.setattr(cmd_mod, "rename_selfhosted_defaults", no_renames)
+    rt = _keyless_runtime()
+    object.__setattr__(rt, "sessionmaker", None)
+
+    out = _run_defaults_apply(rt)
 
     assert "no Anthropic, OpenAI or Gemini key is configured" in out, (
         "a keyless install is told to set a provider key"
@@ -171,9 +178,21 @@ def test_defaults_apply_runs_with_only_a_non_anthropic_key(
     assert "nothing to run" not in out
 
 
+def _managed_spec(name: str) -> AgentSpec:
+    """A self-hosted record as the defaults sync seeds it."""
+    metadata = {MA_METADATA_KEY_MANAGED: "true", MA_METADATA_KEY_NAME: name}
+    return AgentSpec(
+        name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol"), metadata=metadata
+    )
+
+
 def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(
-    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+    tmp_path: Path,
+    schema_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    for env in DEFAULT_KEY_ENV.values():
+        monkeypatch.delenv(env, raising=False)
     (tmp_path / "agents").mkdir()
     (tmp_path / "agents" / "default.yaml").write_text(
         "name: default\nmodel: claude-sonnet-4-6\nsystem: You are Daimon.\n"
@@ -190,7 +209,7 @@ def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(
                 principal_id="cli",
                 authorization_id="cli-deployment-operator",
             ),
-            AgentSpec(name="daimon", model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol")),
+            _managed_spec("daimon"),
             key="seed",
         )
         return tenant.id
@@ -207,7 +226,7 @@ def test_defaults_apply_when_no_key_then_skips_anthropic_and_renames_selfhosted(
     )
 
     out = buf.getvalue()
-    assert "no DAIMON_ANTHROPIC__API_KEY configured" in out, out
+    assert "no Anthropic, OpenAI or Gemini key is configured" in out, out
     assert "renamed" in out, f"the report lists the self-hosted rename: {out}"
 
     async def names() -> list[str]:
@@ -289,7 +308,7 @@ async def _seed_legacy_tenant(
                 principal_id="cli",
                 authorization_id="cli-deployment-operator",
             ),
-            AgentSpec(name=name, model=ModelRef(provider=LOOP.provider, id="gpt-6.1-sol")),
+            _managed_spec(name),
             key=f"{workspace_id}-{name}",
         )
     return tenant.id
@@ -309,7 +328,7 @@ async def _agent_outcomes(
     return json.loads(buf.getvalue())["agents"]
 
 
-def test_defaults_apply_when_cli_local_rename_blocked_then_reports_one_failure(
+def test_defaults_apply_when_cli_local_rename_blocked_then_defers_it_once_and_succeeds(
     tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     async def run() -> list[dict[str, str]]:
@@ -323,14 +342,13 @@ def test_defaults_apply_when_cli_local_rename_blocked_then_reports_one_failure(
         )
         state.agents["ag_daimon"] = agent.model_dump(mode="json")
         rt = _keyed_runtime(schema_sessionmaker, state)
-        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=False, expect_exit=True)
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=False)
 
     outcomes = asyncio.run(run())
 
-    failed = [o for o in outcomes if o["action"] == "failed"]
-    assert len(failed) == 1, (
-        f"cli:local is renamed once, by apply, not again by the pre-pass: {outcomes}"
-    )
+    deferred = [o for o in outcomes if o["action"] == "deferred"]
+    assert len(deferred) == 1, f"cli:local is tried once, by apply, not again: {outcomes}"
+    assert not [o for o in outcomes if o["action"] == "failed"], "a deferral exits zero"
 
 
 def test_defaults_apply_when_dry_run_then_each_tenant_reports_one_rename(

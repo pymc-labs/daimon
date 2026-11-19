@@ -21,6 +21,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_TENANT,
     tenant_scoped_display_title,
 )
+from daimon.core.defaults.owned import AgentNameTaken
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
@@ -1428,3 +1429,19 @@ async def test_reconcile_agent_updates_seeded_daimon_when_a_renamed_default_also
 
     assert outcome.action is Action.UPDATED, "the live seeded agent is still updated"
     assert outcome.anthropic_id == "ag_seeded", "the update targets the seeded daimon"
+
+
+async def test_reconcile_agent_when_creating_daimon_beside_the_renamed_seed_then_refuses() -> None:
+    """The renamed seeded agent still answers `daimon`, so a new one may not take it."""
+    agents = [_tagged_agent(id_="ag_renamed", name="default", tenant_id=TENANT_ID, managed=True)]
+    client = build_fake_anthropic_http(_router_with_agents(agents).dispatch)
+
+    with pytest.raises(AgentNameTaken):
+        await reconcile_agent(
+            client,
+            _agent_spec(),
+            tenant_id=TENANT_ID,
+            dry_run=False,
+            managed=False,
+            create_only=True,
+        )

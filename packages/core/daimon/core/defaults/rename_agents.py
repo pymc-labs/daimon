@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
@@ -180,6 +181,68 @@ async def _rename_on_provider(
     await update_agent_with_version_retry(client, agent.id, _apply, scope=scope)
 
 
+@dataclass(frozen=True)
+class SeededRename:
+    """A tenant's due rename of its seeded `old` to `new`, planned from one listing."""
+
+    old: str
+    new: str
+    # The provider agents that move: the seeded agent, then its readers.
+    moves: tuple[BetaManagedAgentsAgent, ...]
+    outcome: ResourceOutcome
+
+
+async def plan_seeded_rename(
+    agents: Collection[BetaManagedAgentsAgent],
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    old: str,
+    new: str,
+) -> SeededRename | None:
+    """The rename the tenant's live `agents` and records call for; None when none is due.
+
+    Raises `AgentRenameBlocked` when the tenant's own unmanaged agent or
+    self-hosted record holds `new`, with or without a seeded `old`, and
+    `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
+    case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
+    """
+    olds = _named(agents, old)
+    legacy = [agent for agent in olds if _managed(agent)]
+    if _only_unmanaged(_named(agents, new)):
+        raise AgentRenameBlocked(old=old, new=new)
+    readers = _legacy_readers(agents, old=old, new=new, old_agent_live=len(olds) > len(legacy))
+    selfhosted = await inspect_selfhosted_rename(session, tenant_id=tenant_id, old=old, new=new)
+    _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
+    if not legacy and not readers and selfhosted == "absent":
+        return None
+    first = legacy[0].id if legacy else None
+    outcome = ResourceOutcome(kind="agent", name=new, action=Action.RENAMED, anthropic_id=first)
+    return SeededRename(old=old, new=new, moves=(*legacy, *readers), outcome=outcome)
+
+
+async def write_seeded_rename(
+    session: AsyncSession, rename: SeededRename, *, tenant_id: uuid.UUID
+) -> None:
+    """The database half of `rename`, under the caller's reconcile lock. Idempotent."""
+    old, new = rename.old, rename.new
+    selfhosted = await rename_selfhosted_agent(session, tenant_id=tenant_id, old=old, new=new)
+    _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
+    await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
+
+
+async def move_seeded_rename(
+    client: AsyncAnthropic | None, rename: SeededRename, *, tenant_id: uuid.UUID
+) -> None:
+    """The provider half of `rename`, once its database half committed. Idempotent."""
+    if client is not None:
+        for agent in rename.moves:
+            await _rename_on_provider(
+                client, agent, tenant_id=tenant_id, old=rename.old, new=rename.new
+            )
+    _log.info("defaults.agent_renamed", tenant_id=str(tenant_id), old=rename.old, new=rename.new)
+
+
 async def rename_seeded_agent(
     client: AsyncAnthropic | None,
     session_factory: async_sessionmaker[AsyncSession],
@@ -192,43 +255,29 @@ async def rename_seeded_agent(
 ) -> ResourceOutcome | None:
     """Rename the tenant's seeded `old` to `new`; None when there is nothing to do.
 
-    Raises `AgentRenameBlocked` when the tenant's own unmanaged agent or
-    self-hosted record holds `new`, with or without a seeded `old`, and
-    `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
-    case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
-    Without a `client` (no Anthropic credentials) only self-hosted records move.
+    Plans without the lock, so a tenant with nothing due never waits on it, then
+    re-plans under it. Without a `client` (no Anthropic credentials) only
+    self-hosted records move. Raises as `plan_seeded_rename` does.
     """
-    agents = [] if client is None else await list_agents_by_tenant(client, tenant_id=tenant_id)
-    olds = _named(agents, old)
-    legacy = [agent for agent in olds if _managed(agent)]
-    if _only_unmanaged(_named(agents, new)):
-        raise AgentRenameBlocked(old=old, new=new)
-    readers = _legacy_readers(agents, old=old, new=new, old_agent_live=len(olds) > len(legacy))
-    async with session_factory() as session:
-        selfhosted = await inspect_selfhosted_rename(session, tenant_id=tenant_id, old=old, new=new)
-    _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
-    if not legacy and not readers and selfhosted == "absent":
-        return None
-    outcome = ResourceOutcome(
-        kind="agent", name=new, action=Action.RENAMED, anthropic_id=legacy[0].id if legacy else None
-    )
-    if dry_run:
-        return outcome
 
-    # Re-check under the reconcile lock: another apply may have moved first.
+    async def _plan(session: AsyncSession) -> SeededRename | None:
+        agents = [] if client is None else await list_agents_by_tenant(client, tenant_id=tenant_id)
+        return await plan_seeded_rename(agents, session, tenant_id=tenant_id, old=old, new=new)
+
+    async with session_factory() as session:
+        rename = await _plan(session)
+    if rename is None or dry_run:
+        return None if rename is None else rename.outcome
     async with session_factory() as session, session.begin():
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": lock_key}
         )
-        selfhosted = await rename_selfhosted_agent(session, tenant_id=tenant_id, old=old, new=new)
-        _raise_if_selfhosted_blocked(selfhosted, old=old, new=new)
-        if legacy or selfhosted == "pending":
-            await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
-    if client is not None:
-        for agent in (*legacy, *readers):
-            await _rename_on_provider(client, agent, tenant_id=tenant_id, old=old, new=new)
-    _log.info("defaults.agent_renamed", tenant_id=str(tenant_id), old=old, new=new)
-    return outcome
+        rename = await _plan(session)  # another apply may have moved first
+        if rename is None:
+            return None
+        await write_seeded_rename(session, rename, tenant_id=tenant_id)
+    await move_seeded_rename(client, rename, tenant_id=tenant_id)
+    return rename.outcome
 
 
 def _raise_if_selfhosted_blocked(state: SelfHostedState, *, old: str, new: str) -> None:

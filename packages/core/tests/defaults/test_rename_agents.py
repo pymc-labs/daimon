@@ -7,15 +7,19 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.core.defaults import apply_defaults
+from daimon.core.defaults import _reconcile, apply_defaults
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
     MA_METADATA_KEY_READER_SOURCE,
 )
-from daimon.core.defaults.rename_agents import rename_seeded_agent
-from daimon.core.defaults.report import Action, ApplyReport
+from daimon.core.defaults.rename_agents import (
+    SeededRename,
+    move_seeded_rename,
+    rename_seeded_agent,
+)
+from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.agent_avatars import get_or_create_avatar
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
@@ -64,7 +68,9 @@ async def _selfhosted(
     await session.commit()
     agents = SelfHostedAgents(factory)
     for name in names:
-        await agents.create(scope(str(_TENANT), str(account.id)), agent_spec(name), key=name)
+        metadata = {**_MANAGED, MA_METADATA_KEY_NAME: name}
+        spec = agent_spec(name).model_copy(update={"metadata": metadata})
+        await agents.create(scope(str(_TENANT), str(account.id)), spec, key=name)
 
 
 async def _names(session: AsyncSession, sql: str) -> list[str]:
@@ -81,6 +87,14 @@ def _actions(report: ApplyReport) -> list[tuple[str, Action]]:
     return [(outcome.name, outcome.action) for outcome in report.agents]
 
 
+def _deferred(report: ApplyReport) -> str:
+    """The deferred rename's reason; asserts the apply did not fail over it."""
+    assert not report.is_failure(), f"a deferred rename fails nothing: {report}"
+    deferred = [o for o in report.agents if o.action is Action.DEFERRED]
+    assert deferred, f"the rename is deferred: {report}"
+    return deferred[0].error or ""
+
+
 async def _apply(
     factory: async_sessionmaker[AsyncSession],
     state: FakeMAState,
@@ -88,10 +102,13 @@ async def _apply(
     *,
     dry_run: bool,
     refuse_update: str | None = None,
+    requests: list[str] | None = None,
 ) -> ApplyReport:
     agents = make_fake_ma_handler(state)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(f"{request.method} {request.url.path}")
         if request.method == "GET" and request.url.path == "/v1/environments":
             return list_response([])
         if request.method == "POST" and request.url.path == f"/v1/agents/{refuse_update}":
@@ -169,7 +186,7 @@ async def test_apply_when_seeded_daimon_exists_then_renames_it_in_place(
     assert sorted(_live(state)) == sorted(live), "a re-run creates and archives nothing"
 
 
-async def test_apply_when_workspace_has_own_default_then_fails_and_leaves_both(
+async def test_apply_when_workspace_has_own_default_then_defers_and_leaves_both(
     tmp_path: Path,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -181,10 +198,8 @@ async def test_apply_when_workspace_has_own_default_then_fails_and_leaves_both(
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    assert report.is_failure(), "a name collision fails the tenant loudly"
-    failed = [o for o in report.agents if o.action is Action.FAILED]
-    assert failed and "already has its own agent named 'default'" in (failed[0].error or ""), (
-        f"the failure says what to do: {failed}"
+    assert "already has its own agent named 'default'" in _deferred(report), (
+        "the deferral says what to do"
     )
     live = _live(state)
     assert live["daimon"]["id"] == "ag_daimon", "the seeded agent keeps its name"
@@ -235,7 +250,7 @@ async def test_apply_when_reader_source_is_not_seeded_then_reader_stays(
 
 
 @pytest.mark.parametrize("name", ["default", "Default"])
-async def test_apply_when_only_own_default_exists_then_fails_without_adopting_it(
+async def test_apply_when_only_own_default_exists_then_defers_without_adopting_it(
     name: str, tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     own = ma_agent(id="ag_own", name=name, tenant_id=_TENANT)
@@ -244,7 +259,7 @@ async def test_apply_when_only_own_default_exists_then_fails_without_adopting_it
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    assert report.is_failure(), "a workspace's own default blocks the seeded agent"
+    _deferred(report)
     live = _live(state)
     assert list(live) == [name], f"nothing is created or archived: {live}"
     metadata = live[name]["metadata"]
@@ -270,7 +285,7 @@ async def test_apply_when_seeded_and_own_default_exist_then_keeps_both(
 @pytest.mark.parametrize(
     "names", [("daimon", "default"), ("Daimon", "daimon")], ids=["taken", "case-duplicates"]
 )
-async def test_apply_when_selfhosted_rename_unsafe_then_fails_and_moves_nothing(
+async def test_apply_when_selfhosted_rename_unsafe_then_defers_and_moves_nothing(
     names: tuple[str, str],
     tmp_path: Path,
     db_session: AsyncSession,
@@ -282,7 +297,7 @@ async def test_apply_when_selfhosted_rename_unsafe_then_fails_and_moves_nothing(
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    assert report.is_failure(), f"self-hosted records {names} block the rename"
+    _deferred(report)
     assert list(_live(state)) == ["daimon"], "the seeded agent keeps its name on the provider"
     routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert routines == ["daimon"], "database references are unchanged"
@@ -321,7 +336,7 @@ async def test_rename_when_nothing_pending_then_returns_without_taking_the_lock(
     assert outcome is None, "a migrated tenant has nothing to rename"
 
 
-async def test_apply_when_new_reader_exists_then_fails_and_moves_nothing(
+async def test_apply_when_new_reader_exists_then_defers_and_moves_nothing(
     tmp_path: Path,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -338,8 +353,7 @@ async def test_apply_when_new_reader_exists_then_fails_and_moves_nothing(
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    failed = [o for o in report.agents if o.action is Action.FAILED]
-    assert failed and "'default-reader'" in (failed[0].error or ""), f"names the reader: {failed}"
+    assert "'default-reader'" in _deferred(report), "the deferral names the reader"
     assert set(_live(state)) == {"daimon", "daimon-reader", "default-reader"}, (
         "no agent is renamed, created or archived"
     )
@@ -359,7 +373,7 @@ async def test_apply_when_provider_rename_fails_after_commit_then_rerun_finishes
 
     failed = await _apply(db_session_factory, state, root, dry_run=False, refuse_update="ag_daimon")
 
-    assert failed.is_failure(), "a provider refusal fails the apply"
+    _deferred(failed)
     assert list(_live(state)) == ["daimon"], "the agent keeps its old name and nothing is created"
     routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert routines == ["default"], "the database references committed first"
@@ -436,3 +450,44 @@ async def test_apply_when_new_reader_serves_renamed_agent_then_leaves_old_reader
         assert set(_live(state)) == {"default", "daimon-reader", "default-reader"}, (
             "the new reader stays and the stale old reader is left unarchived"
         )
+
+
+async def test_rename_when_a_concurrent_apply_moved_the_reader_then_keeps_its_suffix(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A rename planned before another apply moved the reader leaves it as moved."""
+    stale = ma_agent(id="ag_reader", name="daimon-reader", tenant_id=_TENANT, metadata=_MANAGED)
+    state = FakeMAState()
+    _seed(state, ma_agent(id="ag_reader", name="default-reader", tenant_id=_TENANT))
+    rename = SeededRename(
+        old="daimon",
+        new="default",
+        moves=(stale,),
+        outcome=ResourceOutcome(kind="agent", name="default", action=Action.RENAMED),
+    )
+
+    await move_seeded_rename(
+        build_fake_anthropic(make_fake_ma_handler(state)), rename, tenant_id=_TENANT
+    )
+
+    assert list(_live(state)) == ["default-reader"], "the reader never becomes `default`"
+
+
+async def test_apply_when_renamed_then_lists_agents_no_more_than_without_a_rename(
+    tmp_path: Path,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = FakeMAState()
+    _seed(state, ma_agent(id="ag_seeded", name="default", tenant_id=_TENANT, metadata=_MANAGED))
+    root = _tree(tmp_path)
+    with_rename: list[str] = []
+    await _apply(db_session_factory, state, root, dry_run=False, requests=with_rename)
+    monkeypatch.setattr(_reconcile, "pending_renames", lambda _names: [])
+    without: list[str] = []
+    await _apply(db_session_factory, state, root, dry_run=False, requests=without)
+
+    listings = "GET /v1/agents"
+    assert with_rename.count(listings) == without.count(listings), (
+        "the rename check reuses the agent pass's listing"
+    )
