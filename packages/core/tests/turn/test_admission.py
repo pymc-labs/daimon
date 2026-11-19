@@ -1337,6 +1337,58 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
+async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Gemini and OpenAI never read a channel's tool switches, so a turn there is refused
+    rather than run with a tool the channel turned off; the same turn on Claude is not."""
+    from daimon.core.features.model_input import TOOL_KEYS
+    from daimon.core.features.snapshot import FeaturePlace
+    from daimon.core.turn.admission import place_features, require_tool_limits_hold
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    admission = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+
+    async def on_gemini() -> Admission:
+        CACHE.clear()
+        place = FeaturePlace.of(
+            tenant.id, "discord", "chan-1", agent_id=admission.agent.id, backend="gemini"
+        )
+        features = await place_features(deps, place, admission.agent, keys=TOOL_KEYS)
+        return replace(admission, features=features)
+
+    await require_tool_limits_hold(deps, await on_gemini())
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("channel", channel_id="chan-1"),
+        key="tool.bash",
+        value="off",
+        set_by=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    with pytest.raises(AdmissionDenied) as refused:
+        await require_tool_limits_hold(deps, await on_gemini())
+    assert (refused.value.reason, refused.value.cause) == ("backend_unsupported", "tool_limits"), (
+        "a channel's switched-off tool should refuse the native turn by name"
+    )
+
+
 async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

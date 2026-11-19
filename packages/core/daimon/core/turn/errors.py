@@ -69,6 +69,9 @@ BackendRefusalCause = Literal[
     # A channel pinned to a keyed provider whose code defaults hold no channel row
     # (OpenAI's needs a native agent): the operator adds a row, or the pin is cleared.
     "channel_row_missing",
+    # A channel's or thread's tool switches can't be applied by the provider the agent
+    # runs on (it compiles one revision per agent): refused, never run with the tool.
+    "tool_limits",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

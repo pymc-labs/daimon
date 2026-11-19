@@ -284,6 +284,10 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
         " Daimon to add the Anthropic key.",
     ),
+    "tool_limits": _Copy(
+        "This {scope} limits the agent's tools, and {provider} can't apply that limit.",
+        'Ask {who} to turn those tools back on, or to say "switch {agent_mid} to {default}".',
+    ),
 }
 _PROVIDER_NAMES = {
     MANAGED_AGENTS.provider: "Anthropic",

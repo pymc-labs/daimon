@@ -85,6 +85,13 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
                 "Switch back to Claude." if admin else ask,
                 way_back,
             )
+        case "tool_limits":
+            return _refusal(
+                f"This chat's tool limits can't be applied on {named}.",
+                _NO_ANSWER,
+                "Switch back to Claude, or turn the tools back on." if admin else ask,
+                way_back,
+            )
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
         case None:

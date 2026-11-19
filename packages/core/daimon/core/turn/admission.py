@@ -68,6 +68,7 @@ from daimon.core.features.model_input import (
     HISTORY_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
+    TOOL_KEYS,
     TURN_KEYS,
     HistoryDepth,
     SessionToolset,
@@ -1988,6 +1989,7 @@ async def _admit_gates(
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
     result = replace(result, features=await features_at(result))
+    await require_tool_limits_hold(deps, result)
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
         # still the binding this message read (a concurrent move or card wins).
@@ -2870,6 +2872,28 @@ async def place_features(
         agent_builtins=builtins_of(agent),
         server_setup=False,
     )
+
+
+async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:
+    """Refuse a native turn where a channel or thread switched a built-in tool off.
+
+    Gemini and OpenAI compile one revision per agent, so a switch below the agent never
+    reaches them; the same place on Claude would hide the tool. Running anyway would
+    quietly give the agent a tool the people there turned off.
+    """
+    native = admission.features
+    if native is None or native.place.backend in (None, MANAGED_AGENTS.provider):
+        return
+    claude = await place_features(
+        deps,
+        replace(native.place, backend=MANAGED_AGENTS.provider),
+        admission.agent,
+        keys=TOOL_KEYS,
+    )
+    if any(native.on(key) and not claude.on(key) for key in TOOL_KEYS):
+        raise AdmissionDenied(
+            reason="backend_unsupported", cause="tool_limits", provider=native.place.backend
+        )
 
 
 def running_on(admission: Admission) -> dict[str, str]:

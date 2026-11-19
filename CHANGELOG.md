@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A channel's tool limits are no longer ignored on GPT and Gemini.** A tool
+  switched off for a channel or thread still ran there when the agent was on
+  GPT or Gemini. The reply is now refused, saying those providers can't apply
+  the limit, until the tool is turned back on or the agent is on Claude.
 - **Failure alerts name the provider.** `turn.user_failure` carries a
   `provider` field, and its `backend` is set as soon as admission reads the
   channel's or agent's choice, so a turn that fails while being admitted no
