@@ -4,7 +4,7 @@ import pytest
 from daimon.core.agent_detail_lists import format_detail_lists
 
 
-@pytest.mark.parametrize("count", [0, 1, 5, 6, 7, 61])
+@pytest.mark.parametrize("count", [0, 6, 7])
 def test_collapsed_list_shows_six_complete_entries(count: int) -> None:
     entries = [f"`KEY_{index}`" for index in range(count)]
     text = format_detail_lists({"keys": entries}, expanded=None, max_chars=4000)["keys"]

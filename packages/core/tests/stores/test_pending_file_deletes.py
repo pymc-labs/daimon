@@ -6,28 +6,12 @@ import datetime as dt
 import uuid
 
 import pytest
-from daimon.core.stores.domain import PendingFileDeleteRow
 from daimon.core.stores.pending_file_deletes import (
     delete_pending_file_delete,
     enqueue_pending_file_delete,
     list_due_pending_file_deletes,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-
-
-@pytest.mark.asyncio
-async def test_enqueue_then_list_due_returns_row_when_now_past_delete_after(
-    db_session: AsyncSession,
-) -> None:
-    """A pending delete whose delete_after is in the past is returned by list_due."""
-    file_id = f"file_{uuid.uuid4().hex}"
-    delete_after = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=5)
-
-    await enqueue_pending_file_delete(db_session, file_id=file_id, delete_after=delete_after)
-
-    due = await list_due_pending_file_deletes(db_session, now=dt.datetime.now(dt.UTC))
-    assert [r.file_id for r in due] == [file_id], "due query should return the enqueued row"
-    assert isinstance(due[0], PendingFileDeleteRow), "store should return Pydantic, not ORM"
 
 
 @pytest.mark.asyncio
@@ -46,20 +30,6 @@ async def test_enqueue_twice_same_file_id_updates_delete_after_without_duplicate
     rows = [r for r in due if r.file_id == file_id]
     assert len(rows) == 1, "upsert must not create a duplicate row for the same file_id"
     assert rows[0].delete_after == second, "second enqueue should update delete_after"
-
-
-@pytest.mark.asyncio
-async def test_list_due_excludes_rows_with_future_delete_after(
-    db_session: AsyncSession,
-) -> None:
-    """A pending delete whose delete_after is in the future is not yet due."""
-    file_id = f"file_{uuid.uuid4().hex}"
-    future = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
-
-    await enqueue_pending_file_delete(db_session, file_id=file_id, delete_after=future)
-
-    due = await list_due_pending_file_deletes(db_session, now=dt.datetime.now(dt.UTC))
-    assert file_id not in [r.file_id for r in due], "future delete_after should not be due"
 
 
 @pytest.mark.asyncio

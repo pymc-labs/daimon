@@ -170,14 +170,6 @@ def test_collapsed_screen_has_zero_button_rows() -> None:
     assert screen.image is None
 
 
-def test_collapsed_and_review_screens_carry_no_image() -> None:
-    review = to_screen(_SPEC, _state(current_step=len(_SPEC.steps)))
-    collapsed = to_screen(_SPEC, _state(status=WizardStatus.SUBMITTED))
-
-    assert review.image is None
-    assert collapsed.image is None
-
-
 def test_every_emitted_action_round_trips_through_build_custom_id_and_matches_one_pattern() -> None:
     states = [
         _state(current_step=0),

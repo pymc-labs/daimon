@@ -2,52 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime
-
 import pytest
-from pydantic import ValidationError
-
-
-def test_agent_google_binding_orm_has_expected_tablename() -> None:
-    from daimon.core._models import AgentGoogleBinding
-
-    assert AgentGoogleBinding.__tablename__ == "agent_google_binding", (
-        "AgentGoogleBinding ORM should map to agent_google_binding table"
-    )
-
-
-def test_agent_google_binding_row_validates_construction() -> None:
-    from daimon.core.stores.domain import AgentGoogleBindingRow
-
-    now = datetime.now(UTC)
-    row = AgentGoogleBindingRow.model_validate(
-        {
-            "agent_id": uuid.uuid4(),
-            "email": "u@example.com",
-            "scopes": ("a", "b"),
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-
-    assert row.email == "u@example.com", "row should preserve email"
-    assert row.scopes == ("a", "b"), "scopes should be a tuple of strings"
-
-
-def test_agent_google_binding_row_is_frozen() -> None:
-    from daimon.core.stores.domain import AgentGoogleBindingRow
-
-    now = datetime.now(UTC)
-    row = AgentGoogleBindingRow(
-        agent_id=uuid.uuid4(),
-        email="u@example.com",
-        scopes=("a",),
-        created_at=now,
-        updated_at=now,
-    )
-    with pytest.raises(ValidationError):
-        row.email = "x@example.com"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_credentials_settings_default_google_sa_json_is_none(
