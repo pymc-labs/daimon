@@ -392,7 +392,10 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 user=member,
                 guild_id="1",
                 guild=SimpleNamespace(owner_id=None),
-                response=SimpleNamespace(send_message=client.chat_postEphemeral),
+                response=SimpleNamespace(
+                    send_message=client.chat_postEphemeral, defer=AsyncMock()
+                ),
+                followup=SimpleNamespace(send=client.chat_postEphemeral),
             )
             view = SimpleNamespace(
                 state=SimpleNamespace(selected=SimpleNamespace(routine=row)), runtime=runtime
@@ -404,7 +407,7 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
             scope.update(
                 checks=SimpleNamespace(is_guild_admin=discord_admin),
                 # The current chat permission is new; the archived handler had none.
-                _chat_permitted=AsyncMock(return_value=True),
+                _chat_refusal=AsyncMock(return_value=None),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
@@ -495,6 +498,10 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
                 item for item in expected if not (isinstance(item, tuple) and item[0] == "write")
             ]
             expected[-1] = ("response", "This routine is already on.")
+    if platform == "discord" and scenario != "admin":
+        # A member's click first reads the routine, to know which direction it applies.
+        assert actual[:3] == ["begin", ("load", ROUTINE, actual[1][2]), "commit"]
+        actual = actual[3:]
     if platform == "discord":
         # Main e7a70df78 reworded these refusals; compare where and how they go.
         expected, actual = (

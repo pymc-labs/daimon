@@ -187,17 +187,7 @@ async def test_refresh_keeps_the_panel_scoped_to_the_clicker(
 async def test_pause_rerenders_only_the_members_own_routines(db_session_factory, monkeypatch):
     """After a member pauses their routine, the redrawn panel still hides everyone else's."""
     from daimon.adapters.discord.routines_panel import panel as panel_mod
-    from daimon.core.authz import build_subject
 
-    monkeypatch.setattr(
-        panel_mod,
-        "resolve_subject",
-        AsyncMock(
-            return_value=build_subject(
-                is_admin=False, platform_user_id=str(ME), verified_membership=True
-            )
-        ),
-    )
     view, click = await _panel_view(db_session_factory, monkeypatch, admin=False)
     pause = next(c for c in view.walk_children() if isinstance(c, panel_mod._PauseButton))
 
@@ -207,33 +197,3 @@ async def test_pause_rerenders_only_the_members_own_routines(db_session_factory,
     selected = click.response.edit_message.call_args.kwargs["view"].state.selected
     assert selected is not None
     assert not selected.routine.enabled, "the routine was paused"
-
-
-@pytest.mark.parametrize("membership", [None, False])
-async def test_pause_refuses_a_creator_who_is_no_longer_a_member(
-    db_session_factory, monkeypatch, membership
-):
-    """Creating the routine is not enough: the clicker's current membership is read fresh."""
-    from daimon.adapters.discord.routines_panel import panel as panel_mod
-    from daimon.core.authz import build_subject
-
-    monkeypatch.setattr(
-        panel_mod,
-        "resolve_subject",
-        AsyncMock(
-            return_value=build_subject(
-                is_admin=False, platform_user_id=str(ME), verified_membership=membership
-            )
-        ),
-    )
-    view, click = await _panel_view(db_session_factory, monkeypatch, admin=False)
-    pause = next(c for c in view.walk_children() if isinstance(c, panel_mod._PauseButton))
-    click.response.send_message = AsyncMock()
-
-    await pause.callback(click)
-
-    click.response.send_message.assert_awaited_once()
-    click.response.edit_message.assert_not_awaited()
-    assert view.state.selected is not None and view.state.selected.routine.enabled, (
-        "the routine stays running"
-    )

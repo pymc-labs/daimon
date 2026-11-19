@@ -1349,7 +1349,7 @@ async def erase_sandbox_setter(
             await session.execute(
                 text(
                     f"UPDATE {table} SET {column} = :erased WHERE {column} = :setter"
-                    " AND (CAST(:tenant AS uuid) IS NULL OR tenant_id = CAST(:tenant AS uuid))"
+                    " AND (CAST(:only_in AS uuid) IS NULL OR tenant_id = CAST(:only_in AS uuid))"
                 ),
-                {"erased": SANDBOX_SETTER_ERASED, "setter": setter, "tenant": tenant_id},
+                {"erased": SANDBOX_SETTER_ERASED, "setter": setter, "only_in": tenant_id},
             )
