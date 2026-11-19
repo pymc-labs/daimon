@@ -56,6 +56,10 @@ NO_QUESTION: dict[tuple[str, str], str] = {
         "packages/testing/daimon/testing/channel_accounting.py",
         "run_turn",
     ): "a test harness, not a production path",
+    (
+        "packages/testing/daimon/testing/turn_fakes.py",
+        "run_prepared",
+    ): "a test helper that forwards its caller's keywords, not a production path",
 }
 
 

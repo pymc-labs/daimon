@@ -20,6 +20,7 @@ for all three dimensions against the sessions these tests produce.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -63,7 +64,7 @@ from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import auth_identity
+from ..harness import auth_identity, stop_confirmation_workers
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _ENV_NAME = "production"
@@ -230,10 +231,13 @@ def _mismatch(dimension: Dimension, session_agent: Any, agent: BetaManagedAgents
 
 
 @pytest.fixture
-async def world(db_session_factory: async_sessionmaker[AsyncSession]) -> _World:
+async def world(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[_World]:
     world = _World(db_session_factory)
     await world.seed()
-    return world
+    yield world
+    # The sends' confirmation workers read through the test's connection: stop them before
+    # the database fixture rolls it back.
+    await stop_confirmation_workers()
 
 
 async def _start_then_change_then_continue(world: _World, dimension: Dimension) -> str:

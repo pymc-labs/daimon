@@ -7,6 +7,7 @@ in `daimon.testing.asgi`. Don't duplicate them here.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from contextlib import AbstractAsyncContextManager
@@ -31,6 +32,7 @@ from daimon.testing.factories import make_account, make_platform_principal, make
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
+    "stop_confirmation_workers",
     "auth_identity",
     "discord_turn_origin",
     "make_identity",
@@ -184,3 +186,18 @@ async def registered_account_token(
             secret=secret,
             now=dt.datetime.now(dt.UTC),
         )
+
+
+async def stop_confirmation_workers() -> None:
+    """Cancel the confirmation workers agent-chat sends started and wait them out.
+
+    A worker reads through the test's database connection, so a test that holds
+    one must call this before its database fixture tears down.
+    """
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+
+    workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
+    _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
+    for worker in workers:
+        worker.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
