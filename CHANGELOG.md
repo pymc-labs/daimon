@@ -434,7 +434,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks each call's asker and place itself. An agent whose relay servers all set it
   gets its normal memory, sessions and direct messages, so what it learns can
   surface in its other channels. The default is `true`, and one scoped server still
-  limits the agent.
+  limits the agent. Conversations that already started keep their limits until
+  someone starts a new one with `/new`. Remove `channel_scoped` from
+  `DAIMON_MCP_IDENTITY__SERVERS` before rolling back to a release without it, which
+  refuses to start on the unknown key.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
   change.** An agent whose Daimon tool list was long no longer fails to start on
   OpenAI, and a provider that is set up is never reported as missing.
