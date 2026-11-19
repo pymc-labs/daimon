@@ -1623,39 +1623,34 @@ with no current tariff is refused. It resets at midnight UTC. 0 allows no OpenAI
 
 Read from `daimon.core.config.SupportSettings`. Prefix `DAIMON_SUPPORT__`.
 
-Human-support escalation: where requests land, and how many each user gets.
+Ask a person: the default channel per platform, and each person's default credits.
 
-`credits_per_user` is a COUNT of human interactions, deliberately not the USD in
-`BillingSettings.signup_credit`. Sharing a ledger with billing would let a support
-request eat the tenant's ability to run turns, and would give a paid-up tenant unlimited
-support. Different unit, different table.
+Support credits are their own unit, not the USD in `BillingSettings.signup_credit`:
+sharing billing's ledger would let a request eat a tenant's turns and give a paid-up
+tenant unlimited support. A request is charged to the most specific place with a support
+limit, else to the person's default credits.
 
-Each platform's requests go only to its own channel: Discord's to
-`escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams' to
-`teams_escalation_channel_id`. An unset channel disables the affordance it serves
-entirely rather than recording requests nobody will ever see. Failing closed is the
-honest behaviour: an escalate button that reaches no one is worse than no button,
-because the person believes they have asked for help. Every platform spends the same
-per-user, per-tenant allowance from one ledger.
+Each platform's requests go to its own default channel, or to a channel the workspace
+picked while `support_own_channel` is on. With neither, Ask a person is unavailable
+there: a button that reaches no one is worse than none.
 
 ### `DAIMON_SUPPORT__ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Discord channel id where human-support requests from Discord are posted (the unprefixed
-name predates per-platform channels). A Teams id (`19:…`) left here is ignored. Unset
-(the default) disables the escalate affordance on Discord — a request that reaches
-nobody is worse than no button at all. A channel rather than operator DMs: it survives
-one person's DMs being closed, and it leaves a shared record anyone on the rota can pick
-up. The bot must be able to post there.
+Default Discord channel id for Ask a person requests from Discord (the unprefixed name
+predates per-platform channels). A Teams id (`19:…`) left here is ignored. A workspace
+may pick its own channel instead while support_own_channel is on. Unset, with no own
+channel, Ask a person is unavailable on Discord. The bot must be able to post there.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID`
 
 `str | None` · optional · default unset
 
-Slack channel id where human-support requests from Slack are posted. Unset (the default)
-disables the Ask the team button on Slack. Slack requests never go to another platform's
-channel, nor theirs here. The bot must be a member of the channel.
+Default Slack channel id for Ask a person requests from Slack. A workspace may pick its
+own channel instead while support_own_channel is on. Unset, with no own channel, Ask a
+person is unavailable on Slack. Requests never go to another platform's channel. The bot
+must be a member of the channel.
 
 ### `DAIMON_SUPPORT__SLACK_ESCALATION_TEAM_ID`
 
@@ -1670,31 +1665,30 @@ suits a single-workspace install. Daimon must be installed in the named workspac
 
 `str | None` · optional · default unset
 
-Teams channel id (`19:…`) where human-support requests from Teams are posted. Unset (the
-default) disables Ask a person on Teams. Teams requests never go to the Discord or Slack
-channel, nor theirs here. The Teams bot must be a member of the channel's team (and of
-the channel, if it is private).
+Default Teams channel id (`19:…`) for Ask a person requests from Teams. A workspace may
+pick its own channel instead while support_own_channel is on. Unset, with no own
+channel, Ask a person is unavailable on Teams. Requests never go to another platform's
+channel. The Teams bot must be a member of the channel's team (and of the channel, if it
+is private).
 
 ### `DAIMON_SUPPORT__CREDITS_PER_USER`
 
 `int` · optional · default `20`
 
-How many human-support requests each user gets within a tenant. A COUNT of interactions,
-NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — the two are deliberately separate
-ledgers. 0 disables escalation.
+Default support credits each person gets within a workspace, spent where no support
+limit applies. A request costs its menu option's price, one credit on the default menu.
+Not the USD in DAIMON_BILLING__SIGNUP_CREDIT. 0 leaves Ask a person to places with a
+support limit.
 
 ### `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT`
 
 `dict[UUID, bool]` · optional · default `{}`
 
-Per-tenant switch, keyed by tenant UUID: true also posts every submitted 👎 "What went
-wrong?" form (the reasons, the text, the person, the agent and a link to the answer) to
-the channel Ask a human posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack,
-DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and
-DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. Missing/false (the default) keeps
-the form in the database only. The form tells the person their answers are shared when
-it is on. Spends no support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a
-JSON object.
+Deprecated: the support_feedback feature replaces it, and `daimon features import-env`
+stores this map as workspace settings. Per-tenant switch, keyed by tenant UUID: true
+also posts every submitted 👎 "What went wrong?" form to where Ask a person requests go.
+A workspace setting beats it. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON
+object.
 
 ## Turn
 

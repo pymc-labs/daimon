@@ -103,8 +103,6 @@ async def enabled_for(settings: Settings | None, requester: str) -> bool:
 
 def card_kind(prompt: ConfirmationPrompt) -> str:
     """A closed name for what the card confirms, for the log and audit."""
-    if prompt.backend_switch is not None:
-        return "backend_switch"
     if prompt.configuration is not None:
         return prompt.configuration.operation
     if prompt.tool_rule is not None:

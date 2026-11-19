@@ -417,6 +417,15 @@ async def _lookup_tags(
     return await asyncio.shield(task)
 
 
+async def find_agent_id_cached(
+    client: AsyncAnthropic, cache: ResolverCache, *, tenant_id: uuid.UUID, name: str
+) -> str | None:
+    """The live agent `name` (its daimon tag) resolves to, from the cache or one shared
+    listing; None when there is none. Unlike `resolve_agent`, never applies defaults."""
+    found = cache.get((tenant_id, "agent", name))
+    return found or (await _lookup_tags(client, tenant_id, "agent", cache)).get(name)
+
+
 async def resolve_agent(
     client: AsyncAnthropic,
     *,

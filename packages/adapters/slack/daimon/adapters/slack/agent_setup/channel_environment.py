@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import uuid
+from dataclasses import replace
 from typing import Final
 
 import anthropic
@@ -17,7 +18,8 @@ from daimon.adapters.slack.admin_caller import admin_caller
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.answering_map import AnsweringMap
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, origin_ids
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_environments import (
     NOT_OFFERED_NOTE,
     EnvironmentPicker,
@@ -57,17 +59,22 @@ async def load_picker_subject(
     *,
     tenant_id: uuid.UUID,
     user_id: str,
+    origin: frozenset[str] = frozenset(),
 ) -> Subject:
-    """The caller as `authorize` sees them, using live native admin authority."""
+    """The caller as `authorize` sees them, using live native admin authority.
+
+    `origin` is the channel the panel was opened in (Slack's own payload), never a pick.
+    """
     caller = await admin_caller(client, user_id=user_id)
     async with runtime.sessionmaker() as session:
-        return await load_live_subject(
+        subject = await load_live_subject(
             session,
             tenant_id=tenant_id,
             platform="slack",
             caller=caller,
             action=DelegatedAction.ENVIRONMENTS,
         )
+    return replace(subject, origin_channel_ids=origin)
 
 
 async def may_pick_environment(
@@ -103,7 +110,7 @@ async def load_environment_picker(
             tenant_id=tenant_id,
             channel_id=channel_id,
             subject=await load_picker_subject(
-                runtime, client, tenant_id=tenant_id, user_id=user_id
+                runtime, client, tenant_id=tenant_id, user_id=user_id, origin=origin_ids(channel_id)
             ),
         )
     ):
@@ -121,8 +128,12 @@ async def load_environment_picker(
         names = await list_environment_names(
             runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker, hidden=hidden
         )
-    except anthropic.APIError:
-        log.warning("slack.agent_setup.environment_picker.list_failed", exc_info=True)
+    except anthropic.APIError as error:
+        log.warning(
+            "slack.agent_setup.environment_picker.list_failed",
+            exc_info=True,
+            causes=backend_refusal_causes(error),
+        )
         return None
     return plan_environment_picker(
         answering_map,

@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 import anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -71,9 +72,13 @@ async def collect_routine_files(
     """Reuse interactive listing settlement; keep references until the outbox settles."""
     try:
         listed = await poll_output_files(client, session_id=session_id, sleep=sleep)
-    except anthropic.APIError:
+    except anthropic.APIError as error:
         # File collection must not discard a routine's completed reply.
-        log.exception("routine.files_collection_failed", session_id=session_id)
+        log.exception(
+            "routine.files_collection_failed",
+            session_id=session_id,
+            causes=backend_refusal_causes(error),
+        )
         return (
             plain_payload(
                 "\n\n".join(filter(None, [text, "Generated files could not be attached."]))

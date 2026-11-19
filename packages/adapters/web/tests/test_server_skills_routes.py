@@ -14,6 +14,7 @@ from daimon.core.stores import web_people as people_store
 from daimon.core.stores import workspace_members as members_store
 from daimon.testing.factories import (
     make_account,
+    make_held_update,
     make_platform_principal,
     make_tenant,
     make_web_person,
@@ -229,14 +230,12 @@ async def test_a_held_update_is_shown_and_applied_by_the_owner(
                 session, tenant_id=owner.tenant_id, skill_id="sk_new"
             )
             assert mirror is not None
-            await server_skills_store.hold_update(
+            await make_held_update(
                 session,
                 tenant_id=owner.tenant_id,
                 agent_id="ag_w",
                 skill_id="sk_new",
                 digest=mirror.digest,
-                reason="drops differ",
-                now=_NOW,
             )
         held = await client.get("/api/agents/ag_w/skill-follows")
         follow = {"skill_id": "sk_new", "follow": False}

@@ -19,7 +19,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import list_running_origins
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.core.features.registry import limit_int
-from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, deployment_on_everywhere, resolve_features
 from daimon.core.outbound.mentions import (
     Platform,
     RenderedPost,
@@ -47,6 +47,7 @@ from daimon.core.outbound.reach import (
 from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.file_uploads import get_upload
+from daimon.core.stores.host_call_cards import get_card
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.routines import get_routine
 from daimon.core.turn_origin import origin_place
@@ -432,7 +433,11 @@ async def prepare_posts(
     async with runtime.session_factory() as session, session.begin():
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
         if rules.budget:
-            _gate(scope, so_far, approved, call, plan or call.counts(), rules, auth)
+            # A provider turn asks on Daimon's host call card where that is on.
+            carded = not auth.no_confirmation_surface or deployment_on_everywhere(
+                runtime.settings, "host_call_gate", (auth.platform or "",)
+            )
+            _gate(scope, so_far, approved, call, plan or call.counts(), rules, auth, carded=carded)
         await save_tally(
             session, tenant_id=auth.tenant_id, turn_key=scope.key, tally=so_far.plus(call)
         )
@@ -496,6 +501,8 @@ def _gate(
     plan: ReachPlan,
     rules: OutboundRules,
     auth: AuthIdentity,
+    *,
+    carded: bool,
 ) -> None:
     limits = ReachPlan(threads=rules.threads, places=rules.places, people=rules.people)
     verdict = check_reach(plan=plan, so_far=so_far, call=call, limits=limits, approved=approved)
@@ -505,7 +512,7 @@ def _gate(
         return
     record_denial(f"reach_{verdict}" if verdict != "ok" else "reach_own_threads")
     log.info("reach.over_budget", key=scope.key, has_card=scope.origin is not None)
-    if scope.kind != "live" or (auth.no_confirmation_surface and not card_satisfied(auth)):
+    if scope.kind != "live" or not carded:
         # No card can be shown (an outside client, or a backend without one): fail closed.
         raise ToolError(NO_CARD)
     if verdict == "ok":
@@ -516,11 +523,26 @@ def _gate(
 async def approve(
     runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope, plan: ReachPlan
 ) -> None:
-    """Record the plan the requester approved on the card, for the rest of the turn."""
+    """Record the plan the requester approved on the card, for the rest of the turn.
+
+    A host call card's Approve runs in the wake turn after it: what the asking turn
+    reached moves there, so it counts once.
+    """
     async with runtime.session_factory() as session, session.begin():
-        _, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+        so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
+        card = (
+            await get_card(session, tenant_id=auth.tenant_id, card_id=auth.confirmed_call_id)
+            if card_satisfied(auth) and auth.confirmed_call_id is not None
+            else None
+        )
+        if card is not None and (asked := turn_tally_key(card.origin_id)) != scope.key:
+            earlier, _ = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=asked)
+            so_far = so_far.plus(earlier)
+            await save_tally(session, tenant_id=auth.tenant_id, turn_key=asked, tally=ReachTally())
         widest = plan if approved is None else approved.widest(plan)
-        await save_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key, approved=widest)
+        await save_tally(
+            session, tenant_id=auth.tenant_id, turn_key=scope.key, tally=so_far, approved=widest
+        )
     log.info("reach.approved", key=scope.key, **plan.model_dump())
 
 

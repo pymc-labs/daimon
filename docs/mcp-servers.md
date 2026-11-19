@@ -105,6 +105,11 @@ The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
 (`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat and senders
 from another organisation name no person. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
+
+A channel turn of an agent with a relay server runs held: it posts only in its
+channel and its threads, sends no DMs and has no admin tools. The agent keeps no
+long-term memory, and its sessions are sealed to the channel.
+
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 
@@ -193,11 +198,9 @@ An update that adds or changes a script, or changes `allowed-tools`, waits
 until an admin approves it. Other changes, such as `.md` and `.txt` files,
 apply without approval.
 
-An agent switched to OpenAI or Gemini moves only when its dropped capabilities
-stay the same. Otherwise it keeps its version and shows **Needs re-confirm**.
-Its update button moves it, and its owner then confirms the new drops. OpenAI
-uploads each version of a custom or channel skill, and a skill over its size
-limit is named on the switch card. Gemini carries the default skills only.
+An agent switched to OpenAI or Gemini follows updates too. OpenAI uploads each
+version of a custom or channel skill, and a skill over its size limit is off
+there. Gemini carries the default skills only.
 Self-hosted channels use their deployment's own skills.
 
 ## Give an agent Google Workspace access

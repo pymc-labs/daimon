@@ -11,20 +11,15 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import httpx
 from daimon.core.agent_editing import AgentActor, AgentEditDeps
-from daimon.core.authz import Subject
-from daimon.core.channel_backend import load_backend_agent, make_backend_service
-from daimon.core.config import Settings, SignedIdentityServer, TurnSettings
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.config import Settings, SignedIdentityServer
 from daimon.core.mcp_rpc import McpStatusError
 from daimon.core.mcp_skills.install import ServerSkill, fetch_server_skill
 from daimon.core.mcp_skills.manifest import SkillEntry, SkillRejected, parse_entry
 from daimon.core.mcp_skills.protocol import Endpoint, fetch_skill_listing
-from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import retrieve_agent
 from daimon.core.node_exchange import (
     NodeAccessError,
     NodeAsker,
@@ -36,20 +31,16 @@ from daimon.core.node_exchange import (
     node_token,
 )
 from daimon.core.server_skills.anthropic import ManagedAgentsTarget
-from daimon.core.server_skills.consent import ConsentKeeper, Renewer
 from daimon.core.server_skills.sync import SyncDeps, UpstreamGone, UpstreamUnreachable
 from daimon.core.skill_library_files import custom_skill_names, skill_lock
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
 from daimon.core.stores import workspace_members as members_store
-from daimon.core.stores.domain import BackendAgent, ServerSkillRow
+from daimon.core.stores.domain import ServerSkillRow
 from daimon.core.stores.web_people import get_person_for_account
 from daimon.core.token_exchange import ExchangeClient
 from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-if TYPE_CHECKING:
-    from daimon.core.turn.deps import TurnDeps
 
 __all__ = [
     "SERVES_TTL_S",
@@ -59,7 +50,6 @@ __all__ = [
     "SkillsNode",
     "active_adder",
     "ask_node",
-    "consent_keeper",
     "list_server_skills",
     "skill_options",
     "skill_sync_deps",
@@ -232,66 +222,16 @@ class NodeUpstream:
         return await self._asked(mirror, fetch)
 
 
-def consent_keeper(
-    *,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    edit: AgentEditDeps,
-    turn_settings: TurnSettings,
-    turn_deps: Callable[[], TurnDeps | None],
-) -> ConsentKeeper:
-    """Renewals vouched for by each mirror's adder; consented agents are held without one."""
-
-    async def renewer(mirror: ServerSkillRow) -> Renewer | None:
-        adder = await active_adder(sessionmaker, mirror)
-        # Without turns there is no source capture, so nothing can be renewed.
-        deps = None if adder is None else turn_deps()
-        if adder is None or deps is None:
-            return None
-        account = adder.account_id
-        # Never an admin: the sync reads each source with the adder's plainest rights.
-        subject = Subject(platform_user_id=str(account))
-
-        async def capture(source: BackendAgent) -> BackendAgent:
-            from daimon.core.turn.admission import capture_agent_source
-
-            return await capture_agent_source(deps, source, account_id=account, subject=subject)
-
-        service = make_backend_service(sessionmaker, turn_settings, capture_source=capture)
-        return Renewer(backends=service, account_id=account)
-
-    async def load(mirror: ServerSkillRow, agent_id: str) -> BackendAgent:
-        scope = resource_scope(tenant_id=str(mirror.tenant_id))
-        actual = await retrieve_agent(edit.client, agent_id, scope=scope)
-        name = (actual.metadata or {}).get(MA_METADATA_KEY_NAME, "")
-        return await load_backend_agent(
-            edit.client,
-            sessionmaker,
-            tenant_id=mirror.tenant_id,
-            agent_name=name,
-            actual_agent=actual,
-        )
-
-    return ConsentKeeper(sessionmaker=sessionmaker, renewer=renewer, load=load)
-
-
 def skill_sync_deps(
     *,
     node: SkillsNode,
     exchange: NodeExchange,
     shared: httpx.AsyncClient | None,
     edit: AgentEditDeps,
-    turn_settings: TurnSettings,
-    turn_deps: Callable[[], TurnDeps | None],
     now: Callable[[], datetime],
 ) -> SyncDeps:
     """The sync's dependencies: the node's server upstream, Managed Agents downstream."""
     upstream = NodeUpstream(exchange, node, shared)
-    keeper = consent_keeper(
-        sessionmaker=exchange.sessionmaker,
-        edit=edit,
-        turn_settings=turn_settings,
-        turn_deps=turn_deps,
-    )
 
     def lock(mirror: ServerSkillRow) -> AbstractAsyncContextManager[None]:
         return skill_lock(edit, tenant_id=mirror.tenant_id, skill_id=mirror.skill_id)
@@ -300,7 +240,7 @@ def skill_sync_deps(
         server=node.server.name,
         sessionmaker=exchange.sessionmaker,
         upstream=lambda _mirror: upstream,
-        targets=(ManagedAgentsTarget(edit.client, consents=keeper),),
+        targets=(ManagedAgentsTarget(edit.client),),
         lock=lock,
         now=now,
     )

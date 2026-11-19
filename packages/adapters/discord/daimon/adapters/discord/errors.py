@@ -10,6 +10,7 @@ from __future__ import annotations
 import anthropic
 import structlog
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget import ChannelBudgetError
 from daimon.core.continuity.handoff import HandoffRefusedInSetupThread
 from daimon.core.continuity.messages import render_responder_changed_without_handoff
@@ -189,6 +190,7 @@ def render_error(
             ref=short_ref(request_id),
             error_type=type(exc).__name__,
             exc_info=exc,
+            causes=backend_refusal_causes(exc),
         )
         lines.append(f"-# Ref {short_ref(request_id)}")
     return "\n\n".join(lines)

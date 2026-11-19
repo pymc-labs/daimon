@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import structlog
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.turn.errors import AdmissionDenied
 from mux.errors import ScopeViolation, UnsupportedCapability
@@ -120,12 +123,29 @@ def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = N
     selected = entry_points(group="daimon.turn_runtimes", name=profile)
     if len(selected) != 1:
         return False
-    try:
-        register = cast(Callable[[], None], next(iter(selected)).load())
-        register()
-    except (ImportError, AttributeError, TypeError, ValueError):
-        return False
+    # A racing registration (ValueError) still leaves the profile installed.
+    with suppress(ImportError, AttributeError, TypeError, ValueError):
+        cast(Callable[[], None], next(iter(selected)).load())()
     return profile in _RUNTIME_FACTORIES and (ready is None or ready())
+
+
+async def preload_channel_runtimes() -> None:
+    """Install every provider runtime off the event loop before a process serves turns.
+
+    Otherwise a provider's first turn imports its SDK on the loop, stalling every turn
+    in the process for seconds.
+    """
+
+    def install() -> None:
+        for point in entry_points(group="daimon.turn_runtimes"):
+            try:
+                ensure_channel_runtime(point.name)
+            except Exception:  # one broken provider must not stop the process
+                structlog.get_logger().warning(
+                    "runtime.preload_failed", profile=point.name, exc_info=True
+                )
+
+    await asyncio.to_thread(install)
 
 
 def authorized_channel_deployments(profile: str, tenant_id: str) -> tuple[RuntimeDeployment, ...]:

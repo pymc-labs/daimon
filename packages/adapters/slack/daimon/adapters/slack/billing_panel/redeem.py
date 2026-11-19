@@ -245,7 +245,7 @@ async def _refresh_panel(
                 now=now,
                 since=since,
                 channel_id=channel_id,
-                web_url=spend_url(runtime.settings.web, tenant_id),
+                web_url=await spend_url(runtime, tenant_id, channel_id),
             ),
         )
     except (DaimonError, SlackApiError, SQLAlchemyError) as exc:

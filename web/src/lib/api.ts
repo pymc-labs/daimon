@@ -1,8 +1,13 @@
+export type Problem = { loc: (string | number)[]; msg: string }
+
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** A 422's list of problems, each at a `loc` path. */
+  problems: Problem[]
+  constructor(status: number, message: string, problems: Problem[] = []) {
     super(message)
     this.status = status
+    this.problems = problems
   }
 }
 
@@ -30,11 +35,16 @@ const CSRF = { "X-Daimon-Web": "1" }
 /** The server's refusal text: the JSON `detail` when there is one, else the status line (empty under HTTP/2). */
 async function errorOf(res: Response): Promise<ApiError> {
   let detail = res.statusText
+  let problems: Problem[] = []
   try {
     const j = await res.json()
     if (typeof j.detail === "string") detail = j.detail
+    else if (Array.isArray(j.detail)) {
+      problems = j.detail.filter((p: Problem) => Array.isArray(p?.loc) && typeof p.msg === "string")
+      if (problems.length) detail = problems.map((p) => p.msg).join(". ")
+    }
   } catch { /* not json */ }
-  return new ApiError(res.status, detail)
+  return new ApiError(res.status, detail, problems)
 }
 
 async function send(method: string, path: string, body: unknown, retry: boolean): Promise<Response> {

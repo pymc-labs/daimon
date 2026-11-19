@@ -39,6 +39,7 @@ from daimon.adapters.slack.privacy_panel.views import (
     build_privacy_main_container,
 )
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -159,7 +160,13 @@ async def handle_privacy_command(
         )
     except (DaimonError, anthropic.APIError, SlackApiError, InvalidToken, SQLAlchemyError) as exc:
         request_id = generate_request_id()
-        log.error("privacy.command.failed", team_id=team_id, request_id=request_id, exc_info=exc)
+        log.error(
+            "privacy.command.failed",
+            team_id=team_id,
+            request_id=request_id,
+            exc_info=exc,
+            causes=backend_refusal_causes(exc),
+        )
         capture_exception_with_scope(exc)
         # A token-resolve failure leaves no client to notify with.
         if web_client is not None:

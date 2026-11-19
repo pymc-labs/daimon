@@ -135,6 +135,7 @@ async def _request(
     expires_in: timedelta = timedelta(minutes=10),
     replaces: datetime | None = None,
     target: str | None = None,
+    parent: str | None = None,
 ) -> CredentialRequestRow:
     async with db.begin() as session:
         return await create_credential_request(
@@ -156,6 +157,7 @@ async def _request(
             replaces_updated_at=replaces,
             platform="teams",
             origin_thread_id=CONVERSATION_ID,
+            parent_channel_id=parent,
             posted_message_id="m-7",
         )
 
@@ -334,6 +336,8 @@ async def test_a_failed_submit_reports_nothing_that_could_carry_the_value(
             failed = await post_activity(service, _submit(row.token))
     assert failed["task"]["value"] == module.FAILED
     sentry.assert_not_called()
+    causes = logs[-1].pop("causes")
+    assert "boom" not in str(causes), f"the cause is logged by closed labels only: {causes}"
     assert logs[-1] == {
         "event": "teams.credential.failed",
         "err_type": "DaimonError",
@@ -619,6 +623,33 @@ async def test_a_pinned_agents_form_from_outside_its_channels_is_refused_at_subm
         file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
     assert file is None, "nothing is saved"
     dispatch.assert_not_awaited()
+
+
+async def test_an_admin_form_for_a_private_channels_agent_needs_the_click_from_that_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
+) -> None:
+    """From the conversation the form was posted in the admin is inside; from another, refused."""
+    from daimon.core.access_policy import AgentRule, ChannelRule
+
+    sealed = "19:sealed@thread.tacv2"
+    row = await _request(db_session_factory, account_id, parent=sealed)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=TENANT,
+            policy=TenantAccessPolicy(
+                channel_rules={sealed: ChannelRule(readers="own", writers="own")},
+                agent_rules={"daimon": AgentRule(runs_in=(sealed,))},
+            ),
+        )
+    async with _running(TeamsApiFake(), _admin_runtime(db_session_factory)) as (service, _):
+        elsewhere = await post_activity(service, _submit(row.token, chat="a:another-chat"))
+        await post_activity(service, _submit(row.token))
+        await service.turns.drain(5)
+    assert elsewhere["task"]["value"] == NO_LONGER_VALID_MESSAGE
+    async with db_session_factory() as session:
+        file = await get_agent_file(session, tenant_id=TENANT, agent_id=row.agent_id, key="API_KEY")
+    assert file is not None, "saved from inside"
 
 
 async def _early_check_passes(*_args: object, **_kwargs: object) -> None:

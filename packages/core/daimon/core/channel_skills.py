@@ -39,6 +39,7 @@ from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
@@ -102,10 +103,13 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
 }
 
 
-def may_set_channel_skills(subject: Subject, channel_id: str) -> Decision:
-    """Whether `subject` may add or remove `channel_id`'s skills: server admins only. Pure."""
+def may_set_channel_skills(
+    policy: TenantAccessPolicy, subject: Subject, channel_id: str
+) -> Decision:
+    """Whether `subject` may add or remove `channel_id`'s skills: server admins only, and a
+    private channel's only from inside it (`sealed_outside`). Pure."""
     return authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=subject,
         action=Action.SET_CHANNEL_SKILLS,
         place=Place(channel_id=channel_id),
@@ -565,8 +569,12 @@ async def turn_platform_skills(
                 else list_skills_lenient_cached(client, cache)
             )
             complete = not truncated
-        except (anthropic.APIError, SkillsListTruncatedError):
-            _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
+        except (anthropic.APIError, SkillsListTruncatedError) as error:
+            _log.warning(
+                "channel_skills.list_failed",
+                tenant_id=str(tenant_id),
+                causes=backend_refusal_causes(error),
+            )
     own = {skill.skill_id for skill in agent.skills}
     held = set(own)
     picked: list[MaSkill] = []
@@ -685,8 +693,12 @@ async def turn_channel_skills(
             # mount would escape the clash check: read it fresh.
             listed, truncated = await list_skills_lenient(client)
         bodies = None if truncated else _tenant_bodies(listed, tenant_id)
-    except (anthropic.APIError, SkillsListTruncatedError):
-        _log.warning("channel_skills.list_failed", tenant_id=str(tenant_id))
+    except (anthropic.APIError, SkillsListTruncatedError) as error:
+        _log.warning(
+            "channel_skills.list_failed",
+            tenant_id=str(tenant_id),
+            causes=backend_refusal_causes(error),
+        )
         bodies = None
     wanted = applicable_skills(
         rows, agent=agent, agent_names=agent_names, bodies=bodies, platform_skills=platform_skills

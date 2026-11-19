@@ -40,6 +40,17 @@ describe("FeatureSettings", () => {
     expect(screen.queryByRole("combobox", { name: "Setup guidance" })).not.toBeInTheDocument()
   })
 
+  it("names the level above as the default: the workspace's value in a channel, the built-in one in the workspace", async () => {
+    features = [view("progress_plans", { value: "on", source: "workspace", tiers: [{ tier: "workspace", value: "on", locked: false, text: "on" }, { tier: "channel", value: "default", locked: false, text: "default" }] })]
+    schemas = [schema("progress_plans", { name: "Progress plans", default: "off" })]
+    const { unmount } = render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
+    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Workspace default (On)")
+    unmount()
+    render(<FeatureSettings place={{}} tier="workspace" edit />)
+    await userEvent.click(screen.getByRole("combobox", { name: "Progress plans" }))
+    expect(await screen.findByRole("option", { name: "Built-in default (Off)" })).toBeInTheDocument()
+  })
+
   it("draws a key it has never heard of, with no code for it", () => {
     schemas = [...schemas, schema("brand_new", { name: "Brand new" })]
     features = [...features, view("brand_new")]

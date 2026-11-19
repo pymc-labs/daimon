@@ -21,6 +21,7 @@ from anthropic.types.beta.skill_list_response import SkillListResponse
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_target import AgentTarget, ChangeRecorder, load_target
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
@@ -34,6 +35,7 @@ from daimon.core.github_credentials import encrypt_token
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.mux_compat import list_skill_versions
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.skill_library import SyncedSkill, github_url_of
 from daimon.core.skill_sync.orchestrator import SyncReport, sync_agent_skills
 from daimon.core.skill_sync.resync_lock import hold_resync_locks
@@ -484,7 +486,8 @@ async def _target(deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str) -> A
     except (anthropic.APIConnectionError, anthropic.APIStatusError) as exc:
         raise AgentEditError("Agents are unavailable right now.", kind="unavailable") from exc
     if not target.sees_setup:
-        raise AgentEditError(ASK_WHO, kind="forbidden")
+        # A private channel's own agent is hidden from outside its channel (`sealed_outside`).
+        raise AgentEditError(SEALED_REFUSAL if target.sealed else ASK_WHO, kind="forbidden")
     return target
 
 
@@ -494,8 +497,8 @@ async def _listing(deps: AgentEditDeps) -> list[SkillListResponse]:
             rows, _ = await list_skills_lenient_cached(deps.client, deps.resolver_cache)
         else:
             rows, _ = await list_skills_lenient(deps.client)
-    except (anthropic.APIError, httpx.HTTPError):
-        _log.warning("agent_github.skills_listing_failed")
+    except (anthropic.APIError, httpx.HTTPError) as error:
+        _log.warning("agent_github.skills_listing_failed", causes=backend_refusal_causes(error))
         return []
     return rows
 
@@ -532,9 +535,13 @@ async def _version_times(
                         if row.version == version:
                             at = _parse_time(row.created_at)
                             break
-                except (anthropic.AnthropicError, httpx.HTTPError, MuxError):
+                except (anthropic.AnthropicError, httpx.HTTPError, MuxError) as error:
                     # Any provider or scope failure leaves the time empty: the panel still answers.
-                    _log.warning("agent_github.version_lookup_failed", skill_id=skill_id)
+                    _log.warning(
+                        "agent_github.version_lookup_failed",
+                        skill_id=skill_id,
+                        causes=backend_refusal_causes(error),
+                    )
                     return
             if cache is not None:
                 cache.put(key, at)

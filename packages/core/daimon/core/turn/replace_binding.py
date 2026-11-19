@@ -11,6 +11,7 @@ binding and terminates the old session through the Sessions port.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -20,6 +21,7 @@ from typing import Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.handoff_context import (
     HandoffFraming,
     TranscriptTurn,
@@ -178,6 +180,12 @@ def _busy(now: datetime, reason: str) -> SessionBusyError:
     )
 
 
+async def _release(store: StateStore, lease: Lease) -> None:
+    # A lease lost to expiry already belongs to a newer holder: leave it alone.
+    with contextlib.suppress(StaleFence):
+        await store.release_lease(lease)
+
+
 @contextlib.asynccontextmanager
 async def hold_slot(
     store: StateStore, slot: Slot, now: datetime, *, ttl: timedelta = REPLACEMENT_LEASE_TTL
@@ -196,9 +204,8 @@ async def hold_slot(
     try:
         yield lease
     finally:
-        # A lease lost to expiry already belongs to a newer holder: leave it alone.
-        with contextlib.suppress(StaleFence):
-            await store.release_lease(lease)
+        # Shielded: a cancelled caller must not leave the lease held until it expires.
+        await asyncio.shield(_release(store, lease))
 
 
 async def read_turns(scope: Scope, old: OldSession) -> list[TranscriptTurn] | None:
@@ -224,7 +231,12 @@ async def read_turns(scope: Scope, old: OldSession) -> list[TranscriptTurn] | No
                 break
             page = PageRequest(cursor=result.next_cursor, limit=100, order="desc")
     except MuxError as error:
-        log.warning("binding.transcript_unreadable", binding_id=old.binding.id, error=str(error))
+        log.warning(
+            "binding.transcript_unreadable",
+            binding_id=old.binding.id,
+            error=str(error),
+            causes=backend_refusal_causes(error),
+        )
         return None
     texts.reverse()
     return select_recent_turn_texts(texts)
@@ -269,7 +281,12 @@ async def carry_files(
                 key=f"{key}:file:{artifact.ref.id}",
             )
         except MuxError as error:
-            log.warning("binding.file_not_carried", artifact_id=artifact.ref.id, error=str(error))
+            log.warning(
+                "binding.file_not_carried",
+                artifact_id=artifact.ref.id,
+                error=str(error),
+                causes=backend_refusal_causes(error),
+            )
             continue
         total += size
         mounts.append(
@@ -296,7 +313,12 @@ async def end_session(
             continue
         except MuxError as error:
             # A session left open costs only storage.
-            log.warning("binding.session_kept", session_id=ref.id, error=str(error))
+            log.warning(
+                "binding.session_kept",
+                session_id=ref.id,
+                error=str(error),
+                causes=backend_refusal_causes(error),
+            )
             return False
         return True
     return False

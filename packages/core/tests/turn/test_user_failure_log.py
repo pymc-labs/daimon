@@ -44,6 +44,7 @@ _FIELDS = {
     "release",
     "turn_id",
     "tenant_id",
+    "causes",
 }
 _NOT_FAILURES = [
     TerminationReason.COMPLETED,
@@ -139,6 +140,7 @@ async def test_a_failed_turn_logs_one_content_free_line(
         "release": current_release(),
         "turn_id": str(observation.id),
         "tenant_id": str(observation.tenant_id),
+        "causes": [{"type": "ValueError"}],
     }
     for private in ("C-private", "T-private", "sesn_private", "sensitive text"):
         assert private not in line

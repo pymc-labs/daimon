@@ -346,3 +346,97 @@ async def test_set_places_refuses_an_owner_who_is_not_an_admin_and_writes_nothin
     async with db_session_factory() as session:
         policy = await load_access_policy(session, tenant_id=actor.tenant_id)
     assert "helper" not in policy.agent_rules, "nothing was written"
+
+
+async def test_set_places_changes_no_private_channels_pick_from_outside_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A shared agent's places include a private channel's pick, which is that
+    channel's setting: an admin outside it neither adds nor removes it."""
+    import dataclasses
+
+    from daimon.core.permissions import SEALED_REFUSAL
+    from daimon.core.stores.access_policy import set_access_policy
+
+    actor = await _actor(db_session, admin=True)
+    deps = _deps(_router(actor.tenant_id, []), db_session_factory)
+    agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id="ag_x")
+    picked = [PlaceEdit("c_seal", True), PlaceEdit("web")]
+    await agent_editing.set_places(deps, actor=actor, agent=agent, before=[], after=picked)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=actor.tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={"c_seal": ChannelRule(readers="inside", writers="any")}
+            ),
+        )
+    for before, after in (
+        (picked, [PlaceEdit("web")]),
+        ([PlaceEdit("web")], [PlaceEdit("c_new", True), *picked]),
+    ):
+        with pytest.raises(AgentEditError, match=re.escape(SEALED_REFUSAL)):
+            await agent_editing.set_places(
+                deps, actor=actor, agent=agent, before=before, after=after
+            )
+    async with db_session_factory() as session:
+        scope = await get_scope(
+            session, scope=ChannelScopeRef(tenant_id=actor.tenant_id, channel_id="c_seal")
+        )
+    assert scope is not None and scope.agent_name == "helper", "the private pick stays"
+    inside = dataclasses.replace(
+        actor,
+        subject=dataclasses.replace(actor.subject, origin_channel_ids=frozenset({"c_seal"})),
+    )
+    await agent_editing.set_places(
+        deps, actor=inside, agent=agent, before=picked, after=[PlaceEdit("web")]
+    )
+
+
+async def test_set_places_rechecks_a_private_pick_made_after_its_check(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inside admin picks the shared agent between the outside edit's check and its
+    write: the write still refuses to clear that private channel's pick."""
+    from daimon.core.permissions import SEALED_REFUSAL
+    from daimon.core.scope import ChannelScopeRef as Ref
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    actor = await _actor(db_session, admin=True)
+    deps = _deps(_router(actor.tenant_id, []), db_session_factory)
+    agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id="ag_x")
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=actor.tenant_id,
+            policy=TenantAccessPolicy(
+                channel_rules={"c_seal": ChannelRule(readers="inside", writers="any")}
+            ),
+        )
+    checked = agent_editing.check_places
+
+    async def then_inside_picks(*args: Any, **kwargs: Any) -> None:
+        await checked(*args, **kwargs)
+        async with db_session_factory.begin() as session:
+            await set_fields(
+                session,
+                scope=Ref(tenant_id=actor.tenant_id, channel_id="c_seal"),
+                tenant_id=actor.tenant_id,
+                agent_name="helper",
+            )
+
+    monkeypatch.setattr(agent_editing, "check_places", then_inside_picks)
+    with pytest.raises(AgentEditError, match=re.escape(SEALED_REFUSAL)):
+        await agent_editing.set_places(
+            deps,
+            actor=actor,
+            agent=agent,
+            before=[PlaceEdit("c_seal", True), PlaceEdit("web")],
+            after=[PlaceEdit("web")],
+        )
+    async with db_session_factory() as session:
+        scope = await get_scope(session, scope=Ref(tenant_id=actor.tenant_id, channel_id="c_seal"))
+    assert scope is not None and scope.agent_name == "helper", "the inside pick stays"

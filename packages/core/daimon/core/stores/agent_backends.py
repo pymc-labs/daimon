@@ -109,7 +109,6 @@ async def put_revision(
     previous_local: int | None,
     agent_name: str,
     preview_digest: str,
-    drop_consent: JsonValue | None = None,
     model: str | None = None,
     profile: str | None = None,
     requires: JsonValue | None = None,
@@ -132,7 +131,6 @@ async def put_revision(
         previous_local=previous_local,
         agent_name=agent_name,
         preview_digest=preview_digest,
-        drop_consent=drop_consent,
     )
     session.add(row)
     await session.flush()

@@ -506,20 +506,19 @@ const dataStatus = (id: string): DataServerStatus => ({
 const DATA = "/api/agents/:id/nodes/data_server"
 
 const PREVIEW_BASE: ModelPreview = {
-  moves: false, card: false, allowed: true, skills: [], servers: [], capabilities: [], title: "", lines: [], drops: [], digest: "", revision: 0, refusal: null,
+  moves: false, allowed: true, skills: [], servers: [], capabilities: [], lines: [], drops: [], refusal: null,
 }
 const REFUSED = "gemini:gemini-4-argon"
 
-/** The preview of a pick: no change within a provider, a refusal for one model, the switch card for the rest. */
-function previewOf(name: string, from: Backend, value: string): ModelPreview {
-  const [to, id] = value.split(":") as [Backend, string]
-  const title = `Switch ${name} to ${MODELS.find((m) => m.id === id)?.label ?? id}?`
-  if (to === from) return { ...PREVIEW_BASE, title }
-  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, card: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
-  if (to === "openai") return { ...PREVIEW_BASE, moves: true, title, digest: "e".repeat(64), revision: 4 }
+/** The preview of a pick: no change within a provider, a refusal for one model, what is off for the rest. */
+function previewOf(from: Backend, value: string): ModelPreview {
+  const [to] = value.split(":") as [Backend, string]
+  if (to === from) return PREVIEW_BASE
+  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
+  if (to === "openai") return { ...PREVIEW_BASE, moves: true }
   return {
-    ...PREVIEW_BASE, moves: true, card: true, title, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
-    lines: ["Stops working: memory and Pricing playbook skill"], digest: "d".repeat(64), revision: 4,
+    ...PREVIEW_BASE, moves: true, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
+    lines: ["Stops working: memory and Pricing playbook skill"],
   }
 }
 
@@ -538,7 +537,7 @@ export const agentsHandlers = [
     const v = viewer(), r = find(String(params.id))
     if (!v) return unauthorized()
     if (!r) return notFound()
-    return HttpResponse.json(previewOf(current(r).config.name, current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
+    return HttpResponse.json(previewOf(current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
   }),
   http.get("/api/agents/templates", async () => {
     await wait(120)
@@ -600,10 +599,8 @@ export const agentsHandlers = [
     if (!v) return unauthorized()
     if (!r) return notFound()
     const d = r.drafts[v.id]
-    const { note, preview_digest } = (await request.json()) as { note?: string; preview_digest?: string }
+    const { note } = (await request.json()) as { note?: string }
     if (!d) return HttpResponse.json({ detail: "Nothing to apply" }, { status: 409 })
-    const was = current(r).config.model.backend
-    if (d.config.model.backend !== was && !preview_digest) return HttpResponse.json({ detail: "Confirm what the switch drops first." }, { status: 422 })
     if (d.base_version !== current(r).version) {
       return HttpResponse.json({ detail: `Changed to v${current(r).version} since your draft began` }, { status: 409 })
     }

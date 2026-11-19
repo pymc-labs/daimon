@@ -61,6 +61,7 @@ CLIENT_REFUSED = [
     Action.SET_CHANNEL_RULE,
     Action.SET_AGENT_RULE,
     Action.SET_CHANNEL_BUDGET,
+    Action.SET_SUPPORT,
     Action.SET_CHANNEL_SKILLS,
     Action.SET_AGENT_TOOL_RULE,
     Action.SET_CHANNEL_AGENT_TOOL_RULE,
@@ -325,3 +326,12 @@ def test_a_client_with_no_hold_is_refused_session_access_it_owns(action: Action)
         session=SessionFacts(channel="C_SHARED"),
     )
     assert decision == Decision(False, "origin_required")
+
+
+@pytest.mark.parametrize("action", [Action.READ_SESSION, Action.CONTINUE_SESSION])
+def test_a_relay_hold_reads_no_session_even_inside_its_channel(action: Action) -> None:
+    relay = TurnHold(platform=HOLD.platform, channel_id=HOLD.channel_id, client=False, relay=True)
+    session = SessionFacts(channel=HOLD.channel_id)
+    kwargs = {"subject": MEMBER, "action": action, "agent": ACME, "session": session}
+    assert _allowed(OPEN, **kwargs, hold=HOLD).allowed
+    assert _allowed(OPEN, **kwargs, hold=relay) == Decision(False, "outside_hold")

@@ -278,3 +278,27 @@ class Both(discord.ui.Modal, title="Both"):
         "Discord answers 400 'Cannot set label on a TextInput in a Label component', "
         "so a wrapped input that also sets label= makes the modal unopenable"
     )
+
+
+def test_max_length_capped_by_min_when_bound_is_a_literal_then_passes() -> None:
+    source = """
+class Capped(discord.ui.Modal, title="Capped"):
+    field = discord.ui.TextInput(label="F", max_length=min(spec.max_chars, 4000))
+"""
+    assert _rules(source) == [], "min() over a literal bounds the value, so the lint can verify it"
+
+
+def test_max_length_capped_by_min_when_bound_exceeds_the_cap_then_flagged() -> None:
+    source = """
+class Over(discord.ui.Modal, title="Over"):
+    field = discord.ui.TextInput(label="F", max_length=min(spec.max_chars, 4001))
+"""
+    assert _rules(source) == ["discord/max-length-too-large"], "the bound itself is over 4000"
+
+
+def test_max_length_min_without_a_literal_when_linted_then_non_literal() -> None:
+    source = """
+class Unbounded(discord.ui.Modal, title="Unbounded"):
+    field = discord.ui.TextInput(label="F", max_length=min(a, b))
+"""
+    assert _rules(source) == ["discord/non-literal-max-length"], "no visible bound, no trust"
