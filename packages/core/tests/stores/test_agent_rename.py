@@ -51,7 +51,7 @@ async def test_rename_references_when_names_differ_in_case_then_renames_only_tha
 async def test_rename_references_when_historical_continuation_breaks_check_then_keeps_it_and_renames(
     db_session: AsyncSession,
 ) -> None:
-    """A settled row with a retired reason is history: it keeps its name, live rows move."""
+    """Settled wakes and wakes with a retired reason keep their name; live wakes move."""
     tenant = await make_tenant(db_session, workspace_id="guild-1")
     account = await make_account(db_session, tenant=tenant)
 
@@ -71,17 +71,17 @@ async def test_rename_references_when_historical_continuation_breaks_check_then_
         )
         return row.id
 
-    history, live = await continuation(), await continuation()
+    history, retired, live = await continuation(), await continuation(), await continuation()
     # Migrations 0169 and 0194 leave the check NOT VALID, so a retired reason can survive.
     await db_session.execute(
         text("ALTER TABLE task_continuations DROP CONSTRAINT ck_task_continuations_reason")
     )
     await db_session.execute(
-        text(
-            "UPDATE task_continuations SET reason = 'worker_finished', status = 'cancelled' "
-            "WHERE id = :id"
-        ),
-        {"id": history},
+        text("UPDATE task_continuations SET reason = 'worker_finished' WHERE id IN (:a, :b)"),
+        {"a": history, "b": retired},
+    )
+    await db_session.execute(
+        text("UPDATE task_continuations SET status = 'cancelled' WHERE id = :id"), {"id": history}
     )
     await db_session.execute(
         text(
@@ -100,6 +100,7 @@ async def test_rename_references_when_historical_continuation_breaks_check_then_
         .all()
     )
     assert names[history] == "daimon", "a cancelled continuation is history and keeps its name"
+    assert names[retired] == "daimon", "a pending wake with a retired reason never runs"
     assert names[live] == "default", "a pending continuation follows the renamed agent"
 
 
