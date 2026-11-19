@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -15,6 +16,8 @@ from daimon.core.access_policy import (
     place_thread_id,
 )
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAMES,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_OF,
     MA_METADATA_KEY_READER_SOURCE,
@@ -945,6 +948,11 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
     also carries the source's names (stamped as `daimon_reader_source`; a
     reader written before that stamp falls back to its name without the
     ``-reader`` suffix): a rule on the source holds for its reader.
+
+    The seeded agent and its readers carry both built-in names: its rename
+    moves rules before the provider name follows, and a rollback writes the old
+    one. A workspace's own agent of either name does not, its readers aside;
+    more names only add restrictions, as every matching rule must hold.
     """
     config_name = metadata.get(MA_METADATA_KEY_NAME)
     names: list[str | None] = [name, config_name]
@@ -958,6 +966,14 @@ def agent_names(name: str | None, metadata: Mapping[str, str]) -> tuple[str | No
                 for candidate in (name, config_name)
                 if candidate and candidate.endswith(_READER_SUFFIX)
             )
+    seeded = (
+        metadata.get(MA_METADATA_KEY_MANAGED) == "true" or MA_METADATA_KEY_READER_OF in metadata
+    )
+    if seeded and any(
+        n is not None and unicodedata.normalize("NFKC", n).casefold() in BUILTIN_AGENT_NAMES
+        for n in names
+    ):
+        names.extend(sorted(BUILTIN_AGENT_NAMES))
     return tuple(names)
 
 

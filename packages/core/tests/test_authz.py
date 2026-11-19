@@ -1251,3 +1251,26 @@ def test_role_gate_requires_current_membership_and_matching_role(action: Action)
     assert not authorize(
         policy, subject=Subject(platform_user_id="U1", is_admin=True), action=action
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "metadata", "ruled"),
+    [
+        ("daimon", {"daimon_managed": "true", "daimon_name": "daimon"}, True),
+        ("default", {"daimon_managed": "true", "daimon_name": "default"}, True),
+        ("daimon-reader", {"daimon_reader_of": "ag_1", "daimon_reader_source": "daimon"}, True),
+        ("default", {"daimon_name": "default"}, False),
+    ],
+    ids=["seeded-before-provider-rename", "seeded-after", "stale-reader", "own-default"],
+)
+def test_agent_names_when_rules_moved_to_default_then_seeded_names_carry_them(
+    name: str, metadata: dict[str, str], ruled: bool
+) -> None:
+    """The rename moves rules to `default` before the provider name follows."""
+    from daimon.core.access_policy import AgentRule, agent_invoker_roles
+    from daimon.core.authz import agent_names
+
+    policy = TenantAccessPolicy(agent_rules={"default": AgentRule(invoker_role_ids=("1234",))})
+    names = agent_names(name, metadata)
+    assert ({"default", "daimon"} <= set(names)) is ruled, f"{names}: both names, seeded only"
+    assert agent_invoker_roles(policy, names), f"{names} keep the rule moved to default"
