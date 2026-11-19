@@ -24,6 +24,7 @@ from mux.drivers.gemini.core import (
     page_values,
 )
 from mux.drivers.gemini.deployment import (
+    GeminiClients,
     configured_catalog_transport,
     configured_completions,
     configured_transport,
@@ -214,6 +215,7 @@ __all__ = [
     "compile_environment",
     "inline_bytes",
     "package_sources",
+    "GeminiClients",
     "configured_catalog_transport",
     "configured_completions",
     "configured_transport",
