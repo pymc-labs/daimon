@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversations stored there, and logs any it could not. Google offers no
   delete for stored Gemini conversations, so the policy says Google keeps
   them for its own retention period.
+- **Long GPT-6 Luna replies are billed.** A Luna reply whose prompt passed 272k
+  input tokens had no price, so it never reached the ledger. It now settles at
+  OpenAI's published long-context rates: twice the input and cache rates and 1.5
+  times the output rate for the whole request.
 
 - **Gemini and vault-cleanup work stall other turns less.** Reading and saving
   a Gemini conversation's stored state now runs on a small worker pool, which

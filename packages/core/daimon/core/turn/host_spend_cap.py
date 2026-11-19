@@ -9,8 +9,8 @@ turn counts as writing nothing to the cache (`pricing.unreported_cache_writes`, 
 estimate that never exceeds what the counts prove). Container time is not counted; the
 cap bounds tokens.
 
-Past a tariff's priced input limit with no sourced long-context rate (gpt-6-luna), the
-usage is counted at the base rate: a lower bound, so the cap still fires.
+Past a tariff's priced input limit with no sourced long-context rate, the usage is
+counted at the base rate: a lower bound, so the cap still fires.
 """
 
 from __future__ import annotations

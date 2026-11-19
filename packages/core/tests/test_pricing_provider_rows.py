@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -84,8 +85,8 @@ def test_a_stored_row_costs_what_its_settlement_charged(
 
 
 def test_a_row_above_an_unpriced_limit_has_no_cost() -> None:
-    """Luna has no long-context multipliers; settlement refuses such a turn, so does display."""
-    price = _price("gpt-6-luna")
+    """A tariff with no long-context multipliers refuses such a turn, and so does display."""
+    price = replace(_price("gpt-6-luna"), long_context_multipliers=None)
     observation = _observation(price, input_tokens=300_000)
     tokens = provider_usage_tokens(observation, price)
     assert tokens is not None

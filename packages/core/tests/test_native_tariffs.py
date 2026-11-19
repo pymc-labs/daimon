@@ -80,7 +80,7 @@ def test_unsupported_models_and_profiles_are_absent():
     assert ("gemini", "gemini-pro") not in pricing.provider_prices("gemini.inline_reuse")
 
 
-def test_luna_context_and_unknown_write_keep_exact_actual_pending():
+def test_luna_long_context_rates_and_unknown_write_keep_exact_actual_pending():
     price = pricing.provider_prices("openai.persistent_workspace")[("openai", "gpt-6-luna")]
     assert pricing.provider_cost_of(usage(price), price, infrastructure_usd=Decimal(0)) == Decimal(
         ".0000191"
@@ -91,9 +91,11 @@ def test_luna_context_and_unknown_write_keep_exact_actual_pending():
         )
         is not None
     )
+    # Past 272k input the official rule applies: 2x input and cache, 1.5x output.
     aggregate = usage(price, input_tokens=272_001)
-    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) is None
-    assert pricing.minimum_cost_of(aggregate, price) == Decimal(".0272092")
+    assert pricing.provider_cost_of(aggregate, price, infrastructure_usd=Decimal(0)) == Decimal(
+        ".0544134"
+    ), "a long prompt settles at the long-context rates"
     # OpenAI's turn meter never counts cache writes (ROOT D2=B): an unknown write is
     # priced as no write, an estimate marked on its debit, never above the counts.
     unreported = usage(price, input_cache_write_tokens=None)
