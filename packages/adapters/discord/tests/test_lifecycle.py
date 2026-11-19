@@ -8,6 +8,7 @@ message reference as its first positional argument.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import time
@@ -483,6 +484,19 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         reconciled.append(session_id)
 
     monkeypatch.setattr(turn_runner, "settle_session", fake_settle)
+
+    class HeldLease:
+        """The slot lease, held: this test is about the cards, not the persisted binding."""
+
+        lease_acquired = True
+
+        def activate(self) -> contextlib.AbstractContextManager[None]:
+            return contextlib.nullcontext()
+
+    async def held_lease(*args: Any, **kwargs: Any) -> HeldLease:
+        return HeldLease()
+
+    monkeypatch.setattr(turn_runner, "prepared_persistence", held_lease)
     result = await turn_runner.run_prepared_turn_impl(
         deps,
         prepared,
