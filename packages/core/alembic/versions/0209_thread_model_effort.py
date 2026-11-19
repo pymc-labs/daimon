@@ -4,6 +4,8 @@
 xhigh or max); null keeps the agent's own. `model` becomes nullable so a pick can
 set the effort alone and leave the model to the agent. Downgrading drops effort-only
 rows, whose conversations go back to their agents' own settings, and the column.
+After this revision, roll back by downgrading the migration first: an old pod fails
+every turn in a conversation whose pick sets an effort and no model.
 
 downgrade: destructive
 """

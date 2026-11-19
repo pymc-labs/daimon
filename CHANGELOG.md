@@ -185,6 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upgrade note: effort-only thread picks during a rolling deploy.** A pick of an effort
   with no model, written by a new pod, makes old pods fail turns in that conversation
   until the rollout ends. Avoid changing a conversation's effort while it rolls out.
+  To roll back to an earlier image, downgrade `thread_model_effort` first: it drops
+  those picks, and an old pod fails every turn in a conversation that keeps one.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.

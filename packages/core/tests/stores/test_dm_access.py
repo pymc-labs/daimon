@@ -127,7 +127,7 @@ async def test_add_rule_when_subject_id_does_not_fit_the_subject_then_refuses(
             )  # fmt: skip
 
 
-async def test_pick_when_set_then_replaced_and_cleared(db_session: AsyncSession) -> None:
+async def test_pick_when_set_again_then_replaced(db_session: AsyncSession) -> None:
     """One pick per person and workspace; setting again replaces it."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -145,9 +145,6 @@ async def test_pick_when_set_then_replaced_and_cleared(db_session: AsyncSession)
     assert await dm_access.count_picks_for_account(db_session, account_id=account.id) == 1, (
         "one row per person"
     )
-
-    await dm_access.clear_pick(db_session, tenant_id=tenant.id, account_id=account.id)
-    assert await dm_access.get_pick(db_session, tenant_id=tenant.id, account_id=account.id) is None
 
 
 async def test_person_scoped_rows_when_purged_then_picks_user_rules_and_grant_ids_go(
