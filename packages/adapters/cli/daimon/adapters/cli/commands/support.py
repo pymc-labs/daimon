@@ -248,9 +248,13 @@ async def menu_set(
     key: str,
     text: str,
     expected: str | None = None,
+    discord_transport: Transport = None,
 ) -> None:
     target = await _target(rt, selector)
     spec = load_menu(text)
+    pick = None
+    if (c := spec.channel) is not None:
+        pick = await _channel_pick(rt, target, c.id, c.team_id, c.service_url, discord_transport)
     try:
         row = await set_menu(
             rt.sessionmaker,
@@ -258,6 +262,8 @@ async def menu_set(
             platform=target.platform,
             key=key,
             spec=spec,
+            channel=pick,
+            own_allowed=pick is not None and own_channel_allowed(rt.settings),
             expected=_expected_none_or(expected, _revision),
         )
     except StaleChannelValue as exc:
@@ -288,6 +294,8 @@ class MenuListing(BaseModel):
     name: str
     revision: int
     options: str
+    channel: str | None
+    """Where its requests go; None: the workspace's request channel."""
     used_by: list[str]
 
 
@@ -304,6 +312,7 @@ async def menu_list(
             name=r.name,
             revision=r.revision,
             options=options_text(r.spec),
+            channel=None if r.channel is None else r.channel.id,
             used_by=[_label(u.scope, u.scope_id) for u in uses if u.menu_id == r.id],
         )
         for r in rows
@@ -313,8 +322,11 @@ async def menu_list(
         return
     _table(
         console,
-        ("key", "name", "revision", "options", "used by"),
-        [(i.key, i.name, i.revision, i.options, ", ".join(i.used_by) or "-") for i in listing],
+        ("key", "name", "revision", "options", "channel", "used by"),
+        [
+            (i.key, i.name, i.revision, i.options, i.channel or "-", ", ".join(i.used_by) or "-")
+            for i in listing
+        ],
     )
 
 
@@ -577,16 +589,30 @@ async def channel_set(
 ) -> None:
     """Send this workspace's support requests to `channel_id`; Teams also takes team and URL."""
     target = await _target(rt, selector)
+    pick = await _channel_pick(rt, target, channel_id, team, service_url, discord_transport)
+    await _write_channel(rt, console, target, pick, expected, "channel set")
+    console.print(f"support requests go to {pick.channel_id}", markup=False)
+
+
+async def _channel_pick(
+    rt: CliRuntime,
+    target: _Target,
+    channel_id: str,
+    team: str | None,
+    service_url: str | None,
+    transport: Transport,
+) -> ChannelPick:
+    """A channel of the workspace for requests, as `channel set` and a menu's `channel` take."""
     channel = await parent_channel(
         rt,
         platform=target.platform,
         workspace_id=target.workspace_id,
         channel_id=channel_id,
-        transport=discord_transport,
+        transport=transport,
     )
     if target.platform == "teams" and not (team and service_url):
         raise typer.BadParameter("Teams needs --team and --service-url")
-    pick = ChannelPick(
+    return ChannelPick(
         platform=target.platform,
         channel_id=channel,
         discord_guild_id=target.workspace_id if target.platform == "discord" else None,
@@ -594,8 +620,6 @@ async def channel_set(
         teams_team_id=team if target.platform == "teams" else None,
         teams_service_url=service_url if target.platform == "teams" else None,
     )
-    await _write_channel(rt, console, target, pick, expected, "channel set")
-    console.print(f"support requests go to {channel}", markup=False)
 
 
 async def channel_reset(
@@ -758,8 +782,11 @@ async def requests_settle(
     request_id: str,
     charge: str | None,
     expected: str | None = None,
+    accept: bool = False,
 ) -> None:
-    """`charge` None declines. `expected` is the charge to correct on a settled request."""
+    """`charge` None declines, or with `accept` charges a fixed or steps price as it is.
+
+    `expected` is the charge to correct on a settled request."""
     try:
         escalation_id = uuid.UUID(request_id)
     except ValueError as exc:
@@ -769,7 +796,7 @@ async def requests_settle(
     if expected is not None:
         correction = parse_credits(expected, name="--expected")
     target = await _target(rt, selector)
-    command = "requests settle" if charge is not None else "requests decline"
+    command = "requests settle" if charge is not None or accept else "requests decline"
     try:
         outcome = await settle(
             rt.sessionmaker,
@@ -778,6 +805,7 @@ async def requests_settle(
             charge=amount,
             default_allowance=rt.settings.support.credits_per_user,
             expected=None if correction is None else Expected(correction),
+            accept=accept,
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
@@ -1029,8 +1057,9 @@ def requests_settle_command(
     ctx: typer.Context,
     request_id: str,
     credits: Annotated[
-        str, typer.Argument(help="The final charge in credits; a charged request keeps its own.")
-    ],
+        str | None,
+        typer.Argument(help="The final charge in credits; leave out to accept a fixed price."),
+    ] = None,
     expected: Annotated[str | None, _EXPECTED_CHARGE] = None,
 ) -> None:
     """Charge a request. The client is not notified."""
@@ -1042,6 +1071,7 @@ def requests_settle_command(
             request_id=request_id,
             charge=credits,
             expected=expected,
+            accept=credits is None,
         )
     )
 

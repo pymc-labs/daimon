@@ -10595,9 +10595,10 @@
       'description': '''
         Set, replace or remove (``body`` null) a support menu. Admin-only.
         <blank line>
-        ``key``: 1 to 32 lowercase letters, digits or dashes. ``body``: a ``name`` and
-        1 to 10 ``options``, each with ``key``, ``label``, an optional
-        ``description``, a ``price`` and up to 4 ``fields``. Prices:
+        ``key``: 1 to 32 lowercase letters, digits or dashes. ``body``: a ``name``, an
+        optional ``channel`` its requests go to (``{"id", "service_url"}``, checked as
+        ``support_channel_set`` checks one) and 1 to 10 ``options``, each with ``key``,
+        ``label``, an optional ``description``, a ``price`` and up to 4 ``fields``. Prices:
         ``{"kind": "fixed", "amount"}``; ``{"kind": "steps", "label", "steps":
         [{"label", "amount"}]}``; ``{"kind": "range", "min", "max"}``; ``{"kind":
         "quoted"}`` with optional ``min`` and ``max``. Amounts are decimal strings.
@@ -10774,9 +10775,10 @@
       'description': '''
         Settle a support request at ``charge`` credits, or decline it (null). Admin-only.
         <blank line>
+        ``accept`` true, with ``charge`` null, charges a fixed or steps price as it is.
         A range or quoted option takes an amount within its bounds. A request
         already charged at submit (``charge`` shown, not pending) keeps that
-        charge when ``charge`` equals it, or is refunded when null. To correct
+        charge when ``charge`` equals it or on ``accept``, or is refunded when null. To correct
         or refund one a person settled, pass its current charge as
         ``expected_charge``. The person who asked is not told; read ``text`` back.
         Example: ``request_id`` from ``support_requests_list``, ``charge="2.5"``.
@@ -10784,6 +10786,10 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'accept': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
           'charge': dict({
             'anyOf': list([
               dict({

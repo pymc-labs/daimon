@@ -40,6 +40,7 @@ from daimon.core.stores.teams_installations import get_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import (
     LimitSpec,
+    MenuChannel,
     MenuSpec,
     SupportScope,
     credits_text,
@@ -348,13 +349,24 @@ async def set_menu(
     platform: str,
     key: str,
     spec: MenuSpec,
+    channel: ChannelPick | None = None,
+    own_allowed: bool = False,
     expected: Expected[int | None] | None = None,
 ) -> SupportMenuRow:
-    """Set or replace a menu; places using it offer the new options on their next request."""
+    """Set or replace a menu; places using it offer the new options on their next request.
+
+    `channel` replaces `spec.channel`: where its requests go, checked as
+    `set_support_channel` checks a pick. Requests already made stay where they went.
+    """
     _require_admin(actor)
     key = parse_menu_key(key)
+    if channel is not None and not own_allowed:
+        raise ChannelChangeRefused(OWN_CHANNEL_LOCKED, kind="forbidden")
+    spec = spec.model_copy(update={"channel": None if channel is None else _menu_channel(channel)})
     async with sessionmaker.begin() as session:
         before = await _locked_menu(session, actor, key=key, expected=expected)
+        if channel is not None and await _foreign_channel(session, actor.tenant_id, channel):
+            raise ChannelChangeRefused(NOT_IN_WORKSPACE, kind="invalid")
         row = await store.set_menu(
             session,
             tenant_id=actor.tenant_id,
@@ -486,6 +498,14 @@ class ChannelPick:
     teams_service_url: str | None = None
 
 
+def _menu_channel(pick: ChannelPick) -> MenuChannel:
+    return MenuChannel(
+        id=pick.channel_id,
+        team_id=pick.slack_team_id or pick.teams_team_id,
+        service_url=pick.teams_service_url,
+    )
+
+
 async def _foreign_channel(session: AsyncSession, tenant_id: uuid.UUID, pick: ChannelPick) -> bool:
     """True when the pick's guild or team is not this tenant's workspace."""
     if pick.platform == "teams":
@@ -595,8 +615,11 @@ async def settle(
     charge: Decimal | None,
     default_allowance: int,
     expected: Expected[Decimal | None] | None = None,
+    accept: bool = False,
 ) -> ledger.SettleOutcome:
     """An admin settles (`charge`) or declines (None) a request of this tenant.
+
+    `accept` charges a fixed or steps price as it is, in place of `charge`.
 
     `expected` is the charge last read: None for a request nobody has handled (pending, or
     charged at submit: `charge` equal to its charge keeps it, None refunds it), an amount to
@@ -621,6 +644,7 @@ async def settle(
             default_allowance=default_allowance,
             tenant_id=actor.tenant_id,
             expected_charge=None if expected is None else expected.value,
+            accept=accept,
         )
         if outcome.status == "stale":
             raise StaleChannelValue(SETTLE_SETTING, _request_json(outcome.row))
@@ -645,8 +669,11 @@ async def settle_from_post(
     channel_id: str,
     parent_id: str | None,
     default_channel_id: str | None,
+    accept: bool = False,
 ) -> ledger.SettleOutcome:
     """Anyone in the request's support channel settles from its post, with audit.
+
+    `accept` is the post's Accept: the row's fixed price in place of `charge`.
 
     The click must come from the channel the request was posted to (or a thread
     in it); a row from before that was stamped falls back to the workspace's
@@ -681,6 +708,7 @@ async def settle_from_post(
             settled_by=settled_by,
             settled_by_account_id=settled_by_account_id,
             default_allowance=default_allowance,
+            accept=accept,
         )
         await _record_settle(
             session,

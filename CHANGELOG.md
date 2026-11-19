@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run once: the owner must be able to post there, the channel must be in the
   server, and the tenant's access rules must allow it. A thread's permissions
   come from its parent channel. `--dry-run` runs every check and saves nothing.
+- **Support requests wait for Accept, and a menu picks its channel.** A fixed
+  or steps request is no longer charged at submit: it holds its price until
+  someone presses Accept on its post (Discord, Slack, Teams) or Decline to
+  release it; range and quoted requests settle as before. `daimon support
+  requests settle` without an amount, `support_requests_settle` with `accept`
+  and Accept in Admin > Support do the same. A support menu may name its own
+  request channel (`channel` in its YAML, the MCP menu tools and the menu
+  editor), checked like `support channel set`; it beats the workspace's channel,
+  and each request keeps the channel it was sent to. Requests charged before
+  this release keep their charge.
 - **Agents can wake on posts to a private link.** `create_watch` with source
   `callback` DMs the owner a secret link; each post to it wakes the agent once.
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the

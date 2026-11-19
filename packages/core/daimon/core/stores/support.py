@@ -97,7 +97,13 @@ async def set_menu(
     revision comes back after a menu is deleted and recreated.
     """
     options = [o.model_dump(mode="json", exclude_none=True) for o in spec.options]
-    values = {"name": spec.name, "options": options, "set_by_account_id": set_by_account_id}
+    channel = None if spec.channel is None else spec.channel.model_dump(mode="json")
+    values = {
+        "name": spec.name,
+        "options": options,
+        "channel": channel,
+        "set_by_account_id": set_by_account_id,
+    }
     insert = pg_insert(SupportMenu).values(
         tenant_id=tenant_id, key=key, revision=SUPPORT_REVISION_SEQ.next_value(), **values
     )

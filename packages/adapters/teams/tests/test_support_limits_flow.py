@@ -457,22 +457,30 @@ async def test_send_when_every_field_is_full_then_the_post_shows_each_unclipped(
         assert f"Part {n}: {str(n) * 3000}" in texts, f"part {n} whole, on its own block"
 
 
-async def test_send_when_option_has_a_step_and_fields_then_charged_at_submit(
+async def test_send_when_option_has_a_step_then_held_until_accepted_at_its_price(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    """A step prices the request at once: a text post with nothing left to settle."""
+    """A step waits for Accept, which charges its price with no amount to type."""
     await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
         form = (await _click(service, _button(menu), option=_value("call")))["value"]
         sent = await _click(service, _button(form), step="1", field_topic="Billing export")
+        [request] = _posts(teams_api_fake)
+        assert_teams_accepts(request)
+        post = _card(request)
+        buttons = _settle_buttons(post)
+        before = len(teams_api_fake.activity_requests)
+        said = await post_activity(service, _settle(buttons["accept"], post_id="m-2"))
+        [edit] = teams_api_fake.activity_requests[before:]
 
-    assert "We will confirm" not in _text(sent["value"]), "nothing pending"
-    [post] = _posts(teams_api_fake)
-    text = str(post.body["text"])
-    for line in ("Call, 1 hour: 1 credit", "Charged 1 credit", "Topic: Billing export"):
-        assert line in text, f"the terms, the charge and the answers: {line}"
-    assert "attachments" not in post.body, "no controls"
+    assert "We will confirm the charge." in _text(sent["value"]), "told it is pending"
+    for line in ("Call, 1 hour: 1 credit", "Pending: 1 credit", "Topic: Billing export"):
+        assert line in _text(post), f"the terms, the hold and the answers: {line}"
+    assert set(buttons) == {"accept", "decline"}, "Accept and Decline"
+    assert not [b for b in post["body"] if b["type"] == "Input.Number"], "no amount to type"
+    assert said["value"] == f"Charged 1 credit. {CLIENT_NOT_NOTIFIED}", said
+    assert "Charged 1 credit" in _text(edit.body), "the post closes charged"
 
 
 async def test_send_when_a_field_is_missing_then_the_form_comes_back(
@@ -536,10 +544,10 @@ async def test_ask_a_person_when_limit_has_a_menu_then_the_dialog_continues_to_t
     assert nexted["task"]["type"] == "continue", "the option's card, in the same dialog"
     assert (pick["data"]["stage"], send["data"]["stage"]) == ("pick", "send")
     assert sent["task"]["value"] == (
-        "Request sent. Someone will reply.\nUsed 0.5 credits. 1.5 of 2 credits left."
+        "Request sent. Someone will reply.\nHolding 0.5 credits. We will confirm the charge."
     ), sent
     [post] = _posts(teams_api_fake)
-    assert "Call, 30 min: 0.5 credits" in str(post.body["text"]), "charged at its step"
+    assert "Call, 30 min: 0.5 credits" in _text(post.body), "held at its step"
 
 
 async def test_set_charge_when_in_range_then_charges_and_closes_the_post(

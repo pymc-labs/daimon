@@ -108,7 +108,7 @@ async def _tenant(factory: Factory, platform: str = "slack") -> tuple[uuid.UUID,
 async def _pending(
     factory: Factory, tenant_id: uuid.UUID, message_id: str = "m1", option: str = "review"
 ) -> uuid.UUID:
-    """A Review request (pending) or `quick` one (charged at submit) on the `support` menu."""
+    """A pending request for `option` on the `support` menu."""
     async with factory.begin() as session:
         menu = await store.get_menu(session, tenant_id=tenant_id, key="support")
         review = None if menu is None else menu.spec.option(option)
@@ -152,6 +152,7 @@ async def test_menu_when_shown_and_set_back_then_round_trips_and_audits(
             "name": "Support",
             "revision": 2,
             "options": "Review (1-3 credits)",
+            "channel": None,
             "used_by": [],
         }
     ], "the shown YAML set back unchanged"
@@ -437,7 +438,7 @@ async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(
         await requests_settle(**where, request_id=str(uuid.uuid4()), charge="1")
 
 
-async def test_requests_when_charged_at_submit_then_kept_or_refunded_and_leave_the_list(
+async def test_requests_when_fixed_then_held_until_accepted_or_declined(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
@@ -448,20 +449,18 @@ async def test_requests_when_charged_at_submit_then_kept_or_refunded_and_leave_t
     await menu_use(**where, key="support", scope="channel", scope_id="C1")
     await limit_set(**where, scope="channel", scope_id="C1", shared="5")
     kept = await _pending(db_session_factory, tenant_id, "m1", "quick")
-    refunded = await _pending(db_session_factory, tenant_id, "m2", "quick")
-    await requests_list(**where, pending=True, undelivered=True, as_json=True)
+    declined = await _pending(db_session_factory, tenant_id, "m2", "quick")
+    await requests_list(**where, pending=True, as_json=True)
     listed = json.loads(out.getvalue().strip().splitlines()[-1])
-    assert {(r["status"], r["counted"]) for r in listed} == {("settled", "2")}, "charged, listed"
-    with pytest.raises(StoreError, match="Keep that or decline to refund it"):
-        await requests_settle(**where, request_id=str(kept), charge="1")
-    await requests_settle(**where, request_id=str(kept), charge="2")
-    assert f"Charged 2 credits. {CLIENT_NOT_NOTIFIED}" in out.getvalue(), "kept as is"
-    await requests_settle(**where, request_id=str(refunded), charge=None)
-    assert f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}" in out.getvalue(), "refunded"
-    await requests_list(**where, undelivered=True, as_json=True)
+    assert {(r["status"], r["counted"]) for r in listed} == {("pending", "2")}, "held"
+    await requests_settle(**where, request_id=str(kept), charge=None, accept=True)
+    assert f"Charged 2 credits. {CLIENT_NOT_NOTIFIED}" in out.getvalue(), "accepted at its price"
+    await requests_settle(**where, request_id=str(declined), charge=None)
+    assert f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}" in out.getvalue(), "released"
+    await requests_list(**where, pending=True, as_json=True)
     assert json.loads(out.getvalue().strip().splitlines()[-1]) == [], "both left the list"
     with pytest.raises(StoreError, match="Already"):
-        await requests_settle(**where, request_id=str(kept), charge=None)
+        await requests_settle(**where, request_id=str(kept), charge=None, accept=True)
 
 
 async def test_requests_list_when_undelivered_then_only_requests_no_channel_received(

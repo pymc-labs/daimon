@@ -2612,8 +2612,10 @@ class SupportMenu(Base):
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
     )
-    # `SupportOption`s as JSON; the menu is `name` and these.
+    # `SupportOption`s as JSON; the menu is `name`, these and `channel`.
     options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    # `support.MenuChannel` as JSON; NULL: requests go to the workspace's channel.
+    channel: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )

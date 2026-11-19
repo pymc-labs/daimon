@@ -52,7 +52,6 @@ from daimon.core.support import (
     offered_option,
     request_note,
     settle_problem,
-    settles_at_submit,
     snapshot_option,
     validate_answers,
 )
@@ -666,6 +665,7 @@ async def submit_request(
     default_allowance: int,
     exempt: bool = False,
     source_allowed: Callable[[AsyncSession], Awaitable[bool]] | None = None,
+    support_channel_id: str | None = None,
     now: datetime | None = None,
 ) -> SubmitOutcome:
     """Record one request on the governing limit, if its terms still stand and it is affordable.
@@ -680,6 +680,9 @@ async def submit_request(
     comes from. It runs inside this transaction after the locks are held, so it must read the
     policy itself (fresh): a policy edit committed while this waited is read and refuses, with
     nothing spent. Lock order is the limit, the person, then the tenant (`lock_access_policy`).
+    `support_channel_id` is where it is sent, kept so later menu edits never move it.
+    Only an exempt request settles here; every other one waits for a person to accept,
+    settle or decline it.
     The policy writers and a private form's consume never take a ledger lock, so it cannot
     deadlock.
     """
@@ -729,7 +732,6 @@ async def submit_request(
     if not exempt and not may_submit(bounds, view.available):
         return SubmitOutcome(status="out_of_credits", row=None, view=view)
     hold = Decimal(0) if exempt else hold_for(bounds)
-    settled = exempt or settles_at_submit(option.price)
     stmt = (
         insert(SupportEscalation)
         .values(
@@ -751,8 +753,9 @@ async def submit_request(
             option=snapshot.model_dump(mode="json", exclude_none=True),
             answers=answers,
             hold=hold,
-            charge=hold if settled else None,
-            status="settled" if settled else "pending",
+            charge=hold if exempt else None,
+            status="settled" if exempt else "pending",
+            support_channel_id=support_channel_id,
         )
         .returning(SupportEscalation)
     )
@@ -914,8 +917,12 @@ async def settle_request(
     default_allowance: int,
     tenant_id: uuid.UUID | None = None,
     expected_charge: Decimal | None = None,
+    accept: bool = False,
 ) -> SettleOutcome:
     """Settle a pending request at `charge`, or decline it (`charge` None: charged 0).
+
+    `accept` settles at the row's `accept_charge` instead of `charge`, and is
+    "invalid" for a price a person must set.
 
     A request charged at submit (`charged_at_submit`) takes `charge` equal to its
     charge, which keeps it and records the settler, or None, which refunds it.
@@ -935,6 +942,8 @@ async def settle_request(
     row = await get_request(session, escalation_id=escalation_id, tenant_id=tenant_id)
     if row is None:
         return SettleOutcome(status="not_found", row=None)
+    if accept and (charge := row.accept_charge) is None:
+        return SettleOutcome(status="invalid", row=row)
     correction = expected_charge is not None
     if not correction and not row.awaiting_person:
         return SettleOutcome(status="already_settled", row=row)

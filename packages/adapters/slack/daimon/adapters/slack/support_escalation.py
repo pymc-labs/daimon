@@ -131,7 +131,7 @@ from daimon.core.support_escalation import (
 from daimon.core.support_routing import (
     SupportDestination,
     log_undelivered,
-    support_destination,
+    request_destination,
 )
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -708,8 +708,12 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     destination = None
     if await _escalation_offered(runtime, origin):
         async with runtime.sessionmaker() as session:
-            destination = await support_destination(
-                session, tenant_id=origin.tenant_id, platform="slack", settings=runtime.settings
+            destination = await request_destination(
+                session,
+                tenant_id=origin.tenant_id,
+                platform="slack",
+                place=origin.support_place,
+                settings=runtime.settings,
             )
     if destination is None:
         # Disabled between the click and the submit. Nothing is spent.
@@ -764,6 +768,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
                 default_allowance=support.credits_per_user,
                 exempt=exempt,
                 source_allowed=source_allowed,
+                support_channel_id=destination.channel_id,
             )
     except SupportError as err:
         # A missing step or a bad answer: nothing was recorded.
@@ -881,7 +886,9 @@ async def _post_to_escalation_channel(
     row: SupportEscalationRow,
     view: LimitView,
 ) -> SupportPost | None:
-    """Post the request; a pending one carries Set charge and Decline. None unless it landed."""
+    """Post the request; a pending one carries Accept or Set charge, and Decline.
+
+    None unless it landed."""
     s = submission
     # The default form's note as typed, as before; a menu's answers as recorded.
     note = s.note if s.choice is None else row.note
@@ -906,6 +913,7 @@ async def _post_to_escalation_channel(
                 rest=rest,
                 note=escape_mrkdwn(note),
                 escalation_id=row.id,
+                accept=row.accept_charge is not None,
             )
 
         blocks = render_blocks

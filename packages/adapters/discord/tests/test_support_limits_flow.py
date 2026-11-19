@@ -297,7 +297,7 @@ async def test_confirm_when_charged_to_the_default_then_post_shows_facts_and_set
     assert (status, post_id) == ("pending", "555"), "held and posted"
 
 
-async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settled(
+async def test_pick_when_option_has_steps_then_held_until_accepted_at_its_price(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _seed(db_session_factory)
@@ -311,15 +311,17 @@ async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settl
     topic = modal.field_inputs["topic"]
     assert isinstance(topic, discord.ui.TextInput)
     topic._value = "Billing export"  # pyright: ignore[reportPrivateUsage]
-    submit = _interaction(bot)
-    await modal.on_submit(submit)
-    body = bot.support.send.await_args.args[0]
-    assert "Call, 1 hour: 1 credit\nCharged 1 credit" in body, "a step is charged at submit"
+    await modal.on_submit(_interaction(bot))
+    body, view = bot.support.send.await_args.args[0], bot.support.send.await_args.kwargs["view"]
+    assert "Call, 1 hour: 1 credit\nPending: 1 credit" in body, "a step waits"
     assert "Topic: Billing export" in body, "the answers are the note"
-    assert "view" not in bot.support.send.await_args.kwargs, "nothing left to settle"
-    assert _said(submit.followup.send) == (
-        "Request sent. Someone will reply.\nUsed 1 credit. 1 of 2 credits left."
-    ), "the confirmation says what it used and what is left"
+    assert [b.item.label for b in view.children] == ["Accept", "Decline"], "no amount to type"
+    ((_id, status, hold, _post),) = await _rows(db_session_factory)
+    assert (status, hold) == ("pending", D(1)), "holds its price"
+    click = _on_post(bot, body)
+    await view.children[0].callback(click)
+    assert _said(click.followup.send) == f"Charged 1 credit. {CLIENT_NOT_NOTIFIED}", "accepted"
+    assert "Charged 1 credit by <@8>" in click.edit_original_response.await_args.kwargs["content"]
 
 
 async def test_pick_when_the_menu_changed_then_options_changed(

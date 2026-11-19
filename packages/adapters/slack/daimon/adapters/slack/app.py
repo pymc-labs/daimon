@@ -212,7 +212,11 @@ from daimon.adapters.slack.support_escalation import (
     run_support_submission,
 )
 from daimon.adapters.slack.support_menu_form import MENU_CALLBACK_ID, OPTION_ACTION_ID
-from daimon.adapters.slack.support_post import SETTLE_DECLINE_ACTION_ID, SETTLE_SET_ACTION_ID
+from daimon.adapters.slack.support_post import (
+    SETTLE_ACCEPT_ACTION_ID,
+    SETTLE_DECLINE_ACTION_ID,
+    SETTLE_SET_ACTION_ID,
+)
 from daimon.adapters.slack.support_settle import (
     SETTLE_CALLBACK_ID,
     evaluate_settle_submission,
@@ -1640,7 +1644,7 @@ class SlackApp:
             self._spawn(handle_ask_human_click(self.runtime, payload))
         elif action_id == OPTION_ACTION_ID:
             self._spawn(handle_option_pick(self.runtime, payload))
-        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
+        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_ACCEPT_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
             self._spawn(handle_settle_click(self.runtime, payload))
         elif action_id.startswith(PROVIDER_ACTION_PREFIX):
             self._spawn(self._provider_actions.handle_click(payload))

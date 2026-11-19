@@ -11,6 +11,7 @@ from daimon.core.support import (
     DEFAULT_MENU,
     Balance,
     ChargedTo,
+    MenuChannel,
     MenuSpec,
     OptionSnapshot,
     PriceBounds,
@@ -37,13 +38,15 @@ class SupportMenuRow(_Row):
     name: str
     revision: int
     options: tuple[SupportOption, ...]
+    channel: MenuChannel | None = None
+    """Where its requests go; None: the workspace's request channel."""
     set_by_account_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
 
     @property
     def spec(self) -> MenuSpec:
-        return MenuSpec(name=self.name, options=self.options)
+        return MenuSpec(name=self.name, channel=self.channel, options=self.options)
 
 
 class SupportMenuPlaceRow(_Row):
@@ -124,14 +127,22 @@ class SupportEscalationRow(_Row):
     def awaiting_person(self) -> bool:
         """No person has settled or declined it: `settled_at` is stamped only by a person's settle.
 
-        A fixed-price request settles at submit with `settled_at` unset, so it still waits.
+        An exempt request, or a fixed one from before Accept, settled at submit with
+        `settled_at` unset, so it still waits.
         """
         return self.settled_at is None
 
     @property
     def charged_at_submit(self) -> bool:
-        """Charged when asked (fixed or steps price, or exempt) and no person has handled it."""
+        """Charged when asked (exempt, or a fixed price before Accept) and nobody handled it."""
         return self.status == "settled" and self.awaiting_person
+
+    @property
+    def accept_charge(self) -> Decimal | None:
+        """What Accept charges: a charge already taken, else a fixed or steps price."""
+        if self.charged_at_submit:
+            return self.charge
+        return None if self.option is None else self.option.accept_charge
 
     @property
     def counted(self) -> Decimal:

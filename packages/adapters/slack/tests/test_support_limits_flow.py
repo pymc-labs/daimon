@@ -32,6 +32,7 @@ from daimon.adapters.slack.support_menu_form import (
 )
 from daimon.adapters.slack.support_post import (
     NOT_NOTIFIED_LINE,
+    SETTLE_ACCEPT_ACTION_ID,
     SETTLE_DECLINE_ACTION_ID,
     SETTLE_SET_ACTION_ID,
 )
@@ -514,7 +515,7 @@ async def test_click_when_another_option_was_asked_on_the_answer_then_the_menu_s
     assert OPTION_BLOCK_ID in blocks, "a menu asks once per option, not once per answer"
 
 
-async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
+async def test_send_when_option_has_steps_then_held_until_accepted_at_its_price(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
     key = await _seed(db_session_factory)
@@ -527,12 +528,18 @@ async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
     }
     await run_support_submission(runtime, evaluate_menu_submission(_send(view, values)))
     post = _sent(fake, _POST)[-1]
-    assert "Call, 1 hour: 1 credit\nCharged 1 credit" in post["text"], "a step is charged now"
+    assert "Call, 1 hour: 1 credit\nPending: 1 credit" in post["text"], "a step waits"
     assert "Topic: Billing export" in post["text"], "the answers are the note"
-    assert "blocks" not in post, "nothing left to settle"
-    assert _said(fake) == (
-        "Request sent. Someone will reply.\nUsed 1 credit. 1 of 2 credits left."
-    ), "the confirmation says what it used and what is left"
+    buttons = [b["action_id"] for b in post["blocks"][-1]["elements"]]
+    assert buttons == [SETTLE_ACCEPT_ACTION_ID, SETTLE_DECLINE_ACTION_ID], "Accept, no amount"
+    ((escalation_id, status, hold, *_rest),) = await _rows(db_session_factory)
+    assert (status, hold) == ("pending", D(1)), "holds its price"
+    post = {**post, "ts": _POST_TS}
+    await handle_settle_click(
+        runtime, _settle_click(SETTLE_ACCEPT_ACTION_ID, escalation_id.hex, message=post)
+    )
+    assert _said(fake) == f"Charged 1 credit. {CLIENT_NOT_NOTIFIED}", "charged at its price"
+    assert "Charged 1 credit by <@U0STAFF>" in _sent(fake, _UPDATE)[-1]["text"], "closed"
 
 
 async def test_default_note_when_requester_is_admin_then_uses_no_credits(

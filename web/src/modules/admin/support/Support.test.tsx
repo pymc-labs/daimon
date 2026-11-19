@@ -43,7 +43,7 @@ const limit: Limit = {
   used: "1", state: "active", revision: 3, recent: [],
 }
 const lost = { id: "r1", at: "2026-01-01T00:00:00Z", person: "Priya", credits: "2", what: "Look", charged: false, price: { kind: "range" as const, min: "1", max: "3" } }
-const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
+const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], channel: null, body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
 const data: SupportPage = {
   platform: "discord", everyone: { each_person: "20" }, undelivered: [],
   limits: [limit], menus: [menu], menu_use: [{ scope: "workspace", scope_id: "", name: "Workspace", menu: null }],
@@ -167,6 +167,14 @@ describe("limits", () => {
     await userEvent.type(d.getByLabelText("Each person"), "5")
     await userEvent.click(d.getByRole("button", { name: "Save" }))
     expect(api.put).toHaveBeenLastCalledWith("/api/support/limits", expect.objectContaining({ expected_revision: 4, limit: expect.objectContaining({ each_person: "45", shared: "9" }) }))
+  })
+
+  it("sends where a menu's requests go", async () => {
+    const d = await drawer("/?menu=support")
+    await userEvent.click(d.getByRole("combobox", { name: "Requests go to" }))
+    await userEvent.click(await screen.findByRole("option", { name: /help/ }))
+    await userEvent.click(d.getByRole("button", { name: "Save" }))
+    expect(api.put).toHaveBeenCalledWith("/api/support/menus/support", expect.objectContaining({ menu: expect.objectContaining({ channel: { id: "c2" } }) }))
   })
 
   it("shows a server refusal next to the input it names", async () => {
@@ -433,6 +441,13 @@ describe("not delivered", () => {
     expect(d.queryByRole("textbox", { name: "Charge" })).toBeNull()
     await userEvent.click(d.getByRole("button", { name: "Settle" }))
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r1/settle", { charge: "2" }))
+  })
+
+  it("accepts a fixed price without an amount", async () => {
+    open([{ ...charged, charged: false }])
+    const d = within(await screen.findByRole("dialog"))
+    await userEvent.click(await d.findByRole("button", { name: "Accept" }))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r1/settle", {}))
   })
 
   it("asks to refund when declining a charged request", async () => {
