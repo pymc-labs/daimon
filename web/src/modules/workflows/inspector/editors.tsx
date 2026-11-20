@@ -139,7 +139,7 @@ export function ApprovalEditor(p: EditorProps) {
           </Field>
           <Field label="Needs"><Pick value={String(n.min_approvals ?? 1)} ro={ro} onChange={(v) => set((x) => { x.min_approvals = Number(v) })} options={approvers.map((_, i) => ({ value: String(i + 1), label: `${i + 1} of ${approvers.length}` }))} /></Field>
           <Field label="Where">
-            <Segmented value={where} ro={ro} options={[["inbox", "Inbox"], ["dm", "Direct message"], ["thread", "Channel thread"]]}
+            <Segmented value={where} ro={ro} options={[["inbox", "Inbox"], ["dm", "DM"], ["thread", "Thread"]]}
               onChange={(v) => set((x) => { x.deliver = v; if (v !== "thread") { x.channel = undefined; x.approvers = [x.approvers ?? []].flat().filter((a) => a !== "thread") } })} />
           </Field>
           {where === "thread" && (
@@ -149,7 +149,7 @@ export function ApprovalEditor(p: EditorProps) {
             </Field>
           )}
           <Field label="Answer">
-            <Segmented value={shape} ro={ro} options={[["approve", "Approve or reject"], ["choice", "Choice"], ["text", "Text"], ["form", "Form"]]} onChange={(v) => set((x) => setAnswer(x, v))} />
+            <Segmented value={shape} ro={ro} options={[["approve", "Approve"], ["choice", "Choice"], ["text", "Text"], ["form", "Form"]]} onChange={(v) => set((x) => setAnswer(x, v))} />
           </Field>
           <Field label="Remind every"><Text value={n.remind_every ?? ""} placeholder="Never" ro={ro} onChange={(v) => set((x) => { x.remind_every = v || undefined }, 400)} /></Field>
           <Field label="Timeout"><Text value={typeof n.timeout === "object" ? n.timeout.after : n.timeout ?? ""} placeholder="None" ro={ro} onChange={(v) => set((x) => { x.timeout = v ? { after: v, route: typeof x.timeout === "object" ? x.timeout.route : "reject" } : undefined }, 400)} /></Field>

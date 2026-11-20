@@ -63,15 +63,15 @@ export function useLiveDraft(wfId: string, editor: DraftEditor, spec: Spec, sid:
     const base = before.current
     before.current = null
     void refresh().then((after) => {
-      const nodes = base ? changedNodes(base, after) : []
-      if (!base || !nodes.length) return
+      if (!base || !diff(base, after).length) return
+      const nodes = changedNodes(base, after)
       const id = live.current.last
       const undo = () => {
         editor.save(base, 0)
         setEdits((e) => ({ ...e, [id]: { nodes } }))
       }
       setEdits((e) => ({ ...e, [id]: { nodes, undo } }))
-      toast(`Daimon changed ${nodes.length} step${nodes.length === 1 ? "" : "s"}`, { action: { label: "Undo", onClick: undo } })
+      toast(nodes.length ? `Daimon changed ${nodes.length} step${nodes.length === 1 ? "" : "s"}` : "Daimon changed the workflow", { action: { label: "Undo", onClick: undo } })
     })
   }, [t.busy])   // eslint-disable-line react-hooks/exhaustive-deps
 

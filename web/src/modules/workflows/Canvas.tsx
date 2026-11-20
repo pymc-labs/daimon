@@ -65,7 +65,8 @@ function Badges({ items }: { items: CardBadge[] }) {
 
 function StepCard({ id }: NodeProps) {
   const { spec, validation, catalog, changed, flash, selected, ro, remove, duplicate, run } = useContext(C)
-  const n = spec.nodes[id]!
+  const n = spec.nodes[id]
+  if (!n) return null   // a draft replaced under the flow: its store drops this card a render later
   const K = KIND[n.kind]
   const badges = run ? [] : badgesOf(id, n, validation)
   const r = run?.nodes[id]
@@ -284,6 +285,14 @@ export function Canvas({ panel, overlap = PANEL_W, tools, ...props }: CanvasProp
     void rf.setViewport({ x, y, zoom }, { duration })
   }
   useEffect(() => { if (!framed.current && width) { frame(); framed.current = true } }, [width, height, laid]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Daimon's edits can add steps off screen: bring them into view.
+  useEffect(() => {
+    if (!props.flash.size || !width) return
+    const vp = rf.getViewport(), room = width - (panel ? overlap : 0)
+    const off = laid.nodes.some((b) => props.flash.has(b.id) && (b.x * vp.zoom + vp.x < 0 || (b.x + b.w) * vp.zoom + vp.x > room || b.y * vp.zoom + vp.y < 0 || (b.y + b.h) * vp.zoom + vp.y > height - 72))
+    if (off) frame(250)
+  }, [props.flash]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the selected step clear of the panel.
   useEffect(() => {

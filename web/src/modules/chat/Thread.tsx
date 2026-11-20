@@ -112,7 +112,7 @@ export function Thread({ id, agent, compact, placeholder, picker, fill, after, e
           <div ref={bottom} />
         </div>
       </div>
-      <div className={cn(pad, "w-full space-y-3", compact ? "pb-3" : "pb-4")}>
+      <div className={cn(pad, "w-full space-y-3", compact ? "border-t pt-3 pb-3" : "pb-4")}>
         <div role="status" aria-live="polite" className="sr-only">{settledReply}</div>
         {reconnecting && (
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" />Reconnecting</div>

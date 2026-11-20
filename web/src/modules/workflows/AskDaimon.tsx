@@ -33,10 +33,10 @@ export function AskDaimon({ spec, sid, agent, edits, send, select, close }: {
           after={(m) => {
             const e = edits[m.id]
             const nodes = e?.nodes.filter((id) => spec.nodes[id])
-            if (!e || !nodes?.length) return null
+            if (!e || !(nodes?.length || e.undo)) return null
             return (
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {nodes.map((id) => {
+                {nodes?.map((id) => {
                   const K = KIND[spec.nodes[id]!.kind]
                   return (
                     <button key={id} onClick={() => select(id)} className="flex h-6 items-center gap-1.5 rounded-md border bg-background px-2 text-xs hover:bg-accent">
