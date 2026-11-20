@@ -247,6 +247,26 @@ Label this deployment writes as the source of the bundles it exports.
 
 Largest eval bundle import or export handles, in MiB.
 
+### `DAIMON_EVALS__JUDGE_MODELS`
+
+`list[JudgeModelSetting]` · optional · default unset
+
+The judge panel for eval runs that name none: each model scores each item and the panel
+votes. Every model needs a known price, and none may share a model or a provider with an
+arm it judges. Empty: judging names its models.
+
+### `DAIMON_EVALS__ADMIN_APPROVAL_USD`
+
+`float` · optional · default `25.0`
+
+Eval spending ceilings above this, in USD, need an admin to approve them.
+
+### `DAIMON_EVALS__KAPPA_WARN`
+
+`float` · optional · default `0.4`
+
+A judge whose kappa against human scores is below this is flagged.
+
 ## Long Jobs
 
 Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.

@@ -85,8 +85,8 @@ export function Avatar({ name, className }: { name: string; className?: string }
   )
 }
 
-/** Source text as Markdown; `breaks` keeps single newlines, as chat and plain-text sources mean them. */
-export function Prose({ text, breaks, className }: { text: string; breaks?: boolean; className?: string }) {
+/** Source text as Markdown; `breaks` keeps single newlines, as chat and plain-text sources mean them. `noImages` shows an image's description instead of loading it: for text nobody here wrote, where a remote image is a tracking beacon. */
+export function Prose({ text, breaks, noImages, className }: { text: string; breaks?: boolean; noImages?: boolean; className?: string }) {
   return (
     <div className={cn("prose-md text-sm leading-6 break-words", className)}>
       <ReactMarkdown
@@ -94,6 +94,7 @@ export function Prose({ text, breaks, className }: { text: string; breaks?: bool
         components={{
           a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer">{children}</a>,
           table: ({ children }) => <div className="overflow-x-auto"><table>{children}</table></div>,
+          ...(noImages && { img: ({ alt }) => (alt ? <span>{alt}</span> : null) }),
         }}
       >
         {text}
