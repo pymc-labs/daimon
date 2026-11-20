@@ -46,7 +46,11 @@ from daimon.core.handoff_context import (
     supports_system_message,
 )
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
+from daimon.core.mcp_tool_annotations import (
+    agent_mcp_token_for,
+    mcp_annotation_lookup,
+    relay_catalogues,
+)
 from daimon.core.model_presets import model_choice_id
 from daimon.core.monitoring import (
     KeptQuestion,
@@ -2250,6 +2254,9 @@ async def run_prepared_turn_impl(
                         tenant_id=tenant_id, ma_agent_id=str(prepared.admission.agent.id)
                     ),
                 ),
+                relays=relay_catalogues(deps.settings.mcp_identity, public_url=deps.public_url)
+                if deps.settings is not None
+                else None,
             )
             # Only servers the operator trusts for annotations are read; with
             # none trusted no catalogue is ever listed.

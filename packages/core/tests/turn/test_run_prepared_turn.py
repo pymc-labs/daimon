@@ -3449,6 +3449,121 @@ async def test_a_prepared_turn_reads_trusted_server_annotations_with_the_agent_t
     assert credential_reads == [derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_1")]
 
 
+@pytest.mark.parametrize("trusted", [("tracker",), ()], ids=["trusted", "untrusted"])
+async def test_a_trusted_identity_relay_server_is_read_upstream_with_the_operator_bearer(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    trusted: tuple[str, ...],
+) -> None:
+    """A relay server has no stored agent credential and the relay takes only a session's,
+    so its catalogue is read at the upstream URL with the operator's bearer key. Trusted,
+    a `readOnlyHint` read runs without a card; untrusted, it is never listed and asks."""
+    from daimon.core import mcp_tool_annotations
+    from daimon.core.config import DatabaseSettings, McpIdentitySettings, Settings
+    from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
+    from daimon.core.mcp_identity import relay_url
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
+    from pydantic import PostgresDsn
+
+    public_url = "https://daimon.example/mcp"
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id="thread-relay",
+        ma_session_id="sess_relay",
+    )
+    await db_session.commit()
+    identity = McpIdentitySettings.model_validate(
+        {
+            "servers": [
+                {
+                    "name": "tracker",
+                    "url": "https://tracker.example.com/mcp",
+                    "auth": "bearer",
+                    "workspaces": ["discord:1"],
+                    "agents": ["daimon"],
+                }
+            ],
+            "bearers": {"tracker": "operator-key"},
+        }
+    )
+    deps = dataclasses.replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            router=_router(session_bodies=[], dead_session_ids=set()),
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True, trusted_annotations=trusted),
+        public_url=public_url,
+        settings=Settings(
+            database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
+            mcp_identity=identity,
+        ),
+    )
+    admission = _admission(
+        account_id=account.id,
+        agent=ma_agent(
+            id="ag_1",
+            tenant_id=tenant.id,
+            mcp_servers=[
+                {"name": "tracker", "type": "url", "url": relay_url(public_url, "tracker")}
+            ],
+        ),
+        env=ma_environment(id="env_1", tenant_id=tenant.id),
+    )
+    prepared = _prepared_turn(
+        deps=deps,
+        admission=admission,
+        tenant_id=tenant.id,
+        external_user_id="user-1",
+        ma_session_id="sess_relay",
+        mapping_id=row.id,
+        session_account_id=account.id,
+    )
+    reads: list[tuple[str, str | None]] = []
+
+    async def _catalogue(url: str, token: str | None) -> list[dict[str, Any]]:
+        reads.append((url, token))
+        return [{"name": "memory_flag_list", "annotations": {"readOnlyHint": True}}]
+
+    monkeypatch.setattr(mcp_tool_annotations, "read_mcp_catalogue", _catalogue)
+    postures: list[object] = []
+
+    async def _fake_run_turn(**kwargs: object) -> TurnState:
+        postures.append(kwargs["tool_confirmation"])
+        return TurnState()
+
+    monkeypatch.setattr("daimon.core.turn.run.run_turn", _fake_run_turn)
+    prompts: list[ConfirmationPrompt] = []
+
+    async def card(prompt: ConfirmationPrompt) -> ConfirmationAnswer:
+        prompts.append(prompt)
+        return "denied"
+
+    await run_prepared(
+        deps, prepared, tenant_id=tenant.id, thread_id="thread-relay", confirm_write=card
+    )
+
+    (posture,) = postures
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu", server_name="tracker", tool_name="memory_flag_list")
+    )
+    if not trusted:
+        assert not result.allow and len(prompts) == 1, "untrusted: the name decides and asks"
+        assert reads == [], "no tools/list for an untrusted server"
+        return
+    assert result.allow and prompts == [], "readOnlyHint ran the read without a card"
+    assert reads == [("https://tracker.example.com/mcp", "operator-key")], (
+        "read upstream with the operator's key, never the relay URL"
+    )
+
+
 @pytest.mark.parametrize("microsoft", [False, True], ids=["plain", "selected-tools"])
 async def test_an_unattended_prepared_turn_uses_the_unattended_decider_with_safety_off(
     microsoft: bool,

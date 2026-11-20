@@ -38,6 +38,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.headless_runner import unattended_ceiling_s
+from daimon.core.mcp_tool_annotations import relay_catalogues
 from daimon.core.stores import session_settle_state
 from daimon.core.turn.approvals import (
     AnnotationLookup,
@@ -204,6 +205,7 @@ def _annotations_for(
         session_factory=runtime.session_factory,
         tenant_id=auth.tenant_id,
         fernet=runtime.fernet,
+        relays=relay_catalogues(runtime.settings.mcp_identity, public_url=_public_url(runtime)),
     )
 
 

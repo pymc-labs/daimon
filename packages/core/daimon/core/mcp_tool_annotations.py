@@ -8,7 +8,10 @@ closes the rule one: the approval decider asks it for the blocked call's
 `ToolAnnotations`, and it lists that server's tools once per turn.
 
 The read uses the agent-wide credential stored for that URL
-(`agent_mcp_credentials`), or no credential when none is stored. A personal
+(`agent_mcp_credentials`), or no credential when none is stored. A server
+attached through this deployment's identity relay is read at its upstream URL
+with the operator's bearer key (`relay_catalogues`), as the relay reaches it;
+the relay itself takes only a session's credential. A personal
 sign-in lives only in a write-only MA vault, so such a server usually refuses
 the read. Any failure (refusal, timeout, malformed page, a server that sends
 no hints) answers `None`, and the name decides as before: the lookup can
@@ -26,27 +29,33 @@ from typing import TYPE_CHECKING
 import structlog
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_mcp_credentials import resolve_agent_mcp_credentials
+from daimon.core.mcp_identity import relay_base
 from daimon.core.mcp_oauth.discovery import read_mcp_catalogue
-from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
 from daimon.core.tool_safety import ToolAnnotations, ToolCall
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     # Type only: `daimon.core.turn` imports this module through `turn.run`.
+    from daimon.core.config import McpIdentitySettings
     from daimon.core.turn.approvals import AnnotationLookup
 
 __all__ = [
+    "RelayCatalogues",
     "agent_mcp_token_for",
     "annotations_from_mcp",
     "mcp_annotation_lookup",
     "no_mcp_token",
+    "relay_catalogues",
 ]
 
 log = structlog.get_logger(__name__)
 
 CatalogueReader = Callable[[str, str | None], Awaitable[Sequence[Mapping[str, JsonValue]]]]
 TokenFor = Callable[[str], Awaitable[str | None]]
+RelayCatalogues = Mapping[str, tuple[str, str | None]]
+"""A relay URL (canonical) to the upstream URL and bearer key its catalogue is read with."""
 
 #: Ceiling on one server's catalogue read, so a slow server delays the first
 #: approval decision for its tools by at most this long.
@@ -101,6 +110,21 @@ def agent_mcp_token_for(
     return _token_for
 
 
+def relay_catalogues(identity: McpIdentitySettings, *, public_url: str | None) -> RelayCatalogues:
+    """Each identity relay server's upstream URL, with its bearer key when its auth is
+    bearer. A signed server is read with no credential: only the relay signs callers."""
+    if public_url is None:
+        return {}
+    base = relay_base(public_url)
+    return {
+        canonical_mcp_url(base + server.name): (
+            server.url,
+            key.get_secret_value() if (key := identity.bearers.get(server.name)) else None,
+        )
+        for server in identity.servers
+    }
+
+
 async def no_mcp_token(url: str) -> str | None:
     """Read every catalogue anonymously: no stored credential can be resolved."""
     return None
@@ -111,6 +135,7 @@ def mcp_annotation_lookup(
     server_urls: Mapping[str, str],
     token_for: TokenFor,
     read_catalogue: CatalogueReader | None = None,
+    relays: RelayCatalogues | None = None,
 ) -> AnnotationLookup:
     """Capture a session's server URLs; list each server's tools at most once."""
     catalogues: dict[str, asyncio.Task[Mapping[str, ToolAnnotations]]] = {}
@@ -119,7 +144,10 @@ def mcp_annotation_lookup(
         try:
             async with asyncio.timeout(CATALOGUE_TIMEOUT_S):
                 reader = read_catalogue or read_mcp_catalogue
-                tools = await reader(url, await token_for(url))
+                relayed = (relays or {}).get(canonical_mcp_url(url))
+                tools = await (
+                    reader(*relayed) if relayed is not None else reader(url, await token_for(url))
+                )
         except Exception as err:
             first = url not in _warned_urls
             _warned_urls.add(url)
