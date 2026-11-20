@@ -74,9 +74,10 @@ def guild_rooms(
 
     `extra` names channels the cache may lack, such as an archived thread. `roles` and
     `guild_channels` replace the cached roles and channels (not threads) with a fresh
-    REST read, and `members` the cached members with a fresh chunk, for a reconcile.
+    REST read. `members` is a full member list the caller vouches for; only then is
+    `guild.chunked` (a count comparison a missed join can break) not consulted.
     """
-    if not guild.chunked:
+    if members is None and not guild.chunked:
         return None
     cached_channels = guild.channels if guild_channels is None else guild_channels
     seen = {c.id for c in (*cached_channels, *guild.threads)}

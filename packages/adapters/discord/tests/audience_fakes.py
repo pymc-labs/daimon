@@ -79,8 +79,7 @@ def guild(*, channels: list[Any], threads: list[Any] | None = None, chunked: boo
     fake.fetch_channels = AsyncMock(side_effect=lambda: list(fake.channels))
 
     async def chunk(**_kw: Any) -> list[Any]:
-        fake.chunked = True
-        return list(fake.members)
+        return list(fake.members)  # `chunked` is discord.py's count check: it stays as given
 
     fake.chunk = AsyncMock(side_effect=chunk)
     for each in (*channels, *fake.threads):

@@ -110,25 +110,51 @@ async def test_a_full_reload_publishes_and_every_unknown_signal_withdraws(
     assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "reconciled"
 
 
-async def test_a_partial_chunk_and_a_chunk_failure_leave_every_room_unknown(
+async def test_a_chunk_failure_leaves_every_room_unknown(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
     audience, members = _sync(db_session_factory, clock)
     server = _server(chunked=True)
-    await audience.publish(server)  # type: ignore[arg-type]
+    await audience.publish(server, reconciled=True)  # type: ignore[arg-type]
+    assert (await _fact(db_session_factory, clock, "2")).contained
 
-    server.chunked = False  # type: ignore[attr-defined]
-    await audience.publish(server)  # type: ignore[arg-type]
-    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "partial member cache"
-
-    server.chunked = True  # type: ignore[attr-defined]
-    await audience.publish(server)  # type: ignore[arg-type]
     server.chunked = False  # type: ignore[attr-defined]
     server.chunk = AsyncMock(side_effect=TimeoutError)  # type: ignore[attr-defined]
     await members.reload_all([server])  # type: ignore[list-item]
     assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "chunk failure"
+
+
+async def test_a_wrong_member_count_does_not_block_a_full_chunk(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """discord.py's `chunked` compares counts: after a missed join it stays False for good.
+    Our own record of a complete load decides instead."""
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server(chunked=False)
+
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.publish(server)  # type: ignore[arg-type]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "no load yet: skipped"
+    server.fetch_roles.assert_not_awaited()  # type: ignore[attr-defined]
+
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert server.chunked is False  # type: ignore[attr-defined]
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False)
+
+    server.channels[0].overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(  # type: ignore[attr-defined]
+        view_channel=True
+    )
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained, "an event publishes too"
+
+    await audience.disconnected([server])  # type: ignore[list-item]
+    await audience.publish(server)  # type: ignore[arg-type]
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "load lost at disconnect"
 
 
 async def test_the_reload_start_makes_rooms_unknown_until_it_ends(
@@ -138,22 +164,24 @@ async def test_the_reload_start_makes_rooms_unknown_until_it_ends(
     clock = Clock()
     audience, members = _sync(db_session_factory, clock)
     server = _server()
-    await audience.publish(server)  # type: ignore[arg-type]
+    await audience.publish(server, reconciled=True)  # type: ignore[arg-type]
     seen: list[RoomFacts] = []
 
     async def while_chunking(**_: object) -> None:
         seen.append(await _fact(db_session_factory, clock, "1"))
         audience.schedule(server)  # type: ignore[arg-type]
         await audience.settle()
+        await audience.publish(server)  # type: ignore[arg-type]
+        seen.append(await _fact(db_session_factory, clock, "1"))
 
     server.chunked = False  # type: ignore[attr-defined]
     server.chunk = AsyncMock(side_effect=while_chunking)  # type: ignore[attr-defined]
     await members.reload(server)  # type: ignore[arg-type]
 
-    assert seen == [UNKNOWN_FACTS], "unknown during the reload"
-    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, (
-        "an event during the reload published nothing; the cache was still filling"
+    assert seen == [UNKNOWN_FACTS, UNKNOWN_FACTS], (
+        "unknown during the reload; an event recompute during it published nothing"
     )
+    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False), "loaded"
 
 
 async def test_events_recompute_after_a_wait_in_one_write(
@@ -163,7 +191,7 @@ async def test_events_recompute_after_a_wait_in_one_write(
     clock = Clock()
     audience, _ = _sync(db_session_factory, clock)
     server = _server()
-    await audience.publish(server)  # type: ignore[arg-type]
+    await audience.publish(server, reconciled=True)  # type: ignore[arg-type]
     assert not (await _fact(db_session_factory, clock, "1")).contained
 
     server.channels[0].overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(  # type: ignore[attr-defined]
@@ -257,6 +285,56 @@ async def test_a_reconcile_counts_the_chunked_members_so_a_missed_leave_does_not
     await audience.tick([server])  # type: ignore[list-item]
 
     assert not (await _fact(db_session_factory, clock, "2")).contained
+
+
+async def test_an_event_recompute_keeps_what_a_reconcile_read_from_discord(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert not (await _fact(db_session_factory, clock, "1")).contained
+
+    # A channel update was missed: the cache shows the room closed, Discord has it open.
+    opened = fake.channel(1, "planning", fake.internal_only())
+    opened.overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(
+        view_channel=True
+    )
+    opened.guild = server
+    server.fetch_channels = AsyncMock(return_value=[opened, server.channels[1]])  # type: ignore[attr-defined]
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+    # An unrelated member event recomputes from the stale cache plus a fresh REST read.
+    clock.now += timedelta(seconds=30)
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained, "the room stays contained"
+    assert server.fetch_channels.await_count == 2, "the tick reconcile and the recompute"  # type: ignore[attr-defined]
+
+
+async def test_a_failed_rest_read_on_an_event_makes_the_server_unknown_and_a_tick_recovers(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+
+    real: Any = server.fetch_channels  # type: ignore[attr-defined]
+    server.fetch_channels = AsyncMock(side_effect=discord.ClientException("down"))  # type: ignore[attr-defined]
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "fail closed"
+
+    server.fetch_channels = real  # type: ignore[attr-defined]
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert (await _fact(db_session_factory, clock, "2")).contained, "the next tick recovers"
 
 
 async def test_a_failed_publish_on_reconnect_recovers_at_the_next_tick(
