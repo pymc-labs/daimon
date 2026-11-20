@@ -915,15 +915,23 @@ async def not_final_outbox_for_profiles(
         ).where(UsageObservation.provider == provider, UsageObservation.observed_at >= seen_since)
     )
     final = AccountingOutbox.row["observation"]["final"].astext
-    return await _settlements(
-        session,
-        profiles,
-        or_(AccountingOutbox.applied_at.is_(None), seen),
-        ~superseded,
-        final.is_distinct_from("true"),
-        limit=limit,
-        after=after,
-    )
+    # Two index-driven reads, merged: one OR of them stops the planner starting from the
+    # observation index and scans the whole outbox instead.
+    found = {
+        (s.row.binding_id, s.row.observation_id, s.row.revision): s
+        for condition in (AccountingOutbox.applied_at.is_(None), seen)
+        for s in await _settlements(
+            session,
+            profiles,
+            condition,
+            ~superseded,
+            final.is_distinct_from("true"),
+            limit=limit,
+            after=after,
+        )
+    }
+    ordered = sorted(found.items(), key=lambda item: (*item[0][:2], -item[0][2]))
+    return [settlement for _, settlement in ordered[:limit]]
 
 
 async def _settlements(
