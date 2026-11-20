@@ -113,9 +113,9 @@ queued wakes, pending approvals or running jobs.
 
 Set only an OpenAI or Gemini key. `init` seeds the default agents on the first
 keyed provider at its default model, and agents you create later live there
-too. Each is pinned, so a reply never falls back to Anthropic and no Anthropic
-request is made. Thread titles and participation checks use a small model from
-that provider. An agent still on Anthropic gets a card offering a copy on
+too. Each is pinned, and a server whose admin never chose its providers may use
+the keyed ones, so it replies with no Anthropic request. Thread titles and
+participation checks use a small model from that provider. An agent still on Anthropic gets a card offering a copy on
 another provider, or asking whoever runs Daimon to add the Anthropic key.
 Memory settings show as needing setup.
 
@@ -194,10 +194,11 @@ file mounts work), and fixed container defaults.
 
 ## Enable providers for a tenant
 
-A tenant may use Anthropic plus every provider whose deployment key is set,
-such as `DAIMON_CHANNEL_OPENAI_KEY` or `DAIMON_CHANNEL_GEMINI_KEY`. A key
-under another name through `--api-key-env` does not count. Self-hosted
-backends are never on by default. An admin's own choice always wins.
+A tenant whose admin never chose uses Anthropic only. With no Anthropic key, it
+may use every provider whose deployment key is set, such as
+`DAIMON_CHANNEL_OPENAI_KEY` or `DAIMON_CHANNEL_GEMINI_KEY`. A key under another
+name through `--api-key-env` does not count. Self-hosted backends are never on
+by default. An admin's own choice always wins.
 
 An admin changes the list in chat by asking Daimon and confirming the card.
 On Discord, an operator can do the same from the CLI. Each call checks that

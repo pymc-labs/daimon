@@ -34,11 +34,12 @@ def anthropic_configured(client: object) -> bool:
         return False
     if not isinstance(client, AsyncAnthropic):
         return True
-    return client.api_key not in (
-        None,
-        "",
-        ANTHROPIC_UNCONFIGURED_PLACEHOLDER,
-    )
+    return anthropic_key_configured(client.api_key)
+
+
+def anthropic_key_configured(api_key: str | None) -> bool:
+    """Whether `api_key` is a real key rather than unset or the keyless placeholder."""
+    return api_key not in (None, "", ANTHROPIC_UNCONFIGURED_PLACEHOLDER)
 
 
 def require_anthropic(client: AsyncAnthropic | None) -> None:

@@ -253,8 +253,9 @@ async def world(
     script = Script()
     api, openai, gemini = AnthropicAPI(script), OpenAIAPI(script=script), GeminiAPI(script=script)
     network = ProviderNetwork({fake.host: fake for fake in (api, openai, gemini)})
-    saved = {env: os.environ.pop(env, None) for env in DEFAULT_KEY_ENV.values()}
-    os.environ.update({env: "sim" for p, env in DEFAULT_KEY_ENV.items() if p in keyed})
+    envs = {"anthropic": "DAIMON_ANTHROPIC__API_KEY", **DEFAULT_KEY_ENV}
+    saved = {env: os.environ.pop(env, None) for env in envs.values()}
+    os.environ.update({env: "sim" for p, env in envs.items() if p in keyed})
     sim = World(settings, sessions, script, network, api, openai, gemini)
     try:
         with network.installed(), _compressed_waits():

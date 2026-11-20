@@ -56,6 +56,7 @@ def test_j9_a_new_tenant_is_on_anthropic_and_keyed_providers_have_code_default_r
     from daimon.core.turn.runtime_defaults import default_rows
 
     tenant = str(uuid.uuid4())
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "offline")
     for provider in ("openai", "gemini"):
         monkeypatch.delenv(DEFAULT_KEY_ENV[provider], raising=False)
     assert default_enabled_backends() == ("anthropic",)

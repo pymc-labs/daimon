@@ -15,7 +15,7 @@ from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .discord import GUILD, PERSON, Discord
-from .world import enable_backend, world
+from .world import world
 
 MCP = McpSettings(
     public_url=HttpUrl("https://daimon.example.com/mcp"),
@@ -39,7 +39,7 @@ class _Daimon(StrictFake):
 async def test_the_seeded_agent_replies_on_a_keyless_install(
     provider: Provider, db_preflight: None, db_nullpool_engine: AsyncEngine
 ) -> None:
-    """The seeded agent is born on the keyed provider, with no Claude source to switch from."""
+    """The seeded agent is born on the keyed provider and replies with no admin opt-in."""
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with world(sessions, keyed=(provider,), mcp=MCP) as w:
         app = create_mcp_app(settings=w.settings, sessionmaker=w.sessions, anthropic=w.anthropic)
@@ -50,8 +50,6 @@ async def test_the_seeded_agent_replies_on_a_keyless_install(
         async with asgi_lifespan(app):
             d = Discord(w)
             await d.install()
-            # A key makes the provider available; sending conversations there is the admin's opt-in.
-            await enable_backend(w, d.tenant_id, provider)
             w.script.add(Turn("Hello."))
             w.script.add(Turn("Still here."))
             first = await d.say("hello")

@@ -1,4 +1,4 @@
-"""A key makes a provider available; only a tenant admin turns it on."""
+"""A key makes a provider available; only a tenant admin turns it on, unless no Anthropic key."""
 
 from __future__ import annotations
 
@@ -17,10 +17,12 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+ANTHROPIC_KEY = "DAIMON_ANTHROPIC__API_KEY"
+
 
 @pytest.fixture(autouse=True)
 def no_deployment_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    for env in DEFAULT_KEY_ENV.values():
+    for env in (*DEFAULT_KEY_ENV.values(), ANTHROPIC_KEY):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", raising=False)
 
@@ -69,6 +71,7 @@ async def test_another_tenants_runtime_row_never_turns_a_provider_on(
 async def test_a_fresh_tenant_stays_on_anthropic_when_providers_are_keyed(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(ANTHROPIC_KEY, "set")
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
     tenant = await make_tenant(db_session)
@@ -80,9 +83,33 @@ async def test_a_fresh_tenant_stays_on_anthropic_when_providers_are_keyed(
     assert policy.backends_explicit is False
 
 
+async def test_without_an_anthropic_key_a_fresh_tenant_uses_the_keyed_providers(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing else can answer there; a saved list still wins."""
+    monkeypatch.setenv(ANTHROPIC_KEY, "")
+    monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
+    monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
+    fresh = await make_tenant(db_session)
+    chose = await make_tenant(db_session)
+    await set_access_policy(
+        db_session,
+        tenant_id=chose.id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", "gemini")),
+    )
+    db_session.expire_all()
+
+    policy = await load_access_policy(db_session, tenant_id=fresh.id)
+    assert policy.enabled_backends == ("anthropic", "openai", "gemini")
+    assert not policy.backends_explicit
+    saved = await load_access_policy(db_session, tenant_id=chose.id)
+    assert saved.enabled_backends == ("anthropic", "gemini") and saved.backends_explicit
+
+
 async def test_an_admin_opt_in_is_kept_and_unchosen_tenants_stay_on_anthropic(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(ANTHROPIC_KEY, "set")
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")
     opted_in = await make_tenant(db_session)
     other = await make_tenant(db_session)

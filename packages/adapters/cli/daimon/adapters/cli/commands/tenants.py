@@ -87,7 +87,10 @@ def tenants_backend_policy_command(
         str | None,
         typer.Option(
             "--backends",
-            help="Comma-separated providers, or 'default' for the deployment default (Anthropic).",
+            help=(
+                "Comma-separated providers, or 'default' for the deployment default "
+                "(Anthropic, or the keyed providers with no Anthropic key)."
+            ),
         ),
     ] = None,
     expected_revision: Annotated[str | None, typer.Option("--expected-revision")] = None,

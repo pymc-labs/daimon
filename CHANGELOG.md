@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.
 
+- **A server set up with only an OpenAI or Gemini key replies out of the box.**
+  With no Anthropic key, a server whose admin never chose its providers may use
+  the keyed ones, and the seeded agent runs with that provider's tools. A server
+  that saved a list keeps it, and with an Anthropic key the default stays
+  Anthropic only.
+
 - **A conversation moved to GPT keeps replying.** After `/model` picked a GPT
   model in a thread, every turn there failed with "Something went wrong on our
   side". Agents saved on a self-hosted model failed the same way. Threads that
