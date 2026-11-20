@@ -375,7 +375,12 @@ class AudienceSync:
         """Tick until cancelled. Started by the process that holds the gateway."""
         while True:
             await asyncio.sleep(self._renew_every_s)
-            await self.tick(guilds())
+            try:
+                await self.tick(guilds())
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # one bad tick must not end renewal: facts would lapse
+                log.exception("discord.audience.tick_failed", err_type=type(err).__name__)
 
 
 async def _policy_roles(
