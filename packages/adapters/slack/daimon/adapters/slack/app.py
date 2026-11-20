@@ -242,6 +242,14 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.adapters.slack.workflow_cards import (
+    FORM_CALLBACK_ID,
+    card_editor,
+    handle_workflow_click,
+    handle_workflows_command,
+    is_workflow_action,
+    submit_job,
+)
 from daimon.adapters.slack.workflow_delivery import make_slack_workflow_poster
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
@@ -350,6 +358,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.workflows import chat_cards
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
@@ -563,7 +572,12 @@ class SlackApp:
             SUPPORT_CALLBACK_ID: self._submit_support,
             MENU_CALLBACK_ID: self._submit_menu,
             SETTLE_CALLBACK_ID: self._submit_settle,
+            FORM_CALLBACK_ID: self._submit_workflow_form,
         }
+
+    async def _submit_workflow_form(self, payload: dict[str, Any]) -> _Submitted:
+        # The ack closes the form; the run card, or what to tell the person, follows.
+        return None, submit_job(self.runtime, payload)
 
     def _with_web_client(
         self, team_id: str, run: Callable[[AsyncWebClient], Awaitable[None]]
@@ -964,6 +978,12 @@ class SlackApp:
                 platform="slack",
                 post=make_slack_routine_poster(self.runtime),
                 workflow=make_slack_workflow_poster(self.runtime),
+                run_cards=chat_cards.follower(
+                    self.runtime.sessionmaker,
+                    self.runtime.settings,
+                    platform="slack",
+                    edit=card_editor(self.runtime),
+                ),
                 should_stop=lambda: self.draining,
             )
         )
@@ -1296,6 +1316,8 @@ class SlackApp:
                 handler = lambda: handle_settings_command(runtime, payload)  # noqa: E731
             elif cmd == "/routines":
                 handler = lambda: handle_routines_command(runtime, payload)  # noqa: E731
+            elif cmd == "/workflows":
+                handler = lambda: handle_workflows_command(runtime, payload)  # noqa: E731
             elif cmd == "/billing":
                 handler = lambda: handle_billing_command(runtime, payload)  # noqa: E731
             elif cmd == "/privacy":
@@ -1537,6 +1559,8 @@ class SlackApp:
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
+        elif is_workflow_action(action_id):
+            self._spawn(handle_workflow_click(self.runtime, payload))
         elif is_own_card_action(action_id):
             self._spawn(handle_own_card_click(self.runtime, payload))
         elif action_id == HAND_OVER_ACTION_ID:

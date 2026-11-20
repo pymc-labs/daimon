@@ -1299,7 +1299,7 @@ class DaimonBot(commands.Bot):
                         self.runtime.sessionmaker,
                         self.runtime.settings,
                         platform="discord",
-                        edit=functools.partial(card_editor, self._channel_by_id),
+                        edit=lambda _, place, card: card_editor(self._channel_by_id, place, card),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )

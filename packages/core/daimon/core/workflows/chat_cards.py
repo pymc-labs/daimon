@@ -692,7 +692,8 @@ async def pick(sm: Sessions, settings: Settings, presser: Presser, workflow_id: 
 # ---------- following run cards ----------
 
 
-CardEditor = Callable[[ChatPlace, PostedCard], Awaitable[None]]
+#: Edits a run card: the run's tenant, where the card is, and the card to show.
+CardEditor = Callable[[uuid.UUID, ChatPlace, PostedCard], Awaitable[None]]
 
 
 async def follow_cards(
@@ -726,7 +727,7 @@ async def follow_cards(
         if last is not None and last[0] == key:
             continue
         try:
-            await edit(ChatPlace.of(row.triggered_by["card"]), card)
+            await edit(row.tenant_id, ChatPlace.of(row.triggered_by["card"]), card)
         except Exception as err:
             # Boundary: a chat API call; the next round tries again.
             log.warning(

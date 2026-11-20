@@ -96,7 +96,7 @@ async def test_a_confirmed_run_starts_on_its_card_and_the_card_follows_it(
     assert run.triggered_by["card"] == PLACE.ref(), "the run names the card it shows on"
     edits: list[tuple[ChatPlace, str]] = []
 
-    async def edit(place: ChatPlace, shown: PostedCard) -> None:
+    async def edit(_: uuid.UUID, place: ChatPlace, shown: PostedCard) -> None:
         edits.append((place, shown.headline))
 
     seen: dict[uuid.UUID, tuple[str, datetime]] = {}
