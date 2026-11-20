@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import random
 import re
+import secrets
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Sequence
 from typing import Final
@@ -135,6 +136,11 @@ def blind_pool(index: Sequence[ItemIndexRow], arms: Collection[str]) -> list[Ite
         if i.status == "done" and i.arm_key in arms:
             groups[(i.case_key, i.repeat)].append(i)
     return [i for g in groups.values() if {i.arm_key for i in g} == set(arms) for i in g]
+
+
+def new_run_id() -> str:
+    """A run id the server picks: a chosen one could name an arm."""
+    return f"run-{secrets.token_hex(8)}"
 
 
 def run_handle(secret: str, run_key: str) -> str:

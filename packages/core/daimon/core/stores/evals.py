@@ -556,6 +556,17 @@ async def run_keys(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[str]:
     return list(await session.scalars(select(EvalRun.key).where(EvalRun.tenant_id == tenant_id)))
 
 
+async def imported_run(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> RunRow | None:
+    """The run imported under the bundle id `key`, if any."""
+    row = await session.scalar(
+        select(EvalRun).where(
+            EvalRun.tenant_id == tenant_id,
+            EvalRun.document["ext"]["daimon.imported_id"].astext == key,
+        )
+    )
+    return row and RunRow.model_validate(row)
+
+
 async def runs_of_suite(session: AsyncSession, *, suite_id: uuid.UUID) -> list[RunRow]:
     rows = await session.scalars(
         select(EvalRun).where(EvalRun.suite_id == suite_id).order_by(EvalRun.created_at)

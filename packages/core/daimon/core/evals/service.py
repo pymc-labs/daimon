@@ -55,6 +55,7 @@ from daimon.core.evals.blind import (
     case_view,
     is_blind,
     keyed,
+    new_run_id,
     opaque_id,
     run_handle,
 )
@@ -1220,16 +1221,18 @@ class EvalService:
             skipped: list[str] = []
             for run in report.runs:
                 run_id = str(run.document["id"])
-                if await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id):
+                if await store.imported_run(session, tenant_id=actor.tenant_id, key=run_id):
                     skipped.append(run_id)
                     continue
                 try:  # a concurrent import of the same run wins; this one skips it
                     async with session.begin_nested():
-                        await self._import_run(session, actor, manifest, run, renamed, signature)
+                        done.append(
+                            await self._import_run(
+                                session, actor, manifest, run, renamed, signature
+                            )
+                        )
                 except IntegrityError:
                     skipped.append(run_id)
-                    continue
-                done.append(run_id)
             await store.record_bundle(
                 session, tenant_id=actor.tenant_id, direction="import", manifest=raw_manifest,
                 actor_key=actor.key, signature=signature,
@@ -1335,8 +1338,9 @@ class EvalService:
         loaded: LoadedRun,
         renamed: dict[str, str],
         signature: str,
-    ) -> None:
-        """Store a run as a record of work done elsewhere: never as one to carry on here."""
+    ) -> str:
+        """Store a run as a record of work done elsewhere, never as one to carry on here, under
+        a new id; the id it had stays in `ext["daimon.imported_id"]`."""
         run = Run.model_validate(loaded.document)
         key = renamed.get(run.suite.id, run.suite.id)
         if key in renamed.values():  # `_import_suite` just stored it for this actor
@@ -1355,6 +1359,9 @@ class EvalService:
             raise EvalRefused(f"Run {run.id} has cases suite {key} does not pin.", stray)
         document = {k: v for k, v in loaded.document.items() if k != "approval"}
         document["suite"] = {"id": key, "version": run.suite.version}
+        # The bundle's run id was chosen elsewhere and may name an arm: keep it as a note only.
+        document["id"] = run_id = new_run_id()
+        document["ext"] = {**(run.ext or {}), "daimon.imported_id": run.id}
         if run.status in _UNFINISHED_RUN:
             document["status"] = "cancelled"
         if run.origin.kind == "local":
@@ -1364,7 +1371,8 @@ class EvalService:
             )  # fmt: skip
             document["origin"] = to_document(origin)
         documents = [
-            {**raw, "status": "cancelled"} if item.status in ("pending", "running") else raw
+            {**raw, "run_id": run_id}
+            | ({"status": "cancelled"} if item.status in ("pending", "running") else {})
             for raw, item in zip(loaded.items, items, strict=True)
         ]
         scrub = await store.version_scrub(session, suite_id=suite.id, version=run.suite.version)
@@ -1374,6 +1382,7 @@ class EvalService:
             reviews=loaded.reviews, scrub_status=_worst([manifest.scrub.status, scrub]),
             created_by=actor.key, signature=signature,
         )  # fmt: skip
+        return run_id
 
 
 def eval_service(
