@@ -1,0 +1,5451 @@
+{
+ "client_codes": [
+  "start",
+  "no_finish",
+  "unknown_target",
+  "dead_end",
+  "unreachable",
+  "unknown_bind",
+  "unknown_ref",
+  "not_upstream",
+  "loop_limit",
+  "rule_of_two",
+  "cost"
+ ],
+ "cases": [
+  {
+   "name": "a valid spec",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "W"
+    ],
+    "done": [],
+    "stop": []
+   }
+  },
+  {
+   "name": "a missing start makes every step unreachable",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "nowhere",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "start:",
+    "unreachable:done",
+    "unreachable:draft",
+    "unreachable:review",
+    "unreachable:send",
+    "unreachable:stop"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "no finish step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "agent",
+      "instructions": "x",
+      "next": "stop"
+     },
+     "stop": {
+      "kind": "transform",
+      "set": {
+       "a": 1
+      },
+      "next": "send"
+     }
+    }
+   },
+   "errors": [
+    "loop_limit:send",
+    "no_finish:"
+   ],
+   "warnings": [
+    "cost:send"
+   ]
+  },
+  {
+   "name": "unknown next step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "nowhere"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "not_upstream:done",
+    "unknown_target:send",
+    "unreachable:done"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a step with no next step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      }
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "dead_end:send",
+    "not_upstream:done",
+    "unreachable:done"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "an orphan step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "orphan": {
+      "kind": "transform",
+      "set": {
+       "x": 1
+      },
+      "next": "done"
+     }
+    }
+   },
+   "errors": [
+    "unreachable:orphan"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "binds an unknown step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "ghost",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "unknown_bind:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "unknown inputs, steps and fields",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "a": "${{ inputs.missing }}",
+       "b": "${{ steps.nope.output }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.nope }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "unknown_ref:draft",
+    "unknown_ref:send"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "reads a later step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "late": "${{ steps.send.output }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "not_upstream:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a loop without max visits",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "critique": "${{ steps.critique.output.points }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "critique"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "critique": {
+      "kind": "agent",
+      "instructions": "Critique.",
+      "inputs": {
+       "draft": "${{ steps.draft.output.body }}"
+      },
+      "output": {
+       "points": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      },
+      "routes": {
+       "revise": "draft",
+       "accept": "review"
+      }
+     }
+    }
+   },
+   "errors": [
+    "loop_limit:draft"
+   ],
+   "warnings": [
+    "cost:draft"
+   ],
+   "grants": [],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "W"
+    ],
+    "done": [],
+    "stop": [],
+    "critique": [
+     "S"
+    ]
+   }
+  },
+  {
+   "name": "a loop with max visits and a budget",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer",
+     "budget_usd": 2
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "critique": "${{ steps.critique.output.points }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "critique",
+      "max_visits": 3
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "critique": {
+      "kind": "agent",
+      "instructions": "Critique.",
+      "inputs": {
+       "draft": "${{ steps.draft.output.body }}"
+      },
+      "output": {
+       "points": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      },
+      "routes": {
+       "revise": "draft",
+       "accept": "review"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "W"
+    ],
+    "done": [],
+    "stop": [],
+    "critique": [
+     "S"
+    ]
+   }
+  },
+  {
+   "name": "untrusted input reaches an unbound write",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ payload.issue }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "rule_of_two:send"
+   ],
+   "warnings": [],
+   "grants": [
+    "unattended_write:send"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "an exposed agent that writes",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ payload.issue }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "writes": "allow"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [
+    "rule_of_two:draft"
+   ],
+   "warnings": [],
+   "grants": [
+    "unattended_write:draft"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S",
+     "W"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "a waived agent that writes",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ payload.issue }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "writes": "allow",
+      "untrusted_waiver": "Writes only to a sandbox"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "unattended_write:draft",
+    "untrusted_waiver:draft"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S",
+     "W"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "an unverified webhook",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "inputs": "${{ payload.issue }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "unverified_webhook:"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "agents per item at high concurrency with built-ins",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      },
+      "topics": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "each"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "each": {
+      "kind": "for_each",
+      "items": "${{ inputs.topics }}",
+      "concurrency": 8,
+      "do": {
+       "kind": "agent",
+       "instructions": "Research.",
+       "inputs": {
+        "item": "${{ item }}"
+       },
+       "builtins": "read"
+      },
+      "next": "review"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [
+    "cost:each"
+   ],
+   "grants": [
+    "builtins:each"
+   ],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "W"
+    ],
+    "done": [],
+    "stop": [],
+    "each": [
+     "U",
+     "S"
+    ]
+   }
+  },
+  {
+   "name": "a budget over the default",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    },
+    "limits": {
+     "budget_usd": 10
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "budget_over_default:"
+   ],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "W"
+    ],
+    "done": [],
+    "stop": []
+   }
+  },
+  {
+   "name": "an unknown field",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "colour": "red"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "schema:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "an expression that does not parse",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "bad": "${{ 1 + }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "expression:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "instructions with an expression",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Write about ${{ inputs.topic }}",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "instructions_expression:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a branch condition without markers",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "pick"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pick": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "inputs.topic == 'x'",
+        "to": "review"
+       }
+      ],
+      "else": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "expression:pick"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "reads a branch arm that may be skipped",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "pick"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.short.output.text }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pick": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "${{ inputs.topic == 'a' }}",
+        "to": "short"
+       }
+      ],
+      "else": "long"
+     },
+     "short": {
+      "kind": "transform",
+      "set": {
+       "text": "short"
+      },
+      "next": "review"
+     },
+     "long": {
+      "kind": "transform",
+      "set": {
+       "text": "long"
+      },
+      "next": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unguarded_ref:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "guards a branch arm with has()",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "pick"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ has(steps.short.output.text) ? steps.short.output.text : 'none' }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pick": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "${{ inputs.topic == 'a' }}",
+        "to": "short"
+       }
+      ],
+      "else": "long"
+     },
+     "short": {
+      "kind": "transform",
+      "set": {
+       "text": "short"
+      },
+      "next": "review"
+     },
+     "long": {
+      "kind": "transform",
+      "set": {
+       "text": "long"
+      },
+      "next": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "a parallel fan-out joined with all",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": [
+       "left",
+       "right"
+      ]
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ string(steps.left.output.a + steps.right.output.b) }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "left": {
+      "kind": "transform",
+      "set": {
+       "a": 1
+      },
+      "next": "review"
+     },
+     "right": {
+      "kind": "transform",
+      "set": {
+       "b": 2
+      },
+      "next": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "a parallel fan-out joined with first",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": [
+       "left",
+       "right"
+      ]
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ string(steps.left.output.a + steps.right.output.b) }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      },
+      "join": "first"
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "left": {
+      "kind": "transform",
+      "set": {
+       "a": 1
+      },
+      "next": "review"
+     },
+     "right": {
+      "kind": "transform",
+      "set": {
+       "b": 2
+      },
+      "next": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unguarded_ref:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "binds an action after an agent",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "polish",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "polish": {
+      "kind": "agent",
+      "instructions": "Polish.",
+      "next": "send"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "bind_not_direct:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a bound action reads a step after approval",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "shape",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.shape.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "shape": {
+      "kind": "transform",
+      "set": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "send"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "bind_unresolvable:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "approver and timeout rules",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "triggered_by",
+       "thread"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      },
+      "timeout": {
+       "after": "2d",
+       "route": "expire"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "approver_thread:review",
+    "self_approval:review",
+    "unknown_route:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a choice with one route",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "routes": {
+       "approve": "send"
+      },
+      "answer": "choice"
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "approval_routes:review",
+    "unreachable:stop"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "thread and home delivery without a home",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      },
+      "deliver": "thread"
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "no_home:done",
+    "no_home:review"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "respond with the result after an agent",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ payload.issue }}",
+      "respond": "result"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    },
+    "concurrency": {
+     "on_conflict": "replace"
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "respond_result:"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "replace on an unverified webhook",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "inputs": "${{ payload.issue }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    },
+    "concurrency": {
+     "key": "${{ inputs.topic }}",
+     "on_conflict": "replace"
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "replace_unverified:"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "an agent step over the time ceiling",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "timeout": "2h"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "limit:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "the item step has next steps",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      },
+      "topics": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "each"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "each": {
+      "kind": "for_each",
+      "items": "${{ inputs.topics }}",
+      "concurrency": 8,
+      "do": {
+       "kind": "agent",
+       "instructions": "Research.",
+       "inputs": {
+        "item": "${{ item }}"
+       },
+       "builtins": "read",
+       "next": "done"
+      },
+      "next": "review"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "do_edges:each"
+   ],
+   "warnings": [
+    "cost:each"
+   ]
+  },
+  {
+   "name": "no agent named",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "no_agent:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a stranger's answer reaches a write",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "person:p_1"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      },
+      "form": {
+       "note": {
+        "type": "string"
+       }
+      }
+     },
+     "send": {
+      "kind": "agent",
+      "instructions": "Act on the note.",
+      "inputs": {
+       "note": "${{ steps.review.output.note }}"
+      },
+      "writes": "allow",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "rule_of_two:send"
+   ],
+   "warnings": [],
+   "grants": [
+    "unattended_write:send"
+   ],
+   "classes": {
+    "draft": [
+     "S"
+    ],
+    "review": [],
+    "send": [
+     "U",
+     "S",
+     "W"
+    ],
+    "done": [],
+    "stop": []
+   }
+  },
+  {
+   "name": "a write in a lane that saw the web",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "builtins": "read"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "agent",
+      "instructions": "Post it.",
+      "writes": "allow",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "rule_of_two:send"
+   ],
+   "warnings": [],
+   "grants": [
+    "builtins:draft",
+    "unattended_write:send"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "S",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "a write in a fresh session",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "builtins": "read"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "agent",
+      "instructions": "Post it.",
+      "writes": "allow",
+      "next": "done",
+      "session": "fresh"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "builtins:draft",
+    "unattended_write:send"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "S",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "catalog tools: unknown, untrusted reads",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "tools": [
+       "gmail/read_inbox",
+       "linear/create_issue"
+      ],
+      "writes": "allow"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "catalog": {
+    "agents": {
+     "writer": [
+      "gmail/read_inbox",
+      "gmail/send_message"
+     ]
+    },
+    "tools": {
+     "gmail/read_inbox": {
+      "untrusted": true
+     },
+     "gmail/send_message": {
+      "writes": true
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "rule_of_two:draft",
+    "unknown_tool:draft"
+   ],
+   "warnings": [],
+   "grants": [
+    "unattended_write:draft"
+   ],
+   "classes": {
+    "draft": [
+     "U",
+     "S",
+     "W"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ],
+    "stop": []
+   }
+  },
+  {
+   "name": "an unknown agent",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review",
+      "agent": "ghost"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "catalog": {
+    "agents": {
+     "writer": [
+      "gmail/read_inbox",
+      "gmail/send_message"
+     ]
+    },
+    "tools": {
+     "gmail/read_inbox": {
+      "untrusted": true
+     },
+     "gmail/send_message": {
+      "writes": true
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unknown_agent:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a wait with two modes",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     },
+     "pause": {
+      "kind": "wait",
+      "for": "1d",
+      "until": "${{ inputs.topic }}",
+      "next": "done"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "schema:pause"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "reads the item outside a For each",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "x": "${{ item }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unknown_ref:draft"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a trigger mapping reads a step",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Reply",
+    "home": {
+     "channel": "C0HOME"
+    },
+    "inputs": {
+     "type": "object",
+     "properties": {
+      "topic": {
+       "type": "string"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "hook",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ steps.draft.output }}"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "draft",
+    "nodes": {
+     "draft": {
+      "kind": "agent",
+      "instructions": "Draft a reply.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}"
+      },
+      "output": {
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.draft.output.body }}",
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "stop"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "body": "${{ steps.draft.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.draft.output.body }}"
+      }
+     },
+     "stop": {
+      "kind": "finish",
+      "outcome": "failed"
+     }
+    }
+   },
+   "server_only": true,
+   "errors": [
+    "unknown_ref:"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "seed lead",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Inbound lead",
+    "goal": "Qualify website enquiries and draft a reply for sales.",
+    "home": {
+     "channel": "C0SALES"
+    },
+    "visibility": "shared",
+    "label": "${{ inputs.email }}",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "email",
+      "message"
+     ],
+     "properties": {
+      "name": {
+       "type": "string",
+       "title": "Name"
+      },
+      "email": {
+       "type": "string",
+       "format": "email",
+       "title": "Email"
+      },
+      "message": {
+       "type": "string",
+       "maxLength": 5000,
+       "title": "Message"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "site_form",
+      "kind": "webhook",
+      "verify": "standard-webhooks",
+      "inputs": "${{ payload.data }}",
+      "respond": "accepted"
+     }
+    ],
+    "concurrency": {
+     "key": "${{ inputs.email }}",
+     "limit": 1,
+     "on_conflict": "skip"
+    },
+    "defaults": {
+     "agent": "sales",
+     "budget_usd": 2
+    },
+    "limits": {
+     "deadline": "3d"
+    },
+    "start": "research",
+    "nodes": {
+     "research": {
+      "kind": "agent",
+      "title": "Research the lead",
+      "instructions": "Find the sender's company, its size and what it likely needs.\nUse web search and HubSpot reads. Contact nobody.\n",
+      "inputs": {
+       "lead": "${{ inputs }}"
+      },
+      "output": {
+       "company": {
+        "type": "string"
+       },
+       "fit": {
+        "enum": [
+         "strong",
+         "possible",
+         "poor"
+        ]
+       },
+       "notes": {
+        "type": "string"
+       }
+      },
+      "routes": {
+       "qualified": {
+        "to": "draft_reply",
+        "when": "The lead fits our services."
+       },
+       "unqualified": {
+        "to": "done",
+        "when": "Spam, students, job seekers or no fit."
+       }
+      }
+     },
+     "draft_reply": {
+      "kind": "agent",
+      "instructions": "Draft a short, warm reply in our voice that proposes a call.",
+      "inputs": {
+       "lead": "${{ inputs }}",
+       "research": "${{ steps.research.output }}"
+      },
+      "output": {
+       "subject": {
+        "type": "string"
+       },
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "approvers": [
+       "owner"
+      ],
+      "show": "**${{ steps.research.output.company }}** (${{ steps.research.output.fit }})\n${{ steps.draft_reply.output.body }}\n",
+      "form": {
+       "body": {
+        "type": "string",
+        "default": "${{ steps.draft_reply.output.body }}"
+       }
+      },
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "done"
+      },
+      "timeout": {
+       "after": "2d",
+       "route": "reject"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "tool": "gmail/send_message",
+      "args": {
+       "to": "${{ inputs.email }}",
+       "subject": "${{ steps.draft_reply.output.subject }}",
+       "body": "${{ steps.review.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "output": "${{ steps.research.output }}",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.research.output.notes }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "research": [
+     "U",
+     "S"
+    ],
+    "draft_reply": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "done": [
+     "U"
+    ]
+   },
+   "seed": "lead"
+  },
+  {
+   "name": "seed digest",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Weekly pipeline digest",
+    "goal": "Summarise open deals every Monday and flag the risky ones.",
+    "home": {
+     "channel": "C0SALES"
+    },
+    "visibility": "shared",
+    "triggers": [
+     {
+      "id": "monday",
+      "kind": "schedule",
+      "cron": "0 9 * * 1",
+      "timezone": "Europe/Stockholm",
+      "catch_up": "run-once"
+     }
+    ],
+    "defaults": {
+     "agent": "sales",
+     "budget_usd": 1
+    },
+    "start": "collect",
+    "nodes": {
+     "collect": {
+      "kind": "agent",
+      "title": "Collect open deals",
+      "instructions": "List open HubSpot deals with stage, amount, close date and last activity. Mark deals with no activity in 14 days or a slipped close date as risky.",
+      "tools": [
+       "hubspot/search_crm",
+       "hubspot/get_object"
+      ],
+      "output": {
+       "deals": {
+        "type": "array",
+        "items": {
+         "type": "object"
+        }
+       },
+       "any_risky": {
+        "type": "boolean"
+       },
+       "total": {
+        "type": "number"
+       }
+      },
+      "next": "risky"
+     },
+     "risky": {
+      "kind": "branch",
+      "title": "Any risky deals",
+      "cases": [
+       {
+        "when": "${{ steps.collect.output.any_risky }}",
+        "to": "write"
+       }
+      ],
+      "else": "done_quiet"
+     },
+     "write": {
+      "kind": "agent",
+      "title": "Write the digest",
+      "instructions": "Write a short digest. Risky deals first, one line each with the reason and a next step.",
+      "inputs": {
+       "deals": "${{ steps.collect.output.deals }}"
+      },
+      "output": {
+       "digest": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "title": "Post to sales",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.write.output.digest }}"
+      }
+     },
+     "done_quiet": {
+      "kind": "finish",
+      "title": "Nothing risky"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "collect": [
+     "S"
+    ],
+    "risky": [],
+    "write": [
+     "S"
+    ],
+    "done": [],
+    "done_quiet": []
+   },
+   "seed": "digest"
+  },
+  {
+   "name": "seed meeting",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Meeting follow-up",
+    "goal": "Turn client meeting notes into a summary and Linear issues.",
+    "home": {
+     "channel": "C0DELIVERY"
+    },
+    "visibility": "shared",
+    "triggers": [
+     {
+      "id": "meeting_ended",
+      "kind": "event",
+      "source": "bluedot.meeting_ended",
+      "match": "${{ event.meeting.external }}"
+     }
+    ],
+    "inputs": {
+     "type": "object",
+     "required": [
+      "meeting_id"
+     ],
+     "properties": {
+      "meeting_id": {
+       "type": "string",
+       "title": "Meeting"
+      }
+     }
+    },
+    "defaults": {
+     "agent": "daimon"
+    },
+    "start": "summarise",
+    "nodes": {
+     "summarise": {
+      "kind": "agent",
+      "title": "Summarise the meeting",
+      "instructions": "Read the transcript. List decisions, open questions and action items with owners.",
+      "inputs": {
+       "meeting": "${{ inputs.meeting_id }}"
+      },
+      "tools": [
+       "bluedot/get_transcript"
+      ],
+      "output": {
+       "summary": {
+        "type": "string"
+       },
+       "actions": {
+        "type": "array",
+        "items": {
+         "type": "object"
+        }
+       }
+      },
+      "next": "file"
+     },
+     "file": {
+      "kind": "agent",
+      "title": "File action items",
+      "instructions": "Create one Linear issue per action item in the client's project. Skip items already filed.",
+      "inputs": {
+       "actions": "${{ steps.summarise.output.actions }}"
+      },
+      "tools": [
+       "linear/create_issue",
+       "linear/query_issues"
+      ],
+      "writes": "propose",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.summarise.output.summary }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "summarise": [
+     "U",
+     "S"
+    ],
+    "file": [
+     "U",
+     "S"
+    ],
+    "done": [
+     "U"
+    ]
+   },
+   "seed": "meeting"
+  },
+  {
+   "name": "seed profit",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Monthly profitability",
+    "goal": "Report project margins on the first of each month.",
+    "home": {
+     "channel": "C0LEADS"
+    },
+    "visibility": "shared",
+    "triggers": [
+     {
+      "id": "monthly",
+      "kind": "schedule",
+      "cron": "0 7 1 * *",
+      "timezone": "Europe/London",
+      "catch_up": "run-once"
+     }
+    ],
+    "defaults": {
+     "agent": "daimon",
+     "budget_usd": 2
+    },
+    "start": "fetch",
+    "nodes": {
+     "fetch": {
+      "kind": "action",
+      "title": "Fetch hours and rates",
+      "tool": "toggl/project_profitability",
+      "args": {
+       "period": "last_month"
+      },
+      "next": "compute"
+     },
+     "compute": {
+      "kind": "code",
+      "title": "Compute margins",
+      "language": "python",
+      "network": "off",
+      "source": "import json\nrows = json.load(open(\"input.json\"))[\"projects\"]\nout = [{**r, \"margin\": (r[\"revenue\"] - r[\"cost\"]) / r[\"revenue\"]} for r in rows if r[\"revenue\"]]\njson.dump({\"projects\": out}, open(\"output.json\", \"w\"))\n",
+      "inputs": {
+       "data": "${{ steps.fetch.output }}"
+      },
+      "output": {
+       "projects": {
+        "type": "array",
+        "items": {
+         "type": "object"
+        }
+       }
+      },
+      "next": "explain"
+     },
+     "explain": {
+      "kind": "agent",
+      "title": "Explain the month",
+      "instructions": "Explain which projects moved margin and why, in five bullets at most.",
+      "inputs": {
+       "projects": "${{ steps.compute.output.projects }}"
+      },
+      "output": {
+       "report": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "title": "Post to leads",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.explain.output.report }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "unattended_write:fetch"
+   ],
+   "classes": {
+    "fetch": [
+     "W"
+    ],
+    "compute": [
+     "U"
+    ],
+    "explain": [
+     "U",
+     "S"
+    ],
+    "done": [
+     "U"
+    ]
+   },
+   "seed": "profit"
+  },
+  {
+   "name": "seed triage",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Issue triage",
+    "goal": "Classify new GitHub issues, reproduce bugs and draft a response.",
+    "home": {
+     "channel": "C0TRIAGE"
+    },
+    "visibility": "shared",
+    "label": "${{ inputs.title }}",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "number",
+      "title",
+      "body"
+     ],
+     "properties": {
+      "number": {
+       "type": "integer",
+       "title": "Issue"
+      },
+      "title": {
+       "type": "string",
+       "title": "Title"
+      },
+      "body": {
+       "type": "string",
+       "title": "Body"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "github_issues",
+      "kind": "webhook",
+      "verify": "github",
+      "inputs": "${{ payload.issue }}",
+      "respond": "accepted"
+     }
+    ],
+    "concurrency": {
+     "key": "${{ inputs.number }}",
+     "limit": 1,
+     "on_conflict": "replace"
+    },
+    "defaults": {
+     "agent": "reviewer",
+     "budget_usd": 3
+    },
+    "start": "classify",
+    "nodes": {
+     "classify": {
+      "kind": "agent",
+      "title": "Classify the issue",
+      "instructions": "Read the issue and decide what it is.",
+      "inputs": {
+       "issue": "${{ inputs }}"
+      },
+      "output": {
+       "area": {
+        "type": "string"
+       },
+       "severity": {
+        "enum": [
+         "low",
+         "medium",
+         "high"
+        ]
+       }
+      },
+      "routes": {
+       "bug": {
+        "to": "reproduce",
+        "when": "Something is broken."
+       },
+       "question": {
+        "to": "respond",
+        "when": "A usage question."
+       },
+       "feature": {
+        "to": "respond",
+        "when": "A feature request."
+       },
+       "spam": {
+        "to": "ignore",
+        "when": "Spam or off topic."
+       }
+      }
+     },
+     "reproduce": {
+      "kind": "agent",
+      "title": "Reproduce the bug",
+      "instructions": "Check out the repository and try to reproduce the bug. Report the minimal steps.",
+      "inputs": {
+       "issue": "${{ inputs }}"
+      },
+      "session": "fresh",
+      "builtins": "all",
+      "untrusted_waiver": "Sandboxed checkout, no secrets",
+      "output": {
+       "reproduced": {
+        "type": "boolean"
+       },
+       "steps": {
+        "type": "string"
+       }
+      },
+      "next": "respond"
+     },
+     "respond": {
+      "kind": "agent",
+      "title": "Draft a response",
+      "instructions": "Draft a reply on the issue. Thank the reporter and say what happens next.",
+      "inputs": {
+       "issue": "${{ inputs }}",
+       "area": "${{ steps.classify.output.area }}"
+      },
+      "tools": [
+       "github/create_comment"
+      ],
+      "writes": "propose",
+      "join": "first",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.classify.output.area }}"
+      }
+     },
+     "ignore": {
+      "kind": "finish",
+      "title": "Spam"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "builtins:reproduce",
+    "untrusted_waiver:reproduce"
+   ],
+   "classes": {
+    "classify": [
+     "U",
+     "S"
+    ],
+    "reproduce": [
+     "U",
+     "S"
+    ],
+    "respond": [
+     "U",
+     "S"
+    ],
+    "done": [
+     "U"
+    ],
+    "ignore": []
+   },
+   "seed": "triage"
+  },
+  {
+   "name": "seed research",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Competitor research",
+    "goal": "Profile each competitor and synthesise a comparison.",
+    "visibility": "private",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "competitors"
+     ],
+     "properties": {
+      "competitors": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       },
+       "title": "Competitors"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "daimon",
+     "budget_usd": 4
+    },
+    "start": "each",
+    "nodes": {
+     "each": {
+      "kind": "for_each",
+      "title": "Profile each competitor",
+      "items": "${{ inputs.competitors }}",
+      "as": "competitor",
+      "concurrency": 5,
+      "tolerate_failures": 1,
+      "do": {
+       "kind": "agent",
+       "instructions": "Profile the competitor from its website and recent news. Pricing, positioning, customers.",
+       "inputs": {
+        "name": "${{ item }}"
+       },
+       "builtins": "read"
+      },
+      "next": "synthesise"
+     },
+     "synthesise": {
+      "kind": "agent",
+      "title": "Synthesise",
+      "instructions": "Compare the profiles in a table and list three openings for us.",
+      "inputs": {
+       "profiles": "${{ steps.each.output }}"
+      },
+      "output": {
+       "report": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "output": "${{ steps.synthesise.output }}"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "builtins:each"
+   ],
+   "classes": {
+    "each": [
+     "U",
+     "S"
+    ],
+    "synthesise": [
+     "U",
+     "S"
+    ],
+    "done": [
+     "U"
+    ]
+   },
+   "seed": "research"
+  },
+  {
+   "name": "seed content",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Content review loop",
+    "goal": "Draft a blog post, critique it until it is good, then publish to Notion.",
+    "visibility": "shared",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "topic"
+     ],
+     "properties": {
+      "topic": {
+       "type": "string",
+       "title": "Topic"
+      },
+      "audience": {
+       "type": "string",
+       "title": "Audience"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "daimon",
+     "budget_usd": 3
+    },
+    "start": "write",
+    "nodes": {
+     "write": {
+      "kind": "agent",
+      "title": "Write the draft",
+      "instructions": "Write or revise the post. Apply every point of the latest critique.",
+      "inputs": {
+       "topic": "${{ inputs.topic }}",
+       "critique": "${{ steps.critique.output.points }}"
+      },
+      "output": {
+       "title": {
+        "type": "string"
+       },
+       "body": {
+        "type": "string"
+       }
+      },
+      "max_visits": 3,
+      "on_max_visits": "approve",
+      "next": "critique"
+     },
+     "critique": {
+      "kind": "agent",
+      "title": "Critique",
+      "instructions": "Critique the draft against our style guide. Accept only if nothing important is left.",
+      "inputs": {
+       "draft": "${{ steps.write.output }}"
+      },
+      "output": {
+       "points": {
+        "type": "array",
+        "items": {
+         "type": "string"
+        }
+       }
+      },
+      "routes": {
+       "revise": {
+        "to": "write",
+        "when": "Important points remain."
+       },
+       "accept": {
+        "to": "approve",
+        "when": "Ready for an editor."
+       }
+      }
+     },
+     "approve": {
+      "kind": "approval",
+      "title": "Editor approval",
+      "approvers": [
+       "editors"
+      ],
+      "show": "${{ steps.write.output.body }}",
+      "binds": "create_page",
+      "routes": {
+       "approve": "create_page",
+       "reject": "rejected"
+      },
+      "timeout": {
+       "after": "3d",
+       "route": "reject"
+      }
+     },
+     "create_page": {
+      "kind": "action",
+      "title": "Create Notion page",
+      "tool": "notion/create_page",
+      "args": {
+       "title": "${{ steps.write.output.title }}",
+       "body": "${{ steps.write.output.body }}"
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "title": "Published"
+     },
+     "rejected": {
+      "kind": "finish",
+      "title": "Rejected",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "write": [
+     "S"
+    ],
+    "critique": [
+     "S"
+    ],
+    "approve": [],
+    "create_page": [
+     "W"
+    ],
+    "done": [],
+    "rejected": []
+   },
+   "seed": "content"
+  },
+  {
+   "name": "seed onboard",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Client onboarding",
+    "goal": "Set up a new client's workspace and send the welcome pack before kickoff.",
+    "home": {
+     "channel": "C0CLIENTS"
+    },
+    "visibility": "shared",
+    "label": "${{ inputs.client }}",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "client",
+      "contact_email",
+      "kickoff_date"
+     ],
+     "properties": {
+      "client": {
+       "type": "string",
+       "title": "Client"
+      },
+      "contact_email": {
+       "type": "string",
+       "format": "email",
+       "title": "Contact"
+      },
+      "kickoff_date": {
+       "type": "string",
+       "format": "date",
+       "title": "Kickoff"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "deal_won",
+      "kind": "webhook",
+      "verify": "standard-webhooks",
+      "inputs": "${{ payload.deal }}",
+      "respond": "accepted"
+     },
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "daimon",
+     "budget_usd": 3
+    },
+    "limits": {
+     "deadline": "60d"
+    },
+    "start": "confirm",
+    "nodes": {
+     "confirm": {
+      "kind": "approval",
+      "title": "Confirm setup",
+      "approvers": [
+       "owner"
+      ],
+      "show": "Set up ${{ inputs.client }}, kickoff ${{ inputs.kickoff_date }}",
+      "binds": [
+       "folder",
+       "page",
+       "project"
+      ],
+      "routes": {
+       "approve": "setup",
+       "reject": "cancelled"
+      }
+     },
+     "setup": {
+      "kind": "transform",
+      "title": "Names",
+      "set": {
+       "slug": "${{ inputs.client.lowerAscii() }}"
+      },
+      "next": [
+       "folder",
+       "page",
+       "project"
+      ]
+     },
+     "folder": {
+      "kind": "action",
+      "title": "Drive folder",
+      "tool": "gdrive/create_folder",
+      "args": {
+       "name": "${{ inputs.client }}"
+      },
+      "next": "welcome"
+     },
+     "page": {
+      "kind": "action",
+      "title": "Notion page",
+      "tool": "notion/create_page",
+      "args": {
+       "title": "${{ inputs.client }}"
+      },
+      "next": "welcome"
+     },
+     "project": {
+      "kind": "action",
+      "title": "Linear project",
+      "tool": "linear/create_project",
+      "args": {
+       "name": "${{ inputs.client }}"
+      },
+      "next": "welcome"
+     },
+     "welcome": {
+      "kind": "agent",
+      "title": "Draft the welcome email",
+      "join": "all",
+      "instructions": "Draft a welcome email with the folder, page and project links and the kickoff date.",
+      "inputs": {
+       "client": "${{ inputs.client }}",
+       "kickoff": "${{ inputs.kickoff_date }}"
+      },
+      "output": {
+       "subject": {
+        "type": "string"
+       },
+       "body": {
+        "type": "string"
+       }
+      },
+      "next": "review"
+     },
+     "review": {
+      "kind": "approval",
+      "title": "Review the email",
+      "approvers": [
+       "owner"
+      ],
+      "show": "${{ steps.welcome.output.body }}",
+      "form": {
+       "body": {
+        "type": "string",
+        "default": "${{ steps.welcome.output.body }}"
+       }
+      },
+      "binds": "send",
+      "routes": {
+       "approve": "send",
+       "reject": "before_kickoff"
+      }
+     },
+     "send": {
+      "kind": "action",
+      "title": "Send welcome",
+      "tool": "gmail/send_message",
+      "args": {
+       "to": "${{ inputs.contact_email }}",
+       "subject": "${{ steps.welcome.output.subject }}",
+       "body": "${{ steps.review.output.body }}"
+      },
+      "next": "before_kickoff"
+     },
+     "before_kickoff": {
+      "kind": "wait",
+      "title": "Day before kickoff",
+      "until": "${{ timestamp(inputs.kickoff_date) - duration(\"24h\") }}",
+      "next": "brief"
+     },
+     "brief": {
+      "kind": "agent",
+      "title": "Brief the team",
+      "instructions": "Write a one-page kickoff brief for the team.",
+      "inputs": {
+       "client": "${{ inputs.client }}"
+      },
+      "output": {
+       "brief": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.brief.output.brief }}"
+      }
+     },
+     "cancelled": {
+      "kind": "finish",
+      "title": "Cancelled",
+      "outcome": "failed"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "confirm": [
+     "U"
+    ],
+    "setup": [
+     "U"
+    ],
+    "folder": [
+     "U",
+     "W"
+    ],
+    "page": [
+     "U",
+     "W"
+    ],
+    "project": [
+     "U",
+     "W"
+    ],
+    "welcome": [
+     "U",
+     "S"
+    ],
+    "review": [
+     "U"
+    ],
+    "send": [
+     "U",
+     "W"
+    ],
+    "before_kickoff": [
+     "U"
+    ],
+    "brief": [
+     "U",
+     "S"
+    ],
+    "done": [
+     "U"
+    ],
+    "cancelled": []
+   },
+   "seed": "onboard"
+  },
+  {
+   "name": "seed alert",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Alert triage",
+    "goal": "Investigate production alerts and page on-call only when it matters.",
+    "home": {
+     "channel": "C0ONCALL"
+    },
+    "visibility": "shared",
+    "label": "${{ inputs.alert_key }}",
+    "inputs": {
+     "type": "object",
+     "required": [
+      "alert_key",
+      "summary"
+     ],
+     "properties": {
+      "alert_key": {
+       "type": "string",
+       "title": "Alert"
+      },
+      "summary": {
+       "type": "string",
+       "title": "Summary"
+      }
+     }
+    },
+    "triggers": [
+     {
+      "id": "grafana",
+      "kind": "webhook",
+      "verify": "standard-webhooks",
+      "inputs": "${{ payload.alert }}",
+      "respond": "accepted"
+     }
+    ],
+    "concurrency": {
+     "key": "${{ inputs.alert_key }}",
+     "on_conflict": "debounce",
+     "debounce": "5m"
+    },
+    "defaults": {
+     "agent": "reviewer",
+     "budget_usd": 2
+    },
+    "start": "investigate",
+    "nodes": {
+     "investigate": {
+      "kind": "agent",
+      "title": "Investigate",
+      "instructions": "Check logs, recent deploys and dashboards. Estimate severity and the likely cause.",
+      "inputs": {
+       "alert": "${{ inputs }}"
+      },
+      "builtins": "read",
+      "output": {
+       "severity": {
+        "enum": [
+         "low",
+         "medium",
+         "high"
+        ]
+       },
+       "cause": {
+        "type": "string"
+       }
+      },
+      "next": "severity"
+     },
+     "severity": {
+      "kind": "branch",
+      "title": "Severity",
+      "cases": [
+       {
+        "when": "${{ steps.investigate.output.severity == 'high' }}",
+        "to": "page"
+       }
+      ],
+      "else": "watch"
+     },
+     "page": {
+      "kind": "finish",
+      "title": "Page on-call",
+      "deliver": {
+       "to": "#oncall",
+       "message": "${{ steps.investigate.output.cause }}"
+      }
+     },
+     "watch": {
+      "kind": "wait",
+      "title": "Wait for resolve",
+      "event": {
+       "source": "grafana",
+       "match": "${{ event.status == 'resolved' }}"
+      },
+      "timeout": "2h",
+      "routes": {
+       "arrived": "quiet",
+       "timed_out": "escalate"
+      }
+     },
+     "quiet": {
+      "kind": "finish",
+      "title": "Resolved"
+     },
+     "escalate": {
+      "kind": "finish",
+      "title": "Escalate",
+      "deliver": {
+       "to": "#oncall",
+       "message": "${{ steps.investigate.output.cause }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [
+    "builtins:investigate"
+   ],
+   "classes": {
+    "investigate": [
+     "U",
+     "S"
+    ],
+    "severity": [
+     "U"
+    ],
+    "page": [
+     "U"
+    ],
+    "watch": [
+     "U"
+    ],
+    "quiet": [],
+    "escalate": [
+     "U"
+    ]
+   },
+   "seed": "alert"
+  },
+  {
+   "name": "seed board",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Quarterly board pack",
+    "goal": "Assemble the quarterly board pack from finance and delivery data.",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "daimon"
+    },
+    "start": "gather",
+    "nodes": {
+     "gather": {
+      "kind": "agent",
+      "title": "Gather numbers",
+      "instructions": "Collect revenue, margin and headcount for the quarter.",
+      "output": {
+       "numbers": {
+        "type": "object"
+       }
+      },
+      "next": "draft"
+     },
+     "draft": {
+      "kind": "agent",
+      "title": "Draft the pack",
+      "instructions": "Draft the board pack in our template.",
+      "inputs": {
+       "numbers": "${{ steps.gather.output.numbers }}"
+      },
+      "output": {
+       "doc": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "gather": [
+     "S"
+    ],
+    "draft": [
+     "S"
+    ],
+    "done": []
+   },
+   "seed": "board"
+  },
+  {
+   "name": "seed renewal",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Renewal reminders",
+    "goal": "Remind account owners 30 days before a contract renews.",
+    "home": {
+     "channel": "C0SALES"
+    },
+    "visibility": "shared",
+    "triggers": [
+     {
+      "id": "daily",
+      "kind": "schedule",
+      "cron": "0 8 * * 1-5",
+      "timezone": "Europe/London",
+      "catch_up": "skip"
+     }
+    ],
+    "defaults": {
+     "agent": "sales"
+    },
+    "start": "find",
+    "nodes": {
+     "find": {
+      "kind": "agent",
+      "title": "Find renewals",
+      "instructions": "List contracts renewing in the next 30 days with their account owner.",
+      "output": {
+       "renewals": {
+        "type": "array",
+        "items": {
+         "type": "object"
+        }
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.find.output.renewals }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "find": [
+     "S"
+    ],
+    "done": []
+   },
+   "seed": "renewal"
+  },
+  {
+   "name": "seed readout",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Weekly channel readout",
+    "visibility": "private",
+    "home": {
+     "channel": "C0MMM"
+    },
+    "triggers": [
+     {
+      "id": "schedule",
+      "kind": "schedule",
+      "cron": "0 9 * * 1",
+      "timezone": "Europe/Stockholm",
+      "catch_up": "run-once"
+     }
+    ],
+    "defaults": {
+     "agent": "mmm"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "title": "Weekly channel readout",
+      "instructions": "Summarize last week's channel contribution for Larkspur and flag any interval wider than 20%.",
+      "session": "main",
+      "output": {
+       "summary": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.run.output.summary }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "run": [
+     "S"
+    ],
+    "done": []
+   },
+   "seed": "readout"
+  },
+  {
+   "name": "seed price",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Overnight price test",
+    "visibility": "private",
+    "home": {
+     "channel": "C0PRICING"
+    },
+    "triggers": [
+     {
+      "id": "schedule",
+      "kind": "schedule",
+      "cron": "30 8 * * 1-5",
+      "timezone": "America/New_York",
+      "catch_up": "run-once"
+     }
+    ],
+    "defaults": {
+     "agent": "pricing"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "title": "Overnight price test",
+      "instructions": "Post the overnight price test readout.",
+      "session": "main",
+      "output": {
+       "summary": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.run.output.summary }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "run": [
+     "S"
+    ],
+    "done": []
+   },
+   "seed": "price"
+  },
+  {
+   "name": "seed prs",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Stale pull requests",
+    "visibility": "private",
+    "home": {
+     "channel": "C0ENG"
+    },
+    "triggers": [
+     {
+      "id": "schedule",
+      "kind": "schedule",
+      "cron": "0 17 * * 5",
+      "timezone": "Europe/London",
+      "catch_up": "run-once"
+     }
+    ],
+    "defaults": {
+     "agent": "reviewer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "title": "Stale pull requests",
+      "instructions": "List pull requests open for more than a week.",
+      "session": "main",
+      "output": {
+       "summary": {
+        "type": "string"
+       }
+      },
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish",
+      "deliver": {
+       "to": "home",
+       "message": "${{ steps.run.output.summary }}"
+      }
+     }
+    }
+   },
+   "errors": [],
+   "warnings": [],
+   "grants": [],
+   "classes": {
+    "run": [
+     "S"
+    ],
+    "done": []
+   },
+   "seed": "prs"
+  }
+ ]
+}

@@ -446,6 +446,7 @@ source_modules = [
     "daimon.core.wizard",
     "daimon.core.wizard_sweep",
     "daimon.core.windows",
+    "daimon.core.workflows",
     "daimon.core.workspace_transfer",
     "daimon.core.workspace_ports_compat",
     "daimon.core.agent_catalog",
