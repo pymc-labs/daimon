@@ -2,7 +2,7 @@
 
 A workflow keeps its draft and owner (`workflows`), published versions, access, grants
 and publish requests. Triggers keep their secrets and received events. A run projects its
-ledger (`workflow_run_events`, append-only and hash-chained) onto steps, attempts, lanes,
+ledger (`workflow_run_events`, hash-chained, append-only by trigger) onto steps, attempts, lanes,
 waits with their answers and posts, proposals, activity lines and deliveries. Every table
 cascades with its tenant. `web_threads.subject` names what a thread is about (one per
 person and subject). `usage_events` gains the run and step that spent it: nullable,
@@ -52,6 +52,34 @@ USAGE_FKS = {
     "fk_usage_events_workflow_runs": ("workflow_run_id", "workflow_runs"),
     "fk_usage_events_workflow_steps": ("workflow_step_id", "workflow_steps"),
 }
+
+#: A copy of `daimon.core._workflow_ledger_guard`; a test keeps the two equal.
+LEDGER_GUARD = (
+    """CREATE OR REPLACE FUNCTION workflow_run_events_append_only() RETURNS trigger
+LANGUAGE plpgsql AS $guard$
+DECLARE
+    gone boolean;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF current_setting('daimon.workflow_ledger_maintenance', true) = 'on' THEN
+            RETURN OLD;
+        END IF;
+        EXECUTE 'SELECT NOT EXISTS (SELECT 1 FROM ' || quote_ident(TG_TABLE_SCHEMA)
+            || '.workflow_runs WHERE id = $1) OR NOT EXISTS (SELECT 1 FROM '
+            || quote_ident(TG_TABLE_SCHEMA) || '.tenants WHERE id = $2)'
+            INTO STRICT gone USING OLD.run_id, OLD.tenant_id;
+        IF gone THEN
+            RETURN OLD;
+        END IF;
+    END IF;
+    RAISE EXCEPTION 'workflow run events are append-only' USING ERRCODE = 'restrict_violation';
+END
+$guard$""",
+    """CREATE OR REPLACE TRIGGER workflow_run_events_append_only
+BEFORE UPDATE OR DELETE ON workflow_run_events
+FOR EACH ROW EXECUTE FUNCTION workflow_run_events_append_only()""",
+)
+LEDGER_GUARD_REMOVAL = ("DROP FUNCTION IF EXISTS workflow_run_events_append_only() CASCADE",)
 
 
 def create_tables() -> None:
@@ -967,6 +995,8 @@ def create_tables() -> None:
         unique=True,
         postgresql_where=sa.text("subject IS NOT NULL"),
     )
+    for statement in LEDGER_GUARD:
+        op.execute(statement)
     for name, (column, table) in USAGE_FKS.items():
         op.add_column("usage_events", sa.Column(column, sa.UUID(), nullable=True))
         op.execute(
@@ -1006,6 +1036,8 @@ def drop_all(*, concurrently: bool = True) -> None:
     op.drop_column("web_threads", "subject")
     for table in reversed(TABLES):
         op.drop_table(table)
+    for statement in LEDGER_GUARD_REMOVAL:
+        op.execute(statement)
 
 
 def upgrade() -> None:

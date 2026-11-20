@@ -8,6 +8,7 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from daimon.core import _workflow_ledger_guard
 from daimon.core._models import Base
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,12 @@ def migration() -> ModuleType:
 def test_the_migration_creates_every_workflow_table() -> None:
     modelled = {name for name in Base.metadata.tables if name.startswith("workflow")}
     assert set(migration().TABLES) == modelled, "one migration creates every workflow table"
+
+
+def test_the_migration_carries_the_ledger_guard_the_models_install() -> None:
+    module = migration()
+    assert module.LEDGER_GUARD == _workflow_ledger_guard.INSTALL, "ledger guard drifted"
+    assert module.LEDGER_GUARD_REMOVAL == _workflow_ledger_guard.REMOVE, "guard removal drifted"
 
 
 @pytest.mark.fresh_schema

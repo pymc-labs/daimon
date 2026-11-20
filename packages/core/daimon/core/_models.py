@@ -12,7 +12,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any, ClassVar, Final
 
-from daimon.core import _erasure_guards
+from daimon.core import _erasure_guards, _workflow_ledger_guard
 from sqlalchemy import (
     DDL,
     BigInteger,
@@ -6568,3 +6568,5 @@ def _install_erased_account_guards() -> None:
 
 
 _install_erased_account_guards()
+for _statement in _workflow_ledger_guard.INSTALL:
+    event.listen(WorkflowRunEvent.__table__, "after_create", DDL(_statement))
