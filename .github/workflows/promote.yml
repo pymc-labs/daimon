@@ -123,3 +123,14 @@ jobs:
       notebook_digest: ${{ needs.validate.outputs.notebook_digest }}
       report_digest: ${{ needs.validate.outputs.report_digest }}
       source_registry: ${{ needs.validate.outputs.registry }}
+
+  # A real turn per backend right after the deploy; a failed canary turns the promote red.
+  verify:
+    name: Production canary
+    needs: deploy
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/canary.yml
+    with:
+      environments: '["production-canary"]'

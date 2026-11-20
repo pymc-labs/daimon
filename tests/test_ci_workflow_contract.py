@@ -341,6 +341,21 @@ def test_prebuilt_staging_is_pinned_and_production_promotes_the_soaked_digests()
     assert set(validate["outputs"]) == {*digests, "registry"}
 
 
+def test_every_promote_ends_with_a_production_canary_judged_by_the_reply() -> None:
+    """The canary's production identity has no VM access, so it must skip the outcome read."""
+    verify = _workflow("promote.yml")["jobs"]["verify"]
+    assert verify["needs"] == "deploy"
+    assert verify["uses"] == "./.github/workflows/canary.yml"
+    assert verify["with"]["environments"] == '["production-canary"]'
+    job = _workflow("canary.yml")["jobs"]["canary"]
+    assert job["environment"] == "${{ matrix.environment }}", "auth comes from the environment"
+    run = next(step for step in job["steps"] if step.get("name") == "One turn per backend")
+    assert run["env"]["NO_OUTCOMES"] == (
+        "${{ matrix.environment != 'staging' && '--no-outcomes' || '' }}"
+    )
+    assert "$NO_OUTCOMES" in run["run"]
+
+
 _DIGEST = {
     name: "sha256:" + char * 64
     for name, char in (("daimon", "a"), ("notebook", "b"), ("report", "c"))
