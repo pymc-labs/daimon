@@ -335,6 +335,10 @@ EXEMPT: dict[str, str] = {
     "POST /api/workflows/{workflow_id}/triggers/{key}/deliveries/{delivery}/replay": _WORKFLOW,
     "POST /hooks/w/{trigger_id}": _HOOK,
     "POST /hooks/w/{trigger_id}/test": _HOOK,
+    "POST /hooks/callback/{run_id}/{node_id}/{signature}": (
+        "a run's signed callback: it hands data to one Wait of that run and changes no "
+        "channel's or agent's settings"
+    ),
     "DELETE /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "PATCH /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "POST /{path:path}": "the app's page fallback: it serves the page and changes nothing",

@@ -3,7 +3,7 @@
 Every rule lives in `daimon.core.workflows.service`, the one the chat tools use too; this
 module describes who is asking and shapes the answers. Reading needs `workflows.view`,
 everything else `workflows.run`; what a person may do to one workflow comes from their role
-on it. Triggers, webhooks and the approvals inbox are not built yet and answer plainly.
+on it. Inbox decisions go to whoever the wait names, whatever their role.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.channel_directory import list_shared_channel_ids
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.web_identity import place_of, thread_key
-from daimon.core.workflows import catalog, run_views, service, templates, views, webhooks
+from daimon.core.workflows import catalog, inbox, run_views, service, templates, views, webhooks
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
@@ -219,7 +219,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/attention")
     @speaks
     async def attention(caller: Viewer) -> list[service.Attention]:  # pyright: ignore[reportUnusedFunction]
-        return await service.attention(await env_of(caller))
+        return await inbox.attention(await env_of(caller))
 
     @router.get("/runs")
     @speaks
@@ -336,22 +336,24 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     router.add_api_route("/runs/{run_id}/rerun", speaks(fork), methods=["POST"])
     router.add_api_route("/runs/{run_id}/fork", speaks(fork), methods=["POST"])
 
-    # ----- the approvals inbox (not built) -----
+    # ----- the approvals inbox -----
 
     @router.get("/inbox")
-    async def inbox(caller: Viewer) -> list[None]:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        return []
+    @speaks
+    async def inbox_list(caller: Viewer) -> list[inbox.InboxItem]:  # pyright: ignore[reportUnusedFunction]
+        return await inbox.list_items(await env_of(caller))
 
     @router.get("/inbox/{item_id}")
-    async def inbox_item(item_id: str, caller: Viewer) -> None:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        raise HTTPException(status_code=404, detail="There is nothing waiting here.")
+    @speaks
+    async def inbox_item(item_id: uuid.UUID, caller: Viewer) -> inbox.InboxDetail:  # pyright: ignore[reportUnusedFunction]
+        return await inbox.item(await env_of(caller), item_id)
 
     @router.post("/inbox/{item_id}/decide")
-    async def inbox_decide(item_id: str, caller: Member) -> None:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        raise HTTPException(status_code=404, detail="There is nothing waiting here.")
+    @speaks
+    async def inbox_decide(  # pyright: ignore[reportUnusedFunction]
+        item_id: uuid.UUID, body: inbox.Decide, caller: Viewer
+    ) -> inbox.InboxItem:
+        return await inbox.decide(await env_of(caller), item_id, body)
 
     # ----- one workflow -----
 

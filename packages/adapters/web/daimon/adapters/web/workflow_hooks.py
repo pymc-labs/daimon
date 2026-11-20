@@ -1,4 +1,5 @@
-"""`/hooks/w/<trigger id>` and its `/test` twin: the public webhook ingress of workflows.
+"""`/hooks/w/<trigger id>` and its `/test` twin: the public webhook ingress of workflows;
+`/hooks/callback/...`: a run's signed callback URL, delivering to one Wait node.
 
 Outside sign-in and the CSRF guard: the signature is the sender's credential, checked by
 `ingress.receive` on the raw body. The body is read bounded here, refused by its declared
@@ -9,10 +10,11 @@ limit. Answers are small JSON objects that never carry a secret, and are never c
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Final
 
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.workflows import ingress
+from daimon.core.workflows import ingress, waits
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -68,5 +70,33 @@ def workflow_hooks_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/hooks/w/{trigger_id}/test", include_in_schema=False)
     async def test(trigger_id: str, request: Request) -> JSONResponse:  # pyright: ignore[reportUnusedFunction]
         return await receive(trigger_id, request, test=True)
+
+    @router.post("/hooks/callback/{run_id}/{node_id}/{signature}", include_in_schema=False)
+    async def callback(  # pyright: ignore[reportUnusedFunction]
+        run_id: uuid.UUID, node_id: str, signature: str, request: Request
+    ) -> JSONResponse:
+        try:
+            body = await _body(request, runtime.settings.workflows.webhook_max_body_bytes)
+        except _TooLarge:
+            return JSONResponse({"error": "too_large"}, status_code=413, headers=_HEADERS)
+        except TimeoutError:
+            return JSONResponse({"error": "too_slow"}, status_code=408, headers=_HEADERS)
+        payload = ingress.parse(body, request.headers.get("content-type", ""))
+        if payload is None:
+            return JSONResponse({"error": "bad_body"}, status_code=400, headers=_HEADERS)
+        now = runtime.now()
+        event = {"payload": payload, "received_at": now.isoformat()}
+        taken = await waits.deliver_callback(
+            runtime.sessionmaker,
+            runtime.settings,
+            run_id=run_id,
+            node_id=node_id,
+            signature=signature,
+            payload=event,
+            now=now,
+        )
+        if not taken:
+            return JSONResponse({"error": "not_found"}, status_code=404, headers=_HEADERS)
+        return JSONResponse({"ok": True}, status_code=202, headers=_HEADERS)
 
     return router
