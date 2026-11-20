@@ -53,6 +53,8 @@ log = structlog.get_logger(__name__)
 
 DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
 DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
+#: How often run cards are looked at; each is edited at most every `chat_cards.EDIT_EVERY`.
+RUN_CARD_INTERVAL_S: Final[float] = 3.0
 FILES_FAILED: Final[str] = "File delivery failed or was interrupted; it will not be retried."
 
 #: Skip notes that mean a rule refused the post, recorded `refused` on a workflow post.
@@ -134,6 +136,8 @@ class JobPoster:
 
     routine: RoutinePoster
     workflow: WorkflowPoster | None = None
+    #: One round of editing chat-started runs' cards (`workflows.chat_cards.follower`).
+    run_cards: Callable[[], Awaitable[int]] | None = None
 
     async def post_job(self, job: DeliveryJob) -> DeliveryOutcome:
         if job.routine is not None:
@@ -255,13 +259,33 @@ async def run_poller(
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
 ) -> None:
-    """Poll until `should_stop`, one `poll_once` per interval."""
+    """Poll until `should_stop`, one `poll_once` per interval; run cards on their own beat."""
     owner = f"{platform}:{uuid.uuid4()}"
+    cards = (
+        None
+        if post.run_cards is None
+        else asyncio.create_task(_follow(post.run_cards, platform, should_stop))
+    )
+    try:
+        while not should_stop():
+            try:
+                await poll_once(
+                    sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
+                )
+            except Exception:
+                log.exception("routine.delivery_poll_failed", platform=platform)
+            await asyncio.sleep(interval_s)
+    finally:
+        if cards is not None:
+            cards.cancel()
+
+
+async def _follow(
+    once: Callable[[], Awaitable[int]], platform: str, should_stop: Callable[[], bool]
+) -> None:
     while not should_stop():
         try:
-            await poll_once(
-                sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
-            )
+            await once()
         except Exception:
-            log.exception("routine.delivery_poll_failed", platform=platform)
-        await asyncio.sleep(interval_s)
+            log.exception("workflow.run_cards_failed", platform=platform)
+        await asyncio.sleep(RUN_CARD_INTERVAL_S)

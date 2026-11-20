@@ -26,7 +26,7 @@ ADAPTIVE_CARD_TYPE: Final[str] = "application/vnd.microsoft.card.adaptive"
 CREDENTIAL_DIALOG: Final[str] = "credential_request"
 #: `Action.Execute` verb of a call or switch card's buttons; `custom_id` names the press.
 CONTROL_VERB: Final[str] = "posted_control"
-_CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch"})
+_CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch", "workflow"})
 # The poster knows the requester's Entra id, not their name, so the footer
 # names the role; only the requester can open the form either way.
 _REQUESTER: Final[str] = "the person who asked"

@@ -247,6 +247,19 @@ async def get_run(
     return None if orm is None else RunRow.model_validate(orm)
 
 
+async def carded_runs(
+    session: AsyncSession, *, platform: str, ended_after: datetime, started_after: datetime
+) -> list[RunRow]:
+    """Runs started from a chat card on `platform` that are going or ended after `ended_after`."""
+    card = WorkflowRun.triggered_by["card"]
+    stmt = select(WorkflowRun).where(
+        card["platform"].astext == platform,
+        WorkflowRun.created_at >= started_after,
+        (WorkflowRun.ended_at.is_(None)) | (WorkflowRun.ended_at >= ended_after),
+    )
+    return [RunRow.model_validate(orm) for orm in (await session.execute(stmt)).scalars()]
+
+
 async def update_run(
     session: AsyncSession, run_id: uuid.UUID, **changes: Unpack[RunChanges]
 ) -> None:

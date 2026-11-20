@@ -822,8 +822,11 @@ async def start(
     inputs: dict[str, Any],
     *,
     test: dict[str, Any] | None = None,
+    card: Mapping[str, str] | None = None,
 ) -> run_views.RunSummary:
-    """A manual run of the live version, or a test run of the draft (`test` options)."""
+    """A manual run of the live version, or a test run of the draft (`test` options).
+
+    `card` is the chat message a run started from chat shows itself on (`chat_cards`)."""
     async with env.sm() as session:
         workflow, _, rights = await _load(session, env, workflow_id)
         live = (
@@ -856,7 +859,8 @@ async def start(
         start=runs.Start(
             workflow_id=workflow.id,
             run_as_account_id=run_as,
-            triggered_by={"kind": "person", "account_id": str(env.who.account_id)},
+            triggered_by={"kind": "person", "account_id": str(env.who.account_id)}
+            | ({"card": dict(card)} if card else {}),
             inputs=inputs,
             mode="test" if test is not None else "live",
             untrusted_inputs=True,
