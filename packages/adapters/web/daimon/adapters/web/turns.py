@@ -84,6 +84,10 @@ from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
+from daimon.core.workflows import service
+from daimon.core.workflows.access import Who
+from daimon.core.workflows.context import WorkflowContext
+from daimon.core.workflows.service import Env
 from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -134,10 +138,14 @@ class WebTurns:
         principal: WebPrincipal,
         thread: WebThreadRow,
         message: WebMessageRow,
+        selected_node: str | None = None,
     ) -> TurnStream:
-        """Run a turn answering `message`; its stream at once, before it is admitted."""
+        """Run a turn answering `message`; its stream at once, before it is admitted.
+
+        `selected_node` is the workflow node the person had selected, for a workflow's
+        Ask Daimon chat."""
         stream = self.streams.open(thread.id, message.id)
-        self.spawn(self._run(person, principal, thread, message, stream))
+        self.spawn(self._run(person, principal, thread, message, stream, selected_node))
         return stream
 
     async def stop(self, thread_id: uuid.UUID, clicker: str) -> bool:
@@ -169,6 +177,7 @@ class WebTurns:
         thread: WebThreadRow,
         message: WebMessageRow,
         stream: TurnStream,
+        selected_node: str | None,
     ) -> None:
         turn_id, key, place = uuid.uuid4(), thread_key(thread.id), place_of(thread.person_id)
 
@@ -261,7 +270,9 @@ class WebTurns:
                         thread_id=key,
                         caller_id=principal.external_id,
                     ):
-                        await self._admitted(person, principal, thread, message, lifecycle, cancel)
+                        await self._admitted(
+                            person, principal, thread, message, lifecycle, cancel, selected_node
+                        )
                 finally:
                     release_turn_slot()
         except asyncio.CancelledError:
@@ -297,6 +308,7 @@ class WebTurns:
         message: WebMessageRow,
         lifecycle: WebTurnLifecycle,
         cancel: asyncio.Event,
+        selected_node: str | None,
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
@@ -365,7 +377,14 @@ class WebTurns:
                 await lifecycle.finish("done", card=busy())
             else:
                 await self._bind_and_run(
-                    principal, thread, message, admission, lifecycle, cancel, markers
+                    principal,
+                    thread,
+                    message,
+                    admission,
+                    lifecycle,
+                    cancel,
+                    markers,
+                    selected_node,
                 )
         finally:
             async with self.sessionmaker.begin() as session:
@@ -382,6 +401,7 @@ class WebTurns:
         lifecycle: WebTurnLifecycle,
         cancel: asyncio.Event,
         markers: set[uuid.UUID],
+        selected_node: str | None,
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
@@ -450,6 +470,9 @@ class WebTurns:
                 **backend_facts(admission),
                 effective_is_admin=admission.is_admin,
                 session_state=None if continued else prepared.continuity.session_state(),
+                workflow=await self._workflow_context(
+                    thread, admission.account_id, principal.role is Role.ADMIN, selected_node
+                ),
             )
 
             async def reseed() -> str:
@@ -512,6 +535,27 @@ class WebTurns:
             ):
                 lifecycle.files = await self._outputs(outcome.outputs, tenant_id, thread.person_id)
             await lifecycle.finish("done")
+
+    async def _workflow_context(
+        self, thread: WebThreadRow, account_id: uuid.UUID, admin: bool, selected_node: str | None
+    ) -> WorkflowContext | None:
+        """The workflow a subject thread is about, as its person may see it now."""
+        subject = thread.subject or {}
+        if subject.get("kind") != "workflow":
+            return None
+        try:
+            workflow_id = uuid.UUID(str(subject.get("id")))
+        except ValueError:
+            return None
+        if self.deps.settings is None:
+            return None
+        env = Env(
+            sm=self.sessionmaker,
+            settings=self.deps.settings,
+            who=Who(thread.tenant_id, account_id, admin=admin),
+            now=datetime.now(UTC),
+        )
+        return await service.context(env, workflow_id, selected_node)
 
     def _link_for(self, tenant_id: uuid.UUID) -> Callable[[str], str] | None:
         fernet = self.deps.fernet

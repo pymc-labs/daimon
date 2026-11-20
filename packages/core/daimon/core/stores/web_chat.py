@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Collection
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from daimon.core._models import WebMessage, WebThread
 from daimon.core.cursor import Cursor
@@ -34,6 +34,7 @@ async def create_thread(
     agent_id: str,
     agent_name: str,
     title: str,
+    subject: dict[str, Any] | None = None,
 ) -> WebThreadRow:
     orm = WebThread(
         tenant_id=tenant_id,
@@ -41,10 +42,32 @@ async def create_thread(
         agent_id=agent_id,
         agent_name=agent_name,
         title=title,
+        subject=subject,
     )
     session.add(orm)
     await session.flush()
     await session.refresh(orm)
+    return WebThreadRow.model_validate(orm)
+
+
+async def get_subject_thread(
+    session: AsyncSession, *, tenant_id: uuid.UUID, person_id: uuid.UUID, subject: dict[str, Any]
+) -> WebThreadRow | None:
+    """The person's one thread about `subject`; a deleted one comes back empty and live."""
+    orm = (
+        await session.execute(
+            select(WebThread).where(
+                WebThread.tenant_id == tenant_id,
+                WebThread.person_id == person_id,
+                WebThread.subject == subject,
+            )
+        )
+    ).scalar_one_or_none()
+    if orm is None:
+        return None
+    if orm.deleted_at is not None:
+        orm.deleted_at = None
+        await session.flush()
     return WebThreadRow.model_validate(orm)
 
 
@@ -71,12 +94,14 @@ async def list_threads(
     limit: int | None = None,
     before: Cursor | None = None,
 ) -> list[WebThreadRow]:
-    """The person's live threads, most recently active first.
+    """The person's live threads, most recently active first; subject threads stay out.
 
     `limit` and `before` (the `(updated_at, id)` of the last thread already seen) page it.
     """
     query = select(WebThread).where(
-        WebThread.person_id == person_id, WebThread.deleted_at.is_(None)
+        WebThread.person_id == person_id,
+        WebThread.deleted_at.is_(None),
+        WebThread.subject.is_(None),
     )
     if before is not None:
         query = query.where(

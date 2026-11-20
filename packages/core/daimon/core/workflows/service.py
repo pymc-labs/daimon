@@ -23,6 +23,7 @@ from daimon.core.stores import workflows as store
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
+from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.expressions import ExpressionError, render
@@ -295,6 +296,40 @@ async def get_draft(env: Env, workflow_id: uuid.UUID) -> views.Draft:
     async with env.sm() as session:
         workflow, _, _ = await _load(session, env, workflow_id)
         return await _draft(env, session, workflow)
+
+
+async def context(
+    env: Env, workflow_id: uuid.UUID, selected_node: str | None
+) -> turn_context.WorkflowContext | None:
+    """The workflow as Ask Daimon sees it; None when it is gone or no longer visible."""
+    if not await gate.enabled(env.sm, env.settings, env.who.tenant_id):
+        return None
+    try:
+        async with env.sm() as session:
+            workflow, _, _ = await _load(session, env, workflow_id)
+    except NotFound:
+        return None
+    problems = await _validate(env, workflow.draft_spec)
+    node = obj(obj(workflow.draft_spec.get("nodes")).get(selected_node or ""))
+    chosen = (
+        turn_context.SelectedNode(
+            id=str(selected_node),
+            kind=str(node.get("kind", "")),
+            title=turn_context.clip(str(node.get("title", ""))),
+        )
+        if selected_node and node
+        else None
+    )
+    return turn_context.WorkflowContext(
+        id=str(workflow.id),
+        name=turn_context.clip(workflow.name),
+        revision=workflow.draft_revision,
+        live_version=workflow.live_version,
+        status=views.status_of(workflow),
+        errors=len(problems.errors),
+        warnings=len(problems.warnings),
+        selected_node=chosen,
+    )
 
 
 async def save_draft(

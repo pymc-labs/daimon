@@ -20,12 +20,18 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.caller import WebCaller, requires
+from daimon.adapters.web.chat import chattable_agents
+from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.directory import chattable
+from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.stores import tenants
+from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.channel_directory import list_shared_channel_ids
+from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.web_identity import place_of, thread_key
 from daimon.core.workflows import catalog, run_views, service, templates, views
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
@@ -35,13 +41,14 @@ from daimon.core.workflows.validate import Validation
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 Viewer = Annotated[WebCaller, Depends(requires("workflows.view"))]
 Member = Annotated[WebCaller, Depends(requires("workflows.run"))]
 
 SOON = "This is not available yet."
+ASK_TITLE = "Ask Daimon"
 POLL_S = 2.0
 PING_EVERY = 8
 _STATUS: dict[type[WorkflowError], int] = {
@@ -403,6 +410,60 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         return await service.validate(
             await env_of(caller, with_catalog=True), workflow_id, body.spec
         )
+
+    @router.get("/{workflow_id}/chat")
+    @speaks
+    async def ask(workflow_id: uuid.UUID, caller: Member) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+        """The person's one Ask Daimon thread for this workflow, made on first use."""
+        env = await env_of(caller)
+        if not (await service.get(env, workflow_id)).can_edit:
+            raise service.Forbidden(
+                "Only the owner or an editor can ask Daimon to change this workflow."
+            )
+        agents = await chattable_agents(runtime, caller)
+        person = caller.person
+        subject = {"kind": "workflow", "id": str(workflow_id)}
+        thread = None
+        for _ in range(2):
+            try:
+                async with runtime.sessionmaker.begin() as db:
+                    thread = await chat_store.get_subject_thread(
+                        db, tenant_id=person.tenant_id, person_id=person.id, subject=subject
+                    )
+                    if thread is None:
+                        if not agents:
+                            raise service.Refused("No agent is available to you. Ask an admin.")
+                        thread = await chat_store.create_thread(
+                            db,
+                            tenant_id=person.tenant_id,
+                            person_id=person.id,
+                            agent_id=agents[0].id,
+                            agent_name=agents[0].name,
+                            title=ASK_TITLE,
+                            subject=subject,
+                        )
+                        await create_binding(
+                            db,
+                            tenant_id=thread.tenant_id,
+                            platform="web",
+                            parent_channel_id=place_of(person.id),
+                            thread_id=thread_key(thread.id),
+                            responder_ma_agent_id=thread.agent_id,
+                            responder_name=thread.agent_name,
+                            creator_account_id=person.account_id,
+                            kind="web",
+                        )
+                break
+            except IntegrityError:  # another tab made it first
+                thread = None
+        if thread is None:
+            raise service.Refused("Try again in a moment.")
+        agent = next((a for a in agents if a.id == thread.agent_id), None)
+        avatars = await avatars_of(runtime, person.tenant_id, [agent] if agent else [])
+        return {
+            "session_id": str(thread.id),
+            "agent": agent_json(agent, thread, avatar=avatars.get(thread.agent_id, "")),
+        }
 
     @router.get("/{workflow_id}/export")
     @speaks

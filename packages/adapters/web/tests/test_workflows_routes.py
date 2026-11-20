@@ -6,21 +6,23 @@ import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.adapters.web.turns import WebTurns
 from daimon.adapters.web.workflows import workflows_router
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores.domain import WebPersonRow
-from daimon.testing.turn_router import build_turn_router
+from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from .chat_support import Workspace, build_turns, funded_workspace, signed_in
+from .chat_support import Workspace, build_turns, funded_workspace, one_session, signed_in
 from .conftest import PUBLIC_URL, WebClientFactory, discord_settings, web_settings
 from .test_routines_routes import _member  # pyright: ignore[reportPrivateUsage]
 
@@ -51,6 +53,8 @@ class Rig:
         self.ws: Workspace
         self.member: WebPersonRow
         self.client: httpx.AsyncClient
+        self.turns: WebTurns
+        self.sent: list[dict[str, Any]] = []
 
     async def sign_in(self, who: str) -> None:
         person = self.ws.person if who == "owner" else self.member
@@ -79,10 +83,13 @@ class Rig:
                 account_id=self.ws.person.account_id,
                 surface="web",
             )
-        turns = build_turns(self.factory, build_turn_router(str(self.ws.tenant_id)), self.tmp_path)
+        router = build_turn_router(str(self.ws.tenant_id), sent_event_bodies=self.sent)
+        built = build_turns(self.factory, router, self.tmp_path)
         settings = discord_settings(
             features={"workflows": "on" if engine else "off"}, defaults_root=_DEFAULTS
         )
+        turns = WebTurns(settings, built.web, replace(built.deps, settings=settings))
+        self.turns = turns
         async with self.web_client(
             web_settings(), sessionmaker=self.factory, turns=turns, settings=settings
         ) as client:
@@ -293,3 +300,58 @@ async def test_a_test_run_that_has_not_finished_can_be_cancelled_and_forked_from
         )
         assert again.status_code == 200, again.text
         assert again.json()["id"] != run["id"], "a fork is a new run"
+
+
+async def test_ask_daimon_chat_when_opened_twice_gives_one_thread_hidden_from_the_chat_list(
+    rig: Rig,
+) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        opened = await r.client.get(f"/api/workflows/{made['id']}/chat")
+        assert opened.status_code == 200, opened.text
+        chat = opened.json()
+        assert chat["agent"]["id"] == AGENT_ID, "the person's default agent answers"
+        again = (await r.client.get(f"/api/workflows/{made['id']}/chat")).json()
+        assert again["session_id"] == chat["session_id"], "one thread per workflow and person"
+
+        listed = (await r.client.get("/api/chat/sessions")).json()
+        assert listed == [], "a subject thread is not in the chat list"
+        thread = await r.client.get(f"/api/chat/sessions/{chat['session_id']}")
+        assert thread.status_code == 200, "but the chat routes still serve it"
+
+        other = await r.make({**_BLANK, "name": "Other"})
+        elsewhere = (await r.client.get(f"/api/workflows/{other['id']}/chat")).json()
+        assert elsewhere["session_id"] != chat["session_id"], "each workflow has its own"
+
+
+async def test_ask_daimon_chat_when_the_person_can_only_view_the_workflow_is_refused(
+    rig: Rig,
+) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        await r.client.patch(f"/api/workflows/{made['id']}", json={"visibility": "shared"})
+        await r.sign_in("member")
+        refused = await r.client.get(f"/api/workflows/{made['id']}/chat")
+        assert refused.status_code == 403, f"a viewer cannot ask Daimon to edit: {refused.text}"
+
+
+async def test_ask_daimon_message_when_a_node_is_selected_names_the_workflow_to_the_agent(
+    rig: Rig,
+) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        chat = (await r.client.get(f"/api/workflows/{made['id']}/chat")).json()
+        with one_session():
+            sent = await r.client.post(
+                f"/api/chat/sessions/{chat['session_id']}/messages",
+                json={
+                    "id": str(uuid.uuid4()),
+                    "content": "What does this step do?",
+                    "context": {"selected_node": "done"},
+                },
+            )
+            await r.turns.drain(10)
+        assert sent.status_code == 200, sent.text
+        text = str(r.sent)
+        assert made["id"] in text, f"the controls carry the workflow: {text[:300]}"
+        assert '"selected_node": {"id": "done", "kind": "finish"' in text, "and the node"
