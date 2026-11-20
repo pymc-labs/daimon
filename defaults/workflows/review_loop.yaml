@@ -1,0 +1,43 @@
+schema: daimon.workflow/v1
+name: Review loop
+goal: Write a draft, have it reviewed, and revise until the reviewer accepts it.
+inputs:
+  type: object
+  required: [brief]
+  properties:
+    brief: { type: string, title: What to write }
+triggers:
+  - id: manual
+    kind: manual
+defaults:
+  agent: default
+start: write
+nodes:
+  write:
+    kind: agent
+    title: Write the draft
+    instructions: Write the piece the brief asks for. When reviewer notes exist, address each of them.
+    inputs:
+      brief: ${{ inputs.brief }}
+      notes: '${{ has(steps.review.output) ? steps.review.output.notes : "" }}'
+    output:
+      text: { type: string }
+    next: review
+    max_visits: 3
+    on_max_visits: done
+  review:
+    kind: agent
+    title: Review the draft
+    instructions: Review the draft against the brief. Accept it, or ask for a revision with notes.
+    inputs:
+      brief: ${{ inputs.brief }}
+      draft: ${{ steps.write.output.text }}
+    output:
+      notes: { type: string }
+    routes:
+      revise: { to: write, when: "The draft misses the brief or has clear problems." }
+      accept: { to: done, when: "The draft is ready to use." }
+  done:
+    kind: finish
+    title: Final draft
+    output: ${{ steps.write.output.text }}
