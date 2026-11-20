@@ -770,25 +770,25 @@ class GeminiEnvironments(Base):
             refuse("self_hosted_environment")
         if not isinstance(self._transport, SelfHostedTransport):
             refuse("self_hosted_environment")
+        # The provider call holds the account lock, so a retried key never makes a second one.
         async with self._storage.transaction(keys) as records:
             prior = self._creation(records, scope, key, digest)
-        if prior is not None:
-            async with self._storage.read(Keys(read=(("environment", prior),))) as records:
-                return records.environments[prior]
-        provider_id, worker_key = await self._transport.create_self_hosted_environment()
-        async with self._storage.transaction(keys) as records:
-            id_ = str(uuid4())
-            result = Environment(
-                ref=self._ref(scope, id_, "environment"),
-                revision=Revision(local=1),
-                spec=spec,
-                created_at=now(),
-                native={"id": provider_id},
-            )
-            records.environments[id_] = result
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-        native = {"id": provider_id, "environment_key": worker_key}
-        return result.model_copy(update={"native": native})
+            if prior is None:
+                provider_id, worker_key = await self._transport.create_self_hosted_environment()
+                native = {"id": provider_id, "environment_key": worker_key}
+                id_ = str(uuid4())
+                result = Environment(
+                    ref=self._ref(scope, id_, "environment"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                    native={"id": provider_id},
+                )
+                records.environments[id_] = result
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return result.model_copy(update={"native": native})
+        async with self._storage.read(Keys(read=(("environment", prior),))) as records:
+            return records.environments[prior]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._check(scope, ref, "environment")

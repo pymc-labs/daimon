@@ -3044,8 +3044,9 @@ class EvalsSettings(BaseModel):
     passthrough_hosts: list[str] = Field(
         default_factory=list,
         description=(
-            "Extra hosts an eval executor may reach untouched, besides its provider's control "
-            "plane. Agent commands never reach them."
+            "Extra hosts the eval executor's own user may reach untouched, besides its "
+            "provider's control plane. Shells the executor starts run as the agent and reach "
+            "the fake world instead."
         ),
     )
     sandbox_rate_usd_per_hour: Decimal = Field(

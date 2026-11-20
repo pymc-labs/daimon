@@ -12,6 +12,8 @@ import io
 import json
 import mimetypes
 import posixpath
+import re
+import shlex
 import tarfile
 import time
 from collections.abc import Mapping, Sequence
@@ -32,7 +34,11 @@ Executor = Provider | Literal["probe"]
 AGENT_UID: Final = 10001
 GATEWAY_UID: Final = 61000
 AGENT_SHELL: Final = "/opt/eval/agent-bin/bash"
-_MAX_FILES_BYTES: Final = 256 * 1024 * 1024
+#: The most a command's output or a files archive may hold; reading stops past it.
+MAX_OUTPUT_BYTES: Final = 256 * 1024 * 1024
+_ENV_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: Names that would change how the agent's programs load or what clock they see.
+_RESERVED_ENV: Final = re.compile(r"LD_.*|FAKETIME.*|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|PS4")
 
 
 class SandboxError(RuntimeError):
@@ -46,6 +52,18 @@ class PodFile:
     path: str
     content: bytes
     mode: int = 0o644
+
+
+@dataclass(frozen=True)
+class PodLimits:
+    """What one pod may use. Kubernetes caps disk too; pids there follow the node's limit."""
+
+    cpus: float = 2.0
+    memory_mb: int = 4096
+    disk_mb: int = 20480
+    pids: int = 4096
+    #: After this the pod is stopped where the runtime can, and `reap` removes it.
+    deadline_s: int = 4 * 3600
 
 
 @dataclass(frozen=True)
@@ -64,8 +82,9 @@ class PodSpec:
     control_plane: frozenset[str] = frozenset()
     #: Hosts an admin allows the executor besides its control plane.
     passthrough: frozenset[str] = frozenset()
-    registries: Literal["passthrough", "deny"] = "passthrough"
+    registries: Literal["passthrough", "deny"] = "deny"
     clock: datetime | None = None
+    limits: PodLimits = PodLimits()
 
 
 @dataclass(frozen=True)
@@ -90,6 +109,9 @@ class SandboxRuntime(Protocol):
     ) -> CommandResult: ...
     async def files(self, pod: PodHandle, root: str) -> list[DeliverableFile]: ...
     async def stop(self, pod: PodHandle) -> None: ...
+    async def reap(self) -> list[str]:
+        """Remove eval pods past their deadline or finished, e.g. a crashed worker's."""
+        ...
 
 
 async def wait_ready(runtime: SandboxRuntime, pod: PodHandle, timeout_s: float = 300) -> None:
@@ -110,7 +132,7 @@ async def wait_ready(runtime: SandboxRuntime, pod: PodHandle, timeout_s: float =
 
 def registries(features: FeatureSnapshot) -> Literal["passthrough", "deny"]:
     """Whether the gateway lets package downloads reach the real registries."""
-    return "deny" if features.value("eval_package_registries") == "deny" else "passthrough"
+    return "passthrough" if features.value("eval_package_registries") == "passthrough" else "deny"
 
 
 def pod_name(spec: PodSpec) -> str:
@@ -120,6 +142,13 @@ def pod_name(spec: PodSpec) -> str:
 def agent_command(command: str) -> list[str]:
     """argv that runs a shell command in `main` as the agent, with the agent environment."""
     return [AGENT_SHELL, "-c", command]
+
+
+async def read_files(runtime: SandboxRuntime, pod: PodHandle, root: str) -> list[DeliverableFile]:
+    """Files under `root`, archived by the agent so its links never reach past its own reach."""
+    command = f"cd -- {shlex.quote(root)} 2>/dev/null && exec tar -c . || true"
+    listed = await runtime.run(pod, command, timeout_s=300)
+    return untar_files(listed.stdout, root) if listed.stdout else []
 
 
 def gateway_config(spec: PodSpec) -> bytes:
@@ -140,6 +169,9 @@ def gateway_config(spec: PodSpec) -> bytes:
 
 
 def main_config(spec: PodSpec) -> bytes:
+    for name in spec.env:
+        if not _ENV_NAME.fullmatch(name) or _RESERVED_ENV.fullmatch(name):
+            raise SandboxError(f"the agent environment cannot set {name!r}")
     clock = spec.clock.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S") if spec.clock else None
     return json.dumps(
         {
@@ -223,8 +255,8 @@ def untar_files(data: bytes, root: str) -> list[DeliverableFile]:
             if not member.isfile():
                 continue
             total += member.size
-            if total > _MAX_FILES_BYTES:
-                raise SandboxError(f"files under {root} are over {_MAX_FILES_BYTES} bytes")
+            if total > MAX_OUTPUT_BYTES:
+                raise SandboxError(f"files under {root} are over {MAX_OUTPUT_BYTES} bytes")
             reader = tar.extractfile(member)
             content = reader.read() if reader else b""
             name = posixpath.normpath(member.name).removeprefix("./")

@@ -33,6 +33,7 @@ from mux.contracts.resources import (
 from mux.drivers.openai import session_mcp
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
+from mux.drivers.openai.agents import is_eval_agent
 from mux.drivers.openai.environments import SELF_HOSTED
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, non_mcp_tool
 from mux.drivers.openai.mounts import resources, vault_ids
@@ -243,6 +244,8 @@ class OpenAISessions:
         if agent.get("id") != spec.agent.id:
             raise ValueError("wrong session agent identity")
         self._c.record(scope, agent)
+        if environment["type"] == "self_hosted" and not is_eval_agent(agent):
+            raise self._c.unsupported("self_hosted_environment")
         if any(pin.source is not None for pin in spec.skills):
             raise self._c.unsupported("session_skill_source")
         pins = session_pins(decode(agent.get("metadata")), spec.skills)

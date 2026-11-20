@@ -353,8 +353,9 @@ certificate per host with it. Unset: no sandbox can be enclosed.
 
 `list[str]` · optional · default unset
 
-Extra hosts an eval executor may reach untouched, besides its provider's control plane.
-Agent commands never reach them.
+Extra hosts the eval executor's own user may reach untouched, besides its provider's
+control plane. Shells the executor starts run as the agent and reach the fake world
+instead.
 
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 

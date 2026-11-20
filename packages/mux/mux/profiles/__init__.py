@@ -245,7 +245,6 @@ class BackendSelection:
     tariff_gated_models: tuple[str, ...] = ()
 
 
-#: Everyday names for a provider beyond its id, display name and model family.
 #: Control-plane hosts a provider's self-hosted environment worker dials; selfhosted brings its own.
 CONTROL_PLANE_HOSTS: Mapping[Provider, frozenset[str]] = {
     "anthropic": frozenset({"api.anthropic.com"}),
@@ -253,6 +252,7 @@ CONTROL_PLANE_HOSTS: Mapping[Provider, frozenset[str]] = {
     "gemini": frozenset({"generativelanguage.googleapis.com"}),
     "selfhosted": frozenset(),
 }
+#: Everyday names for a provider beyond its id, display name and model family.
 PROVIDER_ALIASES: Mapping[str, Provider] = {"chatgpt": "openai", "google": "gemini"}
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {

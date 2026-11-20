@@ -1,3 +1,0 @@
-#!/bin/sh
-# First on the executor's PATH and its SHELL: every shell it starts runs as the agent.
-exec /usr/bin/env -i /opt/eval/bin/agent-exec "$@"
