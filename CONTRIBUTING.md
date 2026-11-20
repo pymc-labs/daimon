@@ -143,20 +143,27 @@ Explain invariants and causal reasons in product comments and docstrings. Keep
 ticket numbers, review rounds, lane names and checklist labels in commit or PR
 provenance.
 
-### Migration downgrade-safety markers
+### Migrations
 
-Every file under `packages/core/alembic/versions/` must carry a
-`downgrade: safe | destructive | unsupported` line in its module docstring:
+Each file under `packages/core/alembic/versions/` declares two docstring lines:
 
-- `safe` — `downgrade()` reverses the migration cleanly, no data loss.
-- `destructive` — `downgrade()` reverses the migration but loses data.
-- `unsupported` — `downgrade()` raises `NotImplementedError`.
+- `downgrade: safe | destructive | unsupported`: `downgrade()` reverses
+  cleanly, loses data, or raises `NotImplementedError`.
+- `schema: expand | contract`: `expand` only adds new tables, nullable or
+  defaulted columns, indexes (concurrently on existing tables), functions or
+  policies, and sets `lock_timeout` before touching an existing table.
+  Everything else, backfills included, is `contract`.
 
-`alembic revision` emits an invalid `downgrade: TODO-declare
-(safe|destructive|unsupported)` placeholder — replace it with the real
-value. `scripts/lint_migrations.py` (wired into pre-commit and CI)
-AST-cross-checks the declared value against the `downgrade()` body, so
-declaring `unsupported` requires actually raising `NotImplementedError`.
+`alembic revision` writes `TODO-declare` placeholders that fail
+`scripts/lint_migrations.py` (pre-commit and CI) until replaced; the lint
+checks both lines against the code.
+
+The chain is linear and `packages/core/alembic/head.txt` names its head. After
+you merge or rebase `main`, run `uv run python scripts/rechain_migrations.py`:
+it renumbers your branch's new migrations onto `main`'s head, updates the files
+you changed that mention them, and rewrites `head.txt`. CI runs it with `--check`.
+Land a schema change in its own PR before the code that needs it; a `contract`
+migration lands alone, after the release that stopped using what it removes.
 
 ### Designators in comments
 
