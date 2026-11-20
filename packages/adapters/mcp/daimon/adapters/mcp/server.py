@@ -123,6 +123,7 @@ from daimon.adapters.mcp.tools.web_workspace_settings import (
 )
 from daimon.adapters.mcp.tools.wizard import register_wizard_tools
 from daimon.adapters.mcp.tools.workflow_step import register_workflow_step_tools
+from daimon.adapters.mcp.tools.workflows import register_workflow_tools
 from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_route
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
@@ -616,6 +617,7 @@ def create_mcp_app(
     register_channel_environment_tools(mcp, runtime)  # which environment a channel runs in
     register_progress_plan_tools(mcp, runtime)  # the plan on the progress card, and its switch
     register_workflow_step_tools(mcp, runtime)  # finish a workflow step
+    register_workflow_tools(mcp, runtime)  # draft, validate, publish and run workflows
     register_scope_settings_tools(mcp, runtime)  # the Settings group: get_settings, change_setting
     register_agent_coding_key_tools(mcp, runtime)
     register_my_data_tools(mcp, runtime)

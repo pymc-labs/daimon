@@ -989,6 +989,22 @@
         'type': 'object',
       }),
     }),
+    'cancel_workflow_run': dict({
+      'description': 'Stop a run that has not ended.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'run_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'change_setting': dict({
       'description': '''
         Change one setting where you are, after the person presses Approve.
@@ -3276,6 +3292,54 @@
         'type': 'object',
       }),
     }),
+    'create_workflow': dict({
+      'description': '''
+        Create a workflow as a private draft owned by this person.
+        <blank line>
+        Give a name for a blank one, a starter `template` id, or a whole `spec` (the
+        daimon.workflow/v1 document). The result is the new workflow as get_workflow shows it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'spec': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'template': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'delete_allowance': dict({
       'description': 'Remove an allowance or cap.',
       'parameters': dict({
@@ -3651,6 +3715,246 @@
           'channel_id',
           'message_id',
           'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'edit_workflow_draft': dict({
+      'description': '''
+        Change a workflow's draft from the revision you read; nothing goes live.
+        <blank line>
+        Give `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,
+        set_start), applied in order, or a whole `spec`. A draft may have problems; they come
+        back for you to fix. If the draft moved on, you are told its revision: read it again.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'AddNode': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'description': "The new node's id, unique in the workflow.",
+                'type': 'string',
+              }),
+              'node': dict({
+                'additionalProperties': True,
+                'description': "The node: kind, title and its kind's fields.",
+                'type': 'object',
+              }),
+              'op': dict({
+                'const': 'add_node',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'id',
+              'node',
+            ]),
+            'type': 'object',
+          }),
+          'Connect': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'from_node': dict({
+                'type': 'string',
+              }),
+              'op': dict({
+                'const': 'connect',
+                'type': 'string',
+              }),
+              'route': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+                'description': 'The route to set (approval, branch, wait); empty sets `next`.',
+              }),
+              'to': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'from_node',
+              'to',
+            ]),
+            'type': 'object',
+          }),
+          'RemoveNode': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'op': dict({
+                'const': 'remove_node',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'SetInputs': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'inputs': dict({
+                'additionalProperties': True,
+                'description': "The workflow's inputs schema, replacing the old.",
+                'type': 'object',
+              }),
+              'op': dict({
+                'const': 'set_inputs',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'inputs',
+            ]),
+            'type': 'object',
+          }),
+          'SetStart': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'op': dict({
+                'const': 'set_start',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'SetTrigger': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'op': dict({
+                'const': 'set_trigger',
+                'type': 'string',
+              }),
+              'trigger': dict({
+                'additionalProperties': True,
+                'description': 'A trigger with an id; one with that id is replaced.',
+                'type': 'object',
+              }),
+            }),
+            'required': list([
+              'op',
+              'trigger',
+            ]),
+            'type': 'object',
+          }),
+          'UpdateNode': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'fields': dict({
+                'additionalProperties': True,
+                'description': 'Fields to set on the node; null removes one.',
+                'type': 'object',
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'op': dict({
+                'const': 'update_node',
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'op',
+              'id',
+              'fields',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'base_revision': dict({
+            'type': 'integer',
+          }),
+          'edits': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'discriminator': dict({
+                    'mapping': dict({
+                      'add_node': '#/$defs/AddNode',
+                      'connect': '#/$defs/Connect',
+                      'remove_node': '#/$defs/RemoveNode',
+                      'set_inputs': '#/$defs/SetInputs',
+                      'set_start': '#/$defs/SetStart',
+                      'set_trigger': '#/$defs/SetTrigger',
+                      'update_node': '#/$defs/UpdateNode',
+                    }),
+                    'propertyName': 'op',
+                  }),
+                  'oneOf': list([
+                    dict({
+                      '$ref': '#/$defs/AddNode',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/UpdateNode',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/RemoveNode',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/Connect',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/SetTrigger',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/SetInputs',
+                    }),
+                    dict({
+                      '$ref': '#/$defs/SetStart',
+                    }),
+                  ]),
+                }),
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'spec': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
+          'base_revision',
         ]),
         'type': 'object',
       }),
@@ -4306,6 +4610,62 @@
         'type': 'object',
       }),
     }),
+    'fork_workflow_run': dict({
+      'description': '''
+        Start a new run from an earlier one: with `step`, from that step on with the earlier
+        steps' results reused; without, the whole run again. `inputs` replaces the inputs.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'inputs': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'run_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'step': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'version': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_agent': dict({
       'description': '''
         Show what an agent can access: attached MCP servers and skills.
@@ -4858,6 +5218,42 @@
         }),
         'required': list([
           'person_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'get_workflow': dict({
+      'description': '''
+        Read a workflow: its draft spec and revision, its problems, and its live version.
+        <blank line>
+        Read it before editing; edits name the revision they were made from.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'get_workflow_run': dict({
+      'description': "Read one run: its status, failure, inputs and each step's status.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'run_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
         ]),
         'type': 'object',
       }),
@@ -6516,6 +6912,42 @@
         'type': 'object',
       }),
     }),
+    'list_workflow_runs': dict({
+      'description': "List recent runs, newest first: all you can see, or one workflow's.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'limit': dict({
+            'default': 20,
+            'maximum': 100,
+            'minimum': 1,
+            'type': 'integer',
+          }),
+          'workflow_id': dict({
+            'anyOf': list([
+              dict({
+                'format': 'uuid',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_workflows': dict({
+      'description': 'List the workflows this person can see: their own and those shared with the team.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'memory_create': dict({
       'description': 'Save a new memory file at `path` (for example `/notes/project.md`).',
       'parameters': dict({
@@ -7440,6 +7872,31 @@
           'title',
           'recipients',
           'cap_usd',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'publish_workflow': dict({
+      'description': '''
+        Publish the draft as the next live version.
+        <blank line>
+        Needs a person who may edit it, a draft without errors and no grants still to approve.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'note': dict({
+            'default': '',
+            'maxLength': 500,
+            'type': 'string',
+          }),
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
         ]),
         'type': 'object',
       }),
@@ -8792,6 +9249,22 @@
         'type': 'object',
       }),
     }),
+    'retry_workflow_run': dict({
+      'description': 'Retry a failed or stopped run from where it stopped.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'run_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'revert_agent': dict({
       'description': '''
         Restore a recorded version of an agent's setup as its next version; name, avatar,
@@ -8933,6 +9406,42 @@
         }),
         'required': list([
           'routine_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'run_workflow': dict({
+      'description': '''
+        Run the live version once, or with test=true the draft as a test run.
+        <blank line>
+        A test run cannot write to real systems. Read the run with get_workflow_run.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'inputs': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'test': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
         ]),
         'type': 'object',
       }),
@@ -10465,6 +10974,26 @@
         'required': list([
           'invite_id',
           'allow',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_workflow_paused': dict({
+      'description': 'Pause a live workflow so triggers stop starting runs, or resume it. Owner or admin.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'paused': dict({
+            'type': 'boolean',
+          }),
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
+          'paused',
         ]),
         'type': 'object',
       }),
@@ -12533,6 +13062,34 @@
         'required': list([
           'person_id',
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'validate_workflow': dict({
+      'description': "Check a workflow's draft, or a spec you pass, and list errors, warnings and grants.",
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'spec': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'workflow_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'workflow_id',
         ]),
         'type': 'object',
       }),
