@@ -49,3 +49,19 @@ def test_preflight_runs_before_a_run_is_created_or_a_step_spends() -> None:
     for name, spend in (("start_run", "create_run"), ("execute", "executor")):
         checks, spends = _called(fns[name], "check"), _called(fns[name], spend)
         assert checks and spends and max(checks) < min(spends), f"{name} checks before {spend}"
+
+
+def test_every_trigger_path_starts_runs_through_start_run_and_ingress_starts_none() -> None:
+    callers: set[str] = set()
+    for path in PACKAGES.glob("**/daimon/**/*.py"):
+        for fn in ast.walk(ast.parse(path.read_text())):
+            named = isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name
+            if named and named != "start_run" and _called(fn, "start_run"):
+                callers.add(f"{path.name}:{named}")
+    assert callers == {
+        "service.py:start",  # manual and test runs
+        "service.py:rerun",
+        "triggers.py:_start_one",  # schedule slots, webhook deliveries, finished runs
+        "triggers.py:start_called",  # call triggers
+        "webhooks.py:replay",
+    }, f"a new path that starts runs joins this list: {sorted(callers)}"

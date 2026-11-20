@@ -90,6 +90,7 @@ async def test_a_republished_schedule_keeps_its_slot_and_a_dropped_one_stops(
     flow = await _publish(db_session, tenant_id, owner, triggers=[HOURLY])
     full = {"schema": "daimon.workflow/v1", "name": "T", "start": "b", "nodes": INLINE}
     later = NOW + timedelta(minutes=30)
+    slot: datetime | None = None
     for spec in ({**full, "triggers": [HOURLY]}, full):
         await workflows.publish_version(
             db_session,
