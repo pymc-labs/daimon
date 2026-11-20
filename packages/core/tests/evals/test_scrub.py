@@ -129,4 +129,6 @@ def test_bundle_when_scrubbed_offline_then_valid_stable_and_nothing_left(tmp_pat
     )
     assert leftovers_of(tmp_path / "out", scrubber)[0].kind != "person", "nothing found again"
     again = scrub_path(tmp_path / "out", None, scrubber)
-    assert again.replaced == {}, "a second pass changes nothing"
+    # A real name can equal a fake, so names are replaced again; ids, emails and repos are not.
+    assert set(again.replaced) <= {"company", "handle", "person", "project"}, again.replaced
+    assert again.leftovers == [], "a second pass leaves nothing either"

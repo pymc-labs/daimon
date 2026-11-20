@@ -7,6 +7,7 @@ logged or kept: the report names kinds, places and numbers.
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from daimon.core.evals.validate import (
 from pydantic import JsonValue
 
 POLICY: Final = "default/1"
+_PSEUDONYM: Final = re.compile(r"person-[0-9a-f]{8}")
 # Message and clock times are kept to the hour: an exact time can single out a thread.
 _TIMES: Final = (("history", "at"), ("turn", "messages", "at"), ("clock", "now"))
 
@@ -76,6 +78,20 @@ def scrub_blob(scrubber: Scrubber, data: bytes, media_type: str, name: str | Non
             reason = "file_rebuilt" if done.scrub == "rebuilt" else "needs_human_check"
     kind = "clean" if done.data == data and done.scrub == "rebuilt" else done.scrub
     return ScrubbedBlob(done.data, done.media_type, kind, done.needs_human_check, reason)
+
+
+def pseudonymous(who: PrincipalRef | None) -> bool:
+    """Whether a bundle's author is already the label a scrub writes, with no name."""
+    return who is None or (
+        who.kind == "label" and not who.display_name and bool(_PSEUDONYM.fullmatch(who.id))
+    )
+
+
+def _pseudonym(scrubber: Scrubber, who: PrincipalRef | None) -> PrincipalRef | None:
+    """The author as a keyed label: any kind, label ids too, since they name people."""
+    if pseudonymous(who) or who is None:
+        return who
+    return PrincipalRef(kind="label", id=f"person-{keyed_hash(scrubber.key, 'person', who.id)[:8]}")
 
 
 def _obj(value: JsonValue) -> JsonObject:
@@ -308,7 +324,6 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
     partial = partial or bool(report.leftovers)
     report.status = "partial" if partial else "scrubbed"
     report.replaced = dict(scrubber.counts - start)
-    who = manifest.created_by
     header = BundleHeader(
         id=manifest.id,
         created_at=datetime.now(UTC),
@@ -316,11 +331,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         source=SourceInfo(kind=manifest.source.kind, label=label),
         scrub_status=report.status,
         title=title,
-        created_by=PrincipalRef(
-            kind="label", id=f"person-{keyed_hash(scrubber.key, 'person', who.id)[:8]}"
-        )
-        if who and who.kind != "label"
-        else who,
+        created_by=_pseudonym(scrubber, manifest.created_by),
         includes_identities=manifest.includes_identities,
     )
     return build_files(header, suites, runs, blobs_out), report

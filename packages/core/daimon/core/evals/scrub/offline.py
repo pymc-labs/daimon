@@ -23,7 +23,7 @@ from daimon.core.evals.bundle import (
     write_dir,
 )
 from daimon.core.evals.format import JsonObject
-from daimon.core.evals.scrub.bundle import ScrubReport, scrub_bundle
+from daimon.core.evals.scrub.bundle import ScrubReport, pseudonymous, scrub_bundle
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import load_entities
 from daimon.core.evals.scrub.fakes import key_check, scrub_key
@@ -124,11 +124,10 @@ def leftovers_of(
             "title": manifest.title,
             "label": manifest.source.label,
             "instance": manifest.source.instance,
-            "by": manifest.created_by.display_name if manifest.created_by else None,
         },
         "bundle",
     )
-    if manifest.created_by and manifest.created_by.kind != "label":
+    if not pseudonymous(manifest.created_by):
         found.append(Leftover("bundle", "person", 1))
     for where, document in documents:
         found += sweep_document(scrubber, document, where)

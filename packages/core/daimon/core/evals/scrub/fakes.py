@@ -55,13 +55,14 @@ def shape_preserving(real: str, rng: random.Random) -> str:
 
 
 def adapt(matched: str, fake: str) -> str:
-    """`fake` written the way `matched` was: case, and joined like a slug when it was one."""
+    """`fake` written the way `matched` was: case, and joined when it was a slug or camelCase."""
     if len(matched) > 1 and matched.isupper():
         fake = fake.upper()
     elif matched.islower():
         fake = fake.lower()
-    if not any(c.isspace() for c in matched) and " " in fake:
-        slug = re.search(r"[-_.+]", matched)
+    slug = re.search(r"[-_.+]", matched)
+    joined = slug or matched.islower() or re.search(r"[a-z][A-Z]", matched)
+    if joined and not any(c.isspace() for c in matched) and " " in fake:
         fake = fake.replace(" ", slug.group() if slug else "-" if matched.islower() else "")
     return fake
 
@@ -78,11 +79,10 @@ class FakeMap:
     ) -> None:
         self._key = key
         self._known = dict(known or {})
-        words = {normalize(f) for f in forbidden}
-        self._forbidden_words = {w for w in words if " " not in w}
-        self._forbidden_phrases = [w for w in words if " " in w]
+        self._forbidden = {normalize(f) for f in forbidden}
         self._taken: set[tuple[str, str]] = {(k, normalize(v)) for (k, _), v in self._known.items()}
         self.added: dict[tuple[str, str], str] = {}
+        self._values = list(self._known.values())
         self._faker: Faker | None = None
 
     def _gen(self) -> Faker:
@@ -93,16 +93,12 @@ class FakeMap:
         return self._faker
 
     def forbid(self, words: Iterable[str]) -> None:
-        """Real words learned later, which no new fake may hold."""
-        for word in map(normalize, words):
-            if " " in word:
-                self._forbidden_phrases.append(word)
-            else:
-                self._forbidden_words.add(word)
+        """Real terms learned later, which no new fake may be or hold as a phrase."""
+        self._forbidden.update(map(normalize, words))
 
     def values(self) -> list[str]:
-        """Every fake handed out so far, for the sweep to tell fakes from leftovers."""
-        return [*self._known.values(), *self.added.values()]
+        """Every fake handed out so far, in order, for the sweep to tell fakes from leftovers."""
+        return self._values
 
     def fake(self, kind: str, real: str, *, of: str | None = None) -> str:
         if kind == "company" and of:
@@ -117,17 +113,23 @@ class FakeMap:
             if attempt == _ATTEMPTS:
                 candidate = f"{candidate} {attempt}"
             clash = (kind, normalize(candidate)) in self._taken
-            if kind in _DERIVED or not (clash or self._has_real(candidate)):
+            # A fake never repeats a word of the real value ("Emily" for "Emily").
+            echo = set(normalize(candidate).split()) & set(normalize(real).split())
+            if kind in _DERIVED or not (clash or echo or self._has_real(candidate)):
                 break
         self._taken.add((kind, normalize(candidate)))
         self.added[(kind, digest)] = candidate
+        self._values.append(candidate)
         return candidate
 
     def _has_real(self, candidate: str) -> bool:
-        """Whether `candidate` holds a known real word, which a sweep would then flag."""
-        text = normalize(candidate)
-        return bool(set(re.findall(r"[\w']+", text)) & self._forbidden_words) or any(
-            p in text for p in self._forbidden_phrases
+        """Whether `candidate` is a known real term or holds a real phrase. A single real word
+        inside a fake is allowed: common names are in every large dictionary."""
+        words = normalize(candidate).split()
+        return " ".join(words) in self._forbidden or any(
+            " ".join(words[i:j]) in self._forbidden
+            for i in range(len(words))
+            for j in range(i + 2, len(words) + 1)
         )
 
     def _make(self, kind: str, real: str, of: str | None, digest: str, attempt: int) -> str:
@@ -140,7 +142,9 @@ class FakeMap:
             return parts[-1] if kind == "person_last" else parts[0]
         if kind == "person":
             first = faker.first_name()
-            return first if len(real.split()) == 1 else f"{first} {faker.last_name()}"
+            # A single name, or a full one once single names keep clashing.
+            single = len(real.split()) == 1 and attempt < _ATTEMPTS // 2
+            return first if single else f"{first} {faker.last_name()}"
         if kind in ("email", "handle"):
             return self._account(kind, of, faker, attempt)
         if kind == "company":

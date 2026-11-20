@@ -1,8 +1,8 @@
 """Finding what to replace in a string: secrets, ids, emails, hosts, known names, then names by NER.
 
 Matching runs on a folded view of the text (`fold`): accents and invisible marks dropped,
-`\\n`, `\\u00e9` and `%20` escapes decoded. Known names match by word, so `alice_smith`,
-`AliceSmith` and `Alice%20Smith` all match "Alice Smith". Hits are mapped back to the
+`\\n`, `\\u00e9`, `%20` and HTML entity escapes decoded. Known names match by word, so
+`alice_smith`, `AliceSmith` and `Alice%20Smith` all match "Alice Smith". Hits are mapped back to the
 original text. Overlapping hits merge into one covering both, so a longer name found by NER
 is never cut short by a shorter known part. Name detection (Presidio with a spaCy model) is
 optional: without it `Ner.available` is False and only the dictionary and patterns apply.
@@ -10,6 +10,8 @@ optional: without it `Ner.available` is False and only the dictionary and patter
 
 from __future__ import annotations
 
+import base64
+import html
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
@@ -36,7 +38,9 @@ class Hit:
 
 # ---------- folding ----------
 
-_ESCAPES: Final = re.compile(r"\\u[0-9a-fA-F]{4}|\\[nrt]|(?:%[0-9A-Fa-f]{2})+")
+_ESCAPES: Final = re.compile(
+    r"\\u[0-9a-fA-F]{4}|\\[nrt]|(?:%[0-9A-Fa-f]{2})+|&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-z]{2,8});"
+)
 
 
 def _decode(escape: str) -> str:
@@ -45,6 +49,9 @@ def _decode(escape: str) -> str:
         return escape if 0xD800 <= point < 0xE000 else fold_char(chr(point))
     if escape.startswith("\\"):
         return " "
+    if escape.startswith("&"):
+        decoded = html.unescape(escape)
+        return " " if decoded.isspace() else "".join(fold_char(c) for c in decoded)
     try:
         decoded = bytes.fromhex(escape.replace("%", "")).decode("utf-8")
     except UnicodeDecodeError:
@@ -67,7 +74,7 @@ class View:
 
 
 def fold(text: str) -> View:
-    if text.isascii() and "\\" not in text and "%" not in text:
+    if text.isascii() and "\\" not in text and "%" not in text and "&" not in text:
         return View(text)
     chars: list[str] = []
     starts: list[int] = []
@@ -115,7 +122,7 @@ class _Entry:
     term: Term
 
 
-class _Index:
+class TermIndex:
     def __init__(self) -> None:
         self._first: dict[str, list[_Entry]] = {}
 
@@ -175,31 +182,56 @@ _SECRETS: Final = [
         r"\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b",
         r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]+",
         r"\bdata:[\w/+.-]+;base64,[A-Za-z0-9+/=]{16,}",
+        r"\b(?:SK|AC)[0-9a-f]{32}\b",
     )
 ]
-# Key names that hold secrets, in `KEY=value` text and as JSON keys. `auth` but not `author`.
+# Key names that hold secrets, in `KEY=value` text and as JSON keys. `auth` and `authorization`
+# but not `author`.
+_PW_LABEL: Final = r"(?:pass(?:word|wd|phrase|code)?|(?<![a-z])(?:pwd|pin(?:_?code)?))"
+_KEY_LABEL: Final = (
+    r"(?:secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential|auth(?!or(?!i[sz]))"
+    r"|(?:encryption|signing|account|master|client|license|shared[_-]?access)[_-]?key"
+    r"|session[_-]?(?:id|key))"
+)
 SECRET_NAME: Final = re.compile(
-    r"pass(?:word|wd|phrase|code)?(?![a-z])|secret|token|api.?key|private.?key|access.?key"
-    r"|credential|(?<![a-z])auth(?!or)|cookie|session.?id",
+    rf"pass(?:word|wd|phrase|code)?(?![a-z])|(?<![a-z])(?:pwd|pin(?:_?code)?)(?![a-z])"
+    rf"|{_KEY_LABEL}|cookie",
     re.IGNORECASE,
 )
-# The secret is group 1 of each: the label before it stays readable.
+# The secret is group `v` of each: the label before it stays readable. A quoted value is taken
+# whole, a password's to the end of the line, any other labelled value as one word. Quantifiers
+# are bounded: a long run of word characters must not make matching quadratic.
+_LABEL: Final = rf"(?:{_PW_LABEL}|{_KEY_LABEL})[\w.-]{{0,40}}[\"']?[ \t]*[:=][ \t]*"
 _SECRET_VALUES: Final = [
     re.compile(p, re.IGNORECASE | re.MULTILINE)
     for p in (
-        r"\bBearer\s+([A-Za-z0-9._~+/=-]{16,})",
-        r"^\s*(?:proxy-)?authorization\s*:\s*(?!bearer\b)(.+?)\s*$",
-        r"^\s*(?:set-)?cookie\s*:\s*(.+?)\s*$",
-        r"[\w.-]*?(?:pass(?:word|wd|phrase|code)?|secret|token|api[_-]?key|private[_-]?key"
-        r"|access[_-]?key|credential|auth(?!or))[\w.-]*[\"']?\s*[:=]\s*[\"']?([^\s\"',;&]{8,})",
+        r"\bBearer\s+(?P<v>[A-Za-z0-9._~+/=-]{16,})",
+        r"\bToken\s+(?P<v>[A-Za-z0-9_.-]{20,})",
+        r"^\s*(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?(?P<v>.+?)\s*$",
+        r"^\s*(?:set-)?cookie\s*:\s*(?P<v>.+?)\s*$",
+        rf"{_LABEL}([\"'])(?P<v>(?:(?!\1)[^\n])+)\1",
+        rf"{_PW_LABEL}[\w.-]{{0,40}}[\"']?[ \t]*[:=][ \t]*"
+        r"(?P<v>[^\s\"'][^\n\"',;&]*?)[ \t]*(?=[\"',;&\n]|$)",
+        rf"{_LABEL}(?:(?:bearer|basic|token)\s+)?(?P<v>[^\s\"',;&]{{6,}})",
     )
 ]
+# `Basic` and a base64 `user:password`.
+_BASIC: Final = re.compile(r"\bBasic\s+(?P<v>[A-Za-z0-9+/]{8,}={0,2})(?![\w+/=])")
+# A login in a home folder path.
+_HOME: Final = re.compile(
+    r"(?:\b[A-Za-z]:[\\/]+(?:Users|Documents and Settings)|(?<![\w.])/(?:home|Users))[\\/]+"
+    r"(?P<v>[^\\/\s\"'<>:*?|]+)"
+)
+_GENERIC_LOGINS: Final = frozenset(
+    {"public", "default", "shared", "all users", "default user", "guest", "user", "runner",
+     "ubuntu", "root", "admin", "administrator", "vscode", "node", "app", "me", "you"}
+)  # fmt: skip
 _URL: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"'`)\]}]+", re.IGNORECASE)
-_URL_USERINFO: Final = re.compile(r"//([^/@\s:]+:[^/@\s]+)@")
+_URL_USERINFO: Final = re.compile(r"//(?P<v>[^/@\s:?#]+:[^@\s?#]+)@")
 _URL_SECRET_PARAM: Final = re.compile(
-    r"[?&;#](?:[\w.-]*(?:token|secret|signature|credential|pass(?:word|wd)?|api[_-]?key"
-    r"|private[_-]?key|auth(?!or))[\w.-]*|x-amz-[\w-]+|x-goog-[\w-]+|sig|key|apikey|code|t|pwd"
-    r"|hm|session|sessionid|sid|jwt)=([^&#;\s]+)",
+    r"[?&;#](?:[\w.-]{0,40}?(?:token|secret|signature|credential|pass(?:word|wd)?|api[_-]?key"
+    r"|private[_-]?key|auth(?!or(?!i[sz])))[\w.-]{0,40}|x-amz-[\w-]+|x-goog-[\w-]+|sig|key|apikey|code"
+    r"|t|pwd|hm|session|sessionid|sid|jwt|k|pw|pin)=([^&#;\s]+)",
     re.IGNORECASE,
 )
 _EMAIL: Final = re.compile(
@@ -258,7 +290,15 @@ def namey(text: str) -> bool:
 
 
 def _group(m: re.Match[str], kind: str, priority: int, base: int = 0) -> Hit:
-    return Hit(base + m.start(1), base + m.end(1), kind, priority)
+    group = "v" if "v" in m.re.groupindex else 1
+    return Hit(base + m.start(group), base + m.end(group), kind, priority)
+
+
+def _basic(value: str) -> bool:
+    try:
+        return b":" in base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+    except ValueError:
+        return False
 
 
 class Ner:
@@ -321,7 +361,7 @@ class Ner:
 class Detector:
     def __init__(self, terms: Iterable[Term], ner: Ner | None = None) -> None:
         self._terms: dict[str, Term] = {}
-        self._index = _Index()
+        self._index = TermIndex()
         self._ner = ner
         self.add(terms)
 
@@ -362,6 +402,12 @@ class Detector:
             yield from (Hit(m.start(), m.end(), SECRET, _P_SECRET) for m in p.finditer(text))
         for p in _SECRET_VALUES:
             yield from (_group(m, SECRET, _P_SECRET) for m in p.finditer(text))
+        for m in _BASIC.finditer(text):
+            if _basic(m.group("v")):
+                yield _group(m, SECRET, _P_SECRET)
+        for m in _HOME.finditer(text):
+            if m.group("v").casefold() not in _GENERIC_LOGINS:
+                yield _group(m, "handle", _P_ID)
         for url in _URL.finditer(text):
             for p in (_URL_USERINFO, _URL_SECRET_PARAM):
                 for m in p.finditer(url.group()):

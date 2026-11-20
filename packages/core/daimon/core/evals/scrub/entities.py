@@ -34,6 +34,13 @@ _COMMON_FIRST: Final = frozenset(
 )  # fmt: skip
 
 
+# Titles and suffixes are never a first or last name on their own ("Dr. Jane Doe").
+_TITLES: Final = frozenset(
+    {"mr", "mrs", "ms", "miss", "mx", "dr", "prof", "sir", "jr", "sr", "md", "phd", "dds", "dvm",
+     "ii", "iii", "iv"}
+)  # fmt: skip
+
+
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -99,7 +106,13 @@ def normalize(text: str) -> str:
 
 def load_entities(path: Path) -> KnownEntities:
     raw = path.read_text(encoding="utf-8")
-    data = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
+    try:
+        data = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
+    except yaml.YAMLError as failed:
+        # Only where: the parser's message quotes the line, which holds private names.
+        mark = getattr(failed, "problem_mark", None)
+        where = f" at line {mark.line + 1}" if mark is not None else ""
+        raise ValueError(f"the entities file is not valid YAML{where}") from None
     return KnownEntities.model_validate(data or {})
 
 
@@ -125,7 +138,7 @@ def _company(entry: str | NamedEntry) -> list[Term]:
 
 def _person(entry: str | PersonEntry) -> list[Term]:
     person = PersonEntry(name=entry) if isinstance(entry, str) else entry
-    words = person.name.split()
+    words = [w for w in person.name.split() if w.casefold().strip(".,") not in _TITLES]
     terms = [Term("person", person.name)]
     if len(words) > 1:
         terms += [

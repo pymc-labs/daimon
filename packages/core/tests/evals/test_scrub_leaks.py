@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import shutil
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -12,11 +13,14 @@ from pathlib import Path
 
 import pytest
 from daimon.core.evals.from_thread import ThreadRecord, build_cases
+from daimon.core.evals.scrub.detect import Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import KnownEntities
+from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms_of
+from daimon.core.evals.scrub.fakes import adapt
 from daimon.core.evals.scrub.files import rebuild
 from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
 from daimon.core.evals.validate import InvalidDocument
+from faker import Faker
 from PIL import Image
 
 KEY = b"k" * 32
@@ -122,19 +126,21 @@ def _docx() -> bytes:
     parts = {
         "[Content_Types].xml": "<Types/>",
         "word/_rels/document.xml.rels": '<Relationships><Relationship Id="r1" '
-        'Target="media/image1.jpeg"/></Relationships>',
+        'Target="media/alice_smith.jpeg"/><Relationship Id="r2" TargetMode="External" '
+        'Target="file:///C:/Users/psmith/q3.docx"/></Relationships>',
         "word/document.xml": f"<w:document {W}><w:body><w:p><w:r><w:t>Alice Smith met Priya "
         'Raman.</w:t></w:r></w:p><w:p><w:del w:author="Priya Raman"><w:r><w:delText>Note '
         "from Globex Industries</w:delText></w:r></w:del></w:p></w:body></w:document>",
         "docProps/core.xml": '<cp:coreProperties xmlns:cp="urn:cp" xmlns:dc="urn:dc">'
-        "<dc:creator>Priya Raman</dc:creator></cp:coreProperties>",
+        "<dc:creator>Priya Raman</dc:creator><cp:keywords>psmith</cp:keywords>"
+        "<x>lead <b/>Alice Smith tail</x></cp:coreProperties>",
         "docProps/app.xml": "<Properties><Company>Globex Industries</Company></Properties>",
     }
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
         for name, text in parts.items():
             z.writestr(name, text)
-        z.writestr("word/media/image1.jpeg", jpeg.getvalue())
+        z.writestr("word/media/alice_smith.jpeg", jpeg.getvalue())
         z.writestr("word/embeddings/oleObject1.bin", b"raw Alice Smith data")
     return out.getvalue()
 
@@ -145,8 +151,10 @@ def test_docx_when_metadata_deletions_and_embedded_parts_then_nothing_real_and_n
     with zipfile.ZipFile(io.BytesIO(built.data)) as z:
         names = z.namelist()
         dumped = b"".join(z.read(n) for n in names).decode("utf-8", "ignore")
-    assert "word/media/image1.jpeg" in names, "image parts keep their name, so rels still match"
-    assert _real_in(dumped) == [], dumped
+        rels = z.read("word/_rels/document.xml.rels").decode()
+    media = next(n for n in names if n.startswith("word/media/"))
+    assert f'Target="media/{media.rsplit("/", 1)[1]}"' in rels, "renamed parts keep rels valid"
+    assert _real_in(dumped) == [] and "psmith" not in dumped, dumped
 
 
 def _record(files: list[dict[str, object]], result: object = None) -> ThreadRecord:
@@ -196,7 +204,7 @@ def test_bundle_when_manifest_names_people_then_scrubbed_and_map_bound_to_key(
     shutil.copytree(EXAMPLE, source)
     manifest = json.loads((source / "bundle.json").read_text())
     manifest["title"] = "Alice Smith - Globex Industries escalations"
-    manifest["created_by"] = {"kind": "person", "id": "alice@acme-corp.com", "display_name": "x"}
+    manifest["created_by"] = {"kind": "label", "id": "alice-smith-laptop", "display_name": "Alice"}
     manifest["source"] = {"kind": "deployment", "label": "globex-prod", "instance": "https://g.io"}
     (source / "bundle.json").write_text(json.dumps(manifest))
     names, fakes = tmp_path / "names.json", tmp_path / "fakes.json"
@@ -204,11 +212,132 @@ def test_bundle_when_manifest_names_people_then_scrubbed_and_map_bound_to_key(
     scrubber = load_scrubber(
         names, "0123456789abcdef0123", salt="t1", map_path=fakes, ner_model=None
     )
+    assert "person" in {x.kind for x in leftovers_of(source, scrubber)}, "a raw label is flagged"
     scrub_path(source, None, scrubber)
     save_map(scrubber, fakes)
     out = (source / "bundle.json").read_text()
-    assert _real_in(out) == [] and "g.io" not in out, out
+    assert _real_in(out) == [] and "g.io" not in out and "laptop" not in out, out
     kinds = {x.kind for x in leftovers_of(source, scrubber)}
     assert kinds <= {"names_unchecked"}, "the manifest sweeps clean"
     with pytest.raises(InvalidDocument):
         load_scrubber(names, "0123456789abcdef0123", salt="t2", map_path=fakes, ner_model=None)
+
+
+# ---------- second review pass ----------
+
+
+class _Names(Ner):
+    """A stand-in for NER: the given words are people."""
+
+    def __init__(self, *names: str) -> None:
+        super().__init__("none")
+        self._names = re.compile("|".join(map(re.escape, names)))
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def find(self, text: str) -> list[Hit]:
+        return [Hit(m.start(), m.end(), "person", 1) for m in self._names.finditer(text)]
+
+
+def test_name_when_equal_to_an_issued_fake_then_still_replaced_and_sweep_clean() -> None:
+    scrubber = _scrubber()
+    fake = scrubber.fakes.fake("person", "Dana")
+    scrubber.detector = Detector(terms_of(ENTITIES), _Names("Dana", fake))
+    out = scrubber.text(f"Thanks Dana, and thanks {fake}.")
+    assert out.count(fake) == 1, "the real name equal to a fake is replaced too"
+    assert scrubber.residue(out) == {}, "fakes are not leftovers"
+
+
+def test_fakes_when_dictionary_is_large_then_readable() -> None:
+    faker = Faker("en_US")
+    faker.seed_instance(7)
+    people = sorted({faker.name() for _ in range(3000)})
+    scrubber = _scrubber(KnownEntities.model_validate({"people": people}))
+    for name in people[:200]:
+        out = scrubber.text(f"{name} said hi; later {name.split()[-1]} left")
+        assert not re.search(r"\d", out), out
+
+
+def test_sweep_when_ner_widens_a_fake_then_clean_unless_a_real_word_joins() -> None:
+    scrubber = _scrubber()
+    fake = adapt("AcmeCorp", scrubber.fakes.fake("company", "Acme Corp"))
+    scrubber.detector = Detector([], _Names(f"{fake} Team", f"{fake} Johnson"))
+    assert scrubber.residue(f"{fake} Team") == {}
+    assert scrubber.residue(f"{fake} Johnson") == {"person": 1}
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"api_keys": ["hunter2hunter2"]},
+        {"tokens": [{"v": "hunter2hunter2"}]},
+        {"credentials": {"value": "hunter2hunter2", "user": "hunter2"}},
+        {"headers": {"Authorization": "Basic aHVudGVyMjpodW50ZXIy"}},
+        {"headers": [{"name": "Authorization", "value": "Token hunter2hunter2"}]},
+        {"headers": [["Proxy-Authorization", "hunter2"]]},
+        {"pwd": "hunter2", "pin": 1234, "signingKey": "hunter2", "AccountKey": "hunter2"},
+        {"phone": 14155550199},
+    ],
+)
+def test_value_when_secret_in_nested_or_list_shapes_then_dropped(doc: dict[str, object]) -> None:
+    scrubber = _scrubber()
+    assert scrubber.residue_of(doc), "the sweep sees it"  # type: ignore[arg-type]
+    out = json.dumps(scrubber.value(doc))  # type: ignore[arg-type]
+    assert "hunter2" not in out and "1234" not in out and "4155550199" not in out, out
+    assert scrubber.residue_of(json.loads(out)) == {}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password=abc123",
+        "password: correct horse battery staple",
+        'login with {"pwd": "s3cr3t"}',
+        "AccountKey=hunter2hunter2==;EndpointSuffix=core",
+        "ENCRYPTION_KEY=hunter2hunter2",
+        "Authorization: Bearer hunter2",
+        "Authorization: Basic aHVudGVyMjpodW50ZXIy",
+        "send Basic aHVudGVyMjpodW50ZXIy",
+        "postgres://u:hunter2/xx@db.example.com/d",
+        "https://x.example/?k=hunter2hunter2",
+        "SK" + "0123456789abcdef0123456789abcdef",
+        "&#65;lice Smith and Alice&nbsp;Smith",
+        "note: " + base64.b64encode(b"Alice Smith").decode(),
+        "state=" + base64.urlsafe_b64encode(b"Alice Smith, hunter2!?>").decode(),
+        "C:\\Users\\asmith\\x.txt /home/asmith/x",
+    ],
+)
+def test_text_when_labelled_encoded_or_home_path_then_nothing_left(text: str) -> None:
+    scrubber = _scrubber(KnownEntities.model_validate({"people": ["Alice Smith"]}))
+    out = scrubber.text(text)
+    leaked = ("hunter2", "abc123", "horse", "staple", "s3cr3t", "0123456789abcdef", "asmith")
+    assert _real_in(out) == [] and not [x for x in leaked if x in out], out
+    for word in re.findall(r"[A-Za-z0-9+/_-]{12,}={0,2}", out):
+        body = word.rstrip("=")
+        if len(body) % 4 != 1:
+            decoded = base64.urlsafe_b64decode(body.replace("+", "-").replace("/", "_") + "==")
+            assert b"Alice" not in decoded, out
+
+
+def test_docx_when_embedded_files_nest_too_deep_then_refused() -> None:
+    def zipped(parts: dict[str, bytes]) -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in parts.items():
+                z.writestr(name, data)
+        return out.getvalue()
+
+    doc = zipped({"[Content_Types].xml": b"<Types/>"})
+    for _ in range(4):
+        doc = zipped({f"e{i}.docx": doc for i in range(20)})
+    assert rebuild(doc, DOCX, "a.docx", _scrubber()) is None, "flagged, not unpacked"
+
+
+def test_entities_when_yaml_is_broken_then_error_names_no_line(tmp_path: Path) -> None:
+    bad = tmp_path / "names.yaml"
+    bad.write_text('people:\n  - "Alice Smith\n  - x: [\n')
+    with pytest.raises(ValueError, match="line") as failed:
+        load_entities(bad)
+    assert "Alice" not in str(failed.value)
