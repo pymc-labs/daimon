@@ -22,6 +22,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "eval_item_get",
             "eval_compare",
             "eval_judge_run",
+            "eval_review_queues",
             "eval_review_next",
             "eval_review_submit",
             "eval_comment_add",
