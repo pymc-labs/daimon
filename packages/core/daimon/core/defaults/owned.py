@@ -12,6 +12,7 @@ from typing import cast
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from anthropic.types.beta.agent_create_params import Tool
 from daimon.core.defaults.builtin_agent import builtin_lookup_names, resolve_builtin_agent_name
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
@@ -27,6 +28,12 @@ from daimon.core.mux_compat import agent_spec, create_owned_agent, create_owned_
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.specs import AgentSpec, EnvironmentSpec, dump_agent_spec
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    ToolSafetyPolicy,
+    session_tools_for_policy,
+    trusted_servers_for,
+)
 from mux.contracts.ids import ModelRef, Provider, Scope
 from mux.contracts.resources import Agent
 from mux.contracts.resources import AgentSpec as RecordAgentSpec
@@ -268,37 +275,79 @@ async def reconcile_owned_environment(
     )
 
 
-def host_tools_spec(spec: RecordAgentSpec, public_url: str) -> RecordAgentSpec:
-    """A record as its provider host runs it: with the seeded Claude default agent's tools.
+def host_tools_spec(
+    spec: RecordAgentSpec,
+    public_url: str,
+    *,
+    tool_safety: ToolSafetyPolicy,
+    asks_before_publishing: bool = False,
+) -> RecordAgentSpec:
+    """A record as its provider host runs it, as a Claude default agent switched there.
 
-    That is the base agent toolset, plus Daimon's MCP toolset when the record lists
-    Daimon's server, as Managed Agents stores them (every tool enabled, always
-    allowed), and Daimon's server at this deployment's URL: what a Claude default
-    agent switched to the provider is represented with. The record's own tools,
-    servers and toolset extension (`owned_agent_spec` drops most) never widen it.
+    Its own toolsets when it has any (its facts, gated as its session runs them), else
+    the seeded default agent's: the base agent toolset, plus Daimon's MCP toolset when
+    it lists Daimon's server, as Managed Agents stores them (every tool enabled, always
+    allowed). Daimon's server is this deployment's; its connectors stay, so a switch
+    names or relays each as for a Managed Agents agent. Built-ins whoever runs Daimon
+    forbids are off and tool safety applies, so a record never widens its template.
     """
-    from daimon.core.defaults.mcp_merge import merge_default_mcp_toolset
-    from daimon.core.specs import merge_default_agent_toolset
-    from daimon.core.tool_safety import DAIMON_SERVER_NAME
+    from daimon.core.agent_editing import denied_builtins
+    from daimon.core.features.model_input import builtin_enabled, with_builtin
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.resources import MCPConnection
     from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE
 
-    listed = any(s.name == DAIMON_SERVER_NAME for s in spec.mcp_servers or ())
-    servers = (MCPConnection(name=DAIMON_SERVER_NAME, url=public_url),) if listed else ()
+    connectors = tuple(s for s in spec.mcp_servers or () if s.name != DAIMON_SERVER_NAME)
+    listed = len(connectors) < len(spec.mcp_servers or ())
+    daimon = (MCPConnection(name=DAIMON_SERVER_NAME, url=public_url),) if listed else ()
+    servers = (*daimon, *connectors)
+    own = [
+        cast(Tool, tool)
+        for extension in spec.extensions or ()
+        if extension.namespace == AGENT_TOOLS_NAMESPACE
+        for tool in cast(list[JsonValue], extension.value.get("tools") or [])
+    ]
+    # A toolset of a server it doesn't list is not callable on Managed Agents either.
+    names = {server.name for server in servers}
+    tools = [
+        tool
+        for tool in own or _template_tools(public_url, listed=listed)
+        if tool.get("type") != "mcp_toolset" or tool.get("mcp_server_name") in names
+    ]
+    for name in sorted(denied_builtins(tool_safety.denied)):
+        if builtin_enabled(tools, name):
+            tools = with_builtin(tools, name, False)
+    gated = session_tools_for_policy(
+        tool_safety,
+        tools,
+        trusted_servers=trusted_servers_for(public_url, {s.name: s.url for s in servers}),
+        asks_before_publishing=asks_before_publishing,
+    )
+    toolset = ExtensionConfig(
+        namespace=AGENT_TOOLS_NAMESPACE,
+        version=1,
+        value={"tools": cast(list[JsonValue], tools if gated is None else gated)},
+    )
+    others = tuple(e for e in spec.extensions or () if e.namespace != AGENT_TOOLS_NAMESPACE)
+    return spec.model_copy(
+        update={"tools": None, "mcp_servers": servers, "extensions": (*others, toolset)}
+    )
+
+
+def _template_tools(public_url: str, *, listed: bool) -> list[Tool]:
+    """The seeded default agent's toolsets as Managed Agents stores them: all on, allowed."""
+    from daimon.core.defaults.mcp_merge import merge_default_mcp_toolset
+    from daimon.core.specs import merge_default_agent_toolset
+
     tools = merge_default_agent_toolset(None)
-    if servers:
+    if listed:
         tools = merge_default_mcp_toolset(tools, public_url) or tools
     stored: dict[str, JsonValue] = {"enabled": True, "permission_policy": {"type": "always_allow"}}
-    readback: list[JsonValue] = []
+    readback: list[Tool] = []
     for tool in tools:
         entry: dict[str, JsonValue] = {**cast(dict[str, JsonValue], tool), "default_config": stored}
         if "configs" in tool:
             configs = cast(list[dict[str, JsonValue]], tool["configs"])
             entry["configs"] = [{**config, **stored} for config in configs]
-        readback.append(entry)
-    toolset = ExtensionConfig(namespace=AGENT_TOOLS_NAMESPACE, version=1, value={"tools": readback})
-    others = tuple(e for e in spec.extensions or () if e.namespace != AGENT_TOOLS_NAMESPACE)
-    return spec.model_copy(
-        update={"tools": None, "mcp_servers": servers, "extensions": (*others, toolset)}
-    )
+        readback.append(cast(Tool, entry))
+    return readback

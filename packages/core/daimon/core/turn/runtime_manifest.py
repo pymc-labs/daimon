@@ -603,7 +603,12 @@ async def _capture_source_capabilities(
         if _host_supplies_tools(source) and request.deps.mcp.public_url is not None:
             from daimon.core.defaults.owned import host_tools_spec
 
-            spec = host_tools_spec(spec, str(request.deps.mcp.public_url))
+            spec = host_tools_spec(
+                spec,
+                str(request.deps.mcp.public_url),
+                tool_safety=request.deps.tool_safety,
+                asks_before_publishing=bool(source.asks_before_publishing),
+            )
         pin = source_preservation_pin(source)
         represented: list[SourceRepresentation] = []
         candidates: list[tuple[dict[str, JsonValue], SourceCapabilities | _TemplateInputs]] = []
