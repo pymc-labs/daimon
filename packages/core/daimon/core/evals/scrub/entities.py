@@ -1,0 +1,141 @@
+"""The known-entities dictionary: names the deployment's own data tells us are private.
+
+A JSON or YAML file with a list per kind. Person entries are a name or an object with
+`aliases`, `emails`, `handles` and `ids`; companies, projects and channels may be a name or
+`{name, aliases}`. Every other kind is a list of strings.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field
+
+TermKind = Literal[
+    "person", "person_first", "person_last", "email", "handle", "company", "project", "host",
+    "repo", "channel", "phrase", "id",
+]  # fmt: skip
+MIN_PART: Final = 3
+
+
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PersonEntry(_Model):
+    name: str
+    aliases: list[str] = Field(default_factory=list[str])
+    emails: list[str] = Field(default_factory=list[str])
+    handles: list[str] = Field(default_factory=list[str])
+    ids: list[str] = Field(default_factory=list[str])
+
+
+class NamedEntry(_Model):
+    name: str
+    aliases: list[str] = Field(default_factory=list[str])
+
+
+class KnownEntities(_Model):
+    people: list[str | PersonEntry] = Field(default_factory=list[str | PersonEntry])
+    emails: list[str] = Field(default_factory=list[str])
+    companies: list[str | NamedEntry] = Field(default_factory=list[str | NamedEntry])
+    projects: list[str | NamedEntry] = Field(default_factory=list[str | NamedEntry])
+    hostnames: list[str] = Field(default_factory=list[str])
+    repos: list[str] = Field(default_factory=list[str])
+    channels: list[str | NamedEntry] = Field(default_factory=list[str | NamedEntry])
+    ids: list[str] = Field(default_factory=list[str])
+    phrases: list[str] = Field(default_factory=list[str])
+
+
+@dataclass(frozen=True)
+class Term:
+    """One real string to replace. `of` is the entry it belongs to: its fake is derived from it."""
+
+    kind: TermKind
+    text: str
+    of: str | None = None
+
+
+def normalize(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
+def load_entities(path: Path) -> KnownEntities:
+    raw = path.read_text(encoding="utf-8")
+    data = json.loads(raw) if path.suffix == ".json" else yaml.safe_load(raw)
+    return KnownEntities.model_validate(data or {})
+
+
+def _named(entry: str | NamedEntry, kind: TermKind) -> list[Term]:
+    name, aliases = (entry, []) if isinstance(entry, str) else (entry.name, entry.aliases)
+    return [Term(kind, name), *(Term(kind, a, of=name) for a in aliases)]
+
+
+def _person(entry: str | PersonEntry) -> list[Term]:
+    person = PersonEntry(name=entry) if isinstance(entry, str) else entry
+    words = person.name.split()
+    terms = [Term("person", person.name)]
+    if len(words) > 1:
+        terms += [
+            Term("person_first", words[0], of=person.name),
+            Term("person_last", words[-1], of=person.name),
+        ]
+        terms = [t for t in terms if len(t.text) >= MIN_PART or t.kind == "person"]
+    parts = {normalize(w) for w in words}
+    for alias in person.aliases:
+        # An alias that is just one word of the name takes that word's fake.
+        terms.append(Term("person", alias, of=person.name))
+        if normalize(alias) in parts and len(words) > 1:
+            kind = "person_first" if normalize(alias) == normalize(words[0]) else "person_last"
+            terms[-1] = Term(kind, alias, of=person.name)
+    terms += [Term("email", e, of=person.name) for e in person.emails]
+    terms += [Term("handle", h, of=person.name) for h in person.handles]
+    terms += [Term("id", i) for i in person.ids]
+    return terms
+
+
+def _repo(slug: str) -> list[Term]:
+    owner, _, name = slug.partition("/")
+    terms = [Term("repo", slug)]
+    if name:
+        # The owner and name share fakes with the same words elsewhere.
+        terms += [Term("company", owner), Term("project", name)]
+    return [t for t in terms if t.kind == "repo" or len(t.text) >= MIN_PART]
+
+
+def terms_of(entities: KnownEntities) -> list[Term]:
+    """Every term, longest first; the first of equal normalized texts wins."""
+    found: list[Term] = []
+    for p in entities.people:
+        found += _person(p)
+    found += [Term("email", e) for e in entities.emails]
+    for c in entities.companies:
+        found += _named(c, "company")
+    for pr in entities.projects:
+        found += _named(pr, "project")
+    found += [Term("host", h) for h in entities.hostnames]
+    for r in entities.repos:
+        found += _repo(r)
+    for ch in entities.channels:
+        found += [Term(t.kind, re.sub(r"^#", "", t.text), t.of) for t in _named(ch, "channel")]
+    found += [Term("id", i) for i in entities.ids]
+    found += [Term("phrase", p) for p in entities.phrases]
+    unique: dict[str, Term] = {}
+    for term in found:
+        if term.text.strip():
+            unique.setdefault(normalize(term.text), term)
+    return sorted(unique.values(), key=lambda t: len(t.text), reverse=True)
+
+
+def merge_entities(*parts: KnownEntities) -> KnownEntities:
+    """One dictionary holding every entry of `parts`."""
+    merged: dict[str, list[object]] = {name: [] for name in KnownEntities.model_fields}
+    for part in parts:
+        for name in merged:
+            merged[name] += getattr(part, name)
+    return KnownEntities.model_validate(merged)

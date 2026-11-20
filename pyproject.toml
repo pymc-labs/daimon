@@ -25,6 +25,8 @@ billing = ["daimon-adapter-mcp[billing]"]
 # Operator deployments that run agents on Gemini install this extra so the image
 # carries the Gemini SDK pin the driver needs.
 gemini = ["daimon-mux[gemini]"]
+# Eval scrubbing libraries (Presidio, Faker, PDF text, OCR); see docs/evals.md.
+evals = ["daimon-core[evals]"]
 
 [project.urls]
 Repository = "https://github.com/pymc-labs/daimon"
