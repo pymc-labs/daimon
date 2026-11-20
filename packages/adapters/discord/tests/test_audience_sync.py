@@ -753,3 +753,21 @@ async def test_a_channel_event_on_the_bot_recomputes_the_real_facts(
     bot._audience_renewal = None
     await DaimonBot.on_disconnect(bot)
     assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS
+
+
+async def test_renewal_keeps_ticking_after_a_tick_fails() -> None:
+    audience = AudienceSync(MagicMock(), renew_every_s=0)
+    ticks: list[int] = []
+
+    async def tick(_guilds: object) -> None:
+        ticks.append(len(ticks))
+        if len(ticks) == 1:
+            raise AttributeError("a broken read")
+        if len(ticks) == 3:
+            raise asyncio.CancelledError
+
+    audience.tick = tick  # type: ignore[method-assign]
+    with pytest.raises(asyncio.CancelledError):
+        await audience.run(lambda: [])
+
+    assert ticks == [0, 1, 2], "the tick after a failure still runs; cancel still ends it"
