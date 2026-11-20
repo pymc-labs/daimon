@@ -152,7 +152,7 @@ class RunForm:
 @dataclass(frozen=True)
 class Pressed:
     """What the adapter does next: tell the presser, replace the card, open a form or post a
-    run card (`start`, then `start_run`)."""
+    run card (`start`, then `start_on_card`)."""
 
     say: str | None = None
     card: PostedCard | None = None
@@ -487,7 +487,13 @@ async def run_card_of(sm: Sessions, settings: Settings, run_id: uuid.UUID) -> Po
     return run_card(detail, web_root(settings, run.tenant_id))
 
 
-async def start_run(
+async def show_on_card(sm: Sessions, run_id: uuid.UUID, place: ChatPlace) -> None:
+    """Record that the card at `place` shows the run, so the follower edits it."""
+    async with sm.begin() as session:
+        await runs_store.show_on_card(session, run_id, place.ref())
+
+
+async def start_on_card(
     env: Env,
     workflow_id: uuid.UUID,
     inputs: Mapping[str, Any],
@@ -497,11 +503,10 @@ async def start_run(
 ) -> PostedCard:
     """Start a run that shows itself on the card at `place`; the card to show now."""
     try:
-        run = await service.start(
-            env, workflow_id, dict(inputs), test={} if test else None, card=place.ref()
-        )
+        run = await service.start(env, workflow_id, dict(inputs), test={} if test else None)
     except WorkflowError as err:
         return notice(str(err))
+    await show_on_card(env.sm, uuid.UUID(run.id), place)
     return await run_card_of(env.sm, env.settings, uuid.UUID(run.id)) or notice(UNAVAILABLE)
 
 
@@ -538,7 +543,7 @@ async def press(
             inputs = confirmed_inputs(card_text, keys)
             if arg != inputs_digest(target, workflow.live_version, inputs):
                 return Pressed(say=CHANGED)
-            return Pressed(card=await start_run(env, target, inputs, test=False, place=place))
+            return Pressed(card=await start_on_card(env, target, inputs, test=False, place=place))
         draft = await service.get_draft(env, target)
         if arg != f"{draft.revision:x}":
             return Pressed(say=STALE)
@@ -633,7 +638,7 @@ async def open_run(
 ) -> None:
     """Post a run card, start the run on it, and show what happened."""
     place = await post(starting_card(name))
-    await edit(place, await start_run(env, workflow_id, inputs, test=test, place=place))
+    await edit(place, await start_on_card(env, workflow_id, inputs, test=test, place=place))
 
 
 async def list_for(

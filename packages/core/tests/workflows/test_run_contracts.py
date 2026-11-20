@@ -59,10 +59,33 @@ def test_every_trigger_path_starts_runs_through_start_run_and_ingress_starts_non
             if named and named != "start_run" and _called(fn, "start_run"):
                 callers.add(f"{path.name}:{named}")
     assert callers == {
-        "service.py:start",  # manual and test runs
+        "service.py:start",  # manual and test runs, from the web, MCP and chat cards
         "service.py:rerun",
         "triggers.py:_start_one",  # schedule slots, webhook deliveries, finished runs
         "triggers.py:start_called",  # call triggers
         "webhooks.py:replay",
         "workflows.py:run",  # the test helper in daimon.testing
     }, f"a new path that starts runs joins this list: {sorted(callers)}"
+
+
+def test_every_manual_start_is_a_listed_path() -> None:
+    callers: set[str] = set()
+    for path in PACKAGES.glob("**/daimon/**/*.py"):
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in ast.walk(fn):
+                func = isinstance(call, ast.Call) and call.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "start"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "service"
+                ):
+                    callers.add(f"{path.name}:{fn.name}")
+    assert callers == {
+        "chat_cards.py:start_on_card",  # Run and Test run pressed on a chat card
+        "workflows.py:_run_workflow_impl",  # the MCP run tool
+        "workflows.py:start",  # the web route
+        "workflows.py:workflows_router",  # the route's enclosing router
+    }, f"a new path that starts manual runs joins this list: {sorted(callers)}"

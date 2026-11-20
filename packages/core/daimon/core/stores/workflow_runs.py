@@ -260,6 +260,13 @@ async def carded_runs(
     return [RunRow.model_validate(orm) for orm in (await session.execute(stmt)).scalars()]
 
 
+async def show_on_card(session: AsyncSession, run_id: uuid.UUID, card: Mapping[str, str]) -> None:
+    """Name the chat message that shows the run, for the run card follower."""
+    orm = await session.get(WorkflowRun, run_id, with_for_update=True)
+    if orm is not None:
+        orm.triggered_by = {**orm.triggered_by, "card": dict(card)}
+
+
 async def update_run(
     session: AsyncSession, run_id: uuid.UUID, **changes: Unpack[RunChanges]
 ) -> None:
