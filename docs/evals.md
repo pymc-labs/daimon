@@ -102,14 +102,22 @@ simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__
 
 Each item runs its tools in an enclosed sandbox pod. A gateway in the pod sends
 every web request the tools make to the fake world and refuses every other
-connection. Only the provider worker that runs the agent reaches its provider,
-and every shell it starts runs as the agent. Package downloads are blocked
+connection. The provider worker that runs the agent reaches its provider, and
+the shells it starts run as the agent. Package downloads are blocked
 unless the `eval_package_registries` feature lets them reach the real registries.
 
 A pod gets 2 CPUs, 4 GB of memory, 4,096 processes and 20 GB of disk.
 Docker has no per-container disk cap, and on Kubernetes the process limit is
 the node's. Kubernetes stops a pod after 4 hours. Tools written in Go, such
 as `gh`, see the real clock instead of the case's.
+
+Limits: this encloses the agent's tools, not a hostile executor. A command the
+executor starts without a shell, such as the codex backend's `python3` or `curl`,
+and a direct run of the real shell binaries, run as the executor user. That user
+reaches the provider's control plane and any
+[`passthrough_hosts`](configuration.md#daimon_evals__passthrough_hosts) untouched,
+and the gateway matches them by TLS server name, not by the request's Host header.
+Provider web tools are off only for agents compiled by the eval path.
 
 Pods run on a Docker host or in a Kubernetes namespace, chosen by
 [`DAIMON_EVALS__SANDBOX_RUNTIME`](configuration.md#daimon_evals__sandbox_runtime).

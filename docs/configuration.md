@@ -367,8 +367,9 @@ certificate per host with it. Unset: no sandbox can be enclosed.
 `list[str]` · optional · default unset
 
 Extra hosts the eval executor's own user may reach untouched, besides its provider's
-control plane. Shells the executor starts run as the agent and reach the fake world
-instead.
+control plane. Matched by TLS server name, not Host. Shells the executor starts run as
+the agent and reach the fake world; commands it starts without a shell run as the
+executor and reach these hosts.
 
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 

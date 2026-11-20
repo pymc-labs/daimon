@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import time
 import uuid
 from datetime import UTC, datetime
 from functools import cache
@@ -13,12 +14,19 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from daimon.core.evals.format import JsonObject
 from daimon.core.evals.sandbox.ca import EvalCA, eval_ca
 from daimon.core.evals.sandbox.docker import DockerRuntime, demux
-from daimon.core.evals.sandbox.kubernetes import exit_code, pod_manifest, secret_manifest
+from daimon.core.evals.sandbox.kubernetes import (
+    exit_code,
+    overdue_pods,
+    pod_manifest,
+    secret_manifest,
+)
 from daimon.core.evals.sandbox.parity import missing_packages
 from daimon.core.evals.sandbox.runtime import (
     PodFile,
+    PodHandle,
     PodSpec,
     SandboxError,
     gateway_config,
@@ -123,6 +131,47 @@ def test_exec_streams_and_status() -> None:
     assert demux(stream) == (b"ok", b"bad"), "docker stdout and stderr split"
     failed = {"status": "Failure", "details": {"causes": [{"reason": "ExitCode", "message": "3"}]}}
     assert exit_code(failed) == 3 and exit_code({"status": "Success"}) == 0, "kubernetes exit codes"
+
+
+def test_reap_takes_finished_and_overdue_pods_including_pending() -> None:
+    now = time.time()
+
+    def pod(name: str, age_s: float, phase: str) -> JsonObject:
+        made = datetime.fromtimestamp(now - age_s, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"metadata": {"name": name, "creationTimestamp": made}, "status": {"phase": phase}}
+
+    pods = [
+        pod("done", 60, "Succeeded"), pod("stuck", 5 * 3600, "Pending"),
+        pod("old", 5 * 3600, "Running"), pod("fresh", 60, "Pending"),
+    ]  # fmt: skip
+    assert overdue_pods(pods, now) == ["done", "stuck", "old"], "fresh pods are left alone"
+
+
+async def test_docker_reap_removes_containers_past_their_expiry_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    listed = [
+        {"Names": ["/eval-a-main"], "Labels": {"daimon.eval.expires": str(now - 10)}},
+        {"Names": ["/eval-b-main"], "Labels": {"daimon.eval.expires": str(now + 3600)}},
+    ]
+    runtime = DockerRuntime(None, network="eval")  # type: ignore[arg-type]
+
+    class Reply:
+        def json(self) -> object:
+            return listed
+
+    async def call(*_: object, **__: object) -> Reply:
+        return Reply()
+
+    stopped: list[str] = []
+
+    async def stop(pod: PodHandle) -> None:
+        stopped.append(pod.id)
+
+    monkeypatch.setattr(runtime, "_call", call)
+    monkeypatch.setattr(runtime, "stop", stop)
+    assert await runtime.reap() == ["eval-a"] == stopped, "only the expired pod goes"
 
 
 def test_parity_names_missing_packages() -> None:

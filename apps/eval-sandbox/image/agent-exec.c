@@ -5,6 +5,7 @@
  * kernel then kills the shell. Inherited sockets are closed: one opened as the executor
  * would keep the executor's network path. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <grp.h>
 #include <linux/capability.h>
 #include <signal.h>
@@ -27,6 +28,8 @@ static void close_sockets(void) {
 
 int main(int argc, char **argv) {
     (void)argc;
+    /* An ignored SIGCHLD survives execve and makes waitpid fail with ECHILD. */
+    signal(SIGCHLD, SIG_DFL);
     pid_t parent = getpid(), child = fork();
     if (child < 0) {
         perror("agent-exec");
@@ -59,6 +62,7 @@ int main(int argc, char **argv) {
     close(2);
     int status;
     while (waitpid(child, &status, 0) < 0)
-        ;
+        if (errno != EINTR)
+            return 126;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 }
