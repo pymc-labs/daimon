@@ -66,7 +66,7 @@ def kept_headers(headers: Mapping[str, str]) -> dict[str, JsonValue]:
     return kept
 
 
-def _parse(body: bytes, content_type: str) -> dict[str, JsonValue] | None:
+def parse(body: bytes, content_type: str) -> dict[str, JsonValue] | None:
     """The payload object, or None when the body is not one."""
     if not body.strip():
         return {}
@@ -164,6 +164,26 @@ async def _limited(
     )
 
 
+async def _offer(
+    session: AsyncSession,
+    trigger: TriggerRow,
+    spec: Spec,
+    config: dict[str, Any],
+    context: dict[str, JsonValue],
+    now: datetime,
+) -> None:
+    """A delivery that starts no run is an event for this workflow's waits on the trigger,
+    keyed like a run its mapped inputs would start."""
+    try:
+        inputs, _ = engine.resolve_inputs(spec, map_inputs(config.get("inputs"), context, now=now))
+        key = runs.concurrency_key(spec, inputs, now)
+    except (MappingError, ExpressionError):
+        inputs, key = None, None
+    source = f"trigger:{trigger.workflow_id}:{trigger.trigger_key}"
+    event = {**context, "inputs": inputs, "received_at": now.isoformat()}
+    await runs.offer_event(session, trigger.tenant_id, source, key, event, now)
+
+
 async def receive(
     sm: Sessions,
     settings: Settings,
@@ -218,7 +238,7 @@ async def receive(
         if not verify(scheme, plain, headers, body, now=now):
             await reject(401, "signature", None)
             return Reply(401, {"error": "invalid_signature"})
-        payload = _parse(body, headers.get("content-type", ""))
+        payload = parse(body, headers.get("content-type", ""))
         if payload is None:
             await reject(422, "not_an_object", None)
             return Reply(422, {"error": "invalid_body", "message": "Send a JSON object"})
@@ -255,6 +275,8 @@ async def receive(
         if test:
             await store.set_listening(session, trigger, until=None, listener=None)  # one capture
         if not wanted:
+            if not test:
+                await _offer(session, trigger, spec, config, context, now)
             return Reply(200, {"delivery": delivery_ref(event.id, test), "started": False})
         await session.execute(select(func.pg_notify(runs.START_CHANNEL, "webhook")))
     return Reply(202, {"delivery": delivery_ref(event.id, test)})

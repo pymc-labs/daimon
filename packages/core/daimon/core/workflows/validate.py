@@ -62,6 +62,10 @@ _BAD_EVENT_SOURCE: Final = (
     "An event source is a workflow, as `workflow:<id>`; other events never arrive. "
     "Use a webhook trigger for outside events"
 )
+_BAD_WAIT_SOURCE: Final = (
+    "A wait's event is another workflow's run (`workflow:<id>`), a delivery to one of this "
+    "workflow's webhook triggers (`trigger:<id>`) or `callback`"
+)
 _STEP_PARTS: Final = frozenset({"output", "summary", "route", "status", "files", "visits"})
 _ROOTS: Final[dict[str, frozenset[str]]] = {
     "node": frozenset({"inputs", "trigger", "steps", "run", "workflow"}),
@@ -294,8 +298,8 @@ def _check_node(
                 report.error("unknown_tool", f"Unknown tool: {inner.tool}", node_id)
             if (node.concurrency or 1) > _COSTLY_CONCURRENCY and isinstance(inner, AgentNode):
                 report.warn("cost", "Agent per item, high concurrency", node_id)
-        case WaitNode() if node.event and not _EVENT_SOURCE.fullmatch(node.event.source):
-            report.error("bad_event_source", _BAD_EVENT_SOURCE, node_id)
+        case WaitNode() if node.event and not _wait_source(spec, node.event.source):
+            report.error("bad_event_source", _BAD_WAIT_SOURCE, node_id)
         case FinishNode() if node.deliver and node.deliver.to == "home" and spec.home is None:
             report.error("no_home", "Delivery to home needs a home channel", node_id)
         case _:
@@ -316,6 +320,16 @@ def _check_agent(
     for tool in node.tools if isinstance(node.tools, list) else []:
         if tool not in catalog.agents[agent]:
             report.error("unknown_tool", f"{agent} cannot call {tool}", node_id)
+
+
+def _wait_source(spec: Spec, source: str) -> bool:
+    webhooks = {t.id for t in spec.triggers or [] if isinstance(t, WebhookTrigger)}
+    return (
+        bool(_EVENT_SOURCE.fullmatch(source))
+        or source == "callback"
+        or source.removeprefix("trigger:") in webhooks
+        and source.startswith("trigger:")
+    )
 
 
 def _check_approval(spec: Spec, node_id: str, node: ApprovalNode, report: _Report) -> None:
