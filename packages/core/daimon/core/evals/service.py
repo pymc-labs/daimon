@@ -92,6 +92,7 @@ from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import eval_scrub
 from daimon.core.stores import evals as store
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CaseRef = ItemCaseRef
@@ -269,6 +270,18 @@ def _label_people(document: JsonObject, secret: str) -> JsonObject:
 def arm_labels(run: Run) -> dict[str, str]:
     """The neutral name of each arm a blind reviewer sees."""
     return run.blind_labels or {a.id: f"Arm {n}" for n, a in enumerate(run.arms, start=1)}
+
+
+def blind_run(run: Run) -> Run:
+    """A run as a blind reviewer sees it: arms under their neutral labels, and nothing that
+    names a model, an agent, a cost or who approved it."""
+    labels = arm_labels(run)
+    arms = [Arm(id=n, label=n, kind=a.kind) for a in run.arms if (n := labels.get(a.id, "Arm"))]
+    return Run(
+        id=run.id, suite=run.suite, arms=arms, case_ids=run.case_ids, repeats=run.repeats,
+        status=run.status, origin=run.origin, started_at=run.started_at,
+        finished_at=run.finished_at,
+    )  # fmt: skip
 
 
 def blind_item(document: JsonObject, labels: dict[str, str]) -> JsonObject:
@@ -553,8 +566,10 @@ class EvalService:
         actor: Subject,
         *,
         signature: str | None = None,
+        bundle_scrub: str | None = None,
     ) -> None:
-        """Store a version; how scrubbed it is comes from the stored revisions it pins."""
+        """Store a version; how scrubbed it is comes from the stored revisions it pins, and
+        from the bundle it came in, when it did."""
         if problems := schema_problems("Suite", document, "suite"):
             raise EvalRefused("This suite is not valid.", problems)
         ids = await store.case_ids(session, suite_id=suite.id)
@@ -571,7 +586,8 @@ class EvalService:
         scrubs = await store.revision_scrubs(session, [(p.case_id, p.revision) for p in pins])
         await store.add_suite_version(
             session, suite, version=int(str(document["version"])), document=document, pins=pins,
-            scrub_status=_worst(scrubs), created_by=actor.key, signature=signature,
+            scrub_status=_worst([*scrubs, bundle_scrub]) if bundle_scrub else _worst(scrubs),
+            created_by=actor.key, signature=signature,
         )  # fmt: skip
 
     async def put_case(
@@ -810,12 +826,14 @@ class EvalService:
             )
         return Arm.model_validate(row.document)
 
-    async def run(self, actor: Subject, run_id: str) -> Run:
+    async def run(self, actor: Subject, run_id: str, *, blind: bool = False) -> Run:
+        """A run. Reviewers, and `blind`, get the blind view (`blind_run`)."""
         await self._check_on(actor)
         async with self._sessions() as session:
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
-            run, _ = await self._run(session, actor, found, "view")
-        return Run.model_validate(run.document)
+            run, role = await self._run(session, actor, found, "view")
+        document = Run.model_validate(run.document)
+        return blind_run(document) if blind or role == "reviewer" else document
 
     async def items(
         self, actor: Subject, run_id: str, page: Page, *, blind: bool = False
@@ -831,7 +849,8 @@ class EvalService:
         labels = arm_labels(Run.model_validate(run.document)) if blind or role == "reviewer" else {}
         return [
             RunItemSummary(
-                id=str(r.id), key=r.key, case_id=r.case_key, case_revision=r.case_revision,
+                id=str(r.id), key=str(r.id) if labels else r.key, case_id=r.case_key,
+                case_revision=r.case_revision,
                 arm_id=labels.get(r.arm_key, "Arm") if labels else r.arm_key, repeat=r.repeat,
                 status=r.status,
             )
@@ -855,6 +874,7 @@ class EvalService:
         document = row.document
         if blind or role == "reviewer":
             document = blind_item(document, arm_labels(Run.model_validate(run.document)))
+            document = {**document, "id": str(row.id)}  # the stored id can name the arm
         return RunItem.model_validate(document)
 
     async def blob(self, actor: Subject, sha256: str) -> tuple[store.BlobRow, bytes]:
@@ -964,6 +984,10 @@ class EvalService:
                 signature="valid" if key else "unsigned",
             )  # fmt: skip
             spool = await self._zip(session, actor.tenant_id, files, entries)
+            limit = self._settings.evals.max_bundle_mb
+            if await asyncio.to_thread(_size, spool) > limit * 1024 * 1024:
+                spool.close()
+                raise EvalRefused(f"The bundle is over {limit} MiB. Export fewer suites or runs.")
         name, media_type = f"{header.id}.daimon-eval.zip", "application/zip"
         if passphrase:
             sealed = await asyncio.to_thread(bundles.encrypt, spool.read(), passphrase)
@@ -1082,7 +1106,12 @@ class EvalService:
                 if await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id):
                     skipped.append(run_id)
                     continue
-                await self._import_run(session, actor, manifest, run, renamed, signature)
+                try:  # a concurrent import of the same run wins; this one skips it
+                    async with session.begin_nested():
+                        await self._import_run(session, actor, manifest, run, renamed, signature)
+                except IntegrityError:
+                    skipped.append(run_id)
+                    continue
                 done.append(run_id)
             await store.record_bundle(
                 session, tenant_id=actor.tenant_id, direction="import", manifest=raw_manifest,
@@ -1132,7 +1161,12 @@ class EvalService:
                 if stored is None:
                     await self._store_cases(session, actor, existing, loaded, hashes)
                     await self._store_version(
-                        session, existing, loaded.document, actor, signature=signature
+                        session,
+                        existing,
+                        loaded.document,
+                        actor,
+                        signature=signature,
+                        bundle_scrub=manifest.scrub.status,
                     )
                 return ImportedSuite(bundle_id=key, id=key, version=number, created=False)
         target, n, suite = key, 1, None
@@ -1145,7 +1179,14 @@ class EvalService:
             target = suite.key if suite else f"{key[:120]}-{n}"
         await self._store_cases(session, actor, suite, loaded, {})
         document = {**loaded.document, "id": target}
-        await self._store_version(session, suite, document, actor, signature=signature)
+        await self._store_version(
+            session,
+            suite,
+            document,
+            actor,
+            signature=signature,
+            bundle_scrub=manifest.scrub.status,
+        )
         return ImportedSuite(bundle_id=key, id=target, version=number, created=True)
 
     async def _store_cases(
@@ -1181,7 +1222,11 @@ class EvalService:
         """Store a run as a record of work done elsewhere: never as one to carry on here."""
         run = Run.model_validate(loaded.document)
         key = renamed.get(run.suite.id, run.suite.id)
-        suite, _ = await self._suite(session, actor, key, "edit")
+        if key in renamed.values():  # `_import_suite` just stored it for this actor
+            suite = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=key)
+            assert suite is not None
+        else:
+            suite, _ = await self._suite(session, actor, key, "edit")
         version = await store.suite_document(session, suite_id=suite.id, version=run.suite.version)
         if version is None:
             raise EvalRefused(f"Run {run.id} needs suite {key} version {run.suite.version}.")
@@ -1262,6 +1307,10 @@ def _measure(spool: IO[bytes]) -> tuple[int, str]:
         size += len(chunk)
     spool.seek(0)
     return size, digest.hexdigest()
+
+
+def _size(spool: IO[bytes]) -> int:
+    return spool.seek(0, 2)
 
 
 def _pins_of(suite: JsonObject) -> list[JsonObject]:
