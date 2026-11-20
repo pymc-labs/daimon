@@ -776,7 +776,7 @@ The tools a workflow step's agent finishes its step with
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `ask_human` | all callers | Ask a person a question from your workflow step. |
+| `ask_human` | all callers | Ask a person a question from your workflow step, then end your turn. |
 | `complete_step` | all callers | Finish your workflow step with its output, a markdown summary and its route if any. |
 | `fail_step` | all callers | End your workflow step as failed, with why. |
 | `finish_early` | all callers | End the whole workflow run early as done, because there is nothing to do. |

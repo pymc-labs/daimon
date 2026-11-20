@@ -14,17 +14,12 @@ from typing import Annotated
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.core.workflows import step_tools
+from daimon.core.workflows import step_tools, waits
 from daimon.core.workflows.step_tools import FailKind, Grant, StepRefused
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
-
-_NO_QUESTIONS = (
-    "Questions to people are not available in workflows yet. Carry on with what you have, "
-    "or call fail_step with kind blocked."
-)
 
 Act = Callable[[AsyncSession, Grant], Awaitable[str]]
 
@@ -122,17 +117,16 @@ def register_workflow_step_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         question: Annotated[str, Field(min_length=1, max_length=2000)],
         options: list[str] | None = None,
     ) -> str:
-        """Ask a person a question from your workflow step.
+        """Ask a person a question from your workflow step, then end your turn.
 
-        Not available yet: it refuses, so carry on, or fail the step with kind blocked.
+        Only when the step allows questions, one open at a time and at most 3 a step.
+        The answer arrives as your next message; carry on with the step from there.
         """
-        del question, options
 
-        async def refuse(s: AsyncSession, g: Grant) -> str:
-            del s, g
-            raise StepRefused(_NO_QUESTIONS)
+        async def put(s: AsyncSession, g: Grant) -> str:
+            return await waits.ask(s, g, question=question, options=options or [], now=_now())
 
-        return await _on_step(runtime, await _auth(ctx), step, refuse)
+        return await _on_step(runtime, await _auth(ctx), step, put)
 
 
 __all__ = ["register_workflow_step_tools"]

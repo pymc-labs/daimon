@@ -818,9 +818,10 @@
     }),
     'ask_human': dict({
       'description': '''
-        Ask a person a question from your workflow step.
+        Ask a person a question from your workflow step, then end your turn.
         <blank line>
-        Not available yet: it refuses, so carry on, or fail the step with kind blocked.
+        Only when the step allows questions, one open at a time and at most 3 a step.
+        The answer arrives as your next message; carry on with the step from there.
       ''',
       'parameters': dict({
         'additionalProperties': False,
