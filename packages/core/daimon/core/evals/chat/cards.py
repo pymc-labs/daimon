@@ -32,7 +32,7 @@ class EvalCardNotice(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     item_id: uuid.UUID
-    #: "hcc:<id>": the press's card id and the record's message id.
+    #: "hcc:<id>": a host call's press id and message id; "cred:<token>": a credential request.
     card_id: str
     card: PostedCard
 
@@ -46,8 +46,9 @@ async def press_eval_card(
     deps: TurnDeps, tenant_id: uuid.UUID, surface: EvalSurfaceLifecycle, notice: EvalCardNotice,
     *, is_admin: bool,
 ) -> None:  # fmt: skip
-    """Show the card, let the script press it, and press the host call as that person did.
-    An approved call's wake runs as the item's next turn."""
+    """Show the card and let the script press it: a credential request is saved or skipped
+    through the script's presses, a host call is pressed here as that person did. An
+    approved call's wake runs as the item's next turn."""
     pressed = await surface.script.answer(posted_card(notice.card_id, notice.card))
     kind, _, raw = notice.card_id.partition(":")
     if pressed is None or kind != "hcc" or pressed.action not in ("approve", "deny"):

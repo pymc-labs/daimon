@@ -11,6 +11,7 @@ from daimon.core.evals.format import (
     CardAnswer,
     CardButton,
     CardFact,
+    CardField,
     ChatEvent,
     NeutralCard,
 )
@@ -70,7 +71,18 @@ def confirmation_card(card_id: str, prompt: ConfirmationPrompt) -> NeutralCard:
 
 
 def posted_card(card_id: str, card: PostedCard) -> NeutralCard:
-    """A posted control card (credential requests, host calls, switches) in its state."""
+    """A posted control card (credential requests, host calls, switches) in its state. A
+    credential request ("cred:<token>") is its private form: one secret, Save or Skip, and
+    the token as its id, which the script's presses take."""
+    kind, _, token = card_id.partition(":")
+    if kind == "cred":
+        return NeutralCard(
+            id=token, kind="credential_request", headline=card.headline,
+            fields=[CardField(id="value", label=card.headline, kind="secret")],
+            buttons=[CardButton(id="save", label="Save", style="primary", action="save"),
+                     CardButton(id="skip", label="Skip", action="skip")],
+            state="open" if card.state == "requested" else "answered",
+        )  # fmt: skip
     kind = "host_call" if card.kind in ("call", "switch") else "credential_request"
     buttons = [
         CardButton(

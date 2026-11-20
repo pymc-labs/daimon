@@ -28,6 +28,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
 from daimon.core.evals.bundle import DirSource, open_path, to_zip
 from daimon.core.evals.chat.cards import listen_cards
+from daimon.core.evals.chat.forms import CredentialPresses
 from daimon.core.evals.cost import default_cap
 from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.eval_tenant import eval_tenant
@@ -676,7 +677,9 @@ async def _work(reap_every_s: float) -> None:
                                resolver_cache=rt.resolver_cache)  # fmt: skip
         turns = EvalTurns(deps, world, pods)
         rate = float(evals.sandbox_rate_usd_per_hour)
-        items = ItemDeps(rt.sessionmaker, turns, world, sandbox_rate_usd_per_hour=rate)
+        presses = CredentialPresses(rt.sessionmaker)
+        items = ItemDeps(rt.sessionmaker, turns, world, sandbox_rate_usd_per_hour=rate,
+                         presses=presses, requester=simulator)  # fmt: skip
         # Every interface: the item pods reach the world from their own network.
         app, port = create_world_app(world), evals.world_port
         server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning"))

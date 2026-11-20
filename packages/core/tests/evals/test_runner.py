@@ -17,10 +17,12 @@ from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, ToolResultBlockParam
 from daimon.core.config import McpSettings
 from daimon.core.confirmation import ConfirmationPrompt
+from daimon.core.credential_requests import mint_request_token
 from daimon.core.evals.access import Subject
 from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
 from daimon.core.evals.chat.events import ChatLog
-from daimon.core.evals.chat.script import ScriptPlayer
+from daimon.core.evals.chat.forms import CredentialPresses
+from daimon.core.evals.chat.script import HIDDEN, ScriptPlayer
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
@@ -35,12 +37,14 @@ from daimon.core.evals.service import EvalService, SuiteCasePick, SuiteDraft
 from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.host_calls import WAKE_SEED, requested_call_card
 from daimon.core.output_delivery import DeliverableFile
+from daimon.core.posted_controls.cards import card_for_request
+from daimon.core.stores import credential_requests, host_call_cards, identity
 from daimon.core.stores import evals as store
-from daimon.core.stores import host_call_cards, identity
+from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock, TurnState
 from daimon.testing.builders import plain_turn_deps
 from daimon.testing.eval_world import eval_case
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import bare_settings
 from mux.drivers.gemini.flash import FLASH_PRIMARY
@@ -403,6 +407,36 @@ async def test_card_when_script_approves_then_call_is_approved_and_its_wake_queu
         row = await host_call_cards.get_card(session, tenant_id=tenant.id, card_id=created.row.id)
     assert row is not None and row.status == "approved"
     assert len(surface.wakes) == 1, "the approved call waits for the next turn"
+
+
+async def test_credential_card_when_it_comes_as_a_notice_then_the_script_saves_the_key(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    agent_id = uuid.uuid4()
+    row = await credential_requests.create_credential_request(
+        db_session, token=mint_request_token(), kind="env", tenant_id=tenant.id,
+        agent_id=agent_id, account_id=account.id, target="NOTES_TOKEN", mcp_server_url=None,
+        requester_platform_user_id="u1", channel_id="c", idempotency_key=uuid.uuid4(),
+        expires_at=datetime.now(UTC) + timedelta(minutes=30), target_ma_agent_id="ag",
+        target_name="acme", requested_work=None,
+    )  # fmt: skip
+    await db_session.commit()
+    chat = ChatLog()
+    case = eval_case({}, script={"defaults": {"credential_request": "submit_fake"}})
+    script = ScriptPlayer(case, chat, presses=CredentialPresses(db_session_factory))
+    notice = EvalCardNotice(item_id=uuid.uuid4(), card_id=f"cred:{row.token}",
+                            card=card_for_request(row, state="requested"))  # fmt: skip
+    deps = plain_turn_deps(None, db_session_factory, settings=bare_settings())
+    await press_eval_card(deps, tenant.id, EvalSurfaceLifecycle(chat, script), notice,
+                          is_admin=False)  # fmt: skip
+    async with db_session_factory() as session:
+        files = await list_agent_files(session, tenant_id=tenant.id, agent_id=agent_id)
+    assert [f.key for f in files] == ["NOTES_TOKEN"], "the fake key went through the real save"
+    shown = chat.events[-1].card
+    assert shown is not None and shown.answer is not None
+    assert shown.answer.fields == {"value": HIDDEN}, "the chat never shows the secret"
 
 
 class WakingTurns:
