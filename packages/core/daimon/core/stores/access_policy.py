@@ -146,9 +146,10 @@ async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid
         raise PolicyBusyError() from None
 
 
-#: An admin save that meets a short holder (a fact publish) tries again this often, this long.
-POLICY_LOCK_ATTEMPTS = 6
-POLICY_LOCK_RETRY_S = 0.1
+#: An admin save that meets a holder tries again for about POLICY_WRITE_TIMEOUT_S: a message
+#: tidy can hold the fence across platform I/O for up to 15 s. A waiting try holds no lock.
+POLICY_LOCK_RETRY_S = 0.25
+POLICY_LOCK_ATTEMPTS = int(POLICY_WRITE_TIMEOUT_S / POLICY_LOCK_RETRY_S)
 
 
 async def lock_policy_writes_exclusive_retrying(

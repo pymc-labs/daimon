@@ -206,7 +206,7 @@ async def test_a_person_of_another_workspace_cannot_be_listed(db_session: AsyncS
         )
 
 
-@pytest.mark.parametrize(("busy_tries", "saved"), [(2, True), (6, False)])
+@pytest.mark.parametrize(("busy_tries", "saved"), [(2, True), (10_000, False)])
 async def test_a_save_that_meets_a_short_fence_holder_tries_again(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
