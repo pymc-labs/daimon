@@ -12,7 +12,8 @@ refuses it before any hold is decided (`routine_destination_parent_unknown`).
 The hold of a fire is stored with its pending result (`routines.delivery_hold`), so
 delivery does not depend on a registry that never forgets: a live fact can clear. With
 `audience_hold` on, delivery uses the stored hold or the current fact, whichever is
-stricter (`DeliveryGate`). A stored NULL is a legacy result and keeps today's logic.
+stricter (`DeliveryGate`). A stored NULL is a legacy result: `off` and `shadow` keep today's
+logic, and `on` counts it as unheld.
 """
 
 from __future__ import annotations
@@ -111,7 +112,8 @@ class DeliveryGate:
 
     `off`: nothing changes. `shadow`: what `on` would refuse is logged. `on`: a result is
     held to its destination when its fire was, and a contained destination takes only a
-    held result. A legacy result (nothing recorded) keeps today's logic in every mode.
+    held result. A legacy result (nothing recorded) keeps today's logic in `off` and `shadow`;
+    `on` counts it as unheld.
     """
 
     sessionmaker: async_sessionmaker[AsyncSession]
@@ -179,10 +181,11 @@ async def delivery_gate(
             routine_id=row.id,
         )
     )
+    stored = stored_delivery_hold(row, platform=platform)
+    if mode == "on" and not stored.recorded:
+        # A result queued before the hold was recorded has no provenance: in `on` it counts
+        # as unheld, so a contained or unknown destination refuses it.
+        stored = StoredHold(recorded=True)
     return DeliveryGate(
-        sessionmaker=sessionmaker,
-        row=row,
-        platform=platform,
-        mode=mode,
-        stored=stored_delivery_hold(row, platform=platform),
+        sessionmaker=sessionmaker, row=row, platform=platform, mode=mode, stored=stored
     )

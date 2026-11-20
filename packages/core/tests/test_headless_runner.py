@@ -1844,3 +1844,78 @@ async def test_routine_relay_claim_only_when_a_server_names_the_requester(
         )
     assert seen["relay_routine_id"] == (routine_id if requester_meta else None)
     assert seen["relay_owner"] == ("42" if requester_meta else None)
+
+
+@pytest.mark.parametrize(
+    ("mode", "held", "kept"), [("on", True, False), ("shadow", True, True), ("on", False, True)]
+)
+async def test_a_held_fire_mounts_no_identity_server_only_in_mode_on(
+    run_turn: RunTurn,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    held: bool,
+    kept: bool,
+) -> None:
+    """A held routine, watch or digest session answers a room outsiders may read (or nobody
+    can vouch for): in `on` it gets the agent with no signed-identity server."""
+    from daimon.core.config import McpSettings
+    from daimon.core.turn_hold import TurnHold
+    from daimon.testing.ma_models import ma_agent
+    from pydantic import HttpUrl, SecretStr
+
+    public_url = "https://daimon.example"
+    agent = ma_agent(
+        id="agent_x",
+        name="test-agent",
+        model={"id": _MODEL_ID},
+        created_at=_NOW,
+        mcp_servers=[
+            {"type": "url", "name": "daimon-mcp", "url": public_url + "/mcp"},
+            {"type": "url", "name": "grove", "url": public_url + "/mcp-identity/grove"},
+        ],
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": name,
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+                "configs": [],
+            }
+            for name in ("daimon-mcp", "grove")
+        ],
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.headless_runner.sdk_agent", lambda _raw: agent)
+    monkeypatch.setattr("daimon.core.audience_gate.read_audience_mode", read)
+    seen: dict[str, Any] = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
+    with pytest.raises(_Stop):
+        await run_turn(
+            anthropic=_build_client([]),
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="hi",
+            origin="routine",
+            session_factory=db_session_factory,
+            mcp_settings=McpSettings(
+                jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)
+            ),
+            agent_uuid=uuid.uuid4(),
+            account_id=uuid.uuid4(),
+            hold=TurnHold("discord", "C-1", client=False) if held else None,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+    names = {server.name for server in seen["agent"].mcp_servers}
+    assert ("grove" in names) is kept
+    assert "daimon-mcp" in names

@@ -18,10 +18,12 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
+from daimon.core.audience_gate import read_audience_mode
 from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
@@ -202,6 +204,26 @@ async def _listed_as_builtin(
     )
 
 
+async def _held_in_audience_mode_on(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    raw_hold: object,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+) -> bool:
+    """Whether a held token meets `audience_hold` mode `on`. An unreadable hold or mode
+    counts as yes: the relay fails closed."""
+    try:
+        hold = parse_hold_claim(raw_hold)
+        mode = await read_audience_mode(
+            sessionmaker, tenant_id=tenant_id, platform=hold.platform, channel_id=hold.channel_id
+        )
+    except Exception:
+        log.warning("mcp_identity.relay_hold_unreadable", exc_info=True)
+        return True
+    return mode == "on"
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -240,6 +262,12 @@ def build_identity_relay_route(
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return Response(status_code=403)
         platform = str(claims.get("platform") or "")
+        if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
+            sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
+        ):
+            # A held session is in a room outsiders may read, or nobody can vouch for: in
+            # `on` it mounts no signed-identity server, so this token is a leftover. Refused.
+            return Response(status_code=403)
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:

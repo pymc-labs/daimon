@@ -32,6 +32,7 @@ from daimon.core.stores.audience_facts import (
     StoredChannelFact,
     list_channel_facts,
     read_status,
+    retire_facts,
 )
 from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
@@ -55,6 +56,46 @@ class AccessPolicyUnreadable(UserFacingError):
             )
         )
         self.tenant_id = tenant_id
+
+
+class AudienceHoldNeedsInternalRoles(UserFacingError):
+    """The change would leave `audience_hold` on with no internal roles to tell people apart."""
+
+    reason = "audience_hold_needs_internal_roles"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The audience hold is on, so the server needs its internal roles. "
+            "Switch the audience hold off first, or keep at least one internal role."
+        )
+
+
+async def _role_lists_changed(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> None:
+    """Make the server's room facts unknown when a role list that built them changes.
+
+    The facts say which rooms outsiders can read, from `internal_role_ids` and
+    `team_role_ids`. After a change they are no longer true, so they stop being trusted in
+    this transaction; the next reconcile computes them again. Clearing `internal_role_ids`
+    while `audience_hold` is `on` is refused: nobody could be told apart.
+    """
+    try:
+        before = await load_access_policy(session, tenant_id=tenant_id)
+    except AccessPolicyUnreadable:
+        before = None
+    if before is not None and (
+        before.internal_role_ids == policy.internal_role_ids
+        and before.team_role_ids == policy.team_role_ids
+    ):
+        return
+    if (
+        not policy.internal_role_ids
+        and (before is None or before.internal_role_ids)
+        and await audience_mode(session, tenant_id) == "on"
+    ):
+        raise AudienceHoldNeedsInternalRoles
+    await retire_facts(session, tenant_id=tenant_id, now=datetime.now(UTC))
 
 
 def _policy_write_key(tenant_id: uuid.UUID) -> str:
@@ -333,6 +374,7 @@ async def set_access_policy(
         raise ValueError(
             "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
         )
+    await _role_lists_changed(session, tenant_id, policy)
     payload = policy.model_dump(mode="json")
     # A list that differs from the deployment default is a choice even when the
     # caller rebuilt the policy from a defaulted one (a model_dump round trip).
@@ -383,6 +425,7 @@ async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) ->
     """Delete the tenant's row, putting it back on the open default. True if one existed."""
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
+    await _role_lists_changed(session, tenant_id, TenantAccessPolicy())
     result = await session.execute(
         delete(TenantAccessPolicyRecord).where(TenantAccessPolicyRecord.tenant_id == tenant_id)
     )

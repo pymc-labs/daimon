@@ -224,6 +224,7 @@ def make_discord_routine_poster(
             "routine_dms_disabled": "Routine DMs are disabled for this server.",
             "restricted_source": "A restricted source cannot deliver by DM.",
             "agent_not_allowed": "The agent is not allowed to run privately.",
+            "owner_outside_team": "The owner holds no internal role, so the result can't go by DM.",
             "destination_unavailable": "The routine server or recipient is unavailable.",
         }
         return DeliveryOutcome(

@@ -25,6 +25,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.channel_audience import requester_standing
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.dm_access import DmAgent, dm_agent_of, permits_dm
@@ -217,6 +218,12 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         raise DirectMessageAccessRevoked(
             "delivery_access_revoked", message="Private access revoked."
         )
+    if (
+        conversation.platform == "discord"
+        and not membership_unknown
+        and await _recipient_is_outsider(deps, conversation, subject)
+    ):
+        raise DirectMessageAccessRevoked("delivery_outsider", message="Private access revoked.")
     if _source_is_sealed(policy, conversation):
         await _quarantine(deps, conversation)
     agent_subject = replace(subject, is_admin=False)
@@ -237,6 +244,30 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
     await _require_dm_grant(deps, reply, subject=agent_subject, policy=policy)
     if membership_unknown:
         raise DirectMessageMembershipUnknown()
+
+
+async def _recipient_is_outsider(
+    deps: TurnDeps, conversation: DirectMessageRow, subject: Subject
+) -> bool:
+    """Whether `audience_hold` is `on` and the recipient holds no internal role now.
+
+    The roles are the ones just resolved for this delivery. Mode `shadow` logs and allows."""
+    async with deps.sessionmaker() as session:
+        standing = await requester_standing(
+            session,
+            tenant_id=conversation.tenant_id,
+            user_id=conversation.external_user_id,
+            is_dm=True,
+            event_role_ids=subject.role_ids,
+        )
+    if standing is not RequesterOrg.OUTSIDER:
+        return False
+    _log.info(
+        "audience.private_delivery_refused",
+        tenant_id=str(conversation.tenant_id),
+        scope_id=conversation.scope_id,
+    )
+    return True
 
 
 async def _require_dm_grant(

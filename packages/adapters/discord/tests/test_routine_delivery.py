@@ -1455,12 +1455,28 @@ async def test_a_legacy_result_keeps_todays_logic(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    audience.mode = "off"  # `on` counts a legacy result as unheld
     audience.contained = {"555"}
     row = await _stored(db_session, None)
     channel = _text_channel()
     outcome = await _poster(db_session_factory, channel)(row)
     assert outcome.status == "delivered"
     channel.send.assert_awaited_once()
+
+
+async def test_a_legacy_result_counts_as_unheld_in_mode_on(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
 
 
 async def test_shadow_delivers_and_logs_the_refusal(

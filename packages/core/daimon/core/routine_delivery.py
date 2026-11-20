@@ -54,6 +54,7 @@ from daimon.core.authz import (
     build_subject,
     holds_agent_roles,
 )
+from daimon.core.channel_audience import requester_standing
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -84,6 +85,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import ROUTINE_WEB_SENTENCE, words_sentence
 from daimon.core.web_links import TenantLinks, links_at, panel_links
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -150,6 +152,7 @@ SkipReason = Literal[
     "routine_dms_disabled",
     "restricted_source",
     "agent_not_allowed",
+    "owner_outside_team",
 ]
 
 
@@ -742,6 +745,10 @@ async def clear_creator(
             place=Place(),
         ):
             return "agent_not_allowed"
+        if row.destination_kind == "dm" and await _owner_is_outsider(
+            sessionmaker, row, subject=subject
+        ):
+            return "owner_outside_team"
         return policy
     refusal = creator_refusal_for(
         policy,
@@ -749,6 +756,30 @@ async def clear_creator(
         creator_is_admin=is_admin and platform != "discord",
     )
     return refusal if refusal is not None else policy
+
+
+async def _owner_is_outsider(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, subject: Subject
+) -> bool:
+    """Whether `audience_hold` is `on` and the owner of a private result holds no internal role.
+
+    The roles are the ones just resolved for the delivery check. A private result is team
+    work, so it does not go to someone outside the team. Mode `shadow` logs and allows.
+    """
+    async with sessionmaker() as session:
+        standing = await requester_standing(
+            session,
+            tenant_id=row.tenant_id,
+            user_id=row.created_by_user_id or "",
+            is_dm=True,
+            event_role_ids=subject.role_ids,
+        )
+    if standing is not RequesterOrg.OUTSIDER:
+        return False
+    log.info(
+        "audience.private_delivery_refused", tenant_id=str(row.tenant_id), routine_id=str(row.id)
+    )
+    return True
 
 
 def discord_creator_may_post(

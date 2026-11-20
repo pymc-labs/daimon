@@ -37,6 +37,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -112,12 +113,15 @@ async def _person(factory: async_sessionmaker[AsyncSession]) -> _Person:
 
 
 async def _token(
-    factory: async_sessionmaker[AsyncSession], person: _Person, relay: RelayBinding | None
+    factory: async_sessionmaker[AsyncSession],
+    person: _Person,
+    relay: RelayBinding | None,
+    hold: TurnHold | None = None,
 ) -> str:
     async with factory() as db, db.begin():
         token, _, _ = await mint_chat_mcp_token(
             db, account_id=person.account_id, agent_id=person.agent_id, secret=SECRET,
-            now=dt.datetime.now(dt.UTC), relay=relay,
+            now=dt.datetime.now(dt.UTC), relay=relay, hold=hold,
         )  # fmt: skip
     return token
 
@@ -848,3 +852,31 @@ async def test_an_allowlist_naming_the_builtin_when_its_name_changed_then_admits
         response = await _post(client, token, _tool_call())
     assert (response.status_code != 403) is relayed, "the rename keeps the seeded agent listed"
     assert bool(upstream.requests) is relayed, "a workspace's own namesake is never relayed"
+
+
+@pytest.mark.parametrize(("mode", "status"), [("off", 200), ("shadow", 200), ("on", 403)], ids=str)
+async def test_a_held_token_is_refused_only_in_audience_mode_on(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    status: int,
+) -> None:
+    """A held session's identity server is gone in `on`; a leftover held token gets no answer."""
+    person = await _person(db_session_factory)
+    _, mapping_id = await _chat_session(db_session_factory, person, "thread-9")
+    token = await _token(
+        db_session_factory,
+        person,
+        RelayBinding("Agent A", mapping_id),
+        TurnHold("discord", "chan-1", client=False, relay=True),
+    )
+
+    async def read(*_: object, **__: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.adapters.mcp.identity_relay.read_audience_mode", read)
+    upstream, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, upstream, key) as client:
+        response = await _call(client, token)
+    assert response.status_code == status
+    assert len(upstream.requests) == (1 if status == 200 else 0)
