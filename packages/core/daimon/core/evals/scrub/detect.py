@@ -549,6 +549,7 @@ class Detector:
         self._terms: dict[str, Term] = {}
         self._index = TermIndex(strict=True)
         self._ner = ner
+        self._found: dict[tuple[bytes, bool, bool], tuple[Hit, ...]] = {}
         self.add(terms)
 
     @property
@@ -569,11 +570,22 @@ class Detector:
                 self._terms[norm] = term
                 self._index.add(term)
                 added.append(term)
+        if added:
+            self._found.clear()
         return added
 
     def find(self, text: str, *, names: bool = True, words: bool = True) -> list[Hit]:
         """Non-overlapping hits in `text`, in order. `names` adds the NER pass; without `words`,
-        one-word terms are left out (for JSON keys, which share words with names)."""
+        one-word terms are left out (for JSON keys, which share words with names). Kept per
+        text until the dictionary grows: a scrub and its sweep look at most texts twice."""
+        key = (_digest(text), names, words)
+        if (done := self._found.get(key)) is None:
+            if len(self._found) >= _NER_CACHE:
+                self._found.clear()
+            done = self._found[key] = tuple(self._find(text, names=names, words=words))
+        return list(done)
+
+    def _find(self, text: str, *, names: bool, words: bool) -> list[Hit]:
         view = fold(text)
         hits = list(self._patterns(view.text))
         found = [
