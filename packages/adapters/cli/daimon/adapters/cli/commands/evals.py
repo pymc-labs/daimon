@@ -205,6 +205,8 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
         report = validate_bundle(open_path(path, passphrase=passphrase))
     except InvalidDocument as failed:
         problems, warnings, counts = list(failed.problems), [], {}
+    except OSError as failed:
+        problems, warnings, counts = [f"{path}: {failed.strerror or 'cannot be read'}"], [], {}
     else:
         problems, warnings = report.problems, report.warnings
         counts = {
@@ -255,11 +257,20 @@ def bundle_import(
     accept_unscrubbed: bool = False,
 ) -> None:
     """Import a bundle folder, zip or encrypted file into the workspace."""
-    if path.is_dir():
-        source = DirSource(path)
-        data = to_zip({name: source.read(name) for name in source.names()})
-    else:
-        data = path.read_bytes()
+    try:
+        if path.is_dir():
+            source = DirSource(path)
+            data = to_zip({name: source.read(name) for name in source.names()})
+        else:
+            data = path.read_bytes()
+    except (InvalidDocument, OSError) as failed:
+        reason = (
+            "; ".join(failed.problems)
+            if isinstance(failed, InvalidDocument)
+            else f"{path}: {failed.strerror or 'cannot be read'}"
+        )
+        _console.print(f"✗ {reason}", style="red", markup=False)
+        raise typer.Exit(code=1) from None
 
     async def chunks() -> AsyncIterator[bytes]:
         yield data
