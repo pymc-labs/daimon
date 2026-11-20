@@ -643,3 +643,20 @@ async def next_fires(
         .group_by(WorkflowTrigger.workflow_id)
     )
     return {w: at for w, at in rows.tuples() if at is not None}
+
+
+async def routine_origins(
+    session: AsyncSession, *, workflow_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, tuple[uuid.UUID, dict[str, Any]]]:
+    """Each moved routine's workflow: the routine's id and its snapshot from the move."""
+    if not workflow_ids:
+        return {}
+    rows = await session.execute(
+        select(
+            WorkflowTrigger.workflow_id, WorkflowTrigger.from_routine_id, WorkflowTrigger.config
+        ).where(
+            WorkflowTrigger.workflow_id.in_(workflow_ids),
+            WorkflowTrigger.from_routine_id.is_not(None),
+        )
+    )
+    return {w: (r, dict(c.get("routine") or {})) for w, r, c in rows.tuples() if r is not None}

@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import Workspace, build_turns, funded_workspace, one_session, signed_in
 from .conftest import PUBLIC_URL, WebClientFactory, discord_settings, web_settings
-from .test_routines_routes import _member  # pyright: ignore[reportPrivateUsage]
+from .test_routines_routes import _member, _seed  # pyright: ignore[reportPrivateUsage]
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 _DEFAULTS = Path(__file__).parents[4] / "defaults"
@@ -132,7 +132,7 @@ async def test_every_workflows_route_refuses_when_the_feature_is_off(
         ]
         assert len(routes) > 30, f"the routes are found: {len(routes)}"
         for method, path in routes:
-            url = re.sub(r"\{(workflow_id|run_id|item_id)\}", str(uuid.uuid4()), path)
+            url = re.sub(r"\{(workflow_id|run_id|item_id|routine_id)\}", str(uuid.uuid4()), path)
             url = re.sub(r"\{number\}", "1", url)
             url = re.sub(r"\{\w+\}", "x", url)
             res = await r.client.request(method, url, json=_ANY_BODY)
@@ -364,3 +364,25 @@ async def test_ask_daimon_message_when_a_node_is_selected_names_the_workflow_to_
         text = str(r.sent)
         assert made["id"] in text, f"the controls carry the workflow: {text[:300]}"
         assert '"selected_node": {"id": "done", "kind": "finish"' in text, "and the node"
+
+
+async def test_an_admin_moves_a_routine_to_a_workflow_and_back(rig: Rig) -> None:
+    async with rig.open() as r:
+        routine = await _seed(r.factory, r.ws.tenant_id, owner="m-1", message="Sum up")
+        moved = await r.client.post(f"/api/workflows/from-routine/{routine}")
+        assert moved.status_code == 201, moved.text
+        flow = moved.json()
+        assert flow["source_routine"]["id"] == str(routine), "the list links the routine"
+        assert flow["migration"]["routine"]["id"] == str(routine), "the page links it too"
+        again = await r.client.post(f"/api/workflows/from-routine/{routine}")
+        assert again.status_code == 409, "a routine moves once"
+        [row] = (await r.client.get("/api/routines")).json()
+        assert row["workflow"]["id"] == flow["id"], "the routine links its workflow"
+        paused = await r.client.post(f"/api/routines/{routine}/resume")
+        assert paused.status_code == 422 and "Workflows" in paused.text, paused.text
+        await r.sign_in("member")
+        refused = await r.client.post(f"/api/workflows/{flow['id']}/to-routine")
+        assert refused.status_code == 403, "only admins move routines"
+        await r.sign_in("owner")
+        back = await r.client.post(f"/api/workflows/{flow['id']}/to-routine")
+        assert back.status_code == 200 and back.json() == {"routine_id": str(routine)}, back.text

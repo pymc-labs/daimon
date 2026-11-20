@@ -22,6 +22,7 @@ import structlog
 from daimon.core._models import (
     Routine,
     Tenant,
+    Workflow,
     WorkflowTrigger,
 )
 from daimon.core.cron import next_slot_at_or_after
@@ -1312,17 +1313,17 @@ async def erase_sandbox_setter(
 
 async def migrated_workflows(
     session: AsyncSession, routine_ids: Collection[_uuid.UUID]
-) -> dict[_uuid.UUID, _uuid.UUID]:
-    """The workflow each of `routine_ids` runs as now, by routine; absent ones never moved
+) -> dict[_uuid.UUID, tuple[_uuid.UUID, str]]:
+    """The workflow (id, name) each of `routine_ids` runs as now; absent ones never moved
     or converted back. A moved routine claims no slots and refuses every change."""
     if not routine_ids:
         return {}
     rows = await session.execute(
-        select(WorkflowTrigger.from_routine_id, WorkflowTrigger.workflow_id).where(
-            WorkflowTrigger.from_routine_id.in_(routine_ids)
-        )
+        select(WorkflowTrigger.from_routine_id, Workflow.id, Workflow.name)
+        .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+        .where(WorkflowTrigger.from_routine_id.in_(routine_ids))
     )
-    return {routine: workflow for routine, workflow in rows.tuples() if routine is not None}
+    return {r: (w, name) for r, w, name in rows.tuples() if r is not None}
 
 
 async def get_routine_for_move(

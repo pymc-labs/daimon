@@ -39,6 +39,7 @@ from daimon.core.routine_service import (
     UnknownAgent,
 )
 from daimon.core.stores import platform_names as names_store
+from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -101,6 +102,8 @@ class Routine(BaseModel):
     last_output: str | None
     mine: bool
     owner: str | None
+    #: The workflow it runs as since an admin moved it; it changes there until moved back.
+    workflow: Choice | None = None
 
 
 class Choices(BaseModel):
@@ -345,6 +348,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 rid: by is not None
                 for rid, by in (await opted_in_by_many(db, rows, platform)).items()
             }
+            moved = await routines_store.migrated_workflows(db, [r.id for r in rows])
         out: list[Routine] = []
         for row in rows:
             channel = routine_service.destination_channel_of(
@@ -385,6 +389,9 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     last_output=row.last_error or row.last_result_tail,
                     mine=mine,
                     owner=None if mine else (label.name if label else None),
+                    workflow=Choice(id=str(moved[row.id][0]), name=moved[row.id][1])
+                    if row.id in moved
+                    else None,
                 )
             )
         return out

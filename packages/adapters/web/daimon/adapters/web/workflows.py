@@ -32,7 +32,16 @@ from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.channel_directory import list_shared_channel_ids
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.web_identity import place_of, thread_key
-from daimon.core.workflows import catalog, inbox, run_views, service, templates, views, webhooks
+from daimon.core.workflows import (
+    catalog,
+    convert,
+    inbox,
+    run_views,
+    service,
+    templates,
+    views,
+    webhooks,
+)
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
@@ -355,6 +364,19 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         item_id: uuid.UUID, body: inbox.Decide, caller: Viewer
     ) -> inbox.InboxItem:
         return await inbox.decide(await env_of(caller), item_id, body)
+
+    # ----- moving routines -----
+
+    @router.post("/from-routine/{routine_id}", status_code=201)
+    @speaks
+    async def from_routine(routine_id: uuid.UUID, caller: Member) -> views.Workflow:  # pyright: ignore[reportUnusedFunction]
+        env = await env_of(caller)
+        return await service.get(env, await convert.from_routine(env, routine_id))
+
+    @router.post("/{workflow_id}/to-routine")
+    @speaks
+    async def to_routine(workflow_id: uuid.UUID, caller: Member) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        return {"routine_id": str(await convert.to_routine(await env_of(caller), workflow_id))}
 
     # ----- one workflow -----
 

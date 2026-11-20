@@ -267,6 +267,7 @@ def _summary(
     who: Who,
     next_run: datetime | None = None,
     unreviewed: bool = False,
+    origin: tuple[uuid.UUID, Mapping[str, Any]] | None = None,
 ) -> WorkflowSummary:
     spec = live.spec if live is not None else workflow.draft_spec
     changes = len(diff(live.spec if live else None, workflow.draft_spec)) if live else 0
@@ -294,7 +295,9 @@ def _summary(
         shared_with_me=workflow.visibility == "shared" and not mine,
         failing=_failing(runs),
         steps=len(nodes),
-        source_routine=None,
+        source_routine=None
+        if origin is None
+        else RoutineRef(id=str(origin[0]), name=str(origin[1].get("name") or "")),
     )
 
 
@@ -327,6 +330,7 @@ async def list_summaries(
     }
     names = await people_of(session, who.tenant_id, runners)
     fires = await workflow_triggers.next_fires(session, workflow_ids=ids)
+    origins = await workflow_triggers.routine_origins(session, workflow_ids=ids)
     return [
         _summary(
             w,
@@ -340,6 +344,7 @@ async def list_summaries(
             who=who,
             next_run=fires.get(w.id),
             unreviewed=await unreviewed(session, w, lives.get(w.id)),
+            origin=origins.get(w.id),
         )
         for w in seen
     ]
@@ -413,6 +418,9 @@ async def workflow_view(
         else None
     )
     fires = await workflow_triggers.next_fires(session, workflow_ids=[workflow.id])
+    origin = (await workflow_triggers.routine_origins(session, workflow_ids=[workflow.id])).get(
+        workflow.id
+    )
     base = _summary(
         workflow,
         live=live,
@@ -423,6 +431,7 @@ async def workflow_view(
         who=who,
         next_run=fires.get(workflow.id),
         unreviewed=await unreviewed(session, workflow, live),
+        origin=origin,
     )
     spec = _live_spec(workflow, versions)
     home = str(obj(spec.get("home")).get("channel") or workflow.home_channel_id or "")
@@ -459,9 +468,19 @@ async def workflow_view(
         )
         if live is not None and fresh
         else None,
-        migration=None,
+        migration=None if origin is None else _migration(base.source_routine, origin[1]),
         run_budget_usd=limits.get("budget_usd"),
     )
+
+
+def _migration(routine: RoutineRef | None, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """The workflow page's "Migrated from routine" strip, from the move's snapshot."""
+    ref = None if routine is None else routine.model_dump()
+    return {
+        "routine": ref,
+        "migrated_at": snapshot.get("migrated_at"),
+        "last": snapshot.get("last"),
+    }
 
 
 async def _channel_names(
