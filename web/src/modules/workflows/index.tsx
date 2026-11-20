@@ -15,9 +15,9 @@ const RunPage = lazyPage(() => import("./run/RunPage"), "RunPage")
 export const workflows: ModuleDef = {
   key: "workflows",
   nav: [
-    { to: "/workflows", label: "Workflows", icon: Workflow, cap: "routines.view", g: "w" },
-    { to: "/inbox", label: "Inbox", icon: Inbox, cap: "routines.view", g: "n", badge: InboxBadge },
-    { to: "/runs", label: "Runs", icon: History, cap: "routines.view", g: "u" },
+    { to: "/workflows", label: "Workflows", icon: Workflow, cap: "workflows.view", g: "w" },
+    { to: "/inbox", label: "Inbox", icon: Inbox, cap: "workflows.view", g: "n", badge: InboxBadge },
+    { to: "/runs", label: "Runs", icon: History, cap: "workflows.view", g: "u" },
   ],
   routes: (
     <>
@@ -30,6 +30,6 @@ export const workflows: ModuleDef = {
       <Route path="/workflows/:id/*" element={<WorkflowPage />} />
     </>
   ),
-  gates: [{ to: "/workflows/new", cap: "routines.manage" }],
-  actions: [{ label: "New workflow", to: "/workflows/new", icon: Plus, cap: "routines.manage" }],
+  gates: [{ to: "/workflows/new", cap: "workflows.run" }],
+  actions: [{ label: "New workflow", to: "/workflows/new", icon: Plus, cap: "workflows.run" }],
 }

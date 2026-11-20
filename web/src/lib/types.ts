@@ -5,7 +5,7 @@ export type Platform = "discord" | "slack" | "teams" | "web"
 export type ModuleKey = "chat" | "agents" | "channels" | "routines" | "workflows" | "credits" | "integrations" | "admin"
 export type Capability =
   | "chat.use" | "files.attach" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
-  | "routines.view" | "routines.manage"
+  | "routines.view" | "routines.manage" | "workflows.view" | "workflows.run" | "workflows.manage"
   | "credits.view_own" | "credits.manage" | "people.manage" | "integrations.view" | "integrations.manage" | "audit.view" | "workspace.manage"
 
 export type Workspace = { id: string; name: string; platform: Platform; role: Role; members: number }

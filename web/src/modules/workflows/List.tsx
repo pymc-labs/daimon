@@ -36,7 +36,7 @@ export function WorkflowList() {
     <Page
       crumbs={[{ label: "Workflows" }]}
       flush
-      actions={can("routines.manage") && <Button size="sm" asChild><Link to="/workflows/new"><Plus />New workflow</Link></Button>}
+      actions={can("workflows.run") && <Button size="sm" asChild><Link to="/workflows/new"><Plus />New workflow</Link></Button>}
     >
       <FilterBar>
         <ToggleGroup type="single" value={view ?? "all"} onValueChange={(x) => x && setView(x === "all" ? null : x)} variant="segmented" size="sm">

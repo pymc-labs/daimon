@@ -37,7 +37,7 @@ export function NewWorkflow() {
   const [tpl, setTpl] = useState("daily_digest")
   const [name, setName] = useState("")
   const [yaml, setYaml] = useState("")
-  if (!can("routines.manage")) return <NotFound />
+  if (!can("workflows.run")) return <NotFound />
   const body: Body | null = from === "describe" ? (text.trim() ? { from, text: text.trim() } : null)
     : from === "template" ? { from, template: tpl } : from === "blank" ? (name.trim() ? { from, name: name.trim() } : null) : (yaml.trim() ? { from, yaml } : null)
   const submit = () => body && create.mutate(body, {
