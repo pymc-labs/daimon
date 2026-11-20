@@ -24,9 +24,12 @@ from typing import Literal
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.audience_gate import PostAudience, audience_fact
 from daimon.core.authz import Action, Place, Subject, authorize
+from daimon.core.channel_audience import ChannelAudience
 from daimon.core.permissions import any_writers_none, channel_rule
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -52,6 +55,7 @@ async def protection_state(
     channel_id: str,
     thread_id: str | None = None,
     resolve_category: CategoryLookup | None = None,
+    audience: PostAudience | None = None,
 ) -> ProtectionState:
     """Whether the agent may post for a turn in this channel or thread.
 
@@ -59,12 +63,36 @@ async def protection_state(
     may cost a platform call) runs only when they aren't protected and the
     policy protects a category. A category that can't be resolved then counts
     as protected. Never raises: any failure is `UNKNOWN`.
+
+    ``audience`` opts the call into the audience gate (`daimon.core.audience_gate`):
+    a post that is more than a fixed notice in the turn's own room passes the hold the
+    execution runs under, and a contained destination it is not held to is
+    `PROTECTED`. Without it nothing about the audience is read.
     """
     try:
+        target = thread_id or channel_id
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
-        target = thread_id or channel_id
-        if not _may_post(policy, Place(channel_id=target, parent_channel_id=channel_id)):
+            # The mode and the fact are read in this same transaction: no second session.
+            fact = (
+                await audience_fact(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    platform=audience.platform,
+                    channel_id=target,
+                    parent_id=channel_id if thread_id else None,
+                    hold=audience.hold,
+                    agent=audience.agent,
+                    held_if_contained=audience.held_if_contained,
+                    session=session,
+                )
+                if audience is not None
+                else None
+            )
+        hold = audience.hold_for(fact, channel_id) if audience and fact else None
+        if not _may_post(
+            policy, Place(channel_id=target, parent_channel_id=channel_id), fact, hold
+        ):
             return ProtectionState.PROTECTED
         if resolve_category is None or not any_writers_none(policy, categories_only=True):
             return ProtectionState.UNPROTECTED
@@ -77,6 +105,8 @@ async def protection_state(
                 category_id=category_id,
                 category_unresolved=category_unresolved,
             ),
+            fact,
+            hold,
         ):
             return ProtectionState.PROTECTED
         return ProtectionState.UNPROTECTED
@@ -90,9 +120,24 @@ async def protection_state(
         return ProtectionState.UNKNOWN
 
 
-def _may_post(policy: TenantAccessPolicy, place: Place) -> bool:
+def _may_post(
+    policy: TenantAccessPolicy,
+    place: Place,
+    audience: ChannelAudience | None = None,
+    hold: TurnHold | None = None,
+) -> bool:
     """Protection alone: an adapter's own notice, decided before the agent is known."""
-    return bool(authorize(policy, subject=Subject(), action=Action.POST, place=place))
+    return bool(
+        authorize(
+            policy,
+            subject=Subject(),
+            action=Action.POST,
+            place=place,
+            # The hold counts only while the audience is enforced (mode `on`).
+            hold=hold if audience is not None else None,
+            audience=audience,
+        )
+    )
 
 
 async def turn_target_protected(
@@ -102,6 +147,7 @@ async def turn_target_protected(
     channel_id: str,
     thread_id: str | None = None,
     resolve_category: CategoryLookup | None = None,
+    audience: PostAudience | None = None,
 ) -> bool:
     """True unless `protection_state` says the agent may post here."""
     state = await protection_state(
@@ -110,6 +156,7 @@ async def turn_target_protected(
         channel_id=channel_id,
         thread_id=thread_id,
         resolve_category=resolve_category,
+        audience=audience,
     )
     return not state.may_post
 

@@ -26,6 +26,7 @@ from daimon.adapters.discord.post_transport import DiscordPostTransport, _webhoo
 from daimon.adapters.discord.theme import COLOR_RED
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.output_runtime import AnthropicOutputRuntime
+from daimon.core.turn.output import OutputGate
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from daimon.testing.builders import file_meta
@@ -1337,3 +1338,109 @@ async def test_a_dm_sweep_attaches_to_the_answer_names_nobody_and_chains_per_ses
     assert first["answer"] is lifecycle.answer_message
     assert first["requester_id"] is None and first["reply_to"] is None
     lifecycle.files_reply_to.assert_not_called()
+
+
+# --- The room audience (`audience_hold`) and the detached sweep ----------------------
+
+
+class _AudienceLifecycle(OutputGate):
+    """The parts of a turn lifecycle that the sweep reads, over the real output latches."""
+
+    turn_window = None
+    answer_message = None
+    requester_id = 4242
+
+    def files_reply_to(self, thread_id: int) -> int | None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("mode", "held", "contained", "files_go_out", "fact_reads"),
+    [
+        ("off", False, True, True, 0),
+        ("shadow", False, True, True, 1),
+        ("on", False, False, True, 1),
+        ("on", False, True, False, 1),
+        ("on", True, True, True, 1),
+    ],
+)
+async def test_a_turns_files_follow_the_audience_gate_from_turn_to_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    held: bool,
+    contained: bool,
+    files_go_out: bool,
+    fact_reads: int,
+) -> None:
+    """The turn installs the audience latch; the sweep still runs for an ordinary turn, and
+    asks the same latch before each file. Only `on` and a contained room refuses a file."""
+    from daimon.core import audience_gate
+    from daimon.core.channel_audience import ChannelAudience
+    from daimon.core.turn import output as output_mod
+    from daimon.core.turn.run import _install_audience_gate  # pyright: ignore[reportPrivateUsage]
+    from daimon.core.turn_hold import TurnHold
+
+    from .harness import make_bot
+
+    reads: list[str] = []
+
+    async def fact(session: object, *, tenant_id: object, platform: str, channel_id: str) -> Any:
+        reads.append(channel_id)
+        return ChannelAudience(contained=contained, known=True, narrow=False, source="live")
+
+    monkeypatch.setattr(output_mod, "channel_has_outsiders", fact)
+    monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+
+    class _Sessions:
+        def __call__(self) -> Any:
+            return MagicMock(
+                __aenter__=AsyncMock(return_value=MagicMock()),
+                __aexit__=AsyncMock(return_value=False),
+            )
+
+    lifecycle = _AudienceLifecycle()
+    guard = _install_audience_gate(
+        SimpleNamespace(sessionmaker=_Sessions()),  # type: ignore[arg-type]
+        tenant_id=uuid.uuid4(),
+        platform="discord",
+        admission=SimpleNamespace(  # type: ignore[arg-type]
+            private_dm_id=None,
+            origin_channel_id="123",
+            origin_thread_id=None,
+            hold=TurnHold("discord", "123", client=False) if held else None,
+            agent=SimpleNamespace(name="helper"),
+            audience_mode=mode,
+        ),
+        lifecycle=lifecycle,  # type: ignore[arg-type]
+        prior=None,
+    )
+    assert guard is not None
+    assert lifecycle.output_authorization is None, "no watch or direct message restricts it"
+
+    bot = make_bot(MagicMock())
+    bot._may_post_in = AsyncMock(return_value=True)  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sesn_1",
+        None,
+        False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+    )
+    with patch("daimon.adapters.discord.bot.deliver_session_outputs") as deliver:
+        bot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+            outcome,
+            thread=_thread(),
+            tenant_id=uuid.uuid4(),
+            lifecycle=lifecycle,  # type: ignore[arg-type]
+        )
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+    deliver.assert_awaited_once()
+    may_post = deliver.await_args.kwargs["may_post"]
+    assert await may_post() is files_go_out
+    assert len(reads) == fact_reads

@@ -176,3 +176,76 @@ async def test_an_alert_posts_a_neutral_card_and_a_closed_channel_is_refused() -
     assert await alerter(alert) == "refused", "the next post would be refused too"
     channel.send.side_effect = discord.HTTPException(MagicMock(status=500), "down")
     assert await alerter(alert) == "failed", "a server error may pass on the next poll"
+
+
+class _FakeSessions:
+    """A sessionmaker stand-in: the audience mode and fact are patched, so no row is read."""
+
+    def __call__(self) -> Any:
+        return MagicMock(
+            __aenter__=AsyncMock(return_value=MagicMock()), __aexit__=AsyncMock(return_value=False)
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "contained", "own", "outcome", "posted"),
+    [
+        ("off", True, True, "sent", True),
+        ("shadow", True, True, "sent", True),
+        ("on", False, True, "sent", True),
+        ("on", True, True, "refused", False),
+        ("on", True, False, "sent", True),  # the deployment's own alert channel, not a room
+    ],
+)
+async def test_the_alert_sender_takes_the_room_audience_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    contained: bool,
+    own: bool,
+    outcome: str,
+    posted: bool,
+) -> None:
+    """Through the real sender: an alert names another channel and its spend, so a
+    destination that outsiders can read gets none when `audience_hold` is on."""
+    from daimon.core import audience_gate
+    from daimon.core.channel_audience import ChannelAudience
+
+    reads: list[str] = []
+
+    async def fact(session: object, *, tenant_id: object, platform: str, channel_id: str) -> Any:
+        reads.append(channel_id)
+        return ChannelAudience(contained=contained, known=True, narrow=False, source="live")
+
+    async def read_mode(session: object, place: object) -> str:
+        return mode
+
+    monkeypatch.setattr(audience_gate, "audience_mode", read_mode)
+    monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client, _FakeSessions())  # type: ignore[arg-type]
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord", own=own)
+    assert await alerter(alert) == outcome
+    assert channel.send.await_count == int(posted)
+    assert reads == ([] if mode == "off" or not own else ["9"])
+
+
+async def test_an_alert_whose_audience_cannot_be_read_is_tried_again_next_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core import audience_gate
+
+    async def broken(session: object, place: object) -> str:
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(audience_gate, "audience_mode", broken)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock()
+    client = MagicMock()
+    client.get_channel = MagicMock(return_value=channel)
+    alerter = discord_budget_alerter(client, _FakeSessions())  # type: ignore[arg-type]
+    alert = budget_alert(workspace_id="1", destination_id="9", platform="discord")
+    assert await alerter(alert) == "failed", "the claim is freed, not spent"
+    channel.send.assert_not_awaited()

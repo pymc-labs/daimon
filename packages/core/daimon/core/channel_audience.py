@@ -62,12 +62,8 @@ async def channels_with_outsiders(
     return await list_shared_channel_ids(session, tenant_id=tenant_id, platform=platform)
 
 
-async def audience_mode(
-    session: AsyncSession, place: FeaturePlace, *, settings: Settings | None = None
-) -> AudienceMode:
-    """The server's `audience_hold` mode. A failed read raises: it never falls back to a mode."""
-    resolved = await feature_in(session, settings, place, "audience_hold")
-    value = resolved.value
+def mode_of(value: str) -> AudienceMode:
+    """The `audience_hold` mode a resolved feature value means; anything else is `off`."""
     if value == "on":
         return "on"
     if value == "shadow":
@@ -75,10 +71,19 @@ async def audience_mode(
     return "off"
 
 
+async def audience_mode(
+    session: AsyncSession, place: FeaturePlace, *, settings: Settings | None = None
+) -> AudienceMode:
+    """The server's `audience_hold` mode. A failed read raises: it never falls back to a mode."""
+    resolved = await feature_in(session, settings, place, "audience_hold")
+    return mode_of(resolved.value)
+
+
 __all__ = [
     "AudienceMode",
     "ChannelAudience",
     "audience_mode",
+    "mode_of",
     "channel_has_outsiders",
     "channels_with_outsiders",
 ]

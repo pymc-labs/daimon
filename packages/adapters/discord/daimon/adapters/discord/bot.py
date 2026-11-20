@@ -1026,12 +1026,20 @@ class DaimonBot(commands.Bot):
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
-        self._queue_output_sweep(
-            thread,
-            outcome.outputs,
-            may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
-            lifecycle=lifecycle,
-        )
+        # The room's audience (`audience_hold`) is checked before each file, as it is before
+        # each post of the turn: the same latch, so a refusal in the turn stays one here.
+        found = getattr(lifecycle, "audience_latch", None)
+        audience = found if isinstance(found, OutputAuthorization) else None
+
+        async def may_post() -> bool:
+            if audience is not None:
+                try:
+                    await audience.check()
+                except Exception:  # a refusal or an unreadable audience: no file goes out
+                    return False
+            return await self._may_post_in(tenant_id=tenant_id, channel=thread)
+
+        self._queue_output_sweep(thread, outcome.outputs, may_post=may_post, lifecycle=lifecycle)
 
     def schedule_dm_output_sweep(
         self,
@@ -1242,7 +1250,7 @@ class DaimonBot(commands.Bot):
                 run_budget_alert_poller(
                     self.runtime.sessionmaker,
                     platform="discord",
-                    alerter=discord_budget_alerter(self),
+                    alerter=discord_budget_alerter(self, self.runtime.sessionmaker),
                     settings=self.runtime.settings,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )

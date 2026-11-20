@@ -81,7 +81,12 @@ def auth_identity(
 ) -> AuthIdentity:
     """An identity for `role`: an admin is also a platform admin unless `fields` say otherwise."""
     admin = role is Role.ADMIN
-    defaults: dict[str, Any] = {"is_admin": admin, "is_platform_admin": admin}
+    # `audience_hold` is off for a hand-built identity: the write guard reads no mode for it.
+    defaults: dict[str, Any] = {
+        "is_admin": admin,
+        "is_platform_admin": admin,
+        "audience_mode": "off",
+    }
     return AuthIdentity(
         account_id=account_id, tenant_id=tenant_id, role=role, **(defaults | fields)
     )

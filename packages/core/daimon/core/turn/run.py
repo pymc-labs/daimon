@@ -140,7 +140,11 @@ from daimon.core.turn.lifecycle import (
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outcomes import TurnObservation, backend_label, current_outcome
-from daimon.core.turn.output import OutputAuthorization, output_authorization
+from daimon.core.turn.output import (
+    OutputAuthorization,
+    audience_output_check,
+    output_authorization,
+)
 from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
 from daimon.core.turn.posture import (
     Billed,
@@ -647,6 +651,48 @@ def _web_search_sources(prepared: PreparedTurn) -> str:
         )
     )
     return sources_prefix(on=on)
+
+
+def _install_audience_gate(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    admission: Admission,
+    lifecycle: TurnLifecycle,
+    prior: OutputAuthorization | None,
+) -> OutputAuthorization | None:
+    """The output guard of a turn: its earlier latch (a watch's, a DM's) and the audience check.
+
+    Installs the audience latch on the lifecycle and returns the combined guard. With no
+    audience check to make (a platform without `audience_hold`, or a turn with no room) it
+    returns None and changes nothing.
+    """
+    check = audience_output_check(
+        deps.sessionmaker,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=None if admission.private_dm_id else admission.origin_channel_id,
+        thread_id=admission.origin_thread_id,
+        hold=admission.hold,
+        agent=admission.agent.name,
+        mode=admission.audience_mode,
+    )
+    if check is None:
+        return None
+    latch = OutputAuthorization(check)
+
+    async def both() -> None:
+        if prior is not None:
+            await prior.check()
+        await latch.check()
+
+    # The latch goes on the lifecycle apart from a watch's or direct message's own: a detached
+    # file sweep skips a turn that has the second, never one that has only this.
+    install = getattr(lifecycle, "set_audience_latch", None)
+    if install is not None:
+        cast(Callable[[OutputAuthorization], None], install)(latch)
+    return OutputAuthorization(both)
 
 
 def _with_prefix(prefix: str, message: str) -> str:
@@ -2341,6 +2387,16 @@ async def run_prepared_turn_impl(
                 raise
 
         delivery = OutputAuthorization(check_watch_delivery) if watch_row is not None else None
+        # Gate A: every turn in a room checks the room's audience before each post and edit.
+        audience_guard = _install_audience_gate(
+            deps,
+            tenant_id=tenant_id,
+            platform=platform,
+            admission=prepared.admission,
+            lifecycle=lifecycle,
+            prior=delivery or getattr(lifecycle, "output_authorization", None),
+        )
+        guard = audience_guard or delivery
         if delivery is not None:
             install = getattr(lifecycle, "set_output_authorization", None)
             if install is not None:
@@ -2359,7 +2415,7 @@ async def run_prepared_turn_impl(
                 backend=prepared.backend,
                 scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
             ) as attempt_confirmation:
-                with output_authorization(delivery):
+                with output_authorization(guard):
                     try:
                         state = await run_turn(
                             **_turn_port_kwargs(
@@ -2587,35 +2643,50 @@ async def run_prepared_turn_impl(
                     )
                     mark = SEND_ATTEMPTED.get()
                     sends_before = len(mark) if mark is not None else 0
-                    recovered_state = await run_turn(
-                        **_turn_port_kwargs(
-                            deps,
-                            recovery.admission or prepared.admission,
-                            new_session_id,
-                            tenant_id=tenant_id,
-                        ),
-                        anthropic=deps.anthropic,
-                        session_id=new_session_id,
-                        user_message=context + reseeded_message,
+                    recovery_guard = _install_audience_gate(
+                        deps,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        admission=recovery.admission or prepared.admission,
                         lifecycle=new_lifecycle,
-                        cancel=fresh_cancel,
-                        render_interval_s=render_interval_s,
-                        billing=Billed(record=new_record),
-                        tool_confirmation=recovery_confirmation,
-                        image_blocks=image_blocks,
-                        system_blocks=loss_system_blocks,
-                        context_hook=context_hook_for(
-                            recovery.admission or prepared.admission, recovery.model_id
-                        ),
-                        # Reseeding and opening the stream await platform and MA
-                        # calls after recovery's last decision.
-                        before_send=decide_before_send(
-                            deps, recovery.admission or prepared.admission, attended=not unattended
-                        ),
-                        send_guard=lambda: session_mutation_fence(
-                            deps.sessionmaker, recovery.ma_session_id
-                        ),
+                        prior=getattr(new_lifecycle, "output_authorization", None),
                     )
+                    with (
+                        output_authorization(recovery_guard)
+                        if recovery_guard is not None
+                        else contextlib.nullcontext()
+                    ):
+                        recovered_state = await run_turn(
+                            **_turn_port_kwargs(
+                                deps,
+                                recovery.admission or prepared.admission,
+                                new_session_id,
+                                tenant_id=tenant_id,
+                            ),
+                            anthropic=deps.anthropic,
+                            session_id=new_session_id,
+                            user_message=context + reseeded_message,
+                            lifecycle=new_lifecycle,
+                            cancel=fresh_cancel,
+                            render_interval_s=render_interval_s,
+                            billing=Billed(record=new_record),
+                            tool_confirmation=recovery_confirmation,
+                            image_blocks=image_blocks,
+                            system_blocks=loss_system_blocks,
+                            context_hook=context_hook_for(
+                                recovery.admission or prepared.admission, recovery.model_id
+                            ),
+                            # Reseeding and opening the stream await platform and MA
+                            # calls after recovery's last decision.
+                            before_send=decide_before_send(
+                                deps,
+                                recovery.admission or prepared.admission,
+                                attended=not unattended,
+                            ),
+                            send_guard=lambda: session_mutation_fence(
+                                deps.sessionmaker, recovery.ma_session_id
+                            ),
+                        )
                     if (
                         recovered_state.error is None
                         and recovered_state.termination == TerminationReason.COMPLETED

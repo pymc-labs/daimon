@@ -182,6 +182,7 @@ TAIL = (
     "0218_support_menu_channel",
     "0219_channel_budget_alerts",
     "0220_discord_audience_facts",
+    "0221_routine_delivery_hold",
 )
 HEAD = TAIL[-1]
 
@@ -237,6 +238,7 @@ AFTER_MERGE_COLUMNS = {
     ("thread_model_settings", "model"),
     ("usage_observation", "provider"),
     ("usage_observation", "observed_at"),
+    ("routines", "delivery_hold"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 

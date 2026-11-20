@@ -393,6 +393,47 @@ async def test_channel_rules_blocking_output_pause_the_watch(parent_rest, monkey
     assert parent_rest.paused
 
 
+async def test_a_report_thread_under_a_contained_parent_is_made_only_for_a_held_run(
+    parent_rest, monkeypatch
+):
+    """The run that fills the thread is held to its contained parent; a parent whose audience
+    cannot be read makes no thread (the watch pauses, as for any output it cannot verify)."""
+    from daimon.core import audience_gate
+    from daimon.core.audience_gate import PostAudience
+    from daimon.core.channel_audience import ChannelAudience
+    from daimon.core.turn import protection
+
+    seen: dict[str, object] = {"mode": "on"}
+
+    async def mode(session, place):
+        if isinstance(seen["mode"], Exception):
+            raise seen["mode"]
+        return seen["mode"]
+
+    async def fact(session, *, tenant_id, platform, channel_id):
+        return ChannelAudience(contained=True, known=True, narrow=False, source="live")
+
+    real = protection.protection_state
+    spy = AsyncMock(side_effect=real)
+    monkeypatch.setattr(watch_access, "protection_state", spy)
+    monkeypatch.setattr(audience_gate, "audience_mode", mode)
+    monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+    monkeypatch.setattr(
+        protection, "load_access_policy", AsyncMock(return_value=protection.TenantAccessPolicy())
+    )
+
+    await require_watch_parent_access(_Sessions(), _row(_watch("new_thread")), parent_rest.client)
+    assert spy.await_args.kwargs["audience"] == PostAudience("discord", held_if_contained=True)
+    assert not parent_rest.paused
+
+    seen["mode"] = RuntimeError("database down")
+    with pytest.raises(AdmissionDenied):
+        await require_watch_parent_access(
+            _Sessions(), _row(_watch("new_thread")), parent_rest.client
+        )
+    assert len(parent_rest.paused) == 1
+
+
 # Database-backed: the frozen firing SQL, the queue split and the seed shapes.
 
 

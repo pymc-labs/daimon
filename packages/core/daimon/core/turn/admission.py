@@ -49,7 +49,7 @@ from daimon.core.authz import (
     build_turn_place,
     holds_agent_roles,
 )
-from daimon.core.channel_audience import channel_has_outsiders
+from daimon.core.channel_audience import AudienceMode, channel_has_outsiders, mode_of
 from daimon.core.channel_backend import (
     BackendUnsupported,
     backend_is_enabled,
@@ -528,6 +528,13 @@ class Admission:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
         found = self.features.features.get(key) if self.features is not None else None
         return found is None or found.on
+
+    @property
+    def audience_mode(self) -> AudienceMode | None:
+        """The `audience_hold` mode this turn was admitted under; None for a hand-built
+        admission, whose caller must read it."""
+        found = self.resolved("audience_hold")
+        return None if found is None else mode_of(found.value)
 
     def resolved(self, key: str) -> ResolvedFeature | None:
         """`key` as resolved at this place; None for a hand-built admission or an unresolved key."""
@@ -2915,6 +2922,8 @@ _TURN_FEATURE_KEYS: Final = tuple(
             *HISTORY_KEYS,
             *LIMIT_KEYS,
             *CHAT_KEYS,
+            # Read with the rest, so the output gate asks the database nothing more.
+            "audience_hold",
         )
     )
 )

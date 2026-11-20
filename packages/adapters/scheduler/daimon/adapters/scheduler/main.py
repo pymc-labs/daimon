@@ -123,7 +123,7 @@ from daimon.core.routine_delivery import (
     routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
-from daimon.core.routine_hold import routine_hold
+from daimon.core.routine_hold import delivery_hold_value, routine_hold
 from daimon.core.routine_sandbox import routine_sandbox
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.rule_views import (
@@ -1067,6 +1067,8 @@ async def _build_fire(
                 row.id,
                 tail=result,
                 delivery_payload=payload,
+                # The hold this fire ran under travels with its result to delivery.
+                delivery_hold=delivery_hold_value(fire_hold),
                 error=None,
                 delivery="pending" if needs_delivery else "skipped",
                 delivery_note=None if needs_delivery else "agent_posted",
