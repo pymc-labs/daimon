@@ -9,21 +9,37 @@ A missing row is the open default. A row that no longer validates raises
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, cast
 
+import structlog
 from daimon.core._models import Tenant, TenantAccessPolicyRecord
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    OPEN_RULE,
+    ChannelRule,
+    TenantAccessPolicy,
+    attach_automatic_rules,
+)
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.provider_keys import default_enabled_backends
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from daimon.core.stores.audience_facts import (
+    StoredChannelFact,
+    list_channel_facts,
+    read_status,
+)
 from mux.profiles import MANAGED_AGENTS
 from pydantic import ValidationError
 from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
 
 
 class AccessPolicyUnreadable(UserFacingError):
@@ -165,6 +181,107 @@ def _with_default_backends(policy: TenantAccessPolicy) -> TenantAccessPolicy:
 
 
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
+    """The tenant's stored policy, with the computed narrow-room rules when the server's
+    audience mode is `on`. Writers save without them: they are never dumped.
+    """
+    return await _with_automatic_rules(
+        session, tenant_id, await _load_stored_policy(session, tenant_id=tenant_id)
+    )
+
+
+_INSIDE_RULE = ChannelRule(readers="inside")
+_SHADOW_LOGGED: dict[uuid.UUID, float] = {}
+_SHADOW_EVERY = 60.0
+
+
+async def audience_mode(session: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """The server's `audience_hold` mode (`daimon.core.channel_audience`). Imported here, not
+    at the top: the feature and config modules import this store."""
+    from daimon.core.channel_audience import audience_mode as read_mode
+    from daimon.core.features.snapshot import FeaturePlace
+
+    return await read_mode(session, FeaturePlace(tenant_id, "discord"))
+
+
+_Automatic = tuple[dict[str, ChannelRule], bool, bool]
+"""The rules, whether a room with no fact is narrow, and whether the facts are missing."""
+_CACHE_KEY = "audience_automatic_rules"
+_Held = tuple[object, dict[uuid.UUID, _Automatic | None]]
+"""A transaction and what was read inside it."""
+
+
+async def _with_automatic_rules(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> TenantAccessPolicy:
+    """Attach the computed rules, if the mode is `on`. Off costs one mode read, and a
+    transaction reads each server once: a later load in it reuses the answer."""
+    # Valid for one transaction only: a commit or rollback starts a new one, and facts
+    # can expire or turn narrow between them.
+    transaction = session.get_transaction()
+    held = cast(
+        "tuple[object, dict[uuid.UUID, _Automatic | None]] | None", session.info.get(_CACHE_KEY)
+    )
+    if held is None or held[0] is not transaction:
+        held = (transaction, dict[uuid.UUID, _Automatic | None]())
+        session.info[_CACHE_KEY] = held
+    cache = held[1]
+    if tenant_id not in cache:
+        cache[tenant_id] = await _automatic_rules(session, tenant_id)
+    automatic = cache[tenant_id]
+    if automatic is None:
+        return policy
+    rules, unknown_narrow, facts_missing = automatic
+    return attach_automatic_rules(
+        policy, rules, unknown_narrow=unknown_narrow, facts_missing=facts_missing
+    )
+
+
+async def _automatic_rules(session: AsyncSession, tenant_id: uuid.UUID) -> _Automatic | None:
+    # The mode first: it is the only read a server with the hold off pays for.
+    mode = await audience_mode(session, tenant_id)
+    if mode == "off":
+        return None
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None or tenant.platform != "discord":
+        return None
+    if mode == "shadow":
+        # Compute and log, at most once a minute for each server; enforce nothing.
+        if _shadow_due(tenant_id):
+            rooms, usable = await _stored_rooms(session, tenant_id)
+            _log_shadow(tenant_id, narrow=sum(room.narrow for room in rooms), usable=usable)
+        return None
+    rooms, usable = await _stored_rooms(session, tenant_id)
+    rules = {room.channel_id: _INSIDE_RULE if room.narrow else OPEN_RULE for room in rooms}
+    return rules, True, not usable  # a room with no fact is narrow
+
+
+async def _stored_rooms(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[list[StoredChannelFact], bool]:
+    status = await read_status(session, tenant_id=tenant_id, now=datetime.now(UTC))
+    usable = status is not None and status.usable
+    return (await list_channel_facts(session, tenant_id=tenant_id) if usable else []), usable
+
+
+def _shadow_due(tenant_id: uuid.UUID) -> bool:
+    last = _SHADOW_LOGGED.get(tenant_id)
+    return last is None or time.monotonic() - last >= _SHADOW_EVERY
+
+
+def _log_shadow(tenant_id: uuid.UUID, *, narrow: int, usable: bool) -> None:
+    """One `audience.shadow` line a minute for each server: what the automatic rule would seal."""
+    _SHADOW_LOGGED[tenant_id] = time.monotonic()
+    log.info(
+        "audience.shadow",
+        kind="narrow_rule",
+        tenant_id=str(tenant_id),
+        channel_id=None,
+        agent=None,
+        reason=f"narrow_rooms={narrow} facts_usable={usable}",
+    )
+
+
+async def _load_stored_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
     record = (

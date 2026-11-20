@@ -36,7 +36,14 @@ from daimon.core.defaults.ma_index import (
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.permissions import SEALED_REFUSAL, home_of, limited_ids, sealed_outside
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    facts_missing,
+    home_of,
+    limited_among,
+    limited_ids,
+    sealed_outside,
+)
 from daimon.core.platform_words import NEUTRAL_ADMIN, NEUTRAL_SPACE
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import (
@@ -515,6 +522,10 @@ async def authorize_environment_pick(
     return EnvironmentPick(decision=decision, needs_confirm=bool(decision) and open_network)
 
 
+_UNKNOWN_ROOM = ""
+"""Stands for a room with no fact and no pick of its own, in `_Picks.runs`."""
+
+
 @dataclass(frozen=True)
 class _Picks:
     """Each channel's own environment, and the workspace default."""
@@ -595,14 +606,20 @@ async def _sealed_moves(
     change: Callable[[_Picks], _Picks],
 ) -> frozenset[str]:
     """The environments `change` moves sealed channels or threads onto."""
-    seals = limited_ids(policy)
-    if not seals:
-        return frozenset()
     before = await _load_picks(session, tenant_id=tenant_id)
     after = change(before)
-    places = await _seal_parents(
-        session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
+    # A picked channel with unknown room facts is narrow: it is sealed too.
+    seals = limited_ids(policy) | limited_among(policy, {*before.channels, *after.channels})
+    places = (
+        await _seal_parents(
+            session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
+        )
+        if seals
+        else {}
     )
+    if facts_missing(policy):
+        # No room is known: one with no pick of its own runs in the workspace default.
+        places[_UNKNOWN_ROOM] = (None,)
     return frozenset(
         after.runs(seal, parent, default)
         for seal, parents in places.items()
@@ -655,9 +672,12 @@ async def update_needs_confirm(
     name = environment.metadata.get(MA_METADATA_KEY_NAME)
     if config is None or name is None or not opens_network(environment, config):
         return False
-    seals = limited_ids(await load_access_policy(session, tenant_id=tenant_id))
+    policy = await load_access_policy(session, tenant_id=tenant_id)
     picks = await _load_picks(session, tenant_id=tenant_id)
+    seals = limited_ids(policy) | limited_among(policy, picks.channels)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=picks.channels)
+    if facts_missing(policy):
+        places[_UNKNOWN_ROOM] = (None,)  # a room with no pick runs in the workspace default
     return any(
         picks.runs(seal, parent, default) == name
         for seal, parents in places.items()

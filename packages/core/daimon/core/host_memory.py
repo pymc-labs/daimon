@@ -13,7 +13,10 @@ import uuid
 from dataclasses import dataclass
 from typing import Final, Literal
 
+import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.channel_audience import audience_mode
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.memory_resource import (
     ensure_channel_memory_store_and_mount,
     ensure_memory_store_and_mount,
@@ -30,7 +33,37 @@ HOST_MEMORY_TAG: Final = "host-memory"
 MAX_MEMORY_BYTES: Final = 102_400
 _MAX_PATH_BYTES: Final = 1024
 
+log = structlog.get_logger(__name__)
+
 StoreKind = Literal["shared", "personal", "channel"]
+
+
+async def audience_memory_read_only(
+    session: AsyncSession,
+    place: FeaturePlace,
+    *,
+    agent: str | None,
+    already_read_only: bool,
+) -> bool:
+    """Whether the server's audience mode makes shared memory read-only for a DM or
+    private turn at `place`: true only when the mode is `on`.
+
+    `shadow` enforces nothing: it logs `audience.shadow` (kind memory_read_only) when
+    `on` would change the turn, that is when the turn is not read-only already. The
+    one rule for the hosted tools and for admission's mounted memory. Raises when the
+    mode cannot be read.
+    """
+    mode = await audience_mode(session, place)
+    if mode == "shadow" and not already_read_only:
+        log.info(
+            "audience.shadow",
+            kind="memory_read_only",
+            tenant_id=str(place.tenant_id),
+            channel_id=place.channel_id,
+            agent=agent,
+            reason="dm_or_private_turn",
+        )
+    return mode == "on"
 
 
 class HostMemoryError(ValueError):

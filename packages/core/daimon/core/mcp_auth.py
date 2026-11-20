@@ -46,7 +46,7 @@ from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim, parse_hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
-from daimon.core.permissions import agent_permissions, channel_rule
+from daimon.core.permissions import agent_permissions, effective_channel_rule
 from daimon.core.session_seal import SEAL_CLAIM, seal_claim
 from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
@@ -858,7 +858,7 @@ def coding_token_channel(
     """
     if channel_id is None:
         return None
-    if channel_rule(policy, channel_id).readers != "any":
+    if effective_channel_rule(policy, channel_id).readers != "any":
         return channel_id
     ruled = bool(agent_permissions(policy, agent.names).runs_in)
     if ruled and authorize(

@@ -26,6 +26,7 @@ from daimon.adapters.discord.context import (
 from daimon.core.features.model_input import CHANNEL_BACKFILL
 from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES
 from daimon.core.untrusted import UNTRUSTED_NOTE
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .shared_fakes import AsyncIter as _AsyncIter
 
@@ -2191,3 +2192,57 @@ class TestForwardedInput:
         home.id = 900
 
         assert await input_context(home, [msg], bot_user_id=1, bot_display_name="d") == ""
+
+
+class TestSealedForwardSources:
+    """The real Discord forward filter (`DaimonBot._sealed_forward_sources`) with the audience mode on."""
+
+    @pytest.mark.parametrize(("facts", "filtered"), [("missing", True), ("open", False)])
+    async def test_a_forward_from_a_room_with_no_fact_is_left_out(
+        self,
+        db_session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        facts: str,
+        filtered: bool,
+    ) -> None:
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        from daimon.adapters.discord.bot import DaimonBot
+        from daimon.core.audience_facts import RoomFacts
+        from daimon.core.stores import access_policy as policy_store
+        from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+        from daimon.testing.factories import make_tenant
+
+        async def mode_on(*_: object, **__: object) -> str:
+            return "on"
+
+        monkeypatch.setattr(policy_store, "audience_mode", mode_on)
+        source, here = 9100000000000001, 9100000000000002
+        now = datetime.now(UTC)
+        async with db_session_factory.begin() as session:
+            tenant = await make_tenant(session, platform="discord", workspace_id="9100")
+            if facts == "open":
+                await publish_facts(
+                    session,
+                    tenant_id=tenant.id,
+                    rooms={str(source): StoredRoom(RoomFacts(contained=False, narrow=False))},
+                    now=now,
+                    fresh_until=now + timedelta(minutes=10),
+                )
+        forward = _forward()
+        forward.reference = SimpleNamespace(channel_id=source)
+        turn = _make_message(content="what is this")
+        turn.channel = SimpleNamespace(id=here, parent_id=None)
+        bot = SimpleNamespace(
+            runtime=SimpleNamespace(turn_deps=SimpleNamespace(sessionmaker=db_session_factory)),
+            get_channel=lambda _id: None,
+        )
+
+        sealed = await DaimonBot._sealed_forward_sources(  # pyright: ignore[reportPrivateUsage]
+            cast("DaimonBot", bot), (forward,), turn, tenant.id
+        )
+        shown = forwarded_lines([forward], sealed_sources=sealed)
+
+        assert (sealed == {str(source)}) is filtered
+        assert (shown == []) is filtered, "a forward from a room with no fact stays out"

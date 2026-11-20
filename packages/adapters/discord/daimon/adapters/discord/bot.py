@@ -8,7 +8,7 @@ import functools
 import io
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -136,7 +136,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
-from daimon.core.direct_messages import sealed_channel_ids
+from daimon.core.direct_messages import sealed_among
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
@@ -1965,6 +1965,28 @@ class DaimonBot(commands.Bot):
                 and intent.id not in self._live_turn_card_intent_ids
             ]
         )
+
+    async def _sealed_forward_sources(
+        self,
+        forward_messages: Sequence[discord.Message],
+        message: discord.Message,
+        tenant_id: uuid.UUID,
+    ) -> frozenset[str]:
+        """The source rooms of forwards that stay out of this turn: every sealed one but the
+        room the turn runs in. Each source and its parent is asked about, so a room with no
+        fact (narrow) counts."""
+        if not any(getattr(m, "message_snapshots", None) for m in forward_messages):
+            return frozenset()
+        here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
+        raw = [getattr(getattr(m, "reference", None), "channel_id", None) for m in forward_messages]
+        sources = {str(source) for source in raw if source is not None}
+        sources |= {
+            str(parent)
+            for source in raw
+            if isinstance(source, int)
+            and (parent := getattr(self.get_channel(source), "parent_id", None)) is not None
+        }
+        return await sealed_among(self.runtime.turn_deps, tenant_id=tenant_id, ids=sources) - here
 
     async def _prune_message_admissions(self) -> None:
         tenants = await list_tenants_by_platform(self.runtime.sessionmaker, platform="discord")
@@ -6126,12 +6148,7 @@ class DaimonBot(commands.Bot):
         attachment_prefix, image_blocks = await prepare_attachments(attachments)
         forward_messages = query_messages or (message,)
         # A forward from a sealed channel stays out of every turn but that channel's own.
-        sealed_sources: frozenset[str] = frozenset()
-        if any(getattr(m, "message_snapshots", None) for m in forward_messages):
-            here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
-            sealed_sources = (
-                await sealed_channel_ids(self.runtime.turn_deps, tenant_id=tenant_id) - here
-            )
+        sealed_sources = await self._sealed_forward_sources(forward_messages, message, tenant_id)
 
         def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
             # A forwarded message's content is untrusted text the person could see.

@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.agent_setup.permissions_view import (
     COPY_LABEL,
     RELEASE_LABEL,
@@ -383,3 +384,53 @@ async def test_team_role_picker_saves_internal_roles_only_and_follows_the_intern
     await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
     policy = await saved()
     assert policy.internal_role_ids == ("222",) and policy.team_role_ids == ()
+
+
+async def test_internal_role_picker_saves_no_automatic_rule_and_loses_none(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the audience mode on, a narrow room keeps its computed rule through this save."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.core.audience_facts import RoomFacts
+    from daimon.core.permissions import effective_channel_rule
+    from daimon.core.stores import access_policy as policy_store
+    from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+    from sqlalchemy import text
+
+    async def mode_on(*_: object, **__: object) -> str:
+        return "on"
+
+    monkeypatch.setattr(policy_store, "audience_mode", mode_on)
+    narrow = "9000000000000001"
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(channel_rules={str(CHANNEL_ID): ChannelRule(writers="none")}),
+        )
+        await publish_facts(
+            session,
+            tenant_id=tenant.id,
+            rooms={narrow: StoredRoom(RoomFacts(contained=False, narrow=True))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+    view = _view(_runtime(db_session_factory), account.id)
+    view.internal_roles_select._values = [discord.Object(id=222, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory() as session:
+        stored = (
+            await session.execute(
+                text("SELECT policy FROM tenant_access_policies WHERE tenant_id = :t"),
+                {"t": tenant.id},
+            )
+        ).scalar_one()
+        policy = await policy_store.load_access_policy(session, tenant_id=tenant.id)
+    assert "automatic" not in str(stored) and narrow not in stored["channel_rules"]
+    assert stored["internal_role_ids"] == ["222"]
+    assert effective_channel_rule(policy, narrow).readers == "inside", "none was lost"

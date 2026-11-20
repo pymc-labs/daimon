@@ -32,6 +32,7 @@ from daimon.core.permissions import (
     WEB_PLACE_ID,
     WEB_PLACE_PREFIX,
     channel_rule,
+    effective_channel_rule,
     runs_only_in,
 )
 from daimon.core.scope import ConfigTier, DeploymentDefault
@@ -176,7 +177,7 @@ def fold_web_spend(
 
 
 def _tags(policy: TenantAccessPolicy, channel_id: str, shared: bool) -> tuple[AccessTag, ...]:
-    readers = channel_rule(policy, channel_id).readers
+    readers = effective_channel_rule(policy, channel_id).readers
     tags: list[AccessTag] = []
     if readers == "inside":
         tags.append("kept_inside")
