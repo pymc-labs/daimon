@@ -6,16 +6,17 @@ import asyncio
 import hashlib
 import json
 import subprocess
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from daimon.core.evals.format import Case, WorldCall
+from daimon.core.evals.format import Case, ExchangeRequest, HttpRequest, WorldCall
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
 from daimon.core.evals.world.http_app import create_world_app
-from daimon.core.evals.world.model import HttpCall, ItemRef
-from daimon.core.evals.world.simulator import SimAnswer, SimContext, parse_answer
+from daimon.core.evals.world.model import HttpCall, ItemRef, WorldRequest
+from daimon.core.evals.world.simulator import SimAnswer, SimContext, build_prompt, parse_answer
 from daimon.core.stores import eval_world, evals
 from daimon.core.stores.evals import BlobRow
 from daimon.testing.eval_world import eval_case, make_running_item
@@ -181,3 +182,14 @@ async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     verbs = [e.verb for c in logged for e in WorldCall.model_validate(c).effects or ()]
     assert verbs == ["git.repo.clone", "git.repo.push"], f"clone and push are effects: {verbs}"
     assert all(c["surface"] == "git" for c in logged), "logged as git calls"
+
+
+def test_simulator_sees_recorded_commands_when_answering_a_binary() -> None:
+    cli = {"cli": {"argv": ["gh", "pr", "list"]}}
+    case = eval_case(
+        {"exchanges": [{"id": "c1", "surface": "cli", "service": "gh", "request": cli,
+                        "response": {"cli": {"exit_code": 0, "stdout": {"text": "#7 Fix"}}}}]}
+    )  # fmt: skip
+    request = ExchangeRequest(http=HttpRequest(method="GET", url="https://api.github.com/x"))
+    context = SimContext(uuid.uuid4(), WorldRequest("http", "github", request), case, "", {}, ())
+    assert "#7 Fix" in build_prompt(context), "the recorded output is what to reproduce"
