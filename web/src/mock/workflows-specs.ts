@@ -45,7 +45,7 @@ nodes:
       notes: {type: string}
     routes:
       qualified: {to: draft_reply, when: The lead fits our services.}
-      unqualified: {to: done, when: Spam, students, job seekers or no fit.}
+      unqualified: {to: done, when: "Spam, students, job seekers or no fit."}
   draft_reply:
     kind: agent
     instructions: Draft a short, warm reply in our voice that proposes a call.
