@@ -396,21 +396,32 @@ def test_text_when_tailnet_ip_hex_id_or_private_host_then_faked_same_shape(real:
         assert re.fullmatch(re.sub(r"[0-9a-f]", "[0-9a-f]", real), fake), fake
 
 
-def test_bundle_when_output_file_rebuilt_and_case_id_faked_then_valid(tmp_path: Path) -> None:
+def test_bundle_when_ids_and_enums_hold_names_then_ids_faked_alike_enums_kept_and_valid(
+    tmp_path: Path,
+) -> None:
+    """Ids get one id-safe fake wherever they are; enum values are kept; pins follow the cases."""
     loaded = validate_bundle(DirSource(EXAMPLE))
     assert loaded.manifest is not None
     data = b"<p>Acme Corp report</p>"
     blob = BlobEntry(
         sha256=sha256_hex(data), size=len(data), media_type="text/html", scrub="unscrubbed"
     )
-    case = {**loaded.suites[0].cases[0], "id": "288838c5-de50-80c4-b6fb-f19866be187c"}
+    raw_case = loaded.suites[0].cases[0]
+    world = raw_case["world"]
+    assert isinstance(world, dict) and isinstance(world["exchanges"], list)
+    exchanges = [{**x, "id": "x-Acme"} for x in world["exchanges"] if isinstance(x, dict)]
+    case = {**raw_case, "id": "288838c5-de50-80c4-b6fb-f19866be187c"}
+    case["world"] = {**world, "exchanges": exchanges}
     case["hash"] = case_hash(case)
     pin = {"id": case["id"], "revision": 1, "hash": case["hash"]}
     suite = LoadedSuite({**loaded.suites[0].document, "cases": [pin]}, [case])
     ref = blob.model_dump(include={"sha256", "size", "media_type"})
     output = {"id": "o1", "name": "a.html", "media_type": "text/html", "blob": ref}
+    call = {"seq": 1, "surface": "mcp", "origin": "recorded", "exchange_id": "x-Acme"}
+    enclosure = {"mode": "enclosed", "backend": "anthropic"}
     run = loaded.runs[0]
-    items = [{**run.items[0], "case": pin, "outputs": [output]}]
+    item = {**run.items[0], "case": pin, "outputs": [output], "world_calls": [call]}
+    items = [{**item, "enclosure": enclosure}]
     header = BundleHeader(
         id="b", created_at=datetime.now(UTC), source=SourceInfo(kind="converter"),
         scrub_status="unscrubbed",
@@ -419,13 +430,17 @@ def test_bundle_when_output_file_rebuilt_and_case_id_faked_then_valid(tmp_path: 
     blobs = {b: source.read(f"blobs/sha256/{b.sha256}") for b in loaded.manifest.blobs}
     files = build_files(header, [suite], [replace(run, items=items)], {**blobs, blob: data})
     write_dir(files, tmp_path / "raw")
-    scrub_path(tmp_path / "raw", tmp_path / "out", _scrubber())
+    scrubber = _scrubber(ENTITIES.model_copy(update={"companies": ["Acme Corp", "Anthropic"]}))
+    scrub_path(tmp_path / "raw", tmp_path / "out", scrubber)
     report = validate_bundle(DirSource(tmp_path / "out"))
     assert report.ok, report.problems
-    assert (
-        "288838c5"
-        not in (tmp_path / "out" / "suites").joinpath("support-basics", "cases.jsonl").read_text()
-    ), "the case id is faked and its pins follow"
+    done = report.suites[0].cases[0]
+    assert "288838c5" not in str(done["id"]), "the case id is faked and its pins follow"
+    fake = json.dumps(done["world"]).split('"id": "', 1)[1].split('"', 1)[0]
+    out_item = report.runs[0].items[0]
+    assert "Acme" not in fake and re.fullmatch(r"x-[A-Za-z0-9._:-]+", fake), fake
+    assert out_item["world_calls"] == [{**call, "exchange_id": fake}], "references follow the id"
+    assert out_item["enclosure"] == enclosure, "an enum value is never faked"
 
 
 # ---------- memory ----------

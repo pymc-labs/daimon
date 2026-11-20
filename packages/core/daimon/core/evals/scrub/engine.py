@@ -29,7 +29,7 @@ from daimon.core.evals.scrub.detect import (
 )
 from daimon.core.evals.scrub.entities import MIN_PART, KnownEntities, Term, normalize, terms_of
 from daimon.core.evals.scrub.fakes import FakeMap, adapt, key_check, scrub_key
-from daimon.core.evals.scrub.shape import KEEP, Shape, field_shape, shape_of
+from daimon.core.evals.scrub.shape import ID, KEEP, Shape, field_shape, shape_of
 from pydantic import JsonValue
 
 REDACTED = "[REDACTED]"
@@ -113,6 +113,8 @@ _PAYLOAD_KEYS: Final = ("data", "blob", "bytes", "base64")
 _TYPE_KEYS: Final = ("mimeType", "mime_type", "media_type", "mediaType", "contentType")
 _MIN_PAYLOAD: Final = 48
 _MIN_ID_INT: Final = 10**14
+_ID_UNSAFE: Final = re.compile(r"[^A-Za-z0-9._:-]+")
+_ID_MAX: Final = 128
 
 
 def _snake(key: str) -> str:
@@ -231,6 +233,11 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     return (text, urlsafe) if text and len(text.strip()) >= 4 else None
 
 
+def _id_safe(text: str) -> str:
+    """`text` as the schema's ids are written: a fake's spaces and signs become dashes."""
+    return _ID_UNSAFE.sub("-", text).lstrip("._:-")[:_ID_MAX] or "x"
+
+
 def _strings(node: JsonValue) -> Iterator[str]:
     if isinstance(node, str):
         inner = _json_in(node)
@@ -259,6 +266,7 @@ class Scrubber:
         self._fake_cache: tuple[int, set[str]] = (0, set())
         self._fake_index = TermIndex()
         self._indexed = 0
+        self._ids: dict[str, str] = {}
 
     @property
     def names_checked(self) -> bool:
@@ -458,6 +466,8 @@ class Scrubber:
                 return node
             self.counts[done[0]] += 1
             return done[1]
+        if isinstance(node, str) and shape == ID:
+            return self._id(node, key, secret)
         if isinstance(node, str):
             return self._string(node, key, secret)
         if isinstance(node, list):
@@ -477,6 +487,14 @@ class Scrubber:
             )
             for k, v in node.items()
         }
+
+    def _id(self, node: str, key: str, secret: bool) -> str:
+        """An id gets one fake in every document it is in, so references to it still hold."""
+        if (done := self._ids.get(node)) is None:
+            done = self._string(node, key, secret)
+            done = node if done == node else _id_safe(done)
+            self._ids[node] = done
+        return done
 
     def _key(self, key: str, shape: Shape) -> str:
         """A JSON key: a schema field stays; any other loses only what patterns and names of more
