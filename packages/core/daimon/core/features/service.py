@@ -784,6 +784,15 @@ async def _write_in(
     tier = after.tier
     if (refused := _pin_refusal(spec, tier, after.value, pin, place)) is not None:
         raise refused
+    if spec.key == "audience_hold" and after.value == "on":
+        policy = await load_access_policy(session, tenant_id=place.tenant_id)
+        if not policy.internal_role_ids:
+            # Without internal roles every asker counts as outside, so On would hold every
+            # turn on the server (`requester_standing`).
+            raise _refused(
+                "Set the server's internal roles before you turn this on.",
+                "audience_hold_needs_internal_roles",
+            )
     await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
     before = _before(spec, place, values, tier)
