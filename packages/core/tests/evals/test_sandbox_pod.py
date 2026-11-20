@@ -75,13 +75,6 @@ async def test_pod_reaches_only_the_world(
             assert raw[0] != 0, "a raw TCP connection is refused"
             assert (await run("id -u"))[1].strip() == "10001", "commands run as the agent"
         except AssertionError as exc:
-            probe = (
-                "cat /etc/resolv.conf; iptables-save -c; iptables-legacy-save -c; cat /proc/net/udp"
-            )
-            net = subprocess.run(["docker", "exec", "-u", "0", f"{pod.id}-net", "sh", "-c", probe],
-                                 capture_output=True, text=True)  # fmt: skip
-            raise AssertionError(
-                f"{exc}\n{await runtime.logs(pod.id)}\n{net.stdout}{net.stderr}"
-            ) from exc
+            raise AssertionError(f"{exc}\n{await runtime.logs(pod.id)}") from exc
         finally:
             await runtime.stop(pod)
