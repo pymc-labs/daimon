@@ -29,21 +29,34 @@ export const AnchorChip = ({ a, onClear }: { a: Anchor; onClear?: () => void }) 
   </span>
 )
 
-/** Comments on a case, newest last; the composer takes the anchor the reviewer pointed at. */
-export function Comments({ caseId, itemId, anchor, onClear }: { caseId: string; itemId?: string; anchor: Anchor | null; onClear: () => void }) {
+/** Where comments live: a review task (blind readers see only these) or one case of a run. */
+export type Scope = { task: string; initial: Comment[] } | { run: string; case: string }
+
+/** Comments, newest last. The composer takes the anchor the reviewer pointed at; without one the comment is on the case. */
+export function Comments({ scope, anchor, onClear, anonymous }: { scope: Scope; anchor: Anchor | null; onClear: () => void; anonymous?: boolean }) {
   const qc = useQueryClient()
   const [text, setText] = useState("")
-  const key = ["evals", "comments", caseId]
-  const list = useQuery({ queryKey: key, queryFn: () => api.get<Comment[]>(`${E}/comments?case=${encodeURIComponent(caseId)}`) })
+  const inTask = "task" in scope
+  const key = ["evals", "comments", inTask ? scope.task : scope.run]
+  const list = useQuery({
+    queryKey: key,
+    queryFn: () => api.get<Comment[]>(inTask ? `${E}/tasks/${scope.task}/comments` : `${E}/comments?run_id=${encodeURIComponent(scope.run)}`),
+    initialData: inTask ? scope.initial : undefined, staleTime: inTask ? Infinity : 0,
+  })
+  const shown = inTask ? list.data : list.data?.filter((c) => c.case_id === scope.case)
   const post = useMutation({
-    mutationFn: () => api.post<Comment>(`${E}/comments`, { case_id: caseId, item_id: anchor?.item_id ?? itemId, text, anchors: anchor ? [anchor] : undefined }),
+    // Anchors in a task name their column by label, which is also the comment's target.
+    mutationFn: () => api.post<Comment>(`${E}/comments`, {
+      text, anchors: anchor ? [anchor] : undefined,
+      ...(inTask ? { task_id: scope.task, target: anchor?.item_id } : { run_id: scope.run, case_id: scope.case, item_id: anchor?.item_id }),
+    }),
     onSuccess: () => { setText(""); onClear(); void qc.invalidateQueries({ queryKey: key }) },
   })
   return (
     <div className="space-y-3">
-      {list.data?.map((c) => (
+      {shown?.map((c) => (
         <div key={c.id} className="space-y-1 rounded-lg border p-2.5 text-sm">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">{c.author.display_name ?? "Reviewer"}</span><Ago iso={c.at} /></div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">{anonymous ? "Reviewer" : c.author.display_name ?? "Reviewer"}</span><Ago iso={c.at} /></div>
           {c.anchors?.map((a, i) => <AnchorChip key={i} a={a} />)}
           <p className="whitespace-pre-wrap break-words">{c.text}</p>
         </div>
@@ -51,6 +64,7 @@ export function Comments({ caseId, itemId, anchor, onClear }: { caseId: string; 
       <div className="space-y-2">
         {anchor && <AnchorChip a={anchor} onClear={onClear} />}
         <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={2} placeholder="Comment" aria-label="Comment" className="min-h-0" />
+        {post.error && <p role="alert" className="text-sm text-destructive">{post.error.message}</p>}
         <div className="flex justify-end"><Button size="sm" disabled={!text.trim() || post.isPending} onClick={() => post.mutate()}>Comment</Button></div>
       </div>
     </div>

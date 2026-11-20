@@ -9,17 +9,18 @@ import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { E, isLive, useCases, useRun, useRunItems, useSummary } from "./api"
+import { E, isLive, useCases, useIsAdmin, useRole, useRun, useRunItems, useSummary } from "./api"
 import { ApproveBar, EstimateView } from "./Approve"
-import { RunPill } from "./bits"
+import { canEdit, isBlindRun, RunPill } from "./bits"
 import { Summary } from "./Summary"
-import type { Estimate, ItemStatus, Queue, Run as RunDoc, RunItemSummary } from "./types"
+import type { ItemStatus, Judge as JudgeDoc, JudgeOutcome, JudgeRequest, QueueDraft, QueueView, Run as RunDoc, RunItemSummary } from "./types"
 
 const DOT: Record<ItemStatus, string> = { pending: "bg-border-strong", running: "animate-pulse bg-link", done: "bg-success", error: "bg-destructive", skipped: "bg-faint", cancelled: "bg-faint" }
 
@@ -48,23 +49,36 @@ function Grid({ run, items }: { run: RunDoc; items: RunItemSummary[] }) {
   )
 }
 
+/** Estimate one judge over a finished run, then run it under a spend ceiling. Ceilings above the admin limit are refused by the server, which says who to ask. */
 function Judge({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onOpenChange: (o: boolean) => void }) {
   const qc = useQueryClient()
-  const ids = run.judges?.map((j) => j.id) ?? []
-  const [estimate, setEstimate] = useState<Estimate | null>(null)
-  const ask = useMutation({ mutationFn: () => api.post<Estimate>(`${E}/runs/${run.id}/judge`, { judge_ids: ids }), onSuccess: setEstimate })
+  const judges = run.judges ?? []
+  const [id, setId] = useState(judges[0]?.id ?? "")
+  const judge = judges.find((j) => j.id === id)
+  const request = (j: JudgeDoc, cap?: number): JudgeRequest => ({ id: j.id, kind: j.kind, models: j.models, aggregate: j.aggregate ?? "majority", batch: false, approve_cap_usd: cap })
+  const [outcome, setOutcome] = useState<JudgeOutcome | null>(null)
+  const ask = useMutation({ mutationFn: () => api.post<JudgeOutcome>(`${E}/runs/${run.id}/judge`, request(judge!)), onSuccess: setOutcome })
   const go = useMutation({
-    mutationFn: (cap: number) => api.post(`${E}/runs/${run.id}/judge`, { judge_ids: ids, cap_usd: cap }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["evals"] }); onOpenChange(false) },
+    mutationFn: (cap: number) => api.post<JudgeOutcome>(`${E}/runs/${run.id}/judge`, request(judge!, cap)),
+    onSuccess: (o) => { setOutcome(o); void qc.invalidateQueries({ queryKey: ["evals"] }) },
   })
+  const done = outcome?.ran
   return (
-    <Dialog open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) setEstimate(null) }}>
+    <Dialog open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) { setOutcome(null); ask.reset(); go.reset() } }}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>Run judges</DialogTitle></DialogHeader>
-        {estimate ? <EstimateView estimate={estimate} arms={run.arms} /> : <p className="text-sm text-muted-foreground">{ids.join(", ")}</p>}
+        {outcome ? <EstimateView estimate={outcome.estimate} arms={run.arms} /> : (
+          <Select value={id} onValueChange={setId}>
+            <SelectTrigger aria-label="Judge" className="h-8"><SelectValue /></SelectTrigger>
+            <SelectContent>{judges.map((j) => <SelectItem key={j.id} value={j.id}>{j.id}</SelectItem>)}</SelectContent>
+          </Select>
+        )}
+        {done && <p role="status" className="text-sm">{outcome.scores} scores for {usd(outcome.spent_usd)}{outcome.skipped > 0 && `, ${outcome.skipped} skipped for lack of room`}{outcome.failed > 0 && `, ${outcome.failed} failed`}</p>}
         {(ask.error ?? go.error) && <p role="alert" className="text-sm text-destructive">{(ask.error ?? go.error)!.message}</p>}
         <DialogFooter className="sm:justify-end">
-          {estimate ? <ApproveBar estimate={estimate} label="Approve and judge" pending={go.isPending} onApprove={(c) => go.mutate(c)} /> : <Button disabled={ask.isPending || !ids.length} onClick={() => ask.mutate()}>Estimate</Button>}
+          {done ? <Button onClick={() => onOpenChange(false)}>Done</Button>
+            : outcome ? <ApproveBar estimate={outcome.estimate} label="Approve and judge" pending={go.isPending} onApprove={(c) => go.mutate(c)} />
+            : <Button disabled={ask.isPending || !judge} onClick={() => ask.mutate()}>Estimate</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -75,8 +89,10 @@ function NewQueue({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onO
   const go = useNavigate()
   const [name, setName] = useState(`Review of ${run.name ?? run.id}`)
   const [blind, setBlind] = useState(true)
-  const [layout, setLayout] = useState<Queue["layout"]>(run.arms.length > 1 ? "side_by_side" : "single")
-  const make = useMutation({ mutationFn: () => api.post<Queue>(`${E}/queues`, { run_id: run.id, name, blind, layout }), onSuccess: (q) => go(`/evals/queues/${q.id}`) })
+  const [layout, setLayout] = useState<QueueDraft["layout"]>(run.arms.length > 1 ? "side_by_side" : "single")
+  const [id] = useState(() => `queue-${crypto.randomUUID().slice(0, 8)}`)
+  const draft: QueueDraft = { id, name, blind, layout }
+  const make = useMutation({ mutationFn: () => api.post<QueueView>(`${E}/queues`, { run_id: run.id, queue: draft }), onSuccess: (q) => go(`/evals/queues/${q.ref}`) })
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -101,7 +117,10 @@ export function Run() {
   const qc = useQueryClient()
   const confirm = useConfirm()
   const run = useRun(id)
-  const r = run.data
+  const doc = run.data
+  const r = doc && !isBlindRun(doc) ? doc : undefined
+  const role = useRole(doc?.suite.id ?? "")
+  const admin = useIsAdmin()
   const live = isLive(r)
   const items = useRunItems(id, live)
   const finished = !!r && ["done", "partial", "cancelled", "failed"].includes(r.status)
@@ -115,20 +134,22 @@ export function Run() {
   const done = list.filter((i) => !["pending", "running"].includes(i.status)).length
   const spend = r?.spend?.total_usd ?? 0
   const cap = r?.approval?.cap_usd
+  const editor = canEdit(role)
+  if (doc && !r) return <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: "Review" }]}><div className="py-16 text-center text-sm text-muted-foreground">Reviewers open their work from Evals.<br /><Link className="text-link hover:underline" to="/evals">Back to evals</Link></div></Page>
   return (
     <Page
       crumbs={[{ label: "Evals", to: "/evals" }, { label: r?.suite.id ?? "Suite", to: r ? `/evals/suites/${r.suite.id}` : undefined }, { label: r?.name ?? id }]}
       actions={r && (
         <>
-          {live && <Button variant="outline" size="sm" disabled={cancel.isPending} onClick={async () => { if (await confirm({ title: "Cancel run?", body: "Items still running stop. Finished items keep their results.", action: "Cancel run", destructive: true })) cancel.mutate() }}><XCircle />Cancel</Button>}
-          {finished && !!r.judges?.length && <Button variant="outline" size="sm" onClick={() => setJudging(true)}><Gavel />Judge</Button>}
-          {finished && <Button variant="outline" size="sm" onClick={() => setQueueing(true)}><Users />Review</Button>}
+          {live && editor && <Button variant="outline" size="sm" disabled={cancel.isPending} onClick={async () => { if (await confirm({ title: "Cancel run?", body: "Items still running stop. Finished items keep their results.", action: "Cancel run", destructive: true })) cancel.mutate() }}><XCircle />Cancel</Button>}
+          {finished && editor && !!r.judges?.length && <Button variant="outline" size="sm" onClick={() => setJudging(true)}><Gavel />Judge</Button>}
+          {finished && editor && <Button variant="outline" size="sm" onClick={() => setQueueing(true)}><Users />Review</Button>}
           {r.status !== "estimated" && r.status !== "draft" && <Button size="sm" asChild><Link to={`/evals/runs/${id}/compare`}><Columns2 />Compare</Link></Button>}
         </>
       )}
     >
       <QueryState query={run} skeleton={<Skeleton className="h-24" />}>
-        {(r) => (
+        {() => r && (
           <div className="mx-auto max-w-[1040px] space-y-8">
             <StatStrip stats={[
               { label: "Status", value: <RunPill status={r.status} /> },
@@ -141,8 +162,12 @@ export function Run() {
               <section className="space-y-3">
                 <h2 className="text-sm font-medium">Estimate</h2>
                 <EstimateView estimate={r.estimate} arms={r.arms} />
-                {approve.error && <p role="alert" className="text-sm text-destructive">{approve.error.message}</p>}
-                <ApproveBar estimate={r.estimate} pending={approve.isPending} onApprove={(c) => approve.mutate(c)} />
+                {admin ? (
+                  <>
+                    {approve.error && <p role="alert" className="text-sm text-destructive">{approve.error.message}</p>}
+                    <ApproveBar estimate={r.estimate} initial={r.ext?.requested_cap_usd} pending={approve.isPending} onApprove={(c) => approve.mutate(c)} />
+                  </>
+                ) : <p role="status" className="text-right text-sm text-muted-foreground">Awaiting admin approval{r.ext?.requested_cap_usd ? ` of up to ${usd(r.ext.requested_cap_usd)}` : ""}. Ask an admin.</p>}
               </section>
             )}
             {list.length > 0 && <section><h2 className="mb-2 text-sm font-medium">Progress</h2><Grid run={r} items={list} /></section>}
@@ -150,8 +175,8 @@ export function Run() {
           </div>
         )}
       </QueryState>
-      {r && <Judge run={r} open={judging} onOpenChange={setJudging} />}
-      {r && <NewQueue key={queueing ? "open" : "closed"} run={r} open={queueing} onOpenChange={setQueueing} />}
+      {r && editor && <Judge run={r} open={judging} onOpenChange={setJudging} />}
+      {r && editor && <NewQueue key={queueing ? "open" : "closed"} run={r} open={queueing} onOpenChange={setQueueing} />}
     </Page>
   )
 }

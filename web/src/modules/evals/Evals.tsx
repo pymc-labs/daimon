@@ -51,7 +51,7 @@ export function Evals() {
   const queues = useQueues()
   const [adding, setAdding] = useState(false)
   const [importing, setImporting] = useState(false)
-  const open = queues.data?.filter((q) => q.status === "open") ?? []
+  const open = queues.data?.filter((q) => q.queue.status !== "closed" && q.done < q.total) ?? []
   return (
     <Page
       crumbs={[{ label: "Evals" }]}
@@ -85,9 +85,9 @@ export function Evals() {
               <TableHeader><TableRow className="hover:bg-transparent"><TableHead>Queue</TableHead><TableHead>Progress</TableHead></TableRow></TableHeader>
               <TableBody>
                 {open.map((q) => (
-                  <TableRow key={q.id} {...rowProps(() => go(`/evals/queues/${q.id}`))}>
-                    <TableCell className="font-medium">{q.name}</TableCell>
-                    <TableCell className="tabular text-muted-foreground">{q.progress.done} of {q.progress.total}</TableCell>
+                  <TableRow key={q.ref} {...rowProps(() => go(`/evals/queues/${q.ref}`))}>
+                    <TableCell className="font-medium">{q.queue.name}</TableCell>
+                    <TableCell className="tabular text-muted-foreground">{q.done} of {q.total}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

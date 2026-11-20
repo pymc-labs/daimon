@@ -32,20 +32,26 @@ export function EstimateView({ estimate, arms = [] }: { estimate: Estimate; arms
   )
 }
 
-/** Approve with a spend cap. Nothing runs until a cap is set. */
-export function ApproveBar({ estimate, label = "Approve and run", pending, onApprove }: { estimate: Estimate; label?: string; pending?: boolean; onApprove: (cap: number) => void }) {
-  const [text, setText] = useState("")
+/** Approve with a spend cap. Nothing runs until a cap is set. A cap above `limit` needs an admin: for anyone else the button asks for approval instead. */
+export function ApproveBar({ estimate, label = "Approve and run", pending, limit, admin = true, initial, onApprove }: {
+  estimate: Estimate; label?: string; pending?: boolean; limit?: number; admin?: boolean; initial?: number; onApprove: (cap: number) => void
+}) {
+  const [text, setText] = useState(initial ? String(initial) : "")
   const cap = Number(text)
   const ok = text.trim() !== "" && Number.isFinite(cap) && cap > 0
+  const asks = !admin && limit != null && cap > limit
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      <label htmlFor="cap" className="text-sm text-muted-foreground">Spend cap</label>
-      <div className="relative w-28">
-        <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-sm text-muted-foreground">$</span>
-        <Input id="cap" inputMode="decimal" value={text} onChange={(e) => setText(e.target.value)} className="h-8 pl-6 tabular" />
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <label htmlFor="cap" className="text-sm text-muted-foreground">Spend cap</label>
+        <div className="relative w-28">
+          <span className="pointer-events-none absolute inset-y-0 left-2.5 flex items-center text-sm text-muted-foreground">$</span>
+          <Input id="cap" inputMode="decimal" value={text} onChange={(e) => setText(e.target.value)} className="h-8 pl-6 tabular" />
+        </div>
+        <Button variant="ghost" size="sm" onClick={() => setText(String(suggestedCap(estimate)))}>Use {usd(suggestedCap(estimate))}</Button>
+        <Button size="sm" disabled={!ok || pending} onClick={() => onApprove(cap)}>{asks ? "Ask an admin to approve" : label}</Button>
       </div>
-      <Button variant="ghost" size="sm" onClick={() => setText(String(suggestedCap(estimate)))}>Use {usd(suggestedCap(estimate))}</Button>
-      <Button size="sm" disabled={!ok || pending} onClick={() => onApprove(cap)}>{label}</Button>
+      {asks && <p className="text-right text-xs text-muted-foreground">Caps above {usd(limit)} need an admin to approve.</p>}
     </div>
   )
 }

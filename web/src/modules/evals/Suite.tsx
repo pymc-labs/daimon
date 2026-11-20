@@ -115,7 +115,7 @@ export function Suite() {
             <SelectContent>{Array.from({ length: current }, (_, i) => current - i).map((v) => <SelectItem key={v} value={String(v)}>v{v}</SelectItem>)}</SelectContent>
           </Select>
           {canShare(role) && <Button variant="outline" size="sm" onClick={() => setShare("open")}><Share2 />Share</Button>}
-          <Button variant="outline" size="sm" onClick={() => setExporting(true)}><Download />Export</Button>
+          {canEdit(role) && <Button variant="outline" size="sm" onClick={() => setExporting(true)}><Download />Export</Button>}
           {canEdit(role) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild><Button variant="outline" size="sm"><Plus />Add cases</Button></DropdownMenuTrigger>

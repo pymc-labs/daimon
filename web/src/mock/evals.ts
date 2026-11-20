@@ -2,14 +2,15 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  Arm, ArmSummary, Case, CaseSummary, ChatEvent, ChatMessage, Column, Comment, Compare, Estimate, ItemStatus, Output, Platform, Queue, ReviewTask, Run, RunItem,
-  RunItemSummary, RunSummary, Score, Share, Suite, SuiteSummary,
+  Arm, ArmSummary, BlindRun, Case, CaseSummary, ChatEvent, ChatMessage, Comment, Compare, CompareColumn, Criterion, Estimate, ItemStatus, JudgeOutcome, JudgeRequest, Output, Platform,
+  QueueDraft, QueueView, ReviewTask, Run, RunEstimate, RunItem, RunItemSummary, RunSummary, ScoreLine, Share, Suite, SuiteSummary, TaskColumn,
 } from "@/modules/evals/types"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { me } from "./world"
 
 const NOW = Date.now()
 const iso = (offsetMin: number) => new Date(NOW + offsetMin * 60_000).toISOString()
+const isAdmin = () => { const r = me()?.role; return r === "owner" || r === "admin" }
 const guard = () => { const m = me(); return !m ? unauthorized() : m.capabilities.includes("evals.use" as never) ? null : forbidden() }
 
 // ---------- arms ----------
@@ -116,8 +117,9 @@ function pdf(pages: string[]) {
   out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${at.map((n) => `${String(n).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF`
   return out
 }
-const svg = (variant: string, title: string, n = 6) => {
-  const hue = variant === "replica" ? ["#0c9e82", "#2f6db5"] : variant === "replica-fast" ? ["#c2456b", "#2f6db5"] : ["#2f6db5", "#d0731d"]
+const svg = (variant: string, title: string, n = 6, blind = false) => {
+  // Blind pictures share one palette: a colour per arm would name the arm.
+  const hue = blind ? ["#2f6db5", "#d0731d"] : variant === "replica" ? ["#0c9e82", "#2f6db5"] : variant === "replica-fast" ? ["#c2456b", "#2f6db5"] : ["#2f6db5", "#d0731d"]
   const bars = Array.from({ length: n }, (_, i) => { const h = 60 + ((i * 53 + (variant.length * 17)) % 150); return `<rect x="${60 + i * 80}" y="${300 - h}" width="50" height="${h}" fill="${hue[i % 2]}"/><text x="${85 + i * 80}" y="320" font-size="12" text-anchor="middle" fill="#55627a">W${i + 1}</text>` }).join("")
   return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="#ffffff"/><text x="60" y="40" font-size="18" font-family="sans-serif" fill="#0c1f40">${title}</text><line x1="50" y1="300" x2="600" y2="300" stroke="#ccd3dd"/>${bars}</svg>`
 }
@@ -127,8 +129,19 @@ const REPLY = (variant: string, s: Spec) => variant === "baseline-a"
 const SHEET = (variant: string) => [["Option", "Monthly price", "Seats", "Support"], ["Starter", "29", "5", "Email"], ["Team", variant === "baseline-a" ? "79" : "75", "25", "Chat"], ["Business", "199", "100", variant === "replica-fast" ? "Chat" : "Phone"]]
 const toCsv = (rows: string[][]) => rows.map((r) => r.join(",")).join("\n")
 
+// Blind views name arms, items and files by hashed handles; this table is the server's side of them.
+const handles = new Map<string, string>()
+const opaque = new Map<string, { run: string; c: string; arm: string }>()
+const hash = (s: string) => { let x = 5381; for (const ch of s) x = (x * 33) ^ ch.charCodeAt(0); return (x >>> 0).toString(36) }
+const handleOf = (run: string, arm: string) => { const h = hash(`${run}|${arm}`); handles.set(h, arm); return h }
+const opaqueItem = (run: string, c: string, arm: string) => { const id = `i${hash(`${run}|${c}|${arm}`)}`; opaque.set(id, { run, c, arm }); return id }
+/** The arm (and slide number) a blob's variant stands for, behind a blind handle or not. */
+const variantOf = (v: string, blind: boolean) => { if (!blind) return v; const [h, n] = v.split("-"); const arm = handles.get(h!) ?? "replica"; return n ? `${arm}-${n}` : arm }
+const isBlindSha = (sha: string) => sha.startsWith("o:")
+
 function blob(sha: string) {
-  const [, kind, variant, c] = sha.split(":") as [string, string, string, string]
+  const [, kind, v, c] = sha.split(":") as [string, string, string, string]
+  const blind = isBlindSha(sha), variant = variantOf(v, blind)
   const s = specOf(c) ?? SPECS[0]!
   switch (kind) {
     case "md": return { type: "text/markdown", body: REPLY(variant, s) }
@@ -136,15 +149,24 @@ function blob(sha: string) {
     case "json": return { type: "application/json", body: JSON.stringify({ items: [{ owner: "Sam", task: "Send the numbers", due: "Friday" }, { owner: "Riley", task: variant === "baseline-a" ? "Book the review room" : "Book the room for Monday", due: "Thursday" }], count: 2 }, null, 2) }
     case "pdf": return { type: "application/pdf", body: pdf([REPLY(variant, s).replace(/\*\*/g, ""), `Appendix. ${variant === "baseline-a" ? "Figures are rounded." : "Figures are rounded to one decimal."} Source: shared folder, numbers file.`]) }
     case "pdftext": return { type: "text/plain", body: `${REPLY(variant, s).replace(/\*\*/g, "")}\nAppendix. ${variant === "baseline-a" ? "Figures are rounded." : "Figures are rounded to one decimal."}` }
-    case "img": return { type: "image/svg+xml", body: svg(variant, s.title) }
-    case "slide": return { type: "image/svg+xml", body: svg(variant, `${s.title}, slide ${variant.split("-").pop()}`, 4) }
+    case "img": return { type: "image/svg+xml", body: svg(variant, s.title, 6, blind) }
+    case "slide": return { type: "image/svg+xml", body: svg(variant, `${s.title}, slide ${variant.split("-").pop()}`, 4, blind) }
     case "patch": return { type: "text/x-diff", body: "diff --git a/build.sh b/build.sh\n--- a/build.sh\n+++ b/build.sh\n@@ -1,4 +1,5 @@\n #!/bin/sh\n-make all\n+make clean\n+make all\n echo done\n" }
     default: return { type: "text/plain", body: `Issue opened: build fails on the nightly run.\nOwner: unassigned\nLabels: bug, build\n${variant === "baseline-a" ? "" : "Linked to the last failing commit.\n"}` }
   }
 }
-const ref = (kind: string, variant: string, c: string, name: string, media: string) => ({ sha256: `b:${kind}:${variant}:${c}`, size: 2048, media_type: media, name })
+const ref = (kind: string, variant: string, c: string, name: string, media: string, blind = false) => ({ sha256: `${blind ? "o" : "b"}:${kind}:${variant}:${c}`, size: 2048, media_type: media, name })
 
 // ---------- runs and items ----------
+// The run routes (listing, estimating, creating, cancelling and approving) are the contract for the run service; the rest of this file follows the services that exist.
+//   GET  /runs?suite=       -> Run[]  newest first; reviewer-only suites are left out (reviewers reach runs through their queues).
+//   GET  /runs/{id}         -> Run, or BlindRun for reviewers (arms by neutral label, no name, spend or approver).
+//   POST /runs/estimate     {suite, case_ids?, arm_ids, repeats, judge_ids} -> Estimate + admin_approval_usd (editors; the spend limit above which an admin approves).
+//   POST /runs              the draft + cap_usd -> Run. Cap at or under the limit, or an admin asking: approved and running, `approval` set.
+//                           Above the limit from anyone else: status "estimated" (awaiting admin approval), `ext.requested_cap_usd` holds the cap asked for.
+//   POST /runs/{id}/cancel  -> Run (editors).
+//   POST /approvals/{id}    {cap_usd} -> Run, running (admins only; 403 "Ask an admin or an owner." otherwise).
+// Spend is reserved against the approved cap and stops at it, as judging does.
 const MS_PER_ITEM = 1800
 type Sim = { id: string; created: number; cancelled?: boolean; fixed?: Run["status"]; cap?: number }
 const runs: (Run & { sim: Sim })[] = []
@@ -159,7 +181,8 @@ const est = (arms: number, cases: number, repeats: number): Estimate => {
 runs.push(
   mkRun("run-1", "Replica against baseline", "weekly-reports", ["baseline-a", "replica"], { started_at: iso(-300), finished_at: iso(-270), spend: { total_usd: 2.31, by_category: { agent: 1.4, judge: 0.7, simulator: 0.21 } }, approval: { by: { display_name: "Sam Reed" }, at: iso(-305), cap_usd: 5 }, estimate: est(2, 8, 1), sim: { id: "run-1", created: NOW - 300 * 60_000, fixed: "done" } }),
   mkRun("run-2", "Fast variant check", "weekly-reports", ["replica", "replica-fast"], { started_at: iso(-1), spend: { total_usd: 0.44 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-2), cap_usd: 3 }, estimate: est(2, 8, 1), status: "running", sim: { id: "run-2", created: NOW - 40_000, cap: 3 } }),
-  mkRun("run-3", "Pricing replay", "pricing-questions", ["baseline-a", "replica"], { status: "estimated", estimate: est(2, 3, 1), sim: { id: "run-3", created: NOW, fixed: "estimated" } }),
+  mkRun("run-3", "Pricing replay", "pricing-questions", ["baseline-a", "replica"], { status: "estimated", estimate: est(2, 3, 1), ext: { requested_cap_usd: 40 }, sim: { id: "run-3", created: NOW, fixed: "estimated" } }),
+  mkRun("run-4", "Triage replay", "support-triage", ["baseline-a", "replica"], { started_at: iso(-600), finished_at: iso(-580), spend: { total_usd: 0.9 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-605), cap_usd: 2 }, estimate: est(2, 3, 1), sim: { id: "run-4", created: NOW - 600 * 60_000, fixed: "done" } }),
 )
 const runOf = (id: string) => runs.find((r) => r.id === id)
 const caseIds = (r: Run) => r.case_ids ?? (SUITE_CASES[r.suite.id] ?? []).map((c) => c.id)
@@ -187,17 +210,18 @@ const view = (r: Run & { sim: Sim }): Run => {
   return { ...rest, status, spend: sim.fixed ? r.spend : { total_usd: +(finished * 0.09).toFixed(2) }, finished_at: status === "done" ? r.finished_at ?? iso(0) : undefined }
 }
 
-function buildItem(r: Run, caseId: string, armId: string, repeat: number): RunItem {
+function buildItem(r: Run, caseId: string, armId: string, repeat: number, blind = false): RunItem {
   const s = specOf(caseId) ?? SPECS[0]!
   const slug = armId
+  const v = blind ? handleOf(r.id, armId) : armId
   const out: Output[] = []
-  const add = (kind: string, name: string, media: string, extra: Partial<Output> = {}) => out.push({ id: `o-${kind}`, name, media_type: media, blob: ref(kind, slug, caseId, name, media), ...extra })
+  const add = (kind: string, name: string, media: string, extra: Partial<Output> = {}) => out.push({ id: `o-${kind}`, name, media_type: media, blob: ref(kind, v, caseId, name, media, blind), ...extra })
   if (s.kind === "md") add("md", "summary.md", "text/markdown")
   if (s.kind === "csv") add("csv", "options.csv", "text/csv")
   if (s.kind === "json") add("json", "actions.json", "application/json")
-  if (s.kind === "pdf") add("pdf", "report.pdf", "application/pdf", { text: ref("pdftext", slug, caseId, "report.txt", "text/plain") })
+  if (s.kind === "pdf") add("pdf", "report.pdf", "application/pdf", { text: ref("pdftext", v, caseId, "report.txt", "text/plain", blind) })
   if (s.kind === "img") add("img", "trend.svg", "image/svg+xml")
-  if (s.kind === "slides") add("slide", "review.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", { renders: [1, 2, 3].map((n) => ref("slide", `${slug}-${n}`, caseId, `slide-${n}.svg`, "image/svg+xml")) })
+  if (s.kind === "slides") add("slide", "review.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", { renders: [1, 2, 3].map((n) => ref("slide", `${v}-${n}`, caseId, `slide-${n}.svg`, "image/svg+xml", blind)) })
   if (s.kind === "text") add("text", "issue.txt", "text/plain")
   if (s.tags.includes("engineering")) add("patch", "fix.patch", "text/x-diff")
   const write = s.tags.includes("engineering")
@@ -226,26 +250,53 @@ function buildItem(r: Run, caseId: string, armId: string, repeat: number): RunIt
     enclosure: { mode: baseline ? "recorded" : "enclosed", simulated_calls: calls.filter((c) => c.origin === "simulated").length, denied_calls: calls.filter((c) => c.origin === "denied").length },
   }
 }
-const scoresOf = (item: RunItem, s: Spec): Score[] => {
-  const weak = item.arm_id === "replica-fast" || (item.arm_id === "replica" && s.id === "c-issue")
+const replyOf = (armId: string, s: Spec) =>
+  s.tags.includes("engineering") ? (armId === "baseline-a" ? "I opened an issue for the failing nightly build." : "I opened an issue for the failing nightly build and linked the last failing commit.") : REPLY(armId, s)
+const weakOn = (armId: string, s: Spec) => armId === "replica-fast" || (armId === "replica" && s.id === "c-issue")
+const lines = (armId: string, s: Spec): ScoreLine[] => {
+  const weak = weakOn(armId, s)
+  const line = (criterion: string, grader: string, over: Partial<ScoreLine>): ScoreLine => ({ criterion, grader, passed: null, score: null, unknown: false, rationale: null, ...over })
   return [
-    { id: `${item.id}:s1`, item_id: item.id, criterion: "Calls the expected tools", grader: { kind: "code" }, value: { pass: true }, at: iso(-30) },
-    { id: `${item.id}:s2`, item_id: item.id, criterion: "Answers the question that was asked", grader: { kind: "llm", judge_id: "rubric-1", model: "judge-a" }, value: { pass: !weak }, rationale: weak ? "The reply leaves out the recommendation." : "Covers the three changes and gives a recommendation.", at: iso(-29) },
-    { id: `${item.id}:s3`, item_id: item.id, criterion: "Tone fits the channel", grader: { kind: "llm", judge_id: "rubric-1", model: "judge-b" }, value: { score: weak ? 3 : 4 }, at: iso(-29) },
+    line("Calls the expected tools", "code", { passed: true }),
+    line("Answers the question that was asked", "llm", { passed: !weak, rationale: weak ? "The reply leaves out the recommendation." : "Covers the three changes and gives a recommendation." }),
+    line("Tone fits the channel", "llm", { score: weak ? 3 : 4 }),
   ]
 }
-const LABELS = ["A", "B", "C"]
-function compare(r: Run, caseId: string, blind: boolean): Compare {
-  const s = specOf(caseId) ?? SPECS[0]!
-  const order = blind ? [...r.arms].sort((a, b) => (caseId.length + a.id.length) % 2 - (caseId.length + b.id.length) % 2 || a.id.localeCompare(b.id)) : r.arms
-  const columns: Column[] = order.map((a, i) => {
-    const label = blind ? LABELS[i]! : a.id === "baseline-a" ? "B" : a.label[0]!
-    const item = buildItem(r, caseId, a.id, 0)
-    return blind
-      ? { label, item: { ...item, arm_id: label, id: `${r.id}:${caseId}:${label}`, outputs: item.outputs?.map((o) => ({ ...o, blob: { ...o.blob, sha256: o.blob.sha256 } })) }, scores: scoresOf(item, s).filter((x) => x.grader.kind !== "llm" || true).map((x) => ({ ...x, id: `${x.id}b`, item_id: `${r.id}:${caseId}:${label}`, grader: { ...x.grader, model: undefined, judge_id: undefined } })) }
-      : { label, arm: a, item, scores: scoresOf(item, s) }
+
+// ---------- blind views ----------
+/** A reviewer's name for each arm of a run: shuffled by the run id, never by arm. */
+const armLabels = (r: Run) => { const ranked = [...r.arms].sort((a, b) => hash(`${r.id}|${a.id}`).localeCompare(hash(`${r.id}|${b.id}`))); return new Map(ranked.map((a, i) => [a.id, `Arm ${i + 1}`])) }
+const callerRole = (suite: string) => suites.find((x) => x.id === suite)?.role
+/** Reviewers always see runs blind; anyone else when they ask. */
+const blindFor = (r: Run, asked: boolean) => asked || callerRole(r.suite.id) === "reviewer"
+const blindRun = (r: Run): BlindRun => ({ id: r.id, suite: r.suite, arms: [...armLabels(r).values()].sort(), case_ids: r.case_ids ?? null, repeats: r.repeats, status: r.status, origin: r.origin.kind, started_at: r.started_at, finished_at: r.finished_at })
+/** An item as a blind reader gets it: an opaque id and file handles, the chat, files and calls. No usage, enclosure, origin, run id, arm or repeat. */
+function blindItem(r: Run, caseId: string, armId: string): RunItem {
+  const it = buildItem(r, caseId, armId, 0, true)
+  return {
+    id: opaqueItem(r.id, caseId, armId), run_id: "run", case: it.case, arm_id: armLabels(r).get(armId)!, repeat: 0, status: it.status, error: it.error,
+    chat: it.chat?.filter((e) => !e.kind.startsWith("reaction")), outputs: it.outputs, world_calls: it.world_calls?.map((w) => ({ ...w, origin: "recorded" as const })),
+  }
+}
+
+// ---------- compare ----------
+function compare(r: Run, arms: string[] | null, blind: boolean): Compare {
+  const picked = r.arms.filter((a) => !arms?.length || arms.includes(a.id))
+  const rows = caseIds(r).flatMap((caseId) => {
+    const s = specOf(caseId) ?? SPECS[0]!
+    const order = blind ? [...picked].sort((a, b) => hash(`${caseId}|${a.id}`).localeCompare(hash(`${caseId}|${b.id}`))) : picked
+    return Array.from({ length: blind ? 1 : r.repeats }, (_, k) => ({
+      case_id: caseId, title: buildCase(s).title, repeat: k,
+      columns: order.map((a): CompareColumn => {
+        const weak = weakOn(a.id, s), bad = s.id === "c-chart" && a.id === "replica-fast"
+        const base = { status: (bad ? "error" : "done") as ItemStatus, reply: replyOf(a.id, s) }
+        return blind
+          ? { label: armLabels(r).get(a.id)!, item_id: opaqueItem(r.id, caseId, a.id), passed: null, rubric: null, scores: [], ...base }
+          : { label: a.label, item_id: `${r.id}:${caseId}:${a.id}:${k}`, passed: !weak, rubric: weak ? 0.5 : 0.9, scores: lines(a.id, s), ...base }
+      }),
+    }))
   })
-  return { run_id: r.id, case_id: caseId, repeat: 0, blind, columns }
+  return { run_id: blind ? "run" : r.id, blind, rows }
 }
 
 function summary(r: Run): RunSummary {
@@ -257,34 +308,54 @@ function summary(r: Run): RunSummary {
   })
   return {
     run_id: r.id, arms,
-    comparisons: arms.length > 1 ? [{ candidate: arms[1]!.arm_id, reference: arms[0]!.arm_id, metric: "pass_rate", cases: 8, difference: 0.125, low: -0.0625, high: 0.3125, margin: 0.05, non_inferior: arms[1]!.arm_id === "replica", only_candidate: 2, only_reference: 1, mcnemar_p: 0.62 }] : [],
-    preferences: arms.length > 1 ? [{ arm_a: arms[0]!.arm_id, arm_b: arms[1]!.arm_id, a_wins: 2, b_wins: 4, ties: 2, sign_test_p: 0.41 }] : [],
+    comparisons: arms.length > 1 ? [{ candidate: arms[1]!.arm_id, reference: arms[0]!.arm_id, metric: "pass_rate", cases: 8, clusters: 6, difference: 0.125, low: -0.0625, high: 0.3125, margin: 0.05, non_inferior: arms[1]!.arm_id === "replica", only_candidate: 2, only_reference: 1, mcnemar_p: 0.62 }] : [],
+    preferences: arms.length > 1 ? [{ grader: "human", arm_a: arms[0]!.arm_id, arm_b: arms[1]!.arm_id, a_wins: 2, b_wins: 4, ties: 2, sign_test_p: 0.41 }] : [],
     calibration: [{ judge: "judge-a", n: 24, agreement: 0.83, kappa: 0.66, flagged: false }, { judge: "judge-b", n: 24, agreement: 0.67, kappa: 0.31, flagged: true }],
     judge_cost_usd: 0.7, notes: ["Baselines have one recorded answer per case, so their variance is unknown."],
   }
 }
 
 // ---------- review ----------
-const queues: (Queue & { suite_id: string; order: string[] })[] = [
-  { id: "q-1", name: "Blind review of the replica", run_id: "run-1", suite_id: "weekly-reports", layout: "side_by_side", blind: true, reviewers_per_item: 1, status: "open", progress: { done: 2, total: 8 }, order: SPECS.map((s) => s.id) },
-  { id: "q-2", name: "Spot check, replica only", run_id: "run-1", suite_id: "weekly-reports", layout: "single", blind: false, status: "open", progress: { done: 0, total: 8 }, order: SPECS.map((s) => s.id) },
+type Queue = { ref: string; run_id: string; suite_id: string; queue: QueueView["queue"]; total: number; done: number; order: string[] }
+const queues: Queue[] = [
+  { ref: "run-1~q-1", run_id: "run-1", suite_id: "weekly-reports", queue: { id: "q-1", name: "Blind review of the replica", layout: "side_by_side", blind: true, reviewers_per_item: 1, status: "open" }, total: 8, done: 2, order: SPECS.map((s) => s.id) },
+  { ref: "run-1~q-2", run_id: "run-1", suite_id: "weekly-reports", queue: { id: "q-2", name: "Spot check, replica only", layout: "single", blind: false, status: "open", arms: ["replica"] }, total: 8, done: 0, order: SPECS.map((s) => s.id) },
+  { ref: "run-4~q-3", run_id: "run-4", suite_id: "support-triage", queue: { id: "q-3", name: "Triage answers", layout: "side_by_side", blind: true, status: "open" }, total: 3, done: 0, order: SUITE_CASES["support-triage"]!.map((s) => s.id) },
 ]
-function task(q: (typeof queues)[number]): ReviewTask | null {
+const queueView = ({ order: _o, suite_id: _s, ...q }: Queue): QueueView => q
+const criteria = (columns: number): Criterion[] => [
+  { id: "answers", question: "Answers the question that was asked", kind: "binary" },
+  { id: "tone", question: "Tone fits the channel", kind: "scale", scale: { min: 1, max: 5 } },
+  ...(columns === 2 ? [{ id: "preference", question: "Which answer is better?", kind: "preference" as const }] : []),
+]
+/** A reviewer's task: the case, the answers under letters (blind: opaque items and no arms) and the comments made in this queue. Nothing else of the case or the run. */
+function task(q: Queue, caseId: string): ReviewTask {
   const r = runOf(q.run_id)!
-  const id = q.order[q.progress.done]
-  if (!id) return null
-  const cols = compare(r, id, q.blind).columns
-  const columns = q.layout === "single" ? cols.slice(0, 1) : cols
-  const multi = columns.length > 1
+  const s = specOf(caseId) ?? SPECS[0]!
+  const c = buildCase(s)
+  const arms = r.arms.filter((a) => !q.queue.arms || q.queue.arms.includes(a.id))
+  const order = q.queue.blind ? [...arms].sort((a, b) => hash(`${caseId}|${a.id}`).localeCompare(hash(`${caseId}|${b.id}`))) : arms
+  const columns: TaskColumn[] = (q.queue.layout === "single" ? order.slice(0, 1) : order).map((a, i) => ({
+    label: String.fromCharCode(65 + i), arm: q.queue.blind ? null : a, item: q.queue.blind ? blindItem(r, caseId, a.id) : buildItem(r, caseId, a.id, 0),
+  }))
   return {
-    id: `${q.id}:${id}`, queue_id: q.id, suite_id: q.suite_id, case_id: id, blind: q.blind, layout: q.layout, columns, progress: q.progress,
-    criteria: [{ id: "answers", text: "Answers the question that was asked", kind: "pass" }, { id: "tone", text: "Tone fits the channel", kind: "scale", min: 1, max: 5 }, ...(multi ? [{ id: "pref", text: "Which answer would you rather send?", kind: "preference" as const }] : [])],
+    id: `${q.ref}#${caseId}`, queue: q.ref, layout: q.queue.layout, blind: q.queue.blind,
+    case: { id: c.id, title: c.title, platform: c.surface.platform, history: c.history, turn: c.turn.messages, reference: c.expect.reference ?? null },
+    criteria: criteria(columns.length), columns, comments: comments.filter((x) => x.queue === q.ref && x.case_id === caseId).map(shown), reserved_until: iso(10), done: q.done, total: q.total,
   }
 }
-const comments: Comment[] = [{ id: "cm1", case_id: "c-spend", item_id: "run-1:c-spend:replica:0", author: { display_name: "Riley Chen" }, text: "The second bullet is clearer here.", anchors: [{ target: "message", item_id: "run-1:c-spend:replica:0", ref: "m_reply", quote: "Search spend rose 4%" }], resolved: false, at: iso(-50) }]
+const taskOf = (id: string) => { const [ref, c] = id.split("#"); const q = queues.find((x) => x.ref === ref); return q && c ? { q, c } : null }
+
+type Stored = Comment & { run: string; queue?: string }
+const comments: Stored[] = [{ id: "cm1", run: "run-1", case_id: "c-spend", item_id: "run-1:c-spend:replica:0", author: { display_name: "Riley Chen" }, text: "The second bullet is clearer here.", anchors: [{ target: "message", item_id: "run-1:c-spend:replica:0", ref: "m_reply", quote: "Search spend rose 4%" }], resolved: false, at: iso(-50) }]
+const shown = ({ run: _r, queue: _q, ...c }: Stored): Comment => c
 const bundles: string[] = []
 
 const json = (b: unknown, status = 200) => HttpResponse.json(b as never, { status })
+const LIMIT = 25
+const needsAdmin = () => forbidden("Ask an admin or an owner.")
+const canEditSuite = (suite: string) => ["owner", "editor"].includes(callerRole(suite) ?? "")
+const draftCases = (d: { suite: { id: string }; case_ids?: string[] }) => d.case_ids?.length ?? SUITE_CASES[d.suite.id]?.length ?? 0
 export const evalsHandlers: HttpHandler[] = [
   http.get("/api/evals/suites", async () => { await wait(); return guard() ?? json(suites.map(({ shares: _s, description: _d, ...s }) => s)) }),
   http.post("/api/evals/suites", async ({ request }) => {
@@ -313,64 +384,138 @@ export const evalsHandlers: HttpHandler[] = [
   }),
   http.get("/api/evals/arms", async () => { await wait(); return guard() ?? json(ARMS) }),
   http.post("/api/evals/arms", async ({ request }) => { const a = (await request.json()) as Arm; ARMS.push(a); return json(a) }),
+
+  // The run routes below are the contract for the run service (see the note above).
   http.get("/api/evals/runs", async ({ request }) => {
     await wait(); const suite = new URL(request.url).searchParams.get("suite")
-    return guard() ?? json(runs.filter((r) => !suite || r.suite.id === suite).map(view).sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? "")))
+    return guard() ?? json(runs.filter((r) => callerRole(r.suite.id) !== "reviewer" && (!suite || r.suite.id === suite)).map(view).sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? "")))
   }),
   http.post("/api/evals/runs/estimate", async ({ request }) => {
     await wait(350); const d = (await request.json()) as { suite: { id: string }; case_ids?: string[]; arm_ids: string[]; repeats: number }
-    return guard() ?? json(est(d.arm_ids.length, d.case_ids?.length ?? SUITE_CASES[d.suite.id]?.length ?? 0, d.repeats))
+    if (!canEditSuite(d.suite.id)) return forbidden("Only editors and owners can start runs. Ask an owner.")
+    const e: RunEstimate = { ...est(d.arm_ids.length, draftCases(d), d.repeats), admin_approval_usd: LIMIT }
+    return guard() ?? json(e)
   }),
   http.post("/api/evals/runs", async ({ request }) => {
     await wait(300); const d = (await request.json()) as { suite: { id: string; version: number }; case_ids?: string[]; arm_ids: string[]; repeats: number; cap_usd: number }
+    if (!canEditSuite(d.suite.id)) return forbidden("Only editors and owners can start runs. Ask an owner.")
     if (!(d.cap_usd > 0)) return json({ detail: "Set a spend cap first." }, 400)
     const id = `run-${runs.length + 1}`
-    const r = mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { suite: d.suite, case_ids: d.case_ids, repeats: d.repeats, status: "running", started_at: iso(0), estimate: est(d.arm_ids.length, d.case_ids?.length ?? SUITE_CASES[d.suite.id]?.length ?? 0, d.repeats), approval: { by: { display_name: "You" }, at: iso(0), cap_usd: d.cap_usd }, sim: { id, created: Date.now(), cap: d.cap_usd } })
+    const base = { suite: d.suite, case_ids: d.case_ids, repeats: d.repeats, estimate: est(d.arm_ids.length, draftCases(d), d.repeats) }
+    // Above the admin limit an admin's approval is needed: the run waits, with the cap its creator asked for.
+    const waiting = d.cap_usd > LIMIT && !isAdmin()
+    const r = waiting
+      ? mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "estimated", ext: { requested_cap_usd: d.cap_usd }, sim: { id, created: Date.now(), fixed: "estimated" } })
+      : mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "running", started_at: iso(0), approval: { by: { display_name: me()?.name ?? "You" }, at: iso(0), cap_usd: d.cap_usd }, sim: { id, created: Date.now(), cap: d.cap_usd } })
     runs.unshift(r); return json(view(r))
   }),
-  http.get("/api/evals/runs/:id", async ({ params }) => { await wait(100); const r = runOf(String(params.id)); return guard() ?? (r ? json(view(r)) : notFound()) }),
-  http.post("/api/evals/runs/:id/cancel", async ({ params }) => { const r = runOf(String(params.id)); if (!r) return notFound(); r.sim.cancelled = true; r.sim.fixed = undefined; return json(view(r)) }),
+  http.get("/api/evals/runs/:id", async ({ params }) => {
+    await wait(100); const r = runOf(String(params.id))
+    return guard() ?? (r ? json(blindFor(r, false) ? blindRun(view(r)) : view(r)) : notFound())
+  }),
+  http.post("/api/evals/runs/:id/cancel", async ({ params }) => {
+    const r = runOf(String(params.id)); if (!r) return notFound()
+    if (!canEditSuite(r.suite.id)) return forbidden("Only editors and owners can cancel runs. Ask an owner.")
+    r.sim.cancelled = true; r.sim.fixed = undefined; return json(view(r))
+  }),
   http.post("/api/evals/approvals/:id", async ({ params, request }) => {
     const r = runOf(String(params.id)); const b = (await request.json()) as { cap_usd: number }
     if (!r || !(b.cap_usd > 0)) return notFound()
-    r.sim = { id: r.id, created: Date.now(), cap: b.cap_usd }; r.status = "running"; r.started_at = iso(0); r.approval = { by: { display_name: "You" }, at: iso(0), cap_usd: b.cap_usd }
+    if (!isAdmin()) return needsAdmin()
+    r.sim = { id: r.id, created: Date.now(), cap: b.cap_usd }; r.status = "running"; r.started_at = iso(0); r.approval = { by: { display_name: me()?.name ?? "You" }, at: iso(0), cap_usd: b.cap_usd }
     return json(view(r))
   }),
-  http.get("/api/evals/runs/:id/items", async ({ params }) => { await wait(100); const r = runOf(String(params.id)); return guard() ?? (r ? json(itemList(r)) : notFound()) }),
-  http.get("/api/evals/runs/:id/summary", async ({ params }) => { await wait(200); const r = runOf(String(params.id)); return r ? json(summary(view(r))) : notFound() }),
+
+  http.get("/api/evals/runs/:id/items", async ({ params, request }) => {
+    await wait(100); const r = runOf(String(params.id)); if (!r) return notFound()
+    const blind = blindFor(r, new URL(request.url).searchParams.get("blind") === "true")
+    return guard() ?? json(blind ? itemList(r).map((i) => ({ ...i, id: opaqueItem(r.id, i.case_id, i.arm_id), key: opaqueItem(r.id, i.case_id, i.arm_id), arm_id: armLabels(r).get(i.arm_id)!, repeat: 0 })) : itemList(r))
+  }),
+  http.get("/api/evals/runs/:id/summary", async ({ params }) => {
+    await wait(200); const r = runOf(String(params.id))
+    return !r ? notFound() : blindFor(r, false) ? forbidden("Reviewers cannot see run results. Ask an editor.") : json(summary(view(r)))
+  }),
   http.get("/api/evals/runs/:id/compare", async ({ params, request }) => {
     await wait(200); const r = runOf(String(params.id)); const q = new URL(request.url).searchParams
-    return r ? json(compare(view(r), q.get("case") ?? caseIds(r)[0]!, q.get("blind") === "1")) : notFound()
+    return r ? json(compare(view(r), q.getAll("arms"), blindFor(r, ["1", "true"].includes(q.get("blind") ?? "")))) : notFound()
   }),
   http.post("/api/evals/runs/:id/judge", async ({ params, request }) => {
-    await wait(300); const r = runOf(String(params.id)); const b = (await request.json()) as { cap_usd?: number }
-    return !r ? notFound() : b.cap_usd ? json({ ok: true }, 202) : json(est(r.arms.length, caseIds(r).length, 1).lines.filter((l) => l.category === "judge").length ? { ...est(r.arms.length, caseIds(r).length, 1), lines: est(r.arms.length, caseIds(r).length, 1).lines.filter((l) => l.category === "judge") } : est(1, 1, 1))
+    await wait(300); const r = runOf(String(params.id)); const b = (await request.json()) as JudgeRequest
+    if (!r) return notFound()
+    if (!canEditSuite(r.suite.id)) return forbidden("Only editors and owners can run judges. Ask an owner.")
+    const full = est(r.arms.length, caseIds(r).length, 1)
+    const estimate: Estimate = { ...full, lines: full.lines.filter((l) => l.category === "judge") }
+    if (b.approve_cap_usd == null) return json({ estimate, ran: false, scores: 0, spent_usd: 0, skipped: 0, failed: 0 } satisfies JudgeOutcome)
+    if (b.approve_cap_usd > LIMIT && !isAdmin()) return forbidden(`Ceilings above $${LIMIT} need an admin. Ask an admin or an owner.`)
+    return json({ estimate, ran: true, scores: caseIds(r).length * r.arms.length, spent_usd: estimate.expected_usd, skipped: 0, failed: 0 } satisfies JudgeOutcome)
   }),
-  http.get("/api/evals/items/:id", async ({ params }) => { const [run, c, arm, rep] = String(params.id).split(":"); const r = runOf(run!); return r ? json(buildItem(r, c!, arm!, Number(rep))) : notFound() }),
-  http.get("/api/evals/queues", async () => { await wait(); return guard() ?? json(queues.map(({ order: _o, suite_id: _s, ...q }) => q)) }),
+  http.get("/api/evals/items/:id", async ({ params, request }) => {
+    await wait(80); const id = String(params.id)
+    const o = opaque.get(id)
+    if (o) { const r = runOf(o.run); return r ? json(blindItem(r, o.c, o.arm)) : notFound() }
+    const [run, c, arm, rep] = id.split(":"); const r = runOf(run!)
+    if (!r) return notFound()
+    const asked = ["1", "true"].includes(new URL(request.url).searchParams.get("blind") ?? "")
+    return blindFor(r, asked) ? json(blindItem(r, c!, arm!)) : json(buildItem(r, c!, arm!, Number(rep)))
+  }),
+
+  http.get("/api/evals/queues", async () => { await wait(); return guard() ?? json(queues.map(queueView)) }),
   http.post("/api/evals/queues", async ({ request }) => {
-    const b = (await request.json()) as { run_id: string; name: string; layout: Queue["layout"]; blind: boolean }
+    const b = (await request.json()) as { run_id: string; queue: QueueDraft }
     const r = runOf(b.run_id); if (!r) return notFound()
-    const q = { id: `q-${queues.length + 1}`, name: b.name, run_id: b.run_id, suite_id: r.suite.id, layout: b.layout, blind: b.blind, status: "open" as const, progress: { done: 0, total: caseIds(r).length }, order: caseIds(r) }
-    queues.push(q); return json(q)
+    if (!canEditSuite(r.suite.id)) return forbidden("Only editors and owners can make review queues. Ask an owner.")
+    const q: Queue = { ref: `${r.id}~${b.queue.id}`, run_id: r.id, suite_id: r.suite.id, queue: { ...b.queue, status: "open" }, total: caseIds(r).length, done: 0, order: caseIds(r) }
+    queues.push(q); return json(queueView(q))
   }),
-  http.get("/api/evals/queues/:id/next", async ({ params }) => { await wait(200); const q = queues.find((x) => x.id === params.id); return guard() ?? (q ? json(task(q)) : notFound()) }),
+  http.get("/api/evals/queues/:ref/next", async ({ params }) => {
+    await wait(200); const q = queues.find((x) => x.ref === params.ref); if (!q) return notFound()
+    const id = q.order[q.done]
+    return guard() ?? json(id ? task(q, id) : null)
+  }),
   http.post("/api/evals/scores", async ({ request }) => {
-    await wait(200); const b = (await request.json()) as { task_id: string }
-    const q = queues.find((x) => x.id === b.task_id.split(":")[0]); if (!q) return notFound()
-    q.progress = { ...q.progress, done: q.progress.done + 1 }; if (q.progress.done >= q.progress.total) q.status = "closed"
+    await wait(200); const b = (await request.json()) as { task_id: string; scores: { criterion: string; target?: string }[] }
+    const t = taskOf(b.task_id); if (!t) return notFound()
+    const spec = task(t.q, t.c)
+    if (!b.scores?.length) return json({ detail: "Answer at least one question." }, 400)
+    for (const s of b.scores) if (spec.columns.length > 1 && s.criterion !== "preference" && !spec.columns.some((c) => c.label === s.target)) return json({ detail: `${s.criterion}: name the column (A, B...) it is about.` }, 400)
+    t.q.done += 1; if (t.q.done >= t.q.total) t.q.queue.status = "closed"
     return new HttpResponse(null, { status: 204 })
   }),
-  http.get("/api/evals/comments", async ({ request }) => { await wait(100); const c = new URL(request.url).searchParams.get("case"); return json(comments.filter((x) => !c || x.case_id === c)) }),
-  http.post("/api/evals/comments", async ({ request }) => {
-    const b = (await request.json()) as Partial<Comment>; const c: Comment = { id: `cm${comments.length + 1}`, case_id: b.case_id, item_id: b.item_id, author: { display_name: me()?.name ?? "You" }, text: b.text ?? "", anchors: b.anchors, resolved: false, at: iso(0) }
-    comments.push(c); return json(c)
+  http.get("/api/evals/comments", async ({ request }) => {
+    await wait(100); const run = new URL(request.url).searchParams.get("run_id"); const r = run ? runOf(run) : undefined
+    if (!r) return notFound()
+    return blindFor(r, false) ? forbidden("Reviewers comment from their review task. Ask an editor.") : json(comments.filter((c) => c.run === run && !c.queue).map(shown))
   }),
-  http.post("/api/evals/bundles/export", async () => { await wait(400); bundles.push("x"); return json({ sha256: "b:bundle:export:0", size: 48_000, media_type: "application/zip", name: "weekly-reports.zip" }) }),
-  http.post("/api/evals/bundles/import", async () => { await wait(500); return json({ bundle_id: "bundle-1", suites: [{ id: "imported-suite", version: 1, created: true }], runs: ["run-9"], skipped_runs: [], blobs: 34, signature: "unsigned", warnings: ["The bundle is not signed."] }) }),
+  http.get("/api/evals/tasks/:id/comments", async ({ params }) => {
+    const t = taskOf(String(params.id)); return t ? json(comments.filter((c) => c.queue === t.q.ref && c.case_id === t.c).map(shown)) : notFound()
+  }),
+  http.post("/api/evals/comments", async ({ request }) => {
+    const b = (await request.json()) as { text: string; task_id?: string; target?: string; run_id?: string; item_id?: string; case_id?: string; anchors?: Comment["anchors"] }
+    const t = b.task_id ? taskOf(b.task_id) : null
+    if (b.task_id && !t) return notFound()
+    const r = t ? runOf(t.q.run_id) : b.run_id ? runOf(b.run_id) : undefined
+    if (!r) return json({ detail: "Name the task or the run." }, 400)
+    if (!t && blindFor(r, false)) return forbidden("Reviewers comment from their review task. Ask an editor.")
+    const c: Stored = { id: `cm${comments.length + 1}`, run: r.id, queue: t?.q.ref, case_id: t?.c ?? b.case_id, item_id: t ? undefined : b.item_id, author: { display_name: me()?.name ?? "You" }, text: b.text, anchors: b.anchors, resolved: false, at: iso(0) }
+    comments.push(c); return json(shown(c))
+  }),
+
+  http.post("/api/evals/bundles/export", async ({ request }) => {
+    await wait(400); const b = (await request.json()) as { suites: { id: string }[]; include_identities?: boolean }
+    if (b.suites.some((s) => !canEditSuite(s.id))) return forbidden("Only editors and owners can export. Ask an owner.")
+    if (b.include_identities && !isAdmin()) return needsAdmin()
+    bundles.push("x")
+    return new HttpResponse("PK mock bundle", { headers: { "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${b.suites[0]?.id ?? "bundle"}.zip"`, "X-Content-Type-Options": "nosniff" } })
+  }),
+  http.post("/api/evals/bundles/import", async ({ request }) => {
+    await wait(500)
+    if (new URL(request.url).searchParams.get("accept_unscrubbed") === "true" && !isAdmin()) return needsAdmin()
+    return json({ bundle_id: "bundle-1", suites: [{ bundle_id: "bundle-1", id: "imported-suite", version: 1, created: true }], runs: ["run-9"], skipped_runs: [], blobs: 34, signature: "unsigned", warnings: ["The bundle is not signed."] })
+  }),
+  // The server has no table route yet; the viewer reads sheets from here.
   http.get("/api/evals/blobs/:sha/table", async ({ params }) => {
-    const [, , variant, c] = String(params.sha).split(":"); void c
-    return json({ sheets: [{ name: "Options", rows: SHEET(variant ?? "replica") }, { name: "Notes", rows: [["Note"], ["Prices are monthly"]] }] })
+    const sha = String(params.sha); const [, , v] = sha.split(":")
+    return json({ sheets: [{ name: "Options", rows: SHEET(variantOf(v ?? "replica", isBlindSha(sha))) }, { name: "Notes", rows: [["Note"], ["Prices are monthly"]] }] })
   }),
   http.get("/api/evals/blobs/:sha", async ({ params }) => { const b = blob(String(params.sha)); return new HttpResponse(b.body, { headers: { "Content-Type": b.type } }) }),
 ]

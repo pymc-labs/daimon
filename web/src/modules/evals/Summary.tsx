@@ -77,7 +77,7 @@ export function Summary({ s, arms }: { s: RunSummary; arms: Arm[] }) {
       {!!s.preferences.length && (
         <section>
           <H>Preferences</H>
-          <ul className="space-y-1 text-sm">{s.preferences.map((p) => <li key={`${p.arm_a}:${p.arm_b}`} className="tabular">{label(p.arm_a)} {p.a_wins}<span className="text-muted-foreground">, ties {p.ties}, </span>{label(p.arm_b)} {p.b_wins}</li>)}</ul>
+          <ul className="space-y-1 text-sm">{s.preferences.map((p) => <li key={`${p.grader}:${p.arm_a}:${p.arm_b}`} className="tabular"><span className="text-muted-foreground">{p.grader[0]!.toUpperCase() + p.grader.slice(1)}, </span>{label(p.arm_a)} {p.a_wins}<span className="text-muted-foreground">, ties {p.ties}, </span>{label(p.arm_b)} {p.b_wins}</li>)}</ul>
         </section>
       )}
       {!!s.calibration.length && (

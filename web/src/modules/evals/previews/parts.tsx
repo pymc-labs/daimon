@@ -16,7 +16,7 @@ export function Body({ m }: { m: Msg }) {
   if (m.deleted) return <span className="text-sm italic text-faint">Message deleted</span>
   return (
     <>
-      {m.text && (m.markdown ? <Prose text={m.text} breaks className="text-sm leading-[1.4]" /> : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>)}
+      {m.text && (m.markdown ? <Prose text={m.text} breaks noImages className="text-sm leading-[1.4]" /> : <p className="whitespace-pre-wrap break-words text-sm">{m.text}</p>)}
       {m.edited && <span className="text-[11px] text-faint">(edited)</span>}
     </>
   )
@@ -61,7 +61,7 @@ export function Card({ card, skin, className, button }: {
           {card.fields.map((f) => (
             <div key={f.id}>
               <div className="text-xs text-muted-foreground">{f.label}</div>
-              <div className="flex h-8 items-center rounded-md border bg-background px-2 text-xs text-faint">{card.answer?.fields?.[f.id] ?? (f.kind === "secret" ? "••••••" : f.options?.[0] ?? "")}</div>
+              <div className="flex h-8 items-center rounded-md border bg-background px-2 text-xs text-faint">{f.kind === "secret" ? "••••••" : card.answer?.fields?.[f.id] ?? f.options?.[0] ?? ""}</div>
             </div>
           ))}
         </div>

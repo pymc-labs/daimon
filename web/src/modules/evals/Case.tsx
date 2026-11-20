@@ -16,9 +16,9 @@ import type { Case, CaseCheck } from "./types"
 
 const TABS = [["preview", "Preview"], ["world", "World"], ["script", "Script"], ["expect", "Expectations"], ["provenance", "Provenance"], ["json", "JSON"]] as const
 
-/** The smallest case that passes validation. */
-const blank = (id: string): Case => ({
-  id, revision: 1, title: "New case", fidelity: { level: "authored" }, provenance: { kind: "authored" },
+/** The smallest case that passes validation, with an id of its own: saving under an existing id replaces that case. */
+const blank = (): Case => ({
+  id: `case-${crypto.randomUUID().slice(0, 8)}`, revision: 1, title: "New case", fidelity: { level: "authored" }, provenance: { kind: "authored" },
   surface: { platform: "web", conversation: "dm", participants: [{ id: "u1", display_name: "Requester", role: "member", is_requester: true }], bot: { id: "bot", display_name: "Assistant", is_bot: true } },
   clock: { now: new Date().toISOString() }, history: [],
   turn: { messages: [{ id: "m1", author: "u1", at: new Date().toISOString(), text: "" }], trigger: "dm" }, world: {}, expect: {},
@@ -61,7 +61,7 @@ function JsonEditor({ suite, c, editable }: { suite: string; c: Case; editable: 
   )
 }
 
-function Flags({ suite, c }: { suite: string; c: Case }) {
+function Flags({ suite, c, editable }: { suite: string; c: Case; editable: boolean }) {
   const qc = useQueryClient()
   const open = c.review_flags?.filter((f) => !f.cleared_at) ?? []
   const clear = useMutation({
@@ -75,7 +75,7 @@ function Flags({ suite, c }: { suite: string; c: Case }) {
         <li key={f.reason} className="flex min-h-9 items-center gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-1 text-sm">
           <Flag className="size-4 shrink-0 text-warning" /><span className="min-w-0 flex-1">{f.reason.replace(/_/g, " ").replace(/^./, (x) => x.toUpperCase())}{f.detail && <span className="text-muted-foreground">, {f.detail}</span>}</span>
           {clear.error && <span className="text-xs text-destructive">{clear.error.message}</span>}
-          <Button variant="outline" size="sm" disabled={clear.isPending} onClick={() => clear.mutate(f.reason)}>Clear</Button>
+          {editable && <Button variant="outline" size="sm" disabled={clear.isPending} onClick={() => clear.mutate(f.reason)}>Clear</Button>}
         </li>
       ))}
     </ul>
@@ -86,6 +86,7 @@ export function CasePage() {
   const { suite = "", case: id = "" } = useParams()
   const [tab] = useParam("tab")
   const fresh = id === "new"
+  const [start] = useState(blank)
   const query = useCase(suite, fresh ? "" : id)
   const mine = useSuites().data?.find((s) => s.id === suite)
   const role = mine?.role ?? "viewer"
@@ -101,14 +102,14 @@ export function CasePage() {
     }
   }
   const crumbs = (title: string) => [{ label: "Evals", to: "/evals" }, { label: mine?.name ?? suite, to: `/evals/suites/${suite}` }, { label: title }]
-  if (fresh) return <Page crumbs={crumbs("New case")}><JsonEditor suite={suite} c={blank("case-1")} editable /></Page>
+  if (fresh) return <Page crumbs={crumbs("New case")}>{mine && !canEdit(role) ? <div className="py-16 text-center text-sm text-muted-foreground">Only editors and owners can add cases. Ask an owner.</div> : <JsonEditor suite={suite} c={start} editable />}</Page>
   return (
     <Page
       crumbs={crumbs(query.data?.title ?? id)}
       tabs={TABS.map(([key, label]) => ({ label, to: `?tab=${key}`, active: active === key }))}
     >
       <QueryState query={query}>
-        {(c) => <><Flags suite={suite} c={c} />{body(c)}</>}
+        {(c) => <><Flags suite={suite} c={c} editable={canEdit(role)} />{body(c)}</>}
       </QueryState>
     </Page>
   )

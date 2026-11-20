@@ -1,8 +1,8 @@
 import { Pill } from "../agents/bits"
-import type { RunStatus, ScrubStatus, SuiteRole } from "./types"
+import type { BlindRun, Run, RunStatus, ScrubStatus, SuiteRole } from "./types"
 
 const RUN: Record<RunStatus, { label: string; cls?: string }> = {
-  draft: { label: "Draft" }, estimated: { label: "Awaiting approval", cls: "text-warning" }, approved: { label: "Queued" }, running: { label: "Running", cls: "text-link" },
+  draft: { label: "Draft" }, estimated: { label: "Awaiting admin approval", cls: "text-warning" }, approved: { label: "Queued" }, running: { label: "Running", cls: "text-link" },
   done: { label: "Done", cls: "text-success" }, partial: { label: "Partial", cls: "text-warning" }, cancelled: { label: "Cancelled" }, failed: { label: "Failed", cls: "text-destructive" },
 }
 export const RunPill = ({ status }: { status: RunStatus }) => <Pill className={RUN[status].cls}>{RUN[status].label}</Pill>
@@ -17,3 +17,6 @@ export const canReview = (r: SuiteRole) => canEdit(r) || r === "reviewer"
 
 /** A rate as a percentage, "–" when there is none. */
 export const pct = (v: number | null | undefined) => (v == null ? "–" : `${Math.round(v * 100)}%`)
+
+/** A reviewer's view of a run names its arms by label only. */
+export const isBlindRun = (r: Run | BlindRun): r is BlindRun => typeof r.arms[0] === "string"

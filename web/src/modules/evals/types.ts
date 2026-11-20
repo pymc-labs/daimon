@@ -11,7 +11,8 @@ export type ButtonAction = "approve" | "deny" | "always" | "details" | "save" | 
 export type BlobRef = { sha256: string; size: number; media_type: string; name?: string }
 
 export type SuiteSummary = { id: string; name: string; version: number; role: SuiteRole; scrub_status: ScrubStatus }
-export type Judge = { id: string; kind: "rubric" | "pairwise" | "reference"; models: { model: string }[] }
+export type ModelChoice = { backend?: string; model: string; effort?: string }
+export type Judge = { id: string; kind: "rubric" | "pairwise" | "reference"; models: ModelChoice[]; aggregate?: "majority" | "mean" | "all" }
 export type Suite = {
   id: string; version: number; name: string; description?: string; tags?: string[]
   owner?: { kind: string; id: string; display_name?: string }
@@ -27,8 +28,7 @@ export type CaseSummary = {
 }
 export type Share = { kind: "person" | "group"; id: string; role: ShareRole }
 export type CaseCheck = { problems: string[]; warnings: string[] }
-export type ExportRef = BlobRef
-export type ImportReport = { bundle_id: string; suites: { id: string; version: number; created: boolean }[]; runs: string[]; skipped_runs: string[]; blobs: number; warnings: string[] }
+export type ImportReport = { bundle_id: string; suites: { bundle_id: string; id: string; version: number; created: boolean }[]; runs: string[]; skipped_runs: string[]; blobs: number; signature: string; warnings: string[] }
 
 export type Participant = { id: string; display_name: string; role?: string; is_requester?: boolean; is_bot?: boolean }
 export type CardFact = { label: string; value: string }
@@ -94,8 +94,16 @@ export type Run = {
   judges?: Judge[]; status: RunStatus; origin: { kind: "local" | "imported" | "recorded"; deployment?: string }
   estimate?: Estimate; approval?: { by: { display_name?: string }; at: string; cap_usd: number }
   spend?: { total_usd?: number; by_category?: Record<string, number> }; started_at?: string; finished_at?: string
+  /** A run awaiting an admin carries the cap its creator asked for as `requested_cap_usd`. */
+  ext?: { requested_cap_usd?: number }
 }
+/** What a reviewer gets for a run: arms only by neutral label, no name, cost or approver. */
+export type BlindRun = { id: string; suite: { id: string; version: number }; arms: string[]; case_ids: string[] | null; repeats: number; status: RunStatus; origin: string; started_at?: string; finished_at?: string }
 export type RunDraft = { suite: { id: string; version: number }; case_ids?: string[]; arm_ids: string[]; repeats: number; judge_ids: string[] }
+/** The estimate of a draft run, with the spend above which an admin must approve. */
+export type RunEstimate = Estimate & { admin_approval_usd: number }
+export type JudgeRequest = { id: string; kind: Judge["kind"]; models?: ModelChoice[]; aggregate: "majority" | "mean" | "all"; batch: boolean; approve_cap_usd?: number }
+export type JudgeOutcome = { estimate: Estimate; ran: boolean; scores: number; spent_usd: number; skipped: number; failed: number }
 export type ItemStatus = "pending" | "running" | "done" | "error" | "skipped" | "cancelled"
 export type RunItemSummary = { id: string; key: string; case_id: string; case_revision: number; arm_id: string; repeat: number; status: ItemStatus }
 
@@ -104,10 +112,6 @@ export type Anchor = {
   item_id: string; ref?: string; page?: number; region?: { x: number; y: number; w: number; h: number }; cells?: string; sheet?: string; start?: number; end?: number; quote?: string; element?: string
 }
 export type ScoreValue = { pass?: boolean; score?: number; preference?: "a" | "b" | "tie"; label?: string; unknown?: boolean }
-export type Score = {
-  id: string; item_id?: string; criterion: string; grader: { kind: "code" | "llm" | "human" | "agent"; model?: string; judge_id?: string }
-  value: ScoreValue; rationale?: string; anchors?: Anchor[]; at: string
-}
 export type ChatEvent = {
   seq: number; t_ms?: number
   kind: "message" | "edit" | "delete" | "reaction_add" | "reaction_remove" | "card" | "card_update" | "typing" | "status" | "title" | "notice" | "file"
@@ -135,27 +139,39 @@ export type ArmSummary = {
   cost_usd: number; pass_at_k: Record<string, number>; pass_pow_k: Record<string, number>; breakdown: Record<string, Record<string, Rate>>
 }
 export type PairSummary = {
-  candidate: string; reference: string; metric: string; cases: number; difference: number | null; low: number | null; high: number | null
+  candidate: string; reference: string; metric: string; cases: number; clusters: number; difference: number | null; low: number | null; high: number | null
   margin: number; non_inferior: boolean | null; only_candidate: number; only_reference: number; mcnemar_p: number | null
 }
-export type PreferenceSummary = { arm_a: string; arm_b: string; a_wins: number; b_wins: number; ties: number; sign_test_p: number | null }
+export type PreferenceSummary = { grader: string; arm_a: string; arm_b: string; a_wins: number; b_wins: number; ties: number; sign_test_p: number | null }
 export type Calibration = { judge: string; n: number; agreement: number | null; kappa: number | null; flagged: boolean }
 export type RunSummary = {
   run_id: string; arms: ArmSummary[]; comparisons: PairSummary[]; preferences: PreferenceSummary[]; calibration: Calibration[]; judge_cost_usd: number; notes: string[]
 }
 
-/** One column of a comparison or review task. In a blind queue `label` is a letter and `arm` is absent. */
-export type Column = { label: string; arm?: Arm; item: RunItem; scores: Score[] }
-export type Compare = { run_id: string; case_id: string; repeat: number; blind: boolean; columns: Column[] }
+/** One answer's score as the comparison lists it; empty when blind. */
+export type ScoreLine = { criterion: string; grader: string; passed: boolean | null; score: number | null; unknown: boolean; rationale: string | null }
+/** One arm's result on a case. `label` is the arm's label, or a neutral one when blind; `item_id` opens `/items/{id}`. */
+export type CompareColumn = { label: string; item_id: string; status: ItemStatus; passed: boolean | null; rubric: number | null; reply: string | null; scores: ScoreLine[] }
+export type CompareRow = { case_id: string; title: string; repeat: number; columns: CompareColumn[] }
+export type Compare = { run_id: string; blind: boolean; rows: CompareRow[] }
 
-export type Queue = {
-  id: string; name: string; run_id: string; layout: "single" | "side_by_side"; blind: boolean; reviewers_per_item?: number
-  status: "open" | "closed"; progress: { done: number; total: number }
-}
-export type Criterion = { id: string; text: string; kind: "pass" | "scale" | "preference"; min?: number; max?: number }
-export type ReviewTask = { id: string; queue_id: string; suite_id: string; case_id: string; blind: boolean; layout: "single" | "side_by_side"; columns: Column[]; criteria: Criterion[]; progress: { done: number; total: number } }
-export type ScoreDraft = { criterion: string; value: ScoreValue; rationale?: string; anchors?: Anchor[] }
+export type Layout = "single" | "side_by_side"
+export type ReviewQueue = { id: string; name: string; layout: Layout; blind: boolean; arms?: string[]; criteria?: string[]; reviewers_per_item?: number; status?: "open" | "closed" }
+/** A queue as its reviewers list it; `ref` is what `/queues/{ref}/next` takes. */
+export type QueueView = { ref: string; run_id: string; queue: ReviewQueue; total: number; done: number }
+export type QueueDraft = { id: string; name: string; layout: Layout; blind: boolean }
+export type Criterion = { id: string; question: string; kind: "binary" | "scale" | "overall" | "preference"; scale?: { min: number; max: number } }
+/** The part of a case a reviewer sees. */
+export type CaseView = { id: string; title: string; platform: Platform; history: ChatMessage[]; turn: ChatMessage[]; reference?: { text?: string; note?: string } | null }
+/** One column of a review task: `label` names it in scores and comments; `arm` is absent in a blind queue. */
+export type TaskColumn = { label: string; arm?: Arm | null; item: RunItem }
 export type Comment = { id: string; item_id?: string; case_id?: string; parent_id?: string; author: { display_name?: string; kind?: string }; text: string; anchors?: Anchor[]; resolved: boolean; at: string }
+export type ReviewTask = {
+  id: string; queue: string; layout: Layout; blind: boolean; case: CaseView; criteria: Criterion[]; columns: TaskColumn[]; comments: Comment[]
+  reserved_until: string | null; done: number; total: number
+}
+/** `target` is the column label a per-answer score is about; omitted for a preference or a single answer. */
+export type ScoreDraft = { criterion: string; value: ScoreValue; target?: string; rationale?: string }
 
 /** Starts a comment anchored to something the reviewer pointed at; the item is filled in by the caller. */
 export type Pin = (a: Omit<Anchor, "item_id">) => void

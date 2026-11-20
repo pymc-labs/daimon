@@ -11,9 +11,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { shortDate } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { E, useArms, useCases, useSuite } from "./api"
+import { E, useArms, useCases, useIsAdmin, useSuite, useSuites } from "./api"
 import { ApproveBar, EstimateView } from "./Approve"
-import type { Estimate, Run, RunDraft } from "./types"
+import { canEdit } from "./bits"
+import type { Run, RunDraft, RunEstimate } from "./types"
 
 const Section = ({ title, children }: { title: string; children: React.ReactNode }) => <section className="space-y-2"><h2 className="text-sm font-medium">{title}</h2>{children}</section>
 
@@ -35,6 +36,8 @@ export function NewRun() {
   const info = useSuite(suite, version)
   const cases = useCases(suite, version)
   const arms = useArms()
+  const suites = useSuites().data
+  const admin = useIsAdmin()
   const [chosen, setChosen] = useState<string[]>([])
   const [judges, setJudges] = useState<string[] | null>(null)
   const [repeats, setRepeats] = useState("1")
@@ -46,10 +49,12 @@ export function NewRun() {
   const draft: RunDraft | null = s && chosen.length && picked.length
     ? { suite: { id: s.id, version: s.version }, case_ids: picked.length === cases.data?.length ? undefined : picked.map((c) => c.id), arm_ids: chosen, repeats: Math.max(1, Math.min(20, Math.floor(Number(repeats)) || 1)), judge_ids: judgeIds }
     : null
-  const estimate = useQuery({ queryKey: ["evals", "estimate", draft], queryFn: () => api.post<Estimate>(`${E}/runs/estimate`, draft), enabled: !!draft, retry: false })
+  const estimate = useQuery({ queryKey: ["evals", "estimate", draft], queryFn: () => api.post<RunEstimate>(`${E}/runs/estimate`, draft), enabled: !!draft, retry: false })
   const start = useMutation({ mutationFn: (cap: number) => api.post<Run>(`${E}/runs`, { ...draft, cap_usd: cap }), onSuccess: (r) => go(`/evals/runs/${r.id}`) })
   const toggle = (list: string[], id: string, on: boolean) => (on ? [...list, id] : list.filter((x) => x !== id))
   const tagOptions = [...new Set((cases.data ?? []).flatMap((c) => c.tags ?? []))].map((t) => ({ value: t, label: t }))
+  const role = suites?.find((x) => x.id === suite)?.role
+  if (suites && !canEdit(role ?? "viewer")) return <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: "New run" }]}><div className="py-16 text-center text-sm text-muted-foreground">Only editors and owners can start runs. Ask an owner.</div></Page>
   return (
     <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: s?.name ?? suite, to: `/evals/suites/${suite}` }, { label: "New run" }]}>
       <div className="mx-auto max-w-2xl space-y-8">
@@ -88,7 +93,7 @@ export function NewRun() {
           )}
         </Section>
         {start.error && <p role="alert" className="text-sm text-destructive">{start.error.message}</p>}
-        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
+        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} limit={estimate.data.admin_approval_usd} admin={admin} pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
       </div>
     </Page>
   )

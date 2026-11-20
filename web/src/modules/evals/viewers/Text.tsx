@@ -35,7 +35,7 @@ export function Text({ o, pin }: { o: Output; pin?: Pin }) {
             )
           })}
         </pre>
-      ) : <Prose text={text.data} />}
+      ) : <Prose text={text.data} noImages />}
     </div>
   )
 }

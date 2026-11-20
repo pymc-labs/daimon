@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 import { duration } from "@/lib/format"
 import { ChatThread, fromEvents } from "./previews"
 import type { Skin } from "./previews/parts"
-import type { Anchor, Case, Column, Origin, Output, Platform, Score, WorldCall } from "./types"
+import type { Anchor, Case, Origin, Output, Platform, RunItem, ScoreLine, WorldCall } from "./types"
 import { FileDiff } from "./viewers"
 import { Artifact } from "./viewers"
 import { Payload } from "./viewers/Json"
@@ -26,10 +26,7 @@ const Section = ({ title, children, aside }: { title: string; children: React.Re
   </section>
 )
 
-/** The last message the agent sent, for a text diff between arms. */
-const reply = (col: Column, bot: string) => fromEvents(col.item.chat ?? []).filter((m) => m.author === bot && !m.deleted && m.text).at(-1)?.text ?? ""
-
-function Calls({ calls, pin }: { calls: WorldCall[]; pin?: (a: Omit<Anchor, "item_id">) => void }) {
+function Calls({ calls, pin, blind }: { calls: WorldCall[]; pin?: (a: Omit<Anchor, "item_id">) => void; blind: boolean }) {
   const [open, setOpen] = useState<number | null>(null)
   if (!calls.length) return <div className="text-sm text-faint">No calls</div>
   return (
@@ -43,7 +40,7 @@ function Calls({ calls, pin }: { calls: WorldCall[]; pin?: (a: Omit<Anchor, "ite
               <span className="truncate font-mono">{[c.service ?? c.server, c.tool].filter(Boolean).join(".") || c.surface}</span>
               {c.effects?.[0] && <span className="truncate text-muted-foreground">{c.effects[0].verb}</span>}
             </button>
-            <span className={cn("shrink-0 rounded border px-1.5 text-[11px]", ORIGIN[c.origin])}>{c.origin}</span>
+            {!blind && <span className={cn("shrink-0 rounded border px-1.5 text-[11px]", ORIGIN[c.origin])}>{c.origin}</span>}
             {pin && <button aria-label="Comment" className="opacity-0 group-hover/call:opacity-100 focus-visible:opacity-100" onClick={() => pin({ target: "world_call", ref: String(c.seq) })}><MessageSquarePlus className="size-3.5" /></button>}
           </div>
           {open === c.seq && <div className="space-y-2 pb-2 pl-6"><Payload value={c.request ?? null} /><Payload value={c.response ?? c.reason ?? null} /></div>}
@@ -53,16 +50,16 @@ function Calls({ calls, pin }: { calls: WorldCall[]; pin?: (a: Omit<Anchor, "ite
   )
 }
 
-function Scores({ scores }: { scores: Score[] }) {
+function Scores({ scores }: { scores: ScoreLine[] }) {
   if (!scores.length) return <div className="text-sm text-faint">Not scored</div>
   return (
     <ul className="space-y-1.5">
-      {scores.map((s) => (
-        <li key={s.id} className="flex items-start gap-2 text-sm">
-          <span className="mt-0.5 shrink-0">{s.value.unknown ? <span className="text-faint">?</span> : s.value.pass === false ? <X className="size-4 text-destructive" /> : s.value.pass || s.value.score !== undefined ? <Check className="size-4 text-success" /> : null}</span>
+      {scores.map((s, i) => (
+        <li key={`${s.criterion}:${s.grader}:${i}`} className="flex items-start gap-2 text-sm">
+          <span className="mt-0.5 shrink-0">{s.unknown ? <span className="text-faint">?</span> : s.passed === false ? <X className="size-4 text-destructive" /> : s.passed || s.score != null ? <Check className="size-4 text-success" /> : null}</span>
           <span className="min-w-0 flex-1">
-            <span>{s.criterion}</span>{s.value.score !== undefined && <span className="tabular text-muted-foreground">, {s.value.score}</span>}
-            <span className="text-xs text-faint">, {s.grader.kind}</span>
+            <span>{s.criterion}</span>{s.score != null && <span className="tabular text-muted-foreground">, {s.score}</span>}
+            <span className="text-xs text-faint">, {s.grader}</span>
             {s.rationale && <span className="block text-xs text-muted-foreground">{s.rationale}</span>}
           </span>
         </li>
@@ -88,31 +85,31 @@ function Files({ outputs, others, onPin }: { outputs: Output[]; others?: Output[
   )
 }
 
-/** One arm's result on a case: chat, files, calls and scores. With `other` and `diff`, the difference to the other arm. */
-export function ItemColumn({ col, other, diff, platform, case: c, onPin }: {
-  col: Column; other?: Column; diff?: boolean; platform: Platform; case?: Case; onPin?: (a: Anchor) => void
+/** One answer on a case: chat, files, calls and, when named, scores. Blind hides everything that could tell the arms apart: cost, time, origins and simulated counts.
+ * With `diff`, the reply and files are set against another answer's. `anchorRef` is what comments name this column by. */
+export function ItemColumn({ label, title, item, scores, blind, diff, platform, case: c, anchorRef, onPin }: {
+  label: string; title?: string; item: RunItem; scores?: ScoreLine[]; blind: boolean; diff?: { before: string; after: string; outputs?: Output[] }
+  platform: Platform; case?: Case; anchorRef?: string; onPin?: (a: Anchor) => void
 }) {
-  const { item } = col
-  const bot = c?.surface.bot.id ?? "bot"
-  const pin = onPin && ((a: Omit<Anchor, "item_id">) => onPin({ ...a, item_id: item.id }))
+  const pin = onPin && ((a: Omit<Anchor, "item_id">) => onPin({ ...a, item_id: anchorRef ?? item.id }))
   const skin: Skin = { people: names(c), pin, me: c?.surface.participants.find((p) => p.is_requester)?.id }
   return (
-    <div className="min-w-0 overflow-hidden rounded-lg border bg-card" data-column={col.label}>
+    <div className="min-w-0 overflow-hidden rounded-lg border bg-card" data-column={label}>
       <div className="flex h-11 items-center gap-2 px-3">
-        <span className="flex size-6 items-center justify-center rounded-md bg-accent text-xs font-semibold">{col.label.slice(0, 1)}</span>
-        {col.arm && <span className="truncate text-sm font-medium">{col.arm.label}{col.arm.kind === "baseline" && <span className="font-normal text-muted-foreground">, baseline</span>}</span>}
+        <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-accent px-1.5 text-xs font-semibold">{blind ? label : label.slice(0, 1)}</span>
+        {title && !blind && <span className="truncate text-sm font-medium">{title}</span>}
         <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground tabular">
           {item.status !== "done" && <span className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>}
-          {item.usage?.duration_ms != null && <span>{duration(item.usage.duration_ms)}</span>}
-          {item.usage?.cost_usd != null && <Money usd={item.usage.cost_usd} />}
+          {!blind && item.usage?.duration_ms != null && <span>{duration(item.usage.duration_ms)}</span>}
+          {!blind && item.usage?.cost_usd != null && <Money usd={item.usage.cost_usd} />}
         </span>
       </div>
-      <Section title={diff && other ? "Reply difference" : "Chat"}>
-        {diff && other ? <FileDiff before={reply(other, bot)} after={reply(col, bot)} name="reply.md" /> : <ChatThread platform={platform} messages={fromEvents(item.chat ?? [], item.outputs)} skin={skin} />}
+      <Section title={diff ? "Reply difference" : "Chat"}>
+        {diff ? <FileDiff before={diff.before} after={diff.after} name="reply.md" /> : <ChatThread platform={platform} messages={fromEvents(item.chat ?? [], item.outputs)} skin={skin} />}
       </Section>
-      <Section title="Files"><Files outputs={item.outputs ?? []} others={diff ? other?.item.outputs : undefined} onPin={pin} /></Section>
-      <Section title="Calls" aside={item.enclosure?.simulated_calls ? <span className="text-xs text-warning">{item.enclosure.simulated_calls} simulated</span> : null}><Calls calls={item.world_calls ?? []} pin={pin} /></Section>
-      <Section title="Scores"><Scores scores={col.scores} /></Section>
+      <Section title="Files"><Files outputs={item.outputs ?? []} others={diff?.outputs} onPin={pin} /></Section>
+      <Section title="Calls" aside={!blind && item.enclosure?.simulated_calls ? <span className="text-xs text-warning">{item.enclosure.simulated_calls} simulated</span> : null}><Calls calls={item.world_calls ?? []} pin={pin} blind={blind} /></Section>
+      {scores && !blind && <Section title="Scores"><Scores scores={scores} /></Section>}
     </div>
   )
 }

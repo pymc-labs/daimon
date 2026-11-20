@@ -1,7 +1,6 @@
 import { ChevronLeft, ChevronRight } from "lucide-react"
 import { useState } from "react"
 import { Document, Page, pdfjs } from "react-pdf"
-import "react-pdf/dist/Page/AnnotationLayer.css"
 import "react-pdf/dist/Page/TextLayer.css"
 
 import { Rows } from "@/components/QueryState"
@@ -36,7 +35,7 @@ export function Pdf({ o, other, pin }: { o: Output; other?: Output; pin?: Pin })
             {docs.map((d, i) => (
               <div key={d.id} className="overflow-hidden rounded-md border">
                 <Document file={blobUrl(d.blob.sha256)} loading={<Rows n={2} className="p-2" />} onLoadSuccess={i === 0 ? (p) => { setPages(p.numPages); setPage((n) => Math.min(n, p.numPages)) } : undefined}>
-                  <Page pageNumber={page} width={docs.length > 1 ? 280 : 520} />
+                  <Page pageNumber={page} width={docs.length > 1 ? 280 : 520} renderAnnotationLayer={false} />
                 </Document>
               </div>
             ))}
