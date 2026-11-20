@@ -457,7 +457,7 @@ async def ask(
         *(NewEvent(e.type, g.key, dict(e.data)) for e in queued),
     ]
     await append_events(session, run_id=g.run.id, events=events, actor=ENGINE, at=now)
-    return "Asked. End your turn now; the answer arrives as your next message."
+    return "Asked. Stop here; the answer arrives as your next message."
 
 
 async def pending_question(

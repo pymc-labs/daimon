@@ -41,7 +41,7 @@ __all__ = [
 AskShape = Literal["approve", "choice", "text", "form", "question"]
 #: Why an ask did not go, in words for the owner's notice.
 _WHY: Final[dict[str, str]] = {
-    "dm_disabled": "direct messages are off in this workspace",
+    "dm_disabled": "direct messages are off here",
     "recipient_not_on_platform": "they have no linked account here",
     "speaker_not_on_platform": "the person the run runs as has no linked account here",
     "destination_unavailable": "the place to post is gone or out of reach",
