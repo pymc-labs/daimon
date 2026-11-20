@@ -25,7 +25,7 @@ from daimon.core.posted_controls import CardButton, PostedCard
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.web_links import WebLinks
+from daimon.core.web_links import TenantLinks, WebLinks
 from daimon.core.workflows import run_views, service, views
 from daimon.core.workflows.access import who_of
 from daimon.core.workflows.runs import Sessions
@@ -193,11 +193,15 @@ def notice(text: str) -> PostedCard:
     return _card(f"🛡️ {text}", bad=True)
 
 
-def web_root(settings: Settings, tenant_id: uuid.UUID) -> str | None:
+def web_links(settings: Settings, tenant_id: uuid.UUID) -> TenantLinks | None:
     links = WebLinks.from_settings(settings.web)
-    if links is None or "workflows" not in links.modules:
-        return None
-    return f"{links.for_tenant(tenant_id, admin=False).root()}/workflows"
+    return None if links is None else links.for_tenant(tenant_id, admin=False)
+
+
+def _page(web: TenantLinks | None, workflow_id: uuid.UUID | str, tail: str = "") -> str | None:
+    """The workflow's web page (`tail` opens a run on it); None when the module is off."""
+    url = None if web is None else web.workflow(workflow_id)
+    return None if url is None else f"{url}{tail}"
 
 
 def _open(label: str, url: str | None) -> tuple[CardButton, ...]:
@@ -247,7 +251,7 @@ def _next(node: Mapping[str, Any]) -> list[str]:
     return [str(n) for n in out if n]
 
 
-def draft_card(workflow_id: uuid.UUID, draft: views.Draft, web: str | None) -> PostedCard:
+def draft_card(workflow_id: uuid.UUID, draft: views.Draft, web: TenantLinks | None) -> PostedCard:
     """Name, how it starts, its steps one line each, what needs an admin, and the buttons."""
     spec = draft.spec
     facts = [_triggers(spec), *_steps(spec)]
@@ -265,7 +269,7 @@ def draft_card(workflow_id: uuid.UUID, draft: views.Draft, web: str | None) -> P
         f"📝 {spec.get('name') or 'Workflow'}",
         tuple(facts),
         (
-            *_open("Open in web", f"{web}/{workflow_id}" if web else None),
+            *_open("Open in web", _page(web, workflow_id)),
             _press("Test run", _id(workflow_id, "test", rev)),
             _press("Publish", _id(workflow_id, "publish", rev), primary=True),
         ),
@@ -299,7 +303,7 @@ def confirm_card(
     name: str,
     version: int | None,
     inputs: Mapping[str, Any],
-    web: str | None,
+    web: TenantLinks | None,
 ) -> PostedCard:
     """The inputs the agent filled in, and Run for the person to start it with them."""
     return _card(
@@ -311,7 +315,7 @@ def confirm_card(
                 _id(workflow_id, "go", inputs_digest(workflow_id, version, inputs)),
                 primary=True,
             ),
-            *_open("Open in web", f"{web}/{workflow_id}" if web else None),
+            *_open("Open in web", _page(web, workflow_id)),
         ),
     )
 
@@ -326,7 +330,7 @@ def confirmed_inputs(card_text: str, keys: frozenset[str]) -> dict[str, Any]:
     return out
 
 
-def run_card(run: run_views.RunDetail, web: str | None) -> PostedCard:
+def run_card(run: run_views.RunDetail, web: TenantLinks | None) -> PostedCard:
     """Each step with its status, the current step, the cost; the result or failure at the end."""
     steps = [
         f"{_STEP_ICON.get(s.status, '▫️')} {run_views.title_of(s.node, run.spec)}" for s in run.steps
@@ -350,7 +354,7 @@ def run_card(run: run_views.RunDetail, web: str | None) -> PostedCard:
         f"{icon} {name}: {kind} {run.number} {words}",
         tuple(facts),
         (
-            *_open("Open run", f"{web}/{run.workflow['id']}/runs/{run.number}" if web else None),
+            *_open("Open run", _page(web, run.workflow["id"], f"/runs/{run.number}")),
             *((_press("Cancel", _id(run.id, "cancel")),) if active else ()),
         ),
         bad=run.status in ("failed", "timed_out"),
@@ -361,7 +365,7 @@ def starting_card(name: str) -> PostedCard:
     return _card(f"🔄 {name}: starting")
 
 
-def workflow_card(workflow: views.WorkflowSummary, web: str | None) -> PostedCard:
+def workflow_card(workflow: views.WorkflowSummary, web: TenantLinks | None) -> PostedCard:
     """One workflow on the panel: its status and Run, Pause or Resume, Open in web."""
     facts = [_STATUS_WORDS.get(workflow.status, workflow.status)]
     if workflow.next_run:
@@ -378,7 +382,7 @@ def workflow_card(workflow: views.WorkflowSummary, web: str | None) -> PostedCar
     return _card(
         workflow.name,
         tuple(facts),
-        (*buttons, *_open("Open in web", f"{web}/{workflow.id}" if web else None)),
+        (*buttons, *_open("Open in web", _page(web, workflow.id))),
     )
 
 
@@ -483,7 +487,7 @@ async def run_card_of(sm: Sessions, settings: Settings, run_id: uuid.UUID) -> Po
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
         )
         detail = await run_views.detail(session, run, workflow.name if workflow else "")
-    return run_card(detail, web_root(settings, run.tenant_id))
+    return run_card(detail, web_links(settings, run.tenant_id))
 
 
 async def show_on_card(sm: Sessions, run_id: uuid.UUID, place: ChatPlace) -> None:
@@ -531,7 +535,7 @@ async def press(
             await service.cancel(env, target)
             return Pressed(card=await run_card_of(sm, settings, target))
         workflow = await service.get(env, target)
-        web = web_root(settings, env.who.tenant_id)
+        web = web_links(settings, env.who.tenant_id)
         if action in ("pause", "resume"):
             changed = await service.patch(env, target, Patch(paused=action == "pause"))
             return Pressed(card=workflow_card(changed, web))
@@ -557,7 +561,7 @@ async def press(
 
 def _form(
     workflow: views.Workflow,
-    web: str | None,
+    web: TenantLinks | None,
     limit: int,
     *,
     test: bool,
@@ -565,7 +569,7 @@ def _form(
 ) -> Pressed:
     form = run_form(uuid.UUID(workflow.id), spec or workflow.spec, limit=limit, test=test)
     if form is None:
-        link = f"{web}/{workflow.id}" if web else None
+        link = _page(web, workflow.id)
         return Pressed(say="This form doesn't fit here. Run it from the web app.", link=link)
     if not form.fields:
         return Pressed(start=(uuid.UUID(workflow.id), test))
@@ -573,7 +577,7 @@ def _form(
 
 
 async def _publish(
-    env: Env, workflow: views.Workflow, draft: views.Draft, web: str | None
+    env: Env, workflow: views.Workflow, draft: views.Draft, web: TenantLinks | None
 ) -> Pressed:
     """Publish as the presser; with grants only an admin gives, ask an admin as the web does."""
     wid = uuid.UUID(workflow.id)
@@ -590,8 +594,9 @@ async def _publish(
     )
 
 
-def _open_web(web: str | None, workflow_id: uuid.UUID) -> tuple[str, ...]:
-    return () if web is None else (f"Open it in the web app: {web}/{workflow_id}",)
+def _open_web(web: TenantLinks | None, workflow_id: uuid.UUID) -> tuple[str, ...]:
+    url = _page(web, workflow_id)
+    return () if url is None else (f"Open it in the web app: {url}",)
 
 
 async def submit_form(
@@ -685,7 +690,7 @@ async def pick(sm: Sessions, settings: Settings, presser: Presser, workflow_id: 
         workflow = await service.get(env, uuid.UUID(workflow_id))
     except (WorkflowError, ValueError) as err:
         return notice(str(err) if isinstance(err, WorkflowError) else UNAVAILABLE)
-    return workflow_card(workflow, web_root(settings, env.who.tenant_id))
+    return workflow_card(workflow, web_links(settings, env.who.tenant_id))
 
 
 # ---------- following run cards ----------

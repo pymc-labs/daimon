@@ -150,7 +150,7 @@ async def _post_draft(
     runtime: McpRuntime, env: Env, auth: AuthIdentity, origin: TurnOriginRow, workflow_id: uuid.UUID
 ) -> None:
     draft = await service.get_draft(env, workflow_id)
-    web = chat_cards.web_root(runtime.settings, auth.tenant_id)
+    web = chat_cards.web_links(runtime.settings, auth.tenant_id)
     await _post(runtime, auth, origin, chat_cards.draft_card(workflow_id, draft, web))
 
 
@@ -254,7 +254,7 @@ async def _run_workflow_impl(
         if origin is not None and not test:
             # A live run from chat starts on the person's press, with the inputs shown.
             workflow = await service.get(env, workflow_id)
-            web = chat_cards.web_root(runtime.settings, auth.tenant_id)
+            web = chat_cards.web_links(runtime.settings, auth.tenant_id)
             card = chat_cards.confirm_card(
                 workflow_id, workflow.name, workflow.live_version, inputs, web
             )
