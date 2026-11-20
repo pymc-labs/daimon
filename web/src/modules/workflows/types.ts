@@ -254,7 +254,7 @@ export type InboxDecide = { route: string; comment?: string; selected?: string[]
 
 // ---------- Triggers ----------
 
-export type DeliveryOutcome = "accepted" | "rejected" | "duplicate"
+export type DeliveryOutcome = "accepted" | "skipped" | "rejected" | "duplicate"
 /** A mapping evaluated against one delivery by the server. */
 export type MappingPreview = { ok: true; value: unknown } | { ok: false; error: string }
 export type DeliveryRow = {
@@ -262,7 +262,7 @@ export type DeliveryRow = {
   headers: Record<string, string>; payload: unknown
 }
 export type WebhookInfo = {
-  live_url: string; test_url: string; secret_hint: string; secret_created_at: string; previous_expires_at: string | null
+  live_url: string; test_url: string; secret_hint: string | null; secret_created_at: string | null; previous_expires_at: string | null
   listening_until: string | null
 }
 export type Secret = { secret: string; created_at: string; previous_expires_at: string | null }

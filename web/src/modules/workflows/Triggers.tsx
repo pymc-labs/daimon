@@ -167,7 +167,7 @@ const STATE: Record<Row["state"], { icon: typeof CircleCheck; cls: string; label
   wrong_type: { icon: TriangleAlert, cls: "text-warning", label: "Wrong type" },
   empty: { icon: CircleMinus, cls: "text-muted-foreground", label: "Empty" },
 }
-const OUTCOME = { accepted: { icon: CircleCheck, cls: "text-success", label: "Accepted" }, rejected: { icon: CircleX, cls: "text-destructive", label: "Rejected" }, duplicate: { icon: Copy, cls: "text-muted-foreground", label: "Duplicate" } }
+const OUTCOME = { accepted: { icon: CircleCheck, cls: "text-success", label: "Accepted" }, skipped: { icon: CircleMinus, cls: "text-muted-foreground", label: "Skipped" }, rejected: { icon: CircleX, cls: "text-destructive", label: "Rejected" }, duplicate: { icon: Copy, cls: "text-muted-foreground", label: "Duplicate" } }
 
 const show = (v: unknown) => (v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v))
 const isTest = (d: DeliveryRow) => d.id.startsWith("dlv_test_")
@@ -242,10 +242,10 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
         <div className="mt-4">
           <SettingRow label="Secret">
             <div className="flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1">
-              <Mono className="text-sm">{w?.secret_hint ?? "whsec_..."}</Mono>
-              {w && <span className="text-xs text-muted-foreground">Created {absolute(w.secret_created_at).split(",")[0]}</span>}
+              {w && !w.secret_hint ? <span className="text-sm text-muted-foreground">No secret</span> : <Mono className="text-sm">{w?.secret_hint ?? "whsec_..."}</Mono>}
+              {w?.secret_created_at && <span className="text-xs text-muted-foreground">Created {absolute(w.secret_created_at).split(",")[0]}</span>}
               {w?.previous_expires_at && <Tag>Previous valid for {until(w.previous_expires_at)}</Tag>}
-              {!c.ro && <Button variant="outline" size="sm" className="ml-auto" onClick={() => setRotate(true)}><RotateCw />Rotate</Button>}
+              {!c.ro && <Button variant="outline" size="sm" className="ml-auto" onClick={() => setRotate(true)}><RotateCw />{w && !w.secret_hint ? "Create" : "Rotate"}</Button>}
             </div>
           </SettingRow>
         </div>
