@@ -891,9 +891,11 @@ async def not_final_outbox_for_profiles(
     after: tuple[str, str, int] | None = None,
 ) -> list[PendingSettlement]:
     """Each `provider` observation's newest revision seen since `seen_since`, applied or
-    not, unless its usage is final; read as `pending_outbox_for_profiles` reads.
+    not, plus every pending one, unless its usage is final; read as
+    `pending_outbox_for_profiles` reads.
 
-    A billed fallback leaves no pending row, yet its turn's usage may still change.
+    A billed fallback leaves no pending row, yet its turn's usage may still change. Rows
+    written before observations carried a provider (0216) are found as pending ones.
     """
     newer = aliased(AccountingOutbox)
     superseded = (
@@ -916,7 +918,7 @@ async def not_final_outbox_for_profiles(
     return await _settlements(
         session,
         profiles,
-        seen,
+        or_(AccountingOutbox.applied_at.is_(None), seen),
         ~superseded,
         final.is_distinct_from("true"),
         limit=limit,

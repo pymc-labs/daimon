@@ -140,6 +140,7 @@ async def _reread(
     budget_s: float = 10.0,
     stall: bool = False,
     final: bool = True,
+    legacy: bool = False,
 ) -> tuple[int, list[str]]:
     """One durable re-read pass over an unknown OpenAI turn, answered as measured."""
     from daimon.core.turn import openai_deployment
@@ -159,6 +160,11 @@ async def _reread(
     await pending_usage(
         sm, provider="openai", unknown=True, observed_at=datetime.now(UTC) - seen_ago
     )
+    if legacy:  # as written before observations carried these (0216)
+        async with sm.begin() as db:
+            await db.execute(
+                text("UPDATE usage_observation SET provider = NULL, observed_at = NULL")
+            )
     async with sm() as db:
         row = (await mux_state.pending_outbox(db))[0]
     pending = row.observation
@@ -169,8 +175,11 @@ async def _reread(
     return reads, read
 
 
-async def test_unknown_openai_usage_is_reread_from_the_scheduler_and_debited(sm, monkeypatch):
-    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3))
+@pytest.mark.parametrize("legacy", [False, True], ids=["seen", "written_before_0216"])
+async def test_unknown_openai_usage_is_reread_from_the_scheduler_and_debited(
+    sm, monkeypatch, legacy
+):
+    reads, read = await _reread(sm, monkeypatch, seen_ago=timedelta(hours=3), legacy=legacy)
     assert reads == 1 and read == ["turn"]
     debited = await _debited(sm)
     assert debited < 0
