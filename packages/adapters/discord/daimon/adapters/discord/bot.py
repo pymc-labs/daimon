@@ -100,6 +100,7 @@ from daimon.adapters.discord.typed_stop import (
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
+from daimon.adapters.discord.workflow_cards import card_editor
 from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
@@ -260,6 +261,7 @@ from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.workflows import chat_cards
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -1293,6 +1295,12 @@ class DaimonBot(commands.Bot):
                         membership_resolver=self.membership_resolver,
                         output_client=self.runtime.anthropic,
                     ),
+                    run_cards=chat_cards.follower(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings,
+                        platform="discord",
+                        edit=functools.partial(card_editor, self._channel_by_id),
+                    ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -1328,6 +1336,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.commands.settings import SettingsCog
+        from daimon.adapters.discord.commands.workflows import WorkflowsCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
@@ -1336,6 +1345,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
+        await self.add_cog(WorkflowsCog(self))
         await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(SettingsCog(self))
@@ -1360,6 +1370,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.posted_controls.host_call import HostCallControl
 
         self.add_dynamic_items(HostCallControl)
+        from daimon.adapters.discord.workflow_cards import WorkflowCardControl
+
+        self.add_dynamic_items(WorkflowCardControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
