@@ -27,7 +27,7 @@ from daimon.core.workflows import context as turn_context
 from daimon.core.workflows import exchange, gate, run_views, runs, views
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.expressions import ExpressionError, render
-from daimon.core.workflows.preflight import Place, Refusal, private_reach
+from daimon.core.workflows.preflight import Place, Refusal, member_reads, private_reach
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.spec import Spec, dump_spec, node_hash, parse_spec, spec_hash
 from daimon.core.workflows.taint import Catalog
@@ -461,7 +461,8 @@ async def publish(
                 "Request approval instead."
             )
         place = Place(workflow.tenant_id, workflow, parsed, 0, "live", env.who.account_id)
-        if (private := await private_reach(session, place, env.who.account_id)) is not None:
+        reads = member_reads(env.sm, env.settings, workflow.tenant_id)
+        if (private := await private_reach(session, place, env.who.account_id, reads)) is not None:
             raise Forbidden(
                 f"This workflow reaches {private}, which you cannot read. Ask an admin."
             )

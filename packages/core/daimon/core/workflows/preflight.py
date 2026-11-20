@@ -5,25 +5,28 @@ budget and the spend gate. A refusal names its reason; nothing is created or spe
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Final, Literal
 
+import httpx
 from daimon.core.channel_backend import channel_provider
+from daimon.core.channel_member_check import fetch_member_reads
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
-from daimon.core.permissions import agent_permissions, home_of
+from daimon.core.github_credentials import build_multifernet
+from daimon.core.permissions import agent_permissions, effective_channel_rule
 from daimon.core.spend_gate import (
     SpendPerson,
     SpendRequest,
     spend_gate,
     spend_person_of_account,
 )
-from daimon.core.stores import accounts, tenants, workflow_runs
+from daimon.core.stores import accounts, identity, tenants, workflow_runs
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows.access import who_of
 from daimon.core.workflows.delivery import target_for
 from daimon.core.workflows.features import KEYS, workflow_features
 from daimon.core.workflows.spec import (
@@ -102,6 +105,7 @@ async def check(
     now: datetime,
     budget_usd: Decimal | None = None,
     cost_usd: Decimal = Decimal(0),
+    may_read: MayRead | None = None,
 ) -> Refusal | Cleared:
     """The first rule that stops this run or step. Steps pass the run's budget and spend."""
     async with sm() as session:
@@ -131,7 +135,8 @@ async def check(
         account = None if account_id is None else await accounts.get_account(session, account_id)
         if account_id is None or account is None or account.tenant_id != tenant.id:
             return Refusal("run_as_not_allowed", "The person this runs as is not on the team.")
-        if (private := await private_reach(session, place, account_id)) is not None:
+        reads = may_read or member_reads(sm, settings, tenant.id)
+        if (private := await private_reach(session, place, account_id, reads)) is not None:
             return Refusal(
                 "private_channel",
                 f"This workflow reaches {private}, which the person it runs as cannot read. "
@@ -179,20 +184,58 @@ def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[st
     return channels, agents
 
 
-async def private_reach(session: AsyncSession, place: Place, account_id: uuid.UUID) -> str | None:
-    """A channel kept to its own agents that the workflow posts to or whose agent it runs,
-    when `account_id` may not read it (only admins may); None when there is none."""
+#: Whether an account can read a channel (or thread) on the workspace's platform.
+MayRead = Callable[[uuid.UUID, str], Awaitable[bool]]
+
+
+def member_reads(
+    sm: async_sessionmaker[AsyncSession], settings: Settings, tenant_id: uuid.UUID
+) -> MayRead:
+    """The platform's own answer, asked live with the account's id on the workspace's platform."""
+
+    async def may_read(account_id: uuid.UUID, channel_id: str) -> bool:
+        async with sm() as session:
+            tenant = await tenants.get_tenant(session, tenant_id)
+            ids = await identity.list_platform_principals_for_account(
+                session, account_id=account_id
+            )
+        user_id = next(
+            (p.external_id for p in ids if tenant and p.platform == tenant.platform), None
+        )
+        if tenant is None or user_id is None:
+            return False
+        keys = tuple(k.get_secret_value() for k in settings.crypto.keys)
+        async with httpx.AsyncClient(timeout=10) as http:
+            return await fetch_member_reads(
+                http,
+                settings=settings,
+                sessionmaker=sm,
+                fernet=build_multifernet(keys) if keys else None,
+                platform=tenant.platform,
+                workspace_id=tenant.external_id,
+                user_id=user_id,
+                channel_id=channel_id,
+            )
+
+    return may_read
+
+
+async def private_reach(
+    session: AsyncSession, place: Place, account_id: uuid.UUID, may_read: MayRead
+) -> str | None:
+    """The first channel with limited readers (inside or own, a narrow room included) that the
+    workflow posts to or whose own agent it runs, when `account_id` cannot read it on the
+    platform; None when there is none. The seal rule: admins are not exempt."""
     channels, agents = _reached(place.spec, place.workflow.home_channel_id)
     policy = await load_access_policy(session, tenant_id=place.tenant_id)
     names = [n for n in policy.agent_rules if slug(n) in agents or n in agents]
-    private = next((c for c in channels if home_of(policy, c) is not None), None)
-    private = private or next(
-        (h for n in names if (h := agent_permissions(policy, [n]).home) is not None), None
-    )
-    if private is None:
-        return None
-    who = await who_of(session, place.tenant_id, account_id)
-    return None if who is not None and who.admin else private
+    sealed = [c for c in channels if effective_channel_rule(policy, c).readers != "any"]
+    if (home := agent_permissions(policy, names).home) is not None:
+        sealed.append(home)
+    for channel in dict.fromkeys(sealed):
+        if not await may_read(account_id, channel):
+            return channel
+    return None
 
 
 async def missing_grant(

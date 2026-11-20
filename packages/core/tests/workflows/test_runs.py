@@ -18,10 +18,14 @@ from daimon.core._models import (
     WorkflowRunEvent,
     WorkflowStep,
 )
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import tenant_ledger, workflow_runs
+from daimon.core.stores import workflows as workflows_store
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.workflows import engine, preflight, runs
 from daimon.core.workflows.preflight import Refusal
+from daimon.core.workflows.spec import parse_spec
 from daimon.testing.workflows import NOW, make_settings, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import delete, select, update
@@ -341,3 +345,37 @@ async def test_lane_usage_is_tagged_and_rolled_up_to_step_and_run(
     step = (await world.steps(run.id))["a"]
     total = (await world.get(run.id)).cost_usd
     assert step.cost_usd == total == -debits > 0, f"step and run carry the debits: {step}"
+
+
+async def test_private_reach_follows_who_can_read_the_limited_channel(
+    db_session: AsyncSession,
+) -> None:
+    deliver = {"f": {"kind": "finish", "deliver": {"to": "C_PRIVATE", "message": "hi"}}}
+    world = await make_world(db_session, deliver, "f", home="C_OPEN")
+    await set_access_policy(
+        db_session,
+        tenant_id=world.tenant_id,
+        policy=TenantAccessPolicy(channel_rules={"C_PRIVATE": ChannelRule(readers="inside")}),
+    )
+    await db_session.commit()
+    async with world.sm() as session:
+        row = await workflows_store.get_workflow(
+            session, tenant_id=world.tenant_id, workflow_id=world.workflow_id
+        )
+    assert row is not None, "the world's workflow"
+    place = preflight.Place(
+        world.tenant_id, row, parse_spec(row.draft_spec), 0, "live", world.owner
+    )
+    asked: list[str] = []
+
+    def reads(member: bool) -> preflight.MayRead:
+        async def may_read(_account: uuid.UUID, channel: str) -> bool:
+            asked.append(channel)
+            return member
+
+        return may_read
+
+    reached = await preflight.private_reach(db_session, place, world.owner, reads(True))
+    assert (reached, asked) == (None, ["C_PRIVATE"]), "a member may; open channels ask nothing"
+    refused = await preflight.private_reach(db_session, place, world.owner, reads(False))
+    assert refused == "C_PRIVATE", "someone who cannot read the channel is refused, admins too"
