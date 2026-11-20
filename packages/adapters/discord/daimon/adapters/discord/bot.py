@@ -1970,15 +1970,13 @@ class DaimonBot(commands.Bot):
         if not any(getattr(m, "message_snapshots", None) for m in forward_messages):
             return frozenset()
         here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
-        sources = {
-            str(source)
-            for m in forward_messages
-            if (source := getattr(getattr(m, "reference", None), "channel_id", None)) is not None
-        }
+        raw = [getattr(getattr(m, "reference", None), "channel_id", None) for m in forward_messages]
+        sources = {str(source) for source in raw if source is not None}
         sources |= {
             str(parent)
-            for source in sources
-            if (parent := getattr(self.get_channel(int(source)), "parent_id", None)) is not None
+            for source in raw
+            if isinstance(source, int)
+            and (parent := getattr(self.get_channel(source), "parent_id", None)) is not None
         }
         return await sealed_among(self.runtime.turn_deps, tenant_id=tenant_id, ids=sources) - here
 
