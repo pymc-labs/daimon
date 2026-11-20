@@ -99,19 +99,6 @@ jobs:
           ref: ${{ inputs.sha }}
           fetch-depth: 0
 
-      # The migrate gate runs against a shared database, so a SHA that carries a migration
-      # main does not have (a branch dispatch) must never reach it.
-      - name: Refuse migrations that are not on main
-        env:
-          SHA: ${{ inputs.sha }}
-        run: |
-          added="$(git diff --name-only --diff-filter=A "origin/main...$SHA" -- packages/core/alembic/versions)"
-          if [ -n "$added" ]; then
-            echo "::error::$SHA adds migrations that are not on main; merge them first:"
-            echo "$added"
-            exit 1
-          fi
-
       # A main CI run that main has already moved past must not deploy: an older run
       # that reached the deploy after a newer one rolled staging back mid-smoke. The
       # newer run deploys a superset. Checked once this job holds the environment's
@@ -130,6 +117,25 @@ jobs:
             head="$(echo "$result" | sed -n 's/^head=//p')"
             echo "::notice::Deploy of $SHA skipped: superseded by $head (main's newer run deploys it)."
             echo "superseded by $head"
+          fi
+
+      # The migrate gate runs against a shared database, so a SHA that carries a migration
+      # main never added (a branch dispatch) must never reach it. Compared by tree, not
+      # history: a branch commit main reached through a merge can still hold a migration
+      # that was rechained before the merge. Main's first-parent history keeps the names
+      # of migrations it later renamed, so older main SHAs still deploy.
+      - name: Refuse migrations that are not on main
+        if: steps.fresh.outputs.superseded != 'true'
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          versions=packages/core/alembic/versions
+          extra="$(comm -23 <(git ls-tree -r --name-only "$SHA" -- "$versions" | sort -u) \
+            <(git log --first-parent --no-renames --diff-filter=A --name-only --format= origin/main -- "$versions" | sort -u))"
+          if [ -n "$extra" ]; then
+            echo "::error::$SHA holds migrations main never added; deploy the main SHA that has them instead:"
+            echo "$extra"
+            exit 1
           fi
 
       - id: auth

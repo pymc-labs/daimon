@@ -541,7 +541,7 @@ def test_promote_resolves_the_soaked_digests_of_main_builds(
     )
     fake = (
         f'gcloud() {{\n  case "$* " in\n    *configure-docker*) ;;\n{cases}    *) return 1 ;;\n  esac\n}}\n'
-        f"crane() {{ echo '{{\"config\": {{\"Env\": [\"DAIMON_RELEASE={release}\"]}}}}'; }}\n"
+        f'crane() {{ echo \'{{"config": {{"Env": ["DAIMON_RELEASE={release}"]}}}}\'; }}\n'
         f'git() {{ [ "$*" = "merge-base --is-ancestor {_MAIN} {_SHA}" ]; }}\n'
     )
     output = tmp_path / "outputs"
@@ -1076,3 +1076,47 @@ def test_the_tls_check_retries_a_blip_and_fails_a_stale_store(
     with pytest.raises(SystemExit) as stale:
         runpy.run_path(script, run_name="__main__")
     assert stale.value.code == 1, "a store that never handshakes still fails"
+
+
+def test_deploy_refuses_a_migration_main_never_added(tmp_path: Path) -> None:
+    """A branch commit main reached through a merge can hold a pre-rechain migration id."""
+    step = next(
+        s
+        for s in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+        if s.get("name") == "Refuse migrations that are not on main"
+    )
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    def commit(*names: str, rename: tuple[str, str] | None = None) -> str:
+        versions = tmp_path / "packages/core/alembic/versions"
+        versions.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (versions / name).write_text(name)
+        if rename:
+            git("mv", *(f"packages/core/alembic/versions/{n}" for n in rename))
+        git("add", "-A")
+        git("commit", "-qm", "c")
+        return git("rev-parse", "HEAD")
+
+    git("init", "-qb", "main")
+    commit("0221_a.py")
+    git("checkout", "-qb", "feature")
+    stale = commit("0222_mine.py")
+    commit(rename=("0222_mine.py", "0223_mine.py"))
+    git("checkout", "-q", "main")
+    commit("0222_other.py")
+    git("merge", "-q", "--no-ff", "feature", "-m", "Merge pull request #1")
+    git("update-ref", "refs/remotes/origin/main", "main")
+
+    def guard(sha: str) -> int:
+        env = {**os.environ, "SHA": sha}
+        run = ["bash", "-e", "-c", step["run"]]
+        return subprocess.run(run, cwd=tmp_path, env=env, capture_output=True).returncode
+
+    assert guard(git("rev-parse", "main")) == 0, "main's own SHA deploys"
+    assert guard(stale) != 0, "0222_mine was rechained before the merge; main never added it"
