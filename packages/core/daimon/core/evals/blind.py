@@ -9,7 +9,8 @@ import random
 import re
 import secrets
 from collections import defaultdict
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
+from itertools import count
 from typing import Final
 
 from daimon.core.evals.format import (
@@ -18,6 +19,7 @@ from daimon.core.evals.format import (
     Case,
     ChatEvent,
     ChatMessage,
+    ContentBlock,
     EventStream,
     FormatModel,
     ItemCaseRef,
@@ -226,10 +228,21 @@ def real_ref(item: RunItem, anchor: Anchor) -> Anchor:
     )
 
 
+def _content_blocks(item: RunItem) -> Iterator[ContentBlock]:
+    """Every content block of an item, in the order a blind view numbers them."""
+    for e in item.transcript.events or [] if item.transcript else []:
+        yield from (e.result.content or []) if e.result else []
+    for w in item.world_calls or []:
+        yield from (w.response.content or []) if w.response else []
+
+
 def blind_blobs(item: RunItem) -> dict[str, BlobRef]:
-    """An item's output files by the name a blind view gives them: `out1`, `out1.r1` (a render),
-    `out1.t` (its text). A blind view carries these in place of content hashes."""
-    found: dict[str, BlobRef] = {}
+    """An item's files by the name a blind view gives them: `out1`, `out1.r1` (a render),
+    `out1.t` (its text), and `x1`.. for content blocks. A blind view carries these in place
+    of content hashes."""
+    found: dict[str, BlobRef] = {
+        f"x{n}": b.blob for n, b in enumerate(_content_blocks(item), 1) if b.blob
+    }
     for n, out in enumerate(item.outputs or [], start=1):
         found[f"out{n}"] = out.blob
         for k, render in enumerate(out.renders or [], start=1):
@@ -239,29 +252,66 @@ def blind_blobs(item: RunItem) -> dict[str, BlobRef]:
     return found
 
 
-def _world_call(call: WorldCall) -> WorldCall:
+def _blind_content(
+    blocks: Sequence[ContentBlock] | None, numbers: Iterator[int], item_id: str
+) -> list[ContentBlock] | None:
+    """Content blocks with files under neutral names (`x1`..) and no uri."""
+    if blocks is None:
+        return None
+    found: list[ContentBlock] = []
+    for block in blocks:
+        n, blob = next(numbers), block.blob
+        ref = blob and BlobRef(
+            sha256=f"{item_id}{ID_SEP}x{n}", size=blob.size, media_type=blob.media_type,
+            name=blob.name,
+        )  # fmt: skip
+        found.append(ContentBlock(type=block.type, text=block.text, blob=ref))
+    return found
+
+
+def _world_call(call: WorldCall, numbers: Iterator[int], item_id: str) -> WorldCall:
+    """A world call without origin, latency or http headers."""
+    request, response = call.request, call.response
+    if request and request.http:
+        http = request.http.model_copy(update={"headers": None})
+        request = request.model_copy(update={"http": http})
+    if response:
+        update: dict[str, object] = {
+            "latency_ms": None,
+            "content": _blind_content(response.content, numbers, item_id),
+        }
+        if response.http:
+            update["http"] = response.http.model_copy(update={"headers": None})
+        response = response.model_copy(update=update)
     return WorldCall(
         seq=call.seq, surface=call.surface, service=call.service, server=call.server,
-        tool=call.tool, request=call.request, response=call.response,
+        tool=call.tool, request=request, response=response,
         origin=_NEUTRAL_ORIGIN, effects=call.effects,
     )  # fmt: skip
 
 
-def _result(result: TranscriptResult | None) -> TranscriptResult | None:
+def _result(
+    result: TranscriptResult | None, numbers: Iterator[int], item_id: str
+) -> TranscriptResult | None:
     if result is None:
         return None
     return TranscriptResult(
-        content=result.content, is_error=result.is_error, world_call=result.world_call
+        content=_blind_content(result.content, numbers, item_id),
+        is_error=result.is_error,
+        world_call=result.world_call,
     )
 
 
-def _event(e: TranscriptEvent, calls: dict[str, str]) -> TranscriptEvent:
+def _event(
+    e: TranscriptEvent, calls: dict[str, str], numbers: Iterator[int], item_id: str
+) -> TranscriptEvent:
     return e.model_copy(
         update={
             "t_ms": None,
             "model": None,
             "usage": None,
-            "result": _result(e.result),
+            "redacted": None,
+            "result": _result(e.result, numbers, item_id),
             "call_id": calls.get(e.call_id or ""),
         }
     )
@@ -299,17 +349,18 @@ def _output(out: Output, n: int, item_id: str) -> Output:
 def blind_item_view(item: RunItem, *, item_id: str, label: str, names: Iterable[str]) -> JsonObject:
     """An item as a blind reader sees it, rebuilt from an allowlist: what the agent said and
     did under `label` and an opaque id. No usage, model, error, enclosure, case revision,
-    stored transcript blob, content hash, path, platform payload, absolute time, repeat index
-    or world origin; message, call and output ids by place; no model names or reactions."""
+    stored transcript blob, content hash or uri, path, platform payload, absolute time, latency,
+    http header, repeat index or world origin; message, call and output ids by place; no
+    model names or reactions."""
     refs = blind_refs(item)
+    numbers = count(1)
     events = item.transcript.events if item.transcript else None
+    shown_events = [_event(e, refs["tool_call"], numbers, item_id) for e in events or []]
+    shown_calls = [_world_call(w, numbers, item_id) for w in item.world_calls or []]
     blind = RunItem(
         id=item_id, run_id="run", case=ItemCaseRef(id=item.case.id, revision=0, hash=""),
         arm_id=label, repeat=0, status="done",
-        transcript=(
-            EventStream(events=[_event(e, refs["tool_call"]) for e in events])
-            if events is not None else None
-        ),
+        transcript=EventStream(events=shown_events) if events is not None else None,
         chat=(
             [_chat(e, refs["message"], refs["output"]) for e in item.chat]
             if item.chat is not None else None
@@ -318,7 +369,7 @@ def blind_item_view(item: RunItem, *, item_id: str, label: str, names: Iterable[
             [_output(o, n, item_id) for n, o in enumerate(item.outputs, 1)]
             if item.outputs is not None else None
         ),
-        world_calls=[_world_call(w) for w in item.world_calls] if item.world_calls else None,
+        world_calls=shown_calls or None,
     )  # fmt: skip
     masked = mask_document(to_document(blind), names)
     assert isinstance(masked, dict)

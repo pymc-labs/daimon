@@ -87,15 +87,16 @@ def build_comparison(
     arms by id, or by neutral label when blind.
 
     Blind: columns carry the arms' neutral labels and opaque ids for this view, replies have
-    model names masked, scores are left out, only finished items of repeats every chosen arm
+    model names masked, scores are left out, only finished items of repeats every arm of the run
     finished are shown (an error or a missing repeat tells live arms from recorded ones), and
     each row's column order is a shuffle keyed by `secret`, so position never tells the arm.
     """
     names = arm_names(run) if blind else None
     labels = arm_labels(run, secret)
-    chosen = {a.id for a in run.arms}
+    every = {a.id for a in run.arms}
+    chosen = every
     if arms is not None:
-        chosen = {a for a in chosen if (labels[a] if blind else a) in arms}
+        chosen = {a for a in every if (labels[a] if blind else a) in arms}
     arm_label = {a.id: a.label for a in run.arms}
     case_by_id = {c.id: c for c in cases}
     judges = {j.id: j for j in run.judges or []}
@@ -105,11 +106,16 @@ def build_comparison(
             by_item[s.item_id].append(s)
     groups: dict[tuple[str, int], list[RunItem]] = defaultdict(list)
     for item in items:
-        if item.arm_id in chosen and item.status in (("done",) if blind else ("done", "error")):
+        if item.arm_id in (every if blind else chosen) and item.status in (
+            ("done",) if blind else ("done", "error")
+        ):
             groups[(item.case.id, item.repeat)].append(item)
     rows: list[CompareRow] = []
     for (case_id, repeat), group in sorted(groups.items()):
-        if blind and {i.arm_id for i in group} != chosen:
+        if blind and {i.arm_id for i in group} != every:
+            continue  # judged over every arm, so `arms` never shows which repeats failed
+        group = [i for i in group if i.arm_id in chosen]
+        if not group:
             continue
         group.sort(key=lambda i: i.arm_id)
         if blind:

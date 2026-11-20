@@ -987,18 +987,24 @@ class EvalService:
             return await self._blind_blob(actor, sha256)
         async with self._sessions() as session:
             rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=[sha256])
-            readable = actor.is_admin and sha256 in rows
-            if sha256 in rows and not readable:
-                uses = await store.blob_uses(session, tenant_id=actor.tenant_id, sha256=sha256)
-                suites = await store.suites_by_id(session, {s for s, _ in uses})
-                for suite_id, scrub in uses:
-                    if await self._role(session, actor, suites[suite_id], scrub):
-                        readable = True
-                        break
+            readable = await self._may_read(session, actor, sha256, rows)
             content = await self._read_blob(session, actor.tenant_id, sha256) if readable else None
         if content is None:
             raise EvalNotFound("No such file here.")
         return rows[sha256], content
+
+    async def _may_read(
+        self, session: AsyncSession, actor: Subject, sha256: str, rows: Mapping[str, store.BlobRow]
+    ) -> bool:
+        """Whether the actor may read a stored blob: admins always, others where a live suite
+        they hold uses it at the scrub level their role reaches."""
+        if sha256 not in rows:
+            return False
+        if actor.is_admin:
+            return True
+        uses = await store.blob_uses(session, tenant_id=actor.tenant_id, sha256=sha256)
+        suites = await store.suites_by_id(session, {s for s, _ in uses})
+        return any([await self._role(session, actor, suites[sid], scrub) for sid, scrub in uses])
 
     async def _blind_blob(self, actor: Subject, ref: str) -> tuple[store.BlobRow, bytes]:
         """A file of a blind item, by the name its blind view gave it (`item id~out1`)."""
@@ -1009,8 +1015,11 @@ class EvalService:
             if blob is None:
                 raise EvalNotFound("No such file here.")
             rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=[blob.sha256])
-            content = await self._read_blob(session, actor.tenant_id, blob.sha256)
-        if content is None or blob.sha256 not in rows:
+            readable = await self._may_read(session, actor, blob.sha256, rows)
+            content = (
+                await self._read_blob(session, actor.tenant_id, blob.sha256) if readable else None
+            )
+        if content is None:
             raise EvalNotFound("No such file here.")
         return rows[blob.sha256], content
 

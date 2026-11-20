@@ -54,12 +54,54 @@ MAX_SUBJECT: Final = 100_000
 """Characters a pattern is matched against; the rest is not searched."""
 REGEX_SECONDS: Final = 0.25
 """How long one pattern may run: a case is untrusted, and no pattern shape is safe to assume."""
+MAX_REPEATS: Final = 50_000
+"""Most copies of one piece a pattern may expand to: counted repeats nest into products
+(`((a{99}){99}){99}`), and compiling a few of them never finishes."""
+_COUNTED: Final = re.compile(r"\{(\d*)(?:,(\d*))?\}")
+
+
+def _repeats(pattern: str) -> int:
+    """The largest product of counted repeats nested in one another (`(a{9}){9}` is 81)."""
+    best, last, i = [1], 1, 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            i += 1
+            last = 1
+        elif c == "[":
+            i = _class_end(pattern, i)
+            last = 1
+        elif c == "(":
+            best.append(1)
+            last = 1
+        elif c == ")" and len(best) > 1:
+            last = best.pop()
+            best[-1] = max(best[-1], last)
+        elif c == "{" and (m := _COUNTED.match(pattern, i)) and (m[1] or m[2]):
+            last *= max(int(m[2] or 0), int(m[1] or 0)) or 1
+            best[-1] = max(best[-1], last)
+            i = m.end() - 1
+        else:
+            last = 1
+        i += 1
+    return best[0]
+
+
+def _class_end(pattern: str, start: int) -> int:
+    """Where the character class opened at `start` closes (the pattern's end if it never does)."""
+    i = start + 1 + (pattern[start + 1 : start + 2] == "^")
+    i += pattern[i : i + 1] == "]"
+    while i < len(pattern) and pattern[i] != "]":
+        i += 2 if pattern[i] == "\\" else 1
+    return i
 
 
 def pattern_problem(pattern: str) -> str | None:
     """Why a case's `regex` pattern can't be used, or None."""
     if len(pattern) > MAX_PATTERN:
         return f"is longer than {MAX_PATTERN} characters"
+    if _repeats(pattern) > MAX_REPEATS:
+        return "repeats counted repeats inside one another too many times"
     try:
         regex.compile(pattern)
     except regex.error as exc:
@@ -156,7 +198,9 @@ def check_value(check: Check, found: bool, value: JsonValue) -> bool:
                 return False
             try:
                 return (
-                    regex.search(pattern, _text(value)[:MAX_SUBJECT], timeout=REGEX_SECONDS)
+                    regex.search(
+                        pattern, _text(value)[:MAX_SUBJECT], timeout=REGEX_SECONDS, concurrent=True
+                    )
                     is not None
                 )
             except TimeoutError:

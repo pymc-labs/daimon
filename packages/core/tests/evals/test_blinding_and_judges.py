@@ -39,7 +39,7 @@ from daimon.core.evals.format import (
     ScoreValue,
 )
 from daimon.core.evals.review import _units  # pyright: ignore[reportPrivateUsage]
-from daimon.core.evals.scoring.checks import check_value
+from daimon.core.evals.scoring.checks import check_value, pattern_problem
 from daimon.core.evals.scoring.judges import (
     Completion,
     JudgeDeps,
@@ -153,6 +153,7 @@ def test_units_when_queue_is_single_then_task_keys_name_no_item_or_arm() -> None
     units = _units(queue, _SECRET, ["baseline-a", "cand-live"], rows, blind=True)
     assert len(units) == 2, "a repeat only one arm has is not served blind"
     assert all("cand" not in u.key and "baseline" not in u.key for u in units)
+    assert [u.key for u in units] == sorted(u.key for u in units), "ordered by keyed key"
 
 
 def test_blind_handles_when_the_secret_differs_then_labels_ids_and_shuffles_differ() -> None:
@@ -194,6 +195,19 @@ def test_blind_compare_when_an_arm_errored_then_that_repeat_is_not_shown() -> No
     assert len(open_view.rows) == 2, "an editor still sees the failed repeat"
 
 
+def test_blind_compare_when_arms_are_picked_then_the_pool_is_still_every_arms_repeats() -> None:
+    run = _run()
+    items = [
+        _item("baseline-a"), _item("cand-live"),
+        _item("baseline-a", repeat=1), _item("cand-live", repeat=1, status="error"),
+    ]  # fmt: skip
+    for arm in run.arms:
+        label = arm_labels(run, _SECRET)[arm.id]
+        shown = build_comparison(run, items, [], [_CASE], blind=True, secret=_SECRET, arms=[label])
+        assert len(shown.rows) == 1, "a failed repeat on the live arm hides from either pick"
+        assert [c.label for c in shown.rows[0].columns] == [label], "arms only picks columns"
+
+
 def test_blind_item_view_when_item_has_ids_paths_and_platform_data_then_only_neutral_ones_show() -> (
     None
 ):
@@ -220,6 +234,44 @@ def test_blind_item_view_when_item_has_ids_paths_and_platform_data_then_only_neu
     out = view["outputs"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
     assert out["id"] == "out1" and out["blob"]["sha256"] == "r~items~x~out1", "neutral output ids"
     assert blind_blobs(item)["out1"].sha256 == "f" * 64, "the real file is found by that name"
+
+
+def test_blind_item_view_when_world_calls_and_content_carry_arm_signals_then_they_are_gone() -> (
+    None
+):
+    blob = {"sha256": "e" * 64, "size": 3, "media_type": "image/png"}
+    block = {"type": "image", "blob": blob, "uri": "https://files.example/real-name"}
+    events = [{"seq": 1, "kind": "tool_result", "redacted": True, "result": {"content": [block]}}]
+    call = {
+        "seq": 1, "surface": "http", "origin": "live",
+        "request": {"http": {"method": "GET", "url": "https://x.example",
+                             "headers": {"x-request-id": "req-live-1"}}},
+        "response": {"latency_ms": 731, "content": [block],
+                     "http": {"status": 200, "headers": {"server": "arm-edge-9"}}},
+    }  # fmt: skip
+    item = _item("cand-live", transcript={"events": events}, world_calls=[call])
+    view = blind_item_view(item, item_id="r~items~x", label="Arm 1", names=set())
+    text = json.dumps(view)
+    for word in (
+        "731",
+        "latency",
+        "req-live-1",
+        "arm-edge-9",
+        "files.example",
+        "e" * 64,
+        "redacted",
+    ):
+        assert word not in text, f"the blind item shows {word!r}"
+    assert set(blind_blobs(item)) >= {"x1", "x2"}, "content files open by neutral names"
+    assert blind_blobs(item)["x2"].sha256 == "e" * 64
+    assert "r~items~x~x1" in text and "r~items~x~x2" in text
+
+
+def test_regex_check_when_repeats_nest_then_it_is_refused_without_compiling() -> None:
+    nested = "((((a{99}){99}){99}){99})"
+    assert pattern_problem(nested), "nested counted repeats are refused at validation"
+    assert check_value(_check_regex(nested), True, "a") is False
+    assert pattern_problem(r"(\d{1,3}\.){3}\d{1,3}[{]{2}") is None, "ordinary repeats pass"
 
 
 def test_regex_check_when_pattern_backtracks_then_it_stops_and_fails() -> None:
