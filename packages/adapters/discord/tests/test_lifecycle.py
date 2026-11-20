@@ -3463,3 +3463,30 @@ async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpi
     delivered = rendered + "\n".join(str(kwargs) for _, kwargs in edits)
     assert "Here you go" in delivered, "the answer is delivered"
     assert "<@123>" not in rendered, "an unchecked requester is not pinged"
+
+
+async def test_a_card_edit_refused_by_a_contained_room_is_not_retried_every_tick() -> None:
+    """The output gate refused a progress edit (the room became contained mid-turn): the card
+    stops editing at once, with no retry on later render ticks, and the turn is not failed."""
+    from daimon.core.audience_refusal import AUDIENCE_CONTAINED
+    from daimon.core.turn.errors import AdmissionDenied
+
+    now = [0.0]
+    lc, sends, edits = _make_lifecycle(clock=lambda: now[0])
+    attempts: list[object] = []
+
+    async def refused_edit(ref: Any, **kwargs: Any) -> None:
+        attempts.append(ref)
+        raise AdmissionDenied(reason="invoker_not_allowed", detail=AUDIENCE_CONTAINED)
+
+    lc._edit = refused_edit  # pyright: ignore[reportPrivateUsage]
+    state = _make_success_state("working")
+
+    await lc.on_render(state)  # the first post, before the room changed
+    assert len(sends) == 1
+    for _ in range(5):  # five render ticks, each past the debounce
+        now[0] += 10.0
+        await lc.on_render(state)
+
+    assert len(attempts) == 1, "the refused edit is not retried"
+    assert edits == []
