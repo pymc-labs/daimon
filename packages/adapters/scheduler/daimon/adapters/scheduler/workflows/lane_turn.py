@@ -1,4 +1,8 @@
-"""An agent step's turn in its lane: a headless turn as the run's run-as person, metered."""
+"""An agent step's turn in its lane: a headless turn as the run's run-as person, metered.
+
+The spend is that person's, as for any turn of theirs: usage rows carry their id, so
+their allowance counts it, and preflight gates each step on that same allowance.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +20,12 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import ResolverCache, resolve_agent, resolve_environment
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.spend_gate import spend_person_of_account
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workflows.agent_step import Writes, step_policy
 from daimon.core.workflows.lanes import agent_of
+from daimon.core.workflows.preflight import spend_user_id
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.spec import AgentNode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -72,6 +78,13 @@ class HeadlessLaneTurn:
                 context=ScopeContext(tenant_id=run.tenant_id, channel_id=channel),
                 default=self.deployment_default,
             )
+            account_id = run.run_as_account_id
+            spender = None
+            if account_id is not None:
+                person = await spend_person_of_account(
+                    s, tenant_id=run.tenant_id, account_id=account_id
+                )
+                spender = spend_user_id(person, account_id)
         environment_id = await resolve_environment(
             self.client,
             tenant_id=run.tenant_id,
@@ -85,7 +98,7 @@ class HeadlessLaneTurn:
             return functools.partial(
                 record_turn_usage,
                 sessionmaker=self.sm,
-                platform_user_id=None,
+                platform_user_id=spender,
                 managed_session_id=session,
                 model_id=model_id,
                 tenant_id=run.tenant_id,

@@ -13,7 +13,12 @@ from typing import Final, Literal
 from daimon.core.channel_backend import channel_provider
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
-from daimon.core.spend_gate import SpendRequest, spend_gate, spend_person_of_account
+from daimon.core.spend_gate import (
+    SpendPerson,
+    SpendRequest,
+    spend_gate,
+    spend_person_of_account,
+)
 from daimon.core.stores import accounts, tenants, workflow_runs
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows.features import KEYS, workflow_features
@@ -62,6 +67,12 @@ class Place:
     run_as_account_id: uuid.UUID | None
 
 
+def spend_user_id(person: SpendPerson, account_id: uuid.UUID) -> str:
+    """The id the run-as person's step spend is gated and recorded under. An allowance
+    counts what they spent under any of their ids, so any one of them serves."""
+    return min(person.identities, default=str(account_id))
+
+
 async def check(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -107,7 +118,7 @@ async def check(
             session,
             request=SpendRequest(
                 tenant_id=tenant.id,
-                platform_user_id=min(person.identities, default=str(account_id)),
+                platform_user_id=spend_user_id(person, account_id),
                 platform=tenant.platform,
                 channel_id=channel,
                 agent_id=None,

@@ -6,6 +6,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -21,8 +22,10 @@ from daimon.adapters.scheduler.workflows import (
     run_once,
 )
 from daimon.core.headless_runner import StepTurn
+from daimon.core.stores import accounts, spend_allowances, tenants
 from daimon.core.workflows import step_tools
 from daimon.core.workflows.agent_step import AgentStepExecutor
+from daimon.testing.factories import make_platform_principal
 from daimon.testing.workflows import NOW, World, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +44,7 @@ def early(s: AsyncSession, g: step_tools.Grant, now: datetime) -> Awaitable[str]
 
 
 async def run_lanes(
-    world: World, monkeypatch: pytest.MonkeyPatch, acts: list[Act]
+    world: World, monkeypatch: pytest.MonkeyPatch, acts: list[Act], tokens: int = 1000
 ) -> tuple[uuid.UUID, list[str | None]]:
     """Run to the end; each fake session bills one model call, then does its step's act."""
     ticks = iter(range(1000))
@@ -63,7 +66,7 @@ async def run_lanes(
                 id=f"evt_{len(sessions)}",
                 is_error=False,
                 model_request_start_id="start",
-                model_usage=ma_model_usage(input_tokens=1000, output_tokens=100),
+                model_usage=ma_model_usage(input_tokens=tokens, output_tokens=100),
                 processed_at=clock(),
                 type="span.model_request_end",
             )
@@ -175,3 +178,42 @@ async def test_the_digest_continues_its_lane_or_ends_with_nothing_to_do(
     agent_costs = [s.cost_usd for s in steps.values() if s.lane and s.status == "succeeded"]
     assert all(c > 0 for c in agent_costs) and done.cost_usd == sum(agent_costs), f"{steps}"
     await world.verified(run_id)
+
+
+async def test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_them(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step usage is the run-as person's, as for any turn of theirs: their allowance counts
+    it, and once it is used up their next step waits blocked on it."""
+    world = await make_world(db_session, DIGEST, "collect")
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    owner = await accounts.get_account(db_session, world.owner)
+    assert tenant is not None and owner is not None
+    await make_platform_principal(
+        db_session, platform=tenant.platform, external_id="U1", tenant=tenant, account=owner
+    )
+    await spend_allowances.create_allowance(
+        db_session,
+        tenant_id=world.tenant_id,
+        subject_kind="person",
+        subject_id="U1",
+        agent_id=None,
+        amount_usd=Decimal("0.01"),
+        window="total",
+        starts_at=NOW - timedelta(days=1),
+    )
+    await db_session.commit()
+    run_id, seen = await run_lanes(
+        world, monkeypatch, [complete(risky=1), complete(digest="x")], 10_000
+    )
+    used = await spend_allowances.used_since(
+        db_session,
+        tenant_id=world.tenant_id,
+        platform_user_ids={"U1"},
+        agent_id=None,
+        since=NOW - timedelta(days=1),
+        markup=world.settings.billing.markup,
+    )
+    done, steps = await world.get(run_id), await world.steps(run_id)
+    assert used == done.cost_usd > 0, "the first step's spend counts against their allowance"
+    assert (seen, steps["write"].waiting_reason) == ([None], "blocked"), "the next step waits"
