@@ -29,8 +29,8 @@ from daimon.core.evals.scrub.detect import (
     namey,
 )
 from daimon.core.evals.scrub.entities import MIN_PART, KnownEntities, Term, normalize, terms_of
-from daimon.core.evals.scrub.fakes import FakeMap, adapt, key_check, scrub_key
-from daimon.core.evals.scrub.shape import ID, KEEP, Shape, field_shape, shape_of
+from daimon.core.evals.scrub.fakes import FakeMap, adapt, key_check, keyed_hash, scrub_key
+from daimon.core.evals.scrub.shape import ID, KEEP, NAME, Shape, field_shape, shape_of
 from pydantic import JsonValue
 
 REDACTED = "[REDACTED]"
@@ -117,6 +117,7 @@ _MIN_PAYLOAD: Final = 48
 _MIN_ID_INT: Final = 10**14
 _ID_UNSAFE: Final = re.compile(r"[^A-Za-z0-9._:-]+")
 _ID_MAX: Final = 128
+_NAME_UNSAFE: Final = re.compile(r"[^a-z0-9]+")
 
 
 def _snake(key: str) -> str:
@@ -263,9 +264,10 @@ class Scrubber:
         salt: str,
         ner_model: str | None = "en_core_web_sm",
         known: Mapping[tuple[str, str], str] | None = None,
+        learned: Iterable[Term] = (),
         jobs: int = 1,
     ) -> None:
-        terms = terms_of(entities)
+        terms = [*terms_of(entities), *learned]
         self.key = scrub_key(key, salt)
         self.detector = Detector(terms, Ner(ner_model, jobs=jobs) if ner_model else None)
         self.fakes = FakeMap(self.key, known=known, forbidden=[t.text for t in terms])
@@ -275,6 +277,8 @@ class Scrubber:
         self._indexed = 0
         self._fake_words: set[str] = set()
         self._ids: dict[str, str] = {}
+        self.learned: list[Term] = []
+        """Terms found while scrubbing (not in the dictionary or `learned` given), to carry on."""
 
     @property
     def names_checked(self) -> bool:
@@ -290,6 +294,7 @@ class Scrubber:
     def add_terms(self, terms: Iterable[Term]) -> None:
         added = self.detector.add(t for t in terms if len(t.text.strip()) >= MIN_PART)
         self.fakes.forbid(t.text for t in added)
+        self.learned += added
 
     def prefetch(self, node: JsonValue) -> None:
         """Run NER ahead, in batches, over the strings in `node`."""
@@ -303,7 +308,7 @@ class Scrubber:
         self.add_terms(terms)
 
     def _learn(self, node: JsonValue, key: str, terms: list[Term], shape: Shape = None) -> None:
-        if shape == KEEP:
+        if shape in (KEEP, NAME):
             return
         if isinstance(node, list):
             for item in node:
@@ -371,7 +376,7 @@ class Scrubber:
 
     def _own(self, text: str, hit: Hit, fakes: list[tuple[int, int]]) -> bool:
         """Whether a hit in scrubbed text is ours: a fake, or a name the NER widened from one by
-        words no name is written in (a title, "Team", a fake's word, a lowercase word)."""
+        words no name is written in (a title, "Team", a fake's word, a lowercase common word)."""
         if _in_marker(text, hit):
             return True
         matched = text[hit.start : hit.end]
@@ -394,9 +399,10 @@ class Scrubber:
     def _beside(self, word: str) -> bool:
         folded = word.casefold()
         return (
-            word.islower() or folded in _BESIDE_FAKE or folded in self._fake_words
-            or folded in common_words()
-        )  # fmt: skip
+            folded in _BESIDE_FAKE
+            or folded in self._fake_words
+            or (word.islower() and folded in common_words())
+        )
 
     # ---------- text ----------
 
@@ -490,6 +496,8 @@ class Scrubber:
             return done[1]
         if isinstance(node, str) and shape == ID:
             return self._id(node, key, secret)
+        if isinstance(node, str) and shape == NAME:
+            return self._name(node)
         if isinstance(node, str):
             return self._string(node, key, secret)
         if isinstance(node, list):
@@ -514,16 +522,34 @@ class Scrubber:
         """An id gets one fake in every document it is in, so references to it still hold."""
         if (done := self._ids.get(node)) is None:
             done = self._string(node, key, secret)
-            done = node if done == node else _id_safe(done)
+            if done != node:
+                # Every secret-looking id would otherwise become the same "REDACTED-".
+                suffix = f"-{keyed_hash(self.key, 'id', node)[:8]}" if REDACTED in done else ""
+                done = _id_safe(done) + suffix
             self._ids[node] = done
         return done
 
+    def _known_names(self, node: str) -> Iterator[Hit]:
+        """The dictionary names in a tool or effect name (the model reads no such text)."""
+        return (h for h in self.detector.find(node, names=False) if h.canon is not None)
+
+    def _name(self, node: str) -> str:
+        """A tool or effect name with its known names replaced, in the same lowercase form."""
+        out: list[str] = []
+        pos = 0
+        for hit in self._known_names(node):
+            fake = self._replacement(node[hit.start : hit.end], hit)
+            out += [node[pos : hit.start], _NAME_UNSAFE.sub("_", fake.casefold()).strip("_") or "x"]
+            self.counts[hit.kind] += 1
+            pos = hit.end
+        return "".join([*out, node[pos:]])
+
     def _key(self, key: str, shape: Shape) -> str:
-        """A JSON key: a schema field stays; any other loses only what patterns and names of more
-        than one word find, since keys share their words with names ("status", "weight")."""
+        """A JSON key: a schema field stays; any other is scrubbed for patterns and known names
+        (the strict index leaves out lowercase common words: "status", "weight")."""
         if isinstance(shape, dict) and key in shape:
             return key
-        return self.text(key, names=False, words=False)
+        return self.text(key, names=False)
 
     def _string(self, node: str, key: str, secret: bool) -> str:
         if _plain(key, node) or node == REDACTED:
@@ -556,27 +582,28 @@ class Scrubber:
             self.counts[PAYLOAD] += 1
         return REDACTED if node else node
 
-    def residue_of(
-        self, node: JsonValue, *, key: str = "", secret: bool = False, shape: Shape = None
-    ) -> Counter[str]:
+    def residue_of(self, node: JsonValue, *, key: str = "", secret: bool = False) -> Counter[str]:
         """`residue` over a document, keyed by `kind` only (never text)."""
+        return self._residue(node, key, secret, shape_of(node))
+
+    def _residue(self, node: JsonValue, key: str, secret: bool, shape: Shape) -> Counter[str]:
+        """What `_value` would still change, walking the same shapes (found at the root only)."""
         secret = secret or secret_key(key)
-        shape = shape if shape is not None else shape_of(node)
         found: Counter[str] = Counter()
         if isinstance(node, bool) or node is None or isinstance(node, float) or shape == KEEP:
             return found
         if isinstance(node, int):
             if (done := self._int(node, key, secret)) is not None:
                 found[done[0]] += 1
+        elif isinstance(node, str) and shape == NAME:
+            found.update(h.kind for h in self._known_names(node))
         elif isinstance(node, str):
             found += self._string_residue(node, key, secret)
         elif isinstance(node, list):
             pair = _secret_pair(node)
             for n, v in enumerate(node):
                 last = pair and n == 1
-                found += self.residue_of(
-                    v, key=str(node[0]) if last else key, secret=secret or last, shape=shape
-                )
+                found += self._residue(v, str(node[0]) if last else key, secret or last, shape)
         else:
             payload = _payload_key(node)
             named = _named_secret(node)
@@ -587,18 +614,15 @@ class Scrubber:
                     decoded = _as_text(data) if data is not None else None
                     found += self.residue(decoded) if decoded is not None else Counter([PAYLOAD])
                 else:
-                    found += self.residue_of(
-                        v,
-                        key=k,
-                        secret=secret or (named and k in _VALUE_KEYS),
-                        shape=field_shape(shape, k),
+                    found += self._residue(
+                        v, k, secret or (named and k in _VALUE_KEYS), field_shape(shape, k)
                     )
         return found
 
     def _key_residue(self, key: str, shape: Shape) -> Counter[str]:
         if isinstance(shape, dict) and key in shape:
             return Counter()
-        return self.residue(key, names=False, words=False)
+        return self.residue(key, names=False)
 
     def _string_residue(self, node: str, key: str, secret: bool) -> Counter[str]:
         if _plain(key, node) or node == REDACTED:
@@ -608,7 +632,7 @@ class Scrubber:
         if _phone_like(key, node) and not self._is_fake(node):
             return Counter(["phone"])
         if (inner := _json_in(node)) is not None:
-            return self.residue_of(inner)
+            return self._residue(inner, "", False, None)
         if (data := _b64(node)) is not None:
             if (decoded := _as_text(data)) is not None:
                 return self.residue(decoded)

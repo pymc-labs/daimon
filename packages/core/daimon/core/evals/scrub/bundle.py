@@ -212,12 +212,15 @@ class _NewBlob:
     state: str
 
 
-def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape = None) -> None:
+def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob]) -> None:
     """Point blob references (and the attachment or file around them) at the scrubbed blobs."""
-    shape = shape if shape is not None else shape_of(node)
+    _retarget_in(node, mapping, shape_of(node))
+
+
+def _retarget_in(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape) -> None:
     if isinstance(node, list):
         for item in node:
-            _retarget(item, mapping, shape)
+            _retarget_in(item, mapping, shape)
     elif isinstance(node, dict):
         blob = node.get("blob")
         new = (
@@ -232,7 +235,7 @@ def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape = N
                 if key in node:
                     node[key] = value
         for key, value in node.items():
-            _retarget(value, mapping, field_shape(shape, key))
+            _retarget_in(value, mapping, field_shape(shape, key))
     for ref in ref_nodes(node):
         if (new := mapping.get(str(ref["sha256"]))) is not None:
             ref["sha256"], ref["size"], ref["media_type"] = new.sha256, new.size, new.media_type

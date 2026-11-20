@@ -1,7 +1,8 @@
 """Which fields of a bundle document hold text to scrub, read from the bundle's JSON schema.
 
 A shape is `KEEP` (an enum, number, time, hash or media type: written by Daimon, kept as it
-is), `ID` (an id: faked the same everywhere, in a form the id pattern accepts), `None` (free
+is), `ID` (an id: faked the same everywhere, in a form the id pattern accepts), `NAME` (a tool or
+effect name: only known names in it are replaced, in the same lowercase form), `None` (free
 JSON: scrubbed) or a dict of field shapes, where `"*"` stands for any key.
 """
 
@@ -15,9 +16,12 @@ from pydantic import JsonValue
 
 KEEP: Final = "keep"
 ID: Final = "id"
+NAME: Final = "name"
 Shape = dict[str, "Shape"] | str | None
-# Text fields Daimon writes: media types, hashes, tool names, effect verbs, HTTP methods.
-_KEPT_NAMES: Final = frozenset({"media_type", "sha256", "hash", "policy", "tool", "verb", "method"})
+# Text fields Daimon writes: media types, hashes, policies, HTTP methods.
+_KEPT_NAMES: Final = frozenset({"media_type", "sha256", "hash", "policy", "method"})
+# Tool names and effect verbs: machine names, but a vendor or company can be in them.
+_MACHINE_NAMES: Final = frozenset({"tool", "verb"})
 # A pointer names fields: it is scrubbed like text. Every other pattern fixes a format, as
 # `date-time` does (a `uri` is scrubbed).
 _FREE_DEFS: Final = frozenset({"JsonPointer"})
@@ -30,7 +34,7 @@ _BUILT: dict[str, Shape] = {}
 
 def _merge(a: Shape, b: Shape) -> Shape:
     """A shape for values of either: a free or object shape wins over `ID`, which wins over
-    `KEEP`, since a value of the wider one must be scrubbed."""
+    `NAME`, which wins over `KEEP`, since a value of the wider one must be scrubbed."""
     if a is None or b is None:
         return None
     if isinstance(a, dict) and isinstance(b, dict):
@@ -39,7 +43,7 @@ def _merge(a: Shape, b: Shape) -> Shape:
         return {k: _merge(a[k], b[k]) if k in a and k in b else a.get(k, b.get(k)) for k in a | b}
     if isinstance(a, dict) or isinstance(b, dict):
         return a if isinstance(a, dict) else b
-    return ID if ID in (a, b) else KEEP
+    return ID if ID in (a, b) else NAME if NAME in (a, b) else KEEP
 
 
 def _of(node: JsonValue) -> Shape:
@@ -65,7 +69,11 @@ def _of(node: JsonValue) -> Shape:
         own: dict[str, Shape] = {}
         for key, field in (props if isinstance(props, dict) else {}).items():
             shape = _of(field)
-            own[key] = KEEP if key in _KEPT_NAMES and shape is None else shape
+            if shape is None and key in _KEPT_NAMES:
+                shape = KEEP
+            elif shape is None and key in _MACHINE_NAMES:
+                shape = NAME
+            own[key] = shape
         extra = node.get("additionalProperties", True)
         if extra is not False:
             own["*"] = _of(extra) if isinstance(extra, dict) else None
@@ -89,6 +97,8 @@ def _def(name: str) -> Shape:
         return _BUILT[name]
     if name == "Id":
         return ID
+    if name == "EffectVerb":
+        return NAME
     node = _defs().get(name)
     if name in _FREE_DEFS:
         return None

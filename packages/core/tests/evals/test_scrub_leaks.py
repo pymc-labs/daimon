@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import zipfile
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,13 +17,19 @@ import pytest
 from daimon.core.evals.bundle import BundleHeader, DirSource, build_files, write_dir
 from daimon.core.evals.format import BlobEntry, SourceInfo, case_hash, sha256_hex
 from daimon.core.evals.from_thread import ThreadRecord, build_cases
-from daimon.core.evals.scrub import detect
+from daimon.core.evals.scrub import detect, offline
 from daimon.core.evals.scrub.detect import Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms_of
 from daimon.core.evals.scrub.fakes import adapt
 from daimon.core.evals.scrub.files import rebuild
-from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
+from daimon.core.evals.scrub.offline import (
+    leftovers_of,
+    load_scrubber,
+    save_learned,
+    save_map,
+    scrub_path,
+)
 from daimon.core.evals.validate import InvalidDocument, LoadedSuite, validate_bundle
 from faker import Faker
 from PIL import Image
@@ -244,6 +251,9 @@ class _Names(Ner):
     def find(self, text: str) -> list[Hit]:
         return [Hit(m.start(), m.end(), "person", 1) for m in self._names.finditer(text)]
 
+    def prefetch(self, texts: Iterable[str]) -> None:
+        pass
+
 
 def test_name_when_equal_to_an_issued_fake_then_still_replaced_and_sweep_clean() -> None:
     scrubber = _scrubber()
@@ -267,11 +277,9 @@ def test_fakes_when_dictionary_is_large_then_readable() -> None:
 def test_sweep_when_ner_widens_a_fake_then_clean_unless_a_real_word_joins() -> None:
     scrubber = _scrubber()
     fake = adapt("AcmeCorp", scrubber.fakes.fake("company", "Acme Corp"))
-    scrubber.detector = Detector(
-        [], _Names(f"{fake} Team", f"{fake}_weekly_report", f"{fake} Johnson")
-    )
+    scrubber.detector = Detector([], _Names(f"{fake} Team", f"{fake}_report", f"{fake} Johnson"))
     assert scrubber.residue(f"{fake} Team") == {}
-    assert scrubber.residue(f"{fake}_weekly_report") == {}, "lowercase words are no name"
+    assert scrubber.residue(f"{fake}_report") == {}, "lowercase common words are no name"
     assert scrubber.residue(f"{fake} Johnson") == {"person": 1}
 
 
@@ -361,7 +369,7 @@ def test_entities_when_yaml_is_broken_then_error_names_no_line(tmp_path: Path) -
 
 
 def test_value_when_bundle_document_then_keys_and_schema_fields_kept() -> None:
-    scrubber = _scrubber(KnownEntities(phrases=["version", "Kestrel Ops"], projects=["relay"]))
+    scrubber = _scrubber(KnownEntities(phrases=["Kestrel Ops"], projects=["relay"]))
     scrubber.learn({"text": "write to helperbot@corp.example", "project": "weight"})
     case = {
         "schema": "daimon.eval.case/1",
@@ -371,7 +379,7 @@ def test_value_when_bundle_document_then_keys_and_schema_fields_kept() -> None:
     }
     out = scrubber.value(case)
     assert out["world"] == case["world"], "enums keep their values"
-    assert list(out["ext"])[:2] == ["version", "weight"], "keys keep words names share"
+    assert list(out["ext"])[:2] == ["version", "weight"], "keys keep lowercase common words"
     assert "Kestrel Ops" not in json.dumps(out) and "helperbot" not in json.dumps(out)
     suite = scrubber.value({"schema": "daimon.eval.suite/1", "cases": [{"split": "test"}]})
     assert suite["cases"] == [{"split": "test"}]
@@ -493,3 +501,187 @@ def test_ner_when_texts_are_long_then_batches_are_bounded_by_size(
     assert all(len(g) == 1 or sum(map(len, g)) <= 100 for g in groups), "a batch is too large"
     assert all(len(g) <= 64 for g in groups), "a batch has too many texts"
     assert len(groups) < len(texts), "texts are still batched"
+
+
+# ---------- third review pass ----------
+
+
+def _fake_beside(*names: str) -> tuple[Scrubber, str]:
+    scrubber = _scrubber()
+    fake = scrubber.fakes.fake("person", "Dana")
+    scrubber.detector = Detector([], _Names("Dana", *(f"{fake} {n}" for n in names)))
+    return scrubber, fake
+
+
+@pytest.mark.parametrize("beside", ["okonkwo", "Price", "Okonkwo"])
+def test_text_when_ner_widens_a_fake_by_a_name_or_capitalized_word_then_replaced(
+    beside: str,
+) -> None:
+    scrubber, fake = _fake_beside(beside)
+    assert scrubber.residue(f"{fake} {beside}") == {"person": 1}, "the sweep sees the surname"
+    out = scrubber.text(f"Contact Dana {beside} at HQ")
+    assert beside not in out, "a lowercase or capitalized word beside a fake can be a surname"
+    assert scrubber.residue(out) == {}
+
+
+def test_value_when_free_json_key_is_a_single_name_then_replaced_and_sweep_sees_it() -> None:
+    scrubber = _scrubber()
+    doc = {"alice": {"status": 1}, "acme_alice_notes": 2, "Priya": 3, "status": 4}
+    assert sum(scrubber.residue_of(doc).values()) == 4, "the sweep reads keys too"
+    out = scrubber.value(doc)
+    assert _real_in(json.dumps(out)) == [], out
+    assert "status" in out, "a lowercase common word is no name"
+    assert scrubber.residue_of(out) == {}
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "zq-backups-7.s3.amazonaws.com",
+        "mydb.c1x2y3.us-east-1.rds.amazonaws.com",
+        "k3j2.execute-api.us-east-1.amazonaws.com",
+        "svc.example.com",
+        "zqbucket.storage.googleapis.com",
+    ],
+)
+def test_text_when_host_has_a_customer_label_under_a_big_service_then_faked(host: str) -> None:
+    out = _scrubber().text(f"see https://{host}/x and docs.google.com and api.github.com")
+    assert host.split(".")[0] not in out, out
+    assert "docs.google.com" in out and "api.github.com" in out, "generic labels stay public"
+
+
+@pytest.mark.parametrize(
+    ("url", "private"),
+    [
+        ("https://raw.githubusercontent.com/zqcorp/zqrepo/main/x.py", ["zqcorp", "zqrepo"]),
+        ("https://api.github.com/repos/zqcorp/zqrepo/issues", ["zqcorp", "zqrepo"]),
+        ("https://www.linkedin.com/in/jane-roe-123abc", ["jane-roe"]),
+        ("https://twitter.com/janeroe99", ["janeroe99"]),
+        ("https://x.com/jroe", ["jroe"]),
+        ("https://www.youtube.com/@RoeLabs", ["RoeLabs"]),
+    ],
+)
+def test_text_when_repo_or_profile_address_then_owner_and_account_replaced(
+    url: str, private: list[str]
+) -> None:
+    out = _scrubber().text(f"see {url} and x.com/home")
+    assert not any(p in out for p in private), out
+    assert url.split("/")[2] in out and "x.com/home" in out, "the service stays"
+
+
+def test_value_when_tool_or_effect_name_holds_a_known_name_then_replaced_in_the_same_form() -> None:
+    scrubber = _scrubber()
+    case = {
+        "schema": "daimon.eval.case/1",
+        "world": {
+            "exchanges": [
+                {"tool": "acme_crm_lookup", "effects": [{"verb": "acme_crm.contact.update"}]},
+                {"tool": "search_*"},
+            ]
+        },
+        "expect": {"forbidden_effects": ["acme_crm.contact.delete"]},
+    }
+    assert scrubber.residue_of(case) == {"company_first": 3}, "the sweep reads tool and verb names"
+    out = scrubber.value(case)
+    exchanges = out["world"]["exchanges"]
+    assert _real_in(json.dumps(out)) == [], out
+    assert re.fullmatch(r"[a-z0-9_]+_crm_lookup", exchanges[0]["tool"]), exchanges[0]
+    assert re.fullmatch(r"[a-z0-9_]+_crm(\.[a-z0-9_]+)+", exchanges[0]["effects"][0]["verb"])
+    assert re.fullmatch(r"[a-z0-9_]+_crm(\.[a-z0-9_]+)+", out["expect"]["forbidden_effects"][0])
+    assert exchanges[1]["tool"] == "search_*", "a name with no known name is kept"
+    assert scrubber.residue_of(out) == {}
+
+
+def test_text_when_custom_scheme_then_names_in_it_replaced_but_standard_scheme_kept() -> None:
+    scrubber = _scrubber(ENTITIES.model_copy(update={"phrases": ["https"]}))
+    out = scrubber.text("open acme-app://x and acme+ssh://h and https://docs.google.com")
+    assert "acme" not in out and "https://docs.google.com" in out, out
+
+
+def test_scrub_when_batches_share_a_learned_file_then_names_carry_over(tmp_path: Path) -> None:
+    names, learned = tmp_path / "names.json", tmp_path / "learned.json"
+    names.write_text(ENTITIES.model_dump_json())
+    key = "0123456789abcdef0123"
+    first = load_scrubber(names, key, salt="t", learned_path=learned, ner_model=None)
+    first.detector = Detector(terms_of(ENTITIES), _Names("Okonkwo"))
+    first.learn({"text": "ask Okonkwo"})
+    assert "Okonkwo" not in first.text("hi Okonkwo again"), "learned within the run"
+    save_learned(first, learned)
+    assert learned.stat().st_mode & 0o777 == 0o600, "the file holds real names"
+    second = load_scrubber(names, key, salt="t", learned_path=learned, ner_model=None)
+    assert "Okonkwo" not in second.text("later: Okonkwo"), "read at the start of the next run"
+    assert second.learned == [], "terms read from the file are not learned again"
+    second.learn({"text": "and ask Raman Singh"})
+    second.detector = Detector([], _Names("Kowalczyk"))
+    second.learn({"text": "ask Kowalczyk"})
+    save_learned(second, learned)
+    texts = {r["text"] for r in json.loads(learned.read_text())}
+    assert texts == {"Okonkwo", "Kowalczyk"}, "later runs add to the file"
+
+
+def test_scrub_when_write_fails_then_map_and_learned_file_already_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "bundle"
+    shutil.copytree(EXAMPLE, source)
+    names, fakes, learned = tmp_path / "n.json", tmp_path / "fakes.json", tmp_path / "l.json"
+    names.write_text(ENTITIES.model_dump_json())
+    scrubber = load_scrubber(names, "0123456789abcdef0123", salt="t", ner_model=None)
+
+    def broken(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(offline, "_write", broken)
+    with pytest.raises(OSError, match="disk full"):
+        scrub_path(source, tmp_path / "out", scrubber, map_path=fakes, learned_path=learned)
+    assert fakes.exists() and learned.exists(), (
+        "fakes must be in the map before a bundle holds them"
+    )
+
+
+def test_save_map_when_two_runs_save_then_entries_merge_atomically(tmp_path: Path) -> None:
+    fakes = tmp_path / "fakes.json"
+    one, two = _scrubber(), _scrubber()
+    one.text("Alice Smith")
+    two.text("Priya Raman")
+    save_map(one, fakes)
+    save_map(two, fakes)
+    rows = json.loads(fakes.read_text())["entries"]
+    assert len(rows) == len(one.fakes.added) + len(two.fakes.added), "no entry is lost"
+    assert fakes.stat().st_mode & 0o777 == 0o600
+    assert {p.name for p in tmp_path.iterdir()} <= {"fakes.json", "fakes.json.lock"}, "no temp left"
+
+
+def test_value_when_ids_look_secret_then_redacted_ids_differ_and_repeat() -> None:
+    scrubber = _scrubber()
+    one, two = ("sk-ant-" + c * 30 for c in "ab")
+    ids = [scrubber.value({"schema": "daimon.eval.case/1", "id": i})["id"] for i in (one, two, one)]
+    assert ids[0] != ids[1], "two secret ids must not share a fake"
+    assert ids[0] == ids[2] and ids[0].startswith("REDACTED-"), ids
+
+
+def test_sweep_when_free_value_looks_like_a_case_then_seen_as_value_scrubs_it() -> None:
+    scrubber = _scrubber()
+    doc = {"ext": {"schema": "daimon.eval.case/1", "surface": "Alice Smith"}}
+    assert "Alice" not in json.dumps(scrubber.value(doc)), "free JSON is scrubbed as text"
+    assert scrubber.residue_of(doc) == {"person": 1}, "the sweep agrees with the scrub"
+
+
+@pytest.mark.parametrize(
+    ("text", "real"),
+    [
+        ("shop.personal-site.com-backup", "personal-site"),
+        ("a x.personal-site.io- b", "personal-site"),
+        ("id 1234567890123456789abc", "1234567890123456789"),
+        ("id x1234567890123456789", "1234567890123456789"),
+        ("at %10.1.2.3% now", "10.1.2.3"),
+        ("at %10.0.0.1%", "10.0.0.1"),
+    ],
+)
+def test_text_when_host_id_or_ip_is_glued_to_other_characters_then_replaced(
+    text: str, real: str
+) -> None:
+    scrubber = _scrubber()
+    out = scrubber.text(text)
+    assert real not in out, out
+    assert scrubber.residue(out) == {}, "the sweep is clean too"

@@ -49,6 +49,13 @@ _ESCAPES: Final = re.compile(
 
 
 def _decode(escape: str) -> str:
+    """The text an escape stands for; one that decodes to a control character (`%10` in
+    "%10.1.2.3%") stays as written, so it cannot swallow what follows."""
+    out = _decoded(escape)
+    return escape if any(c < " " and c not in "\t\n\r" for c in out) else out
+
+
+def _decoded(escape: str) -> str:
     if escape.startswith("\\u"):
         point = int(escape[2:], 16)
         return escape if 0xD800 <= point < 0xE000 else fold_char(chr(point))
@@ -302,7 +309,7 @@ _EMAIL: Final = re.compile(
     r"(?<![\w.%+-])(?!git@github\.com:)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"
 )
 _IDS: Final = re.compile(
-    r"(?<![0-9A-Za-z])\d{15,20}(?![0-9A-Za-z])"  # Discord snowflakes and other long ids
+    r"(?<!\d)\d{15,20}(?!\d)"  # Discord snowflakes and other long ids
     r"|\b[UWCDGT](?=[A-Z0-9]*\d)[A-Z0-9]{8,12}\b"  # Slack ids
     r"|(?<![0-9A-Za-z])[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"  # UUIDs
     r"|(?<![0-9A-Za-z])(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{32}(?![0-9A-Za-z])"  # page and doc ids
@@ -317,12 +324,13 @@ _PHONE: Final = re.compile(
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
-# Any other host name, unless it is a public service's (subdomains included); the TLDs leave
+# Any other host name, unless it is a public service's (only generic subdomains: `docs.google.com`
+# stays, `zq-backups.s3.amazonaws.com` names a customer); the TLDs leave
 # out file extensions ("notes.md", "app.py"), and a country may follow one ("shop.com.pk").
 _PUBLIC_HOST: Final = re.compile(
     r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ai|dev|app|so|me|us"
     r"|uk|de|fr|nl|eu|ca|au|in|jp|ch|se|no|fi|dk|es|it|pl|be|at|br|nz|sg|ie|il|xyz|info|biz"
-    r"|cloud|tech|site|online|gg|ly|tv|fm)(?:\.[a-z]{2})?(?![\w-]|\.[a-z])",
+    r"|cloud|tech|site|online|gg|ly|tv|fm)(?:\.[a-z]{2})?(?!\w|\.[a-z])",
     re.IGNORECASE,
 )
 _PUBLIC_SERVICES: Final = frozenset(
@@ -330,10 +338,14 @@ _PUBLIC_SERVICES: Final = frozenset(
      "googleapis.com", "youtube.com", "notion.so", "notion.site", "slack.com", "discord.com",
      "discord.gg", "microsoft.com", "office.com", "sharepoint.com", "atlassian.net", "zoom.us",
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
-     "pypi.org", "npmjs.com", "amazonaws.com", "cloudflare.com", "example.com", "example.org",
-     "example.net"}
+     "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
-_SCHEME: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://", re.IGNORECASE)
+# Only a standard scheme is no name; a custom one ("acme-app://") may hold one.
+_SCHEME: Final = re.compile(
+    r"\b(?:https?|ftps?|sftp|ssh|git|file|wss?|s3|gs|jdbc|postgres(?:ql)?|mysql|redis|mongodb"
+    r"|amqp|ldaps?)(?:\+[a-z0-9]+)?://",
+    re.IGNORECASE,
+)
 # The tenant part of a hosted service's address names the customer.
 _TENANT_HOST: Final = re.compile(
     r"\b([a-z0-9][a-z0-9-]{1,62})\.(?:atlassian\.net|zoom\.us|slack\.com|sharepoint\.com"
@@ -346,7 +358,8 @@ _TENANT_HOST: Final = re.compile(
 )
 _SHARED_HOSTS: Final = frozenset(
     {"www", "app", "api", "files", "hooks", "status", "support", "help", "docs", "login",
-     "auth", "id", "my", "account", "accounts", "developer", "developers", "community"}
+     "auth", "id", "my", "account", "accounts", "developer", "developers", "community", "drive",
+     "mail", "raw", "gist", "s3", "en"}
 )  # fmt: skip
 _IP: Final = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
@@ -358,7 +371,19 @@ _REPOS: Final = [
     for p in (
         r"(?:github|gitlab|bitbucket)\.(?:com|org)[/:]([\w.-]+/[\w-][\w.-]*?)"
         r"(?=\.git\b|[/\s?#\"')\]]|$)",
+        r"(?:raw\.githubusercontent\.com|api\.github\.com/repos)/([\w.-]+/[\w-][\w.-]*?)"
+        r"(?=\.git\b|[/\s?#\"')\]]|$)",
         r"(?:^|\s)(?:-R|--repo)[\s=]+([\w.-]+/[\w.-]+)",
+    )
+]
+# The account in a social profile address (`/in/<slug>`, `/<handle>`, `/@<name>`).
+_PROFILES: Final = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\blinkedin\.com/(?:in|company|school|pub)/(?P<v>[\w%.-]+)",
+        r"(?<![\w-])(?:twitter|x)\.com/@?(?!(?:i|home|search|intent|share|hashtag|explore|settings"
+        r"|login|messages|notifications|compose|status)\b)(?P<v>\w+)",
+        r"\byoutube\.com/(?:@|(?:c|user|channel)/)(?P<v>[\w%.-]+)",
     )
 ]
 _NER_KINDS: Final = {
@@ -629,6 +654,8 @@ class Detector:
         yield from (Hit(m.start(), m.end(), "phone", _P_ID) for m in _PHONE.finditer(text))
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
+        for p in _PROFILES:
+            yield from (_group(m, "handle", _P_HOST) for m in p.finditer(text))
         yield from (Hit(m.start(), m.end(), "host", _P_HOST) for m in _HOST.finditer(text))
         for m in _PUBLIC_HOST.finditer(text):
             if _public_suffix(m.group()) is None:
@@ -640,11 +667,14 @@ class Detector:
 
 
 def _public_suffix(host: str) -> int | None:
-    """Where the public service's own name starts in `host` (`docs.google.com`: 5), or None."""
+    """Where the public service's own name starts in `host` (`docs.google.com`: 5), or None.
+    Only generic labels (or a tenant's, replaced on its own) may come before it."""
     labels = host.casefold().split(".")
     for i in range(len(labels) - 1):
         if ".".join(labels[i:]) in _PUBLIC_SERVICES:
-            return sum(len(label) + 1 for label in labels[:i])
+            if all(label in _SHARED_HOSTS for label in labels[:i]) or _TENANT_HOST.fullmatch(host):
+                return sum(len(label) + 1 for label in labels[:i])
+            return None
     return None
 
 

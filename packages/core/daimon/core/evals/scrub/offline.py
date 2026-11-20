@@ -3,14 +3,19 @@
 The dictionary file, the key, a salt (the tenant or project the data belongs to) and a map file
 (keyed hashes to fakes, no real values) are the only inputs. Reuse the same key, salt and map for
 every bundle of a suite so fakes stay the same; a map made with another key or salt is refused.
+Scrubbing many bundles one after another: a learned file (private, real names in plain text) carries
+what the name model found in one run to the next, as extra dictionary entries.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
@@ -25,7 +30,7 @@ from daimon.core.evals.bundle import (
 from daimon.core.evals.format import JsonObject
 from daimon.core.evals.scrub.bundle import ScrubReport, pseudonymous, scrub_bundle
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import load_entities
+from daimon.core.evals.scrub.entities import Term, load_entities
 from daimon.core.evals.scrub.fakes import key_check, scrub_key
 from daimon.core.evals.scrub.sweep import Leftover, sweep_blob, sweep_document
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
@@ -42,12 +47,20 @@ def _read_map(path: Path, check: str) -> dict[tuple[str, str], str]:
     return {(r["kind"], r["hash"]): r["fake"] for r in data["entries"]}
 
 
+def _read_learned(path: Path) -> list[Term]:
+    if not path.exists():
+        return []
+    rows = json.loads(path.read_text())
+    return [Term(r["kind"], r["text"]) for r in rows]
+
+
 def load_scrubber(
     entities: Path,
     key: str,
     *,
     salt: str,
     map_path: Path | None = None,
+    learned_path: Path | None = None,
     ner_model: str | None,
     jobs: int = 1,
 ) -> Scrubber:
@@ -57,20 +70,52 @@ def load_scrubber(
         raise InvalidDocument(["the salt must not be empty"])
     check = key_check(scrub_key(key.encode(), salt))
     known = _read_map(map_path, check) if map_path is not None else {}
+    learned = _read_learned(learned_path) if learned_path is not None else []
     return Scrubber(
         load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known,
-        jobs=jobs,
+        learned=learned, jobs=jobs,
     )  # fmt: skip
 
 
+@contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold an exclusive lock for `path` (on a file beside it: the file itself is replaced)."""
+    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _replace(path: Path, data: object) -> None:
+    """Write `data` as JSON, owner-readable only, so a reader never sees half a file."""
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump(data, out, indent=1)
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
 def save_map(scrubber: Scrubber, path: Path) -> None:
-    """Write the map, past entries and new, owner-readable only: it is private data."""
-    rows = _read_map(path, scrubber.key_check)
-    rows.update(scrubber.fakes.added)
-    entries = [{"kind": k, "hash": h, "fake": f} for (k, h), f in sorted(rows.items())]
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as out:
-        json.dump({"check": scrubber.key_check, "entries": entries}, out, indent=1)
+    """Write the map, past entries and new, owner-readable only: it is private data. Locked and
+    replaced whole, so a run beside this one loses no entries and nobody reads a torn file."""
+    with _locked(path):
+        rows = _read_map(path, scrubber.key_check)
+        rows.update(scrubber.fakes.added)
+        entries = [{"kind": k, "hash": h, "fake": f} for (k, h), f in sorted(rows.items())]
+        _replace(path, {"check": scrubber.key_check, "entries": entries})
+
+
+def save_learned(scrubber: Scrubber, path: Path) -> None:
+    """Add the terms this run learned to the learned file (private: it holds real names)."""
+    with _locked(path):
+        rows = {(t.kind, t.text) for t in _read_learned(path)}
+        rows.update((t.kind, t.text) for t in scrubber.learned)
+        _replace(path, [{"kind": k, "text": t} for k, t in sorted(rows)])
 
 
 def _write(files: dict[str, bytes], target: Path, *, as_zip: bool, passphrase: str | None) -> None:
@@ -87,11 +132,23 @@ def _write(files: dict[str, bytes], target: Path, *, as_zip: bool, passphrase: s
 
 
 def scrub_path(
-    path: Path, out: Path | None, scrubber: Scrubber, *, passphrase: str | None = None
+    path: Path,
+    out: Path | None,
+    scrubber: Scrubber,
+    *,
+    passphrase: str | None = None,
+    map_path: Path | None = None,
+    learned_path: Path | None = None,
 ) -> ScrubReport:
-    """Scrub the bundle at `path` into `out`, or in place. Nothing is written if it is invalid."""
+    """Scrub the bundle at `path` into `out`, or in place. Nothing is written if it is invalid.
+    The map and the learned file are saved first: a bundle written without its fakes in the map
+    could not be matched by the next run."""
     encrypted = path.is_file() and path.read_bytes().startswith(ENC_MAGIC)
     files, report = scrub_bundle(open_path(path, passphrase=passphrase), scrubber)
+    if map_path is not None:
+        save_map(scrubber, map_path)
+    if learned_path is not None:
+        save_learned(scrubber, learned_path)
     target = out or path
     _write(files, target, as_zip=path.is_file(), passphrase=passphrase if encrypted else None)
     return report
