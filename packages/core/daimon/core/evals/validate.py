@@ -54,14 +54,14 @@ class BundleSource(Protocol):
 
 
 @cache
-def _root_schema() -> JsonObject:
+def root_schema() -> JsonObject:
     text = resources.files("daimon.core.evals").joinpath("schema/bundle-1.0.schema.json")
     return json.loads(text.read_text())
 
 
 @cache
 def _validator(kind: DocType) -> Draft202012Validator:
-    root = _root_schema()
+    root = root_schema()
     schema = {k: v for k, v in root.items() if k != "oneOf"} | {"$ref": f"#/$defs/{kind}"}
     return Draft202012Validator(schema, format_checker=FormatChecker())
 

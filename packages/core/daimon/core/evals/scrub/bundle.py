@@ -99,9 +99,22 @@ def _obj(value: JsonValue) -> JsonObject:
     return value if isinstance(value, dict) else {}
 
 
-def _pin_key(pin: JsonObject) -> tuple[int, str]:
-    """A pin by revision and content hash: its id may be faked by the scrub."""
-    return int(str(pin.get("revision"))), str(pin.get("hash"))
+def _list(value: JsonValue) -> list[JsonValue]:
+    return value if isinstance(value, list) else []
+
+
+def _pin_key(pin: JsonValue) -> tuple[str, str, str]:
+    pin = _obj(pin)
+    return str(pin.get("id")), str(pin.get("revision")), str(pin.get("hash"))
+
+
+def _repin(
+    pins: list[JsonValue], raw: list[JsonValue], fresh: Mapping[tuple[str, str, str], JsonObject]
+) -> None:
+    """Point scrubbed `pins` (each made from the `raw` one beside it) at the scrubbed cases."""
+    for pin, before in zip(pins, raw, strict=True):
+        if isinstance(pin, dict) and (case := fresh.get(_pin_key(before))) is not None:
+            pin["id"], pin["hash"] = case["id"], case["hash"]
 
 
 def _flag(case: JsonObject, reason: str, detail: str) -> None:
@@ -199,12 +212,15 @@ class _NewBlob:
     state: str
 
 
-def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape = None) -> None:
+def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob]) -> None:
     """Point blob references (and the attachment or file around them) at the scrubbed blobs."""
-    shape = shape if shape is not None else shape_of(node)
+    _retarget_in(node, mapping, shape_of(node))
+
+
+def _retarget_in(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape) -> None:
     if isinstance(node, list):
         for item in node:
-            _retarget(item, mapping, shape)
+            _retarget_in(item, mapping, shape)
     elif isinstance(node, dict):
         blob = node.get("blob")
         new = (
@@ -219,7 +235,7 @@ def _retarget(node: JsonValue, mapping: Mapping[str, _NewBlob], shape: Shape = N
                 if key in node:
                     node[key] = value
         for key, value in node.items():
-            _retarget(value, mapping, field_shape(shape, key))
+            _retarget_in(value, mapping, field_shape(shape, key))
     for ref in ref_nodes(node):
         if (new := mapping.get(str(ref["sha256"]))) is not None:
             ref["sha256"], ref["size"], ref["media_type"] = new.sha256, new.size, new.media_type
@@ -275,26 +291,22 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
             )
     for doc in documents:
         _retarget(doc, mapping)
-    new_hash: dict[tuple[int, str], str] = {}
+    fresh: dict[tuple[str, str, str], JsonObject] = {}
     suites: list[LoadedSuite] = []
     partial: bool = bool(report.leftovers) or not scrubber.names_checked
     for suite in loaded.suites:
         cases: list[JsonObject] = []
         for case in suite.cases:
-            old = _pin_key(case)
-            fresh, left = scrub_case(scrubber, case, blobs=scrubbed_blobs)
-            new_hash[old] = str(fresh["hash"])
+            done, left = scrub_case(scrubber, case, blobs=scrubbed_blobs)
+            fresh[_pin_key(case)] = done
             report.leftovers += left
-            status = _obj(_obj(fresh.get("provenance")).get("scrub")).get("status")
+            status = _obj(_obj(done.get("provenance")).get("scrub")).get("status")
             partial = partial or bool(left) or status != "scrubbed"
-            cases.append(fresh)
+            cases.append(done)
         doc = scrubber.value(suite.document)
         assert isinstance(doc, dict)
         report.leftovers += sweep_document(scrubber, doc, f"suite {doc.get('id')}")
-        pins = doc.get("cases")
-        for pin in pins if isinstance(pins, list) else []:
-            if isinstance(pin, dict):
-                pin["hash"] = new_hash.get(_pin_key(pin), pin.get("hash"))
+        _repin(_list(doc.get("cases")), _list(suite.document.get("cases")), fresh)
         suites.append(LoadedSuite(doc, cases))
         report.cases += len(cases)
     runs: list[LoadedRun] = []
@@ -304,10 +316,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
             [scrubber.value(d) for d in group] for group in (run.items, run.scores, run.reviews)
         ]
         items = [d for d in scrubbed[0] if isinstance(d, dict)]
-        for item in items:
-            ref = item.get("case")
-            if isinstance(ref, dict):
-                ref["hash"] = new_hash.get(_pin_key(ref), ref.get("hash"))
+        _repin([i.get("case") for i in items], [i.get("case") for i in run.items], fresh)
         doc = scrubber.value(run.document)
         assert isinstance(doc, dict)
         for group, label in zip(
