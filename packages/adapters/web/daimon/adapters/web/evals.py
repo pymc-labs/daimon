@@ -192,8 +192,9 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
         return await _call(scoring.judge(await subject(caller), run_id, request))
 
     @router.get("/queues")
-    async def list_queues(caller: Caller, run_id: str) -> list[QueueView]:  # pyright: ignore[reportUnusedFunction]
-        return await _call(review.queues(await subject(caller), run_id))
+    async def list_queues(caller: Caller, run_id: str | None = None) -> list[QueueView]:  # pyright: ignore[reportUnusedFunction]
+        actor = await subject(caller)
+        return await _call(review.queues(actor, run_id) if run_id else review.my_queues(actor))
 
     @router.post("/queues")
     async def create_queue(caller: Caller, body: QueueCreate) -> QueueView:  # pyright: ignore[reportUnusedFunction]
@@ -210,6 +211,10 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/comments")
     async def list_comments(caller: Caller, run_id: str) -> list[Comment]:  # pyright: ignore[reportUnusedFunction]
         return await _call(review.comments(await subject(caller), run_id))
+
+    @router.get("/tasks/{task_id}/comments")
+    async def task_comments(caller: Caller, task_id: str) -> list[Comment]:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.task_comments(await subject(caller), task_id))
 
     @router.post("/comments")
     async def add_comment(caller: Caller, draft: CommentDraft) -> Comment:  # pyright: ignore[reportUnusedFunction]

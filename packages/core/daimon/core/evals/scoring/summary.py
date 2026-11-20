@@ -11,7 +11,7 @@ from typing import Final
 from daimon.core.evals.format import Case, JudgeConfig, Run, RunItem, Score, StatsDefaults
 from daimon.core.evals.scoring import stats
 from daimon.core.evals.scoring.checks import is_hard
-from daimon.core.evals.scoring.judges import pair_preference, vote
+from daimon.core.evals.scoring.judges import orient, pair_preference, vote
 from pydantic import BaseModel, ConfigDict
 
 KAPPA_WARN: Final = 0.4
@@ -57,13 +57,19 @@ class PairSummary(_Out):
     low: float | None
     high: float | None
     margin: float
+    clusters: int
+    """Independent groups (source threads) behind the interval."""
     non_inferior: bool | None
+    """None: no shared cases, or fewer clusters than a verdict needs."""
     only_candidate: int
     only_reference: int
     mcnemar_p: float | None
+    """None where cases share threads: McNemar's test takes them as independent."""
 
 
 class PreferenceSummary(_Out):
+    grader: str
+    """Who preferred: `human`, `agent` or `llm`, tallied apart."""
     arm_a: str
     arm_b: str
     a_wins: int
@@ -260,41 +266,50 @@ def _compare(
         if rule.cluster_by == "source_thread"
         else {}
     )
-    ni = stats.non_inferiority(
-        stats.group_by_cluster(deltas, keys), margin=rule.non_inferiority_margin
-    )
+    groups = stats.group_by_cluster(deltas, keys)
+    ni = stats.non_inferiority(groups, margin=rule.non_inferiority_margin)
+    paired = metric == "pass_rate" and bool(shared) and len(groups) == len(shared)
     only_a = only_b = 0
-    if metric == "pass_rate":
-        for c in shared:
-            only_a += ours[c] > 0.5 >= theirs[c]
-            only_b += theirs[c] > 0.5 >= ours[c]
+    for c in shared if paired else ():
+        a, b = _side(ours[c]), _side(theirs[c])
+        if a is not None and b is not None:
+            only_a += a and not b
+            only_b += b and not a
     return PairSummary(
         candidate=candidate, reference=reference, metric=metric, cases=len(shared),
         difference=_num(ni.difference) if shared else None, low=_num(ni.low) if shared else None,
-        high=_num(ni.high) if shared else None, margin=ni.margin,
+        high=_num(ni.high) if shared else None, margin=ni.margin, clusters=ni.clusters,
         non_inferior=ni.verdict if shared else None, only_candidate=only_a, only_reference=only_b,
-        mcnemar_p=stats.mcnemar(only_a, only_b) if metric == "pass_rate" and shared else None,
+        mcnemar_p=stats.mcnemar(only_a, only_b) if paired else None,
     )  # fmt: skip
 
 
+def _side(rate: float) -> bool | None:
+    """A case's verdict from its pass rate over repeats; an even split decides nothing."""
+    return None if rate == 0.5 else rate > 0.5
+
+
 def _preferences(scores: Sequence[Score], arm_of: Mapping[str, str]) -> list[PreferenceSummary]:
-    by_pair: dict[tuple[str, str], list[Score]] = defaultdict(list)
+    """Wins per arm pair, people and models apart; each pair ordered by arm first, so a
+    preference counts for the arm it was given to whatever order the items were shown in."""
+    by_pair: dict[tuple[str, str, str], list[Score]] = defaultdict(list)
     for s in scores:
-        if s.pair is not None:
-            by_pair[(s.pair.a, s.pair.b)].append(s)
-    tally: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
-    for (a, b), group in by_pair.items():
-        verdict = pair_preference(group)
-        if verdict is None or a not in arm_of or b not in arm_of:
+        if s.pair is None or s.pair.a not in arm_of or s.pair.b not in arm_of:
             continue
-        key = (arm_of[a], arm_of[b])
-        tally[key][{"a": 0, "b": 1, "tie": 2}[verdict]] += 1
+        s = orient(s, lambda i: (arm_of[i], i))
+        assert s.pair is not None
+        by_pair[(s.grader.kind, s.pair.a, s.pair.b)].append(s)
+    tally: dict[tuple[str, str, str], list[int]] = defaultdict(lambda: [0, 0, 0])
+    for (kind, a, b), group in by_pair.items():
+        verdict = pair_preference(group)
+        if verdict is not None and arm_of[a] != arm_of[b]:
+            tally[(kind, arm_of[a], arm_of[b])][{"a": 0, "b": 1, "tie": 2}[verdict]] += 1
     return [
         PreferenceSummary(
-            arm_a=a, arm_b=b, a_wins=w[0], b_wins=w[1], ties=w[2],
+            grader=kind, arm_a=a, arm_b=b, a_wins=w[0], b_wins=w[1], ties=w[2],
             sign_test_p=stats.binomial_two_sided(w[0], w[0] + w[1]) if w[0] + w[1] else None,
         )
-        for (a, b), w in sorted(tally.items())
+        for (kind, a, b), w in sorted(tally.items())
     ]  # fmt: skip
 
 
@@ -364,8 +379,16 @@ def summarize(
     pending = sum(o.passed is None for group in outcomes.values() for o in group)
     if pending:
         notes.append(f"{pending} finished items have no decisive score yet.")
+    if any(c.cases and c.non_inferior is None for c in comparisons):
+        notes.append(
+            f"A comparison over fewer than {stats.MIN_CLUSTERS} source threads has no verdict."
+        )
+    spent = (run.spend.by_category or {}).get("judge") if run.spend else None
     return RunSummary(
         run_id=run.id, arms=arms, comparisons=comparisons,
         preferences=_preferences(live, arm_of), calibration=calibration(live, warn=kappa_warn),
-        judge_cost_usd=sum(s.cost_usd or 0 for s in live if s.grader.kind == "llm"), notes=notes,
+        judge_cost_usd=spent if spent is not None else sum(
+            s.cost_usd or 0 for s in live if s.grader.kind == "llm"
+        ),
+        notes=notes,
     )  # fmt: skip

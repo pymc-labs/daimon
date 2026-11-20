@@ -15,6 +15,8 @@ from typing import Final
 
 DEFAULT_SEED: Final = 20260101
 DEFAULT_RESAMPLES: Final = 2000
+MIN_CLUSTERS: Final = 10
+"""Fewer independent clusters than this give no verdict: the interval means little."""
 
 
 @dataclass(frozen=True)
@@ -106,8 +108,10 @@ class NonInferiority:
     low: float
     high: float
     margin: float
-    verdict: bool
-    """Candidate is not worse: the lower bound of (candidate - reference) clears -margin."""
+    clusters: int
+    verdict: bool | None
+    """Candidate is not worse: the lower bound of (candidate - reference) clears -margin.
+    None below `MIN_CLUSTERS` clusters."""
 
 
 def non_inferiority(
@@ -117,10 +121,12 @@ def non_inferiority(
     confidence: float = 0.95,
     resamples: int = DEFAULT_RESAMPLES,
     seed: int = DEFAULT_SEED,
+    min_clusters: int = MIN_CLUSTERS,
 ) -> NonInferiority:
     """Non-inferiority from per-case differences (candidate minus reference), by cluster."""
     ci = cluster_bootstrap(clusters, confidence=confidence, resamples=resamples, seed=seed)
-    return NonInferiority(ci.mean, ci.low, ci.high, margin, ci.n > 0 and ci.low > -margin)
+    verdict = ci.low > -margin if ci.clusters >= min_clusters else None
+    return NonInferiority(ci.mean, ci.low, ci.high, margin, ci.clusters, verdict)
 
 
 def cohen_kappa(a: Sequence[Hashable], b: Sequence[Hashable]) -> float:

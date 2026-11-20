@@ -9,10 +9,11 @@ from anthropic import AsyncAnthropic
 from daimon.core.anthropic_guard import anthropic_configured, require_anthropic_allowed
 from daimon.core.evals.format import ModelChoice
 from daimon.core.evals.scoring.judges import Completion
+from daimon.core.mux_backend import resource_scope
 from daimon.core.turn.runtimes import provider_completions
 from mux.contracts.completions import CompletionEffort, Completions
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import PROVIDERS, Scope
+from mux.contracts.ids import PROVIDERS
 from mux.drivers.anthropic import AnthropicCompletions
 
 _EFFORT: Final[dict[str, CompletionEffort]] = {
@@ -41,10 +42,10 @@ class MuxJudgeClient:
         return factory()
 
     async def complete(
-        self, model: ModelChoice, system: str, prompt: str, max_tokens: int
+        self, model: ModelChoice, system: str, prompt: str, max_tokens: int, *, tenant_id: str
     ) -> Completion:
         driver = self._driver(model)
-        scope = Scope.legacy_host_authorized(call_site="evals:judge")
+        scope = resource_scope(tenant_id=tenant_id, authorization_id="evals-judge")
         effort = None if model.effort is None else _EFFORT.get(model.effort)
         done = await driver.complete(scope, model.model, system, prompt, max_tokens, effort)
         usage = done.usage

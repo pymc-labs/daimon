@@ -26,7 +26,7 @@ _BRANDS: Final = "claude|gpt|gemini|deepseek|qwen|mistral|mixtral"
 _WORDS: Final = "opus|sonnet|haiku|grok|codex|llama"
 """Everyday words that name a model only with a version after them."""
 _KNOWN: Final = re.compile(
-    rf"\b(?:{_BRANDS})(?:[-_.:/][A-Za-z0-9.]+)*\b"
+    rf"\b(?:{_BRANDS})(?:\d[A-Za-z0-9.]*)?(?:[-_.:/][A-Za-z0-9.]+)*\b"
     rf"|\b(?:{_WORDS})[-_ ]?\d[A-Za-z0-9.]*(?:[-_.][A-Za-z0-9.]+)*\b",
     re.IGNORECASE,
 )

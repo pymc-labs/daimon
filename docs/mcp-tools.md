@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 254 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 255 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -292,6 +292,7 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |
 | `eval_judge_run` | all callers | Estimate what judging an eval run with models would cost. |
 | `eval_review_next` | all callers | Get your next review task from a queue (`run~queue`), or none when none is left. |
+| `eval_review_queues` | all callers | List the open eval review queues you may work, across every run you review. |
 | `eval_review_submit` | all callers | Submit your scores for a review task: one per criterion the task asks for, naming the column (A, B...) each is about. |
 | `eval_suite_create` | all callers | Create an eval suite with no cases; you own it. |
 | `eval_suite_get` | all callers | Read an eval suite: its cases, weights and defaults. |

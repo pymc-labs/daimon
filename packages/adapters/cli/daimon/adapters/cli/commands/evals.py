@@ -250,12 +250,20 @@ def runs_judge(
     _serve(ctx, _scoring, lambda s, a: s.judge(a, run_id, ask))
 
 
+def _review(rt: CliRuntime) -> ReviewService:
+    return ReviewService(rt.sessionmaker, _evals(rt))
+
+
+@review_app.command("queues")
+def review_queues(ctx: typer.Context) -> None:
+    """List the open review queues you may work."""
+    _serve(ctx, _review, lambda s, a: s.my_queues(a))
+
+
 @review_app.command("next")
 def review_next(ctx: typer.Context, queue: str) -> None:
     """Take the next review task of a queue (`run~queue`)."""
-    _serve(
-        ctx, lambda rt: ReviewService(rt.sessionmaker, rt.settings), lambda s, a: s.next(a, queue)
-    )
+    _serve(ctx, _review, lambda s, a: s.next(a, queue))
 
 
 @review_app.command("submit")
@@ -267,7 +275,7 @@ def review_submit(ctx: typer.Context, task_id: str, scores: Path) -> None:
         await s.submit(a, task_id, parsed)
         return "saved"
 
-    _serve(ctx, lambda rt: ReviewService(rt.sessionmaker, _evals(rt)), work)
+    _serve(ctx, _review, work)
 
 
 @bundle_app.command("validate")

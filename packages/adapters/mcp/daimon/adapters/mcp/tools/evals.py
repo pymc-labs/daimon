@@ -19,7 +19,13 @@ from daimon.core.dm_access import member_roles, resolve_groups
 from daimon.core.evals.access import GroupLookup, Share, Subject, WorkspaceRole, platform_groups
 from daimon.core.evals.compare import Comparison
 from daimon.core.evals.format import Arm, Comment, JsonObject, to_document
-from daimon.core.evals.review import CommentDraft, ReviewService, ReviewTask, ScoreDraft
+from daimon.core.evals.review import (
+    CommentDraft,
+    QueueView,
+    ReviewService,
+    ReviewTask,
+    ScoreDraft,
+)
 from daimon.core.evals.scoring.service import JudgeOutcome, JudgeRequest, ScoringService
 from daimon.core.evals.service import (
     CaseCheck,
@@ -195,10 +201,16 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         return await _call(scoring.judge(await actor(ctx), run_id, ask))
 
     @mcp.tool
+    async def eval_review_queues(ctx: Context) -> list[QueueView]:  # pyright: ignore[reportUnusedFunction]
+        """List the open eval review queues you may work, across every run you review."""
+        return await _call(review.my_queues(await actor(ctx)))
+
+    @mcp.tool
     async def eval_review_next(ctx: Context, queue: str) -> ReviewTask | None:  # pyright: ignore[reportUnusedFunction]
         """Get your next review task from a queue (`run~queue`), or none when none is left.
-        The task is yours for 30 minutes. Blind queues show letters, never arm or model names."""
-        return await _call(review.next(await actor(ctx), queue))
+        The task is yours for 30 minutes. Columns are named A, B... by place; in a blind queue
+        nothing names an arm or a model."""
+        return await _call(review.next(await actor(ctx), queue, by="agent"))
 
     @mcp.tool
     async def eval_review_submit(  # pyright: ignore[reportUnusedFunction]
@@ -212,7 +224,7 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def eval_comment_add(ctx: Context, comment: CommentDraft) -> Comment:  # pyright: ignore[reportUnusedFunction]
         """Comment on an eval item or case, or from inside a review task by column letter."""
-        return await _call(review.comment(await actor(ctx), comment))
+        return await _call(review.comment(await actor(ctx), comment, by="agent"))
 
     @mcp.tool
     async def eval_bundle_export(ctx: Context, request: ExportRequest) -> JsonObject:  # pyright: ignore[reportUnusedFunction]

@@ -619,6 +619,19 @@ def vote(
     return yes * 2 > len(cast)
 
 
+def orient[K](score: Score, key: Callable[[str], K]) -> Score:
+    """A pair score with its items ordered by `key` (the preference flipped to match), so
+    scores given in either display order count as one pair."""
+    pair = score.pair
+    if pair is None or not key(pair.b) < key(pair.a):  # pyright: ignore[reportOperatorIssue]
+        return score
+    flip = {"a": "b", "b": "a"}
+    value = score.value.model_copy(
+        update={"preference": flip.get(score.value.preference or "", score.value.preference)}
+    )
+    return score.model_copy(update={"pair": ItemPair(a=pair.b, b=pair.a), "value": value})
+
+
 def _voter(score: Score) -> str:
     who = score.grader.who
     if score.grader.kind == "llm":

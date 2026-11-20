@@ -2957,11 +2957,17 @@ class EvalsSettings(BaseModel):
         default=128, gt=0, description="Largest eval bundle import or export handles, in MiB."
     )
     judge_models: list[JudgeModelSetting] = Field(
-        default_factory=lambda: [JudgeModelSetting(model="claude-sonnet-5-5")],
+        default_factory=list[JudgeModelSetting],
         description=(
             "The judge panel for eval runs that name none: each model scores each item and the "
-            "panel votes. Every model needs a known price."
+            "panel votes. Every model needs a known price, and none may share a model or a "
+            "provider with an arm it judges. Empty: judging names its models."
         ),
+    )
+    admin_approval_usd: float = Field(
+        default=25.0,
+        gt=0,
+        description="Eval spending ceilings above this, in USD, need an admin to approve them.",
     )
     kappa_warn: float = Field(
         default=0.4,

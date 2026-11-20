@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
+from decimal import Decimal
 
 from daimon.core._models import (
     EvalArm,
@@ -715,6 +716,45 @@ async def put_scores(
             .values(tenant_id=tenant_id, run_id=run_id, key=score["id"], **values)
             .on_conflict_do_update(constraint="uq_eval_scores_run_key", set_=values)
         )
+
+
+async def delete_scores(session: AsyncSession, *, run_id: uuid.UUID, keys: Iterable[str]) -> None:
+    await session.execute(
+        delete(EvalScore).where(EvalScore.run_id == run_id, EvalScore.key.in_(list(keys)))
+    )
+
+
+async def update_run(
+    session: AsyncSession, *, run_id: uuid.UUID, change: Callable[[Document], Document]
+) -> RunRow:
+    """Change a run's document under a row lock, so concurrent writers (judging, the runner)
+    never lose each other's spend; the status and spend columns follow the document."""
+    row = await session.get(EvalRun, run_id, with_for_update=True)
+    if row is None:
+        raise LookupError(run_id)
+    document = change(row.document)
+    spend = _get(document, "spend", "total_usd")
+    row.document = document
+    row.status = str(document["status"])
+    row.spend_usd = Decimal(str(spend)) if isinstance(spend, int | float) else None
+    await session.flush()
+    return RunRow.model_validate(row)
+
+
+async def queues_of_tenant(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> list[tuple[RunRow, QueueRow]]:
+    """Every review queue of a workspace with its run, newest run first."""
+    rows = await session.execute(
+        select(EvalRun, EvalReviewQueue)
+        .join(EvalReviewQueue, EvalReviewQueue.run_id == EvalRun.id)
+        .where(EvalRun.tenant_id == tenant_id)
+        .order_by(EvalRun.created_at.desc(), EvalReviewQueue.created_at, EvalReviewQueue.key)
+    )
+    return [
+        (RunRow.model_validate(r), QueueRow.model_validate(q, from_attributes=True))
+        for r, q in rows.tuples()
+    ]
 
 
 async def queues_of_run(session: AsyncSession, *, run_id: uuid.UUID) -> list[QueueRow]:

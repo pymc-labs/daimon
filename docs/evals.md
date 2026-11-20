@@ -103,14 +103,20 @@ daimon evals runs judge RUN_ID --approve 5    # run, spending at most 5 USD
 daimon evals runs compare RUN_ID --blind
 ```
 
-Judging is paid. It never runs without an approved spending ceiling, stops when the
-ceiling is reached, and refuses a model with no known price. Agents over MCP can only
-ask for the estimate. Running again replaces the same scores. The panel comes from
-[`DAIMON_EVALS__JUDGE_MODELS`](configuration.md#daimon_evals__judge_models).
+Judging is paid. It never runs without an approved spending ceiling and never spends
+past it. A ceiling above
+[`DAIMON_EVALS__ADMIN_APPROVAL_USD`](configuration.md#daimon_evals__admin_approval_usd)
+needs an admin. Agents over MCP can only ask for the estimate. The run keeps the spend
+and who approved it. Running again replaces the same scores.
+
+Name the judge models, or set a default panel in
+[`DAIMON_EVALS__JUDGE_MODELS`](configuration.md#daimon_evals__judge_models). A judge
+must have a known price and share no model or provider with an arm it judges.
 
 `GET /api/evals/runs/{id}/summary` gives pass rate, rubric score, cost, pass@k and
 pass^k per arm. Arms are compared on the same cases with a bootstrap interval that
-resamples whole source threads, an exact McNemar test and a non-inferiority check.
+resamples whole source threads and a non-inferiority check. Fewer than 10 threads give
+no verdict. The exact McNemar test runs only when no two cases share a thread.
 A recorded baseline has one answer per case, so its variance is unknown. Judges are
 checked against human scores with Cohen's kappa; below
 [`DAIMON_EVALS__KAPPA_WARN`](configuration.md#daimon_evals__kappa_warn) they are flagged.
@@ -123,12 +129,14 @@ A queue can ask for several reviewers per item. Editors adjudicate disagreements
 a score that supersedes the earlier ones. Comments attach to an item, a case or a
 passage of a transcript.
 
-A blind queue shows arms as letters, hides model names, model reactions and usage,
-and orders the columns randomly per reviewer and task. The server does this on every
-surface, and a reviewer who only reviews sees every run they can open this way while a
-blind queue is open.
+Columns are named A, B and so on by place. A blind queue hides model names, model
+reactions, usage, times and world origins. It orders the columns randomly per reviewer
+and task, and serves only repeats every arm has. The server does this on every surface.
+Reviewers always see runs, items and comparisons blind, and get comments with each task.
+A task can't be skipped: one left alone comes back when its reservation ends.
 
 ```bash
+daimon evals review queues
 daimon evals review next RUN_ID~QUEUE_ID
 daimon evals review submit TASK_ID scores.json
 ```

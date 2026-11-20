@@ -310,6 +310,7 @@ EXEMPT: dict[str, str] = {
     "eval_compare": _READS,
     "eval_judge_run": _READS,
     "eval_review_next": _EVALS,
+    "eval_review_queues": _READS,
     "eval_review_submit": _EVALS,
     "eval_cases_list": _READS,
     "eval_item_get": _READS,

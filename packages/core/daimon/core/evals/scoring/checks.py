@@ -37,6 +37,7 @@ from daimon.core.evals.format import (
     Score,
     ScoreValue,
     ToolAlias,
+    to_document,
 )
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -47,6 +48,39 @@ WorldState = Mapping[tuple[str, str], JsonValue]
 CODE: Final = Grader(kind="code", version="1")
 _SPACE: Final = re.compile(r"\s+")
 _ALWAYS_HARD: Final = ("status", "forbidden_calls", "forbidden_effects")
+MAX_PATTERN: Final = 500
+MAX_SUBJECT: Final = 100_000
+"""Characters a pattern is matched against; the rest is not searched."""
+_NESTED: Final = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]")
+_BACKREF: Final = re.compile(r"\\[1-9]|\(\?P=")
+
+
+def pattern_problem(pattern: str) -> str | None:
+    """Why a case's `regex` pattern can't be used, or None. Repeated groups that repeat
+    inside and back references are refused: they can take exponential time."""
+    if len(pattern) > MAX_PATTERN:
+        return f"is longer than {MAX_PATTERN} characters"
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return f"is not a valid pattern ({exc})"
+    if _NESTED.search(pattern) or _BACKREF.search(pattern):
+        return "repeats a repeated group or refers back, which can run too long"
+    return None
+
+
+def regex_problems(node: JsonValue) -> list[str]:
+    """Problems of every `regex` check in a case document (or part of one)."""
+    if isinstance(node, list):
+        return [p for v in node for p in regex_problems(v)]
+    if not isinstance(node, dict):
+        return []
+    found = [p for v in node.values() for p in regex_problems(v)]
+    pattern = node.get("pattern")
+    if node.get("op") == "regex" and isinstance(pattern, str):
+        problem = pattern_problem(pattern)
+        found += [f"pattern {pattern!r} {problem}"] if problem else []
+    return found
 
 
 def pass_value(passed: bool) -> ScoreValue:
@@ -119,7 +153,10 @@ def check_value(check: Check, found: bool, value: JsonValue) -> bool:
         case "normalized":
             return _normal(value) == _normal(check.value)
         case "regex":
-            return check.pattern is not None and re.search(check.pattern, _text(value)) is not None
+            pattern = check.pattern
+            if pattern is None or pattern_problem(pattern):
+                return False
+            return re.search(pattern, _text(value)[:MAX_SUBJECT]) is not None
         case "contains":
             return _contains(value, check.value)
         case "one_of":
@@ -197,7 +234,10 @@ def _call_checks(
     first_index: list[int] = []
     unmatched: list[str] = []
     for call in calls:
-        owners = [i for i, e in enumerate(expected) if matches(e.match, call)]
+        owners = [
+            i for i, e in enumerate(expected)
+            if matches(e.match, call) and _args_ok(e.args, call.args, "", None)
+        ]  # fmt: skip
         if owners:
             first_index.append(owners[0])
         else:
@@ -243,7 +283,10 @@ def _effect_checks(checker: _Checker, calls: Sequence[CanonicalCall]) -> None:
         first_index: list[int] = []
         unmatched: list[str] = []
         for effect in effects:
-            owners = [i for i, e in enumerate(spec.items) if _effect_fits(e, effect)]
+            owners = [
+                i for i, e in enumerate(spec.items)
+                if _effect_fits(e, effect) and _args_ok(e.args, effect.args, "", None)
+            ]  # fmt: skip
             if owners:
                 first_index.append(owners[0])
             else:
@@ -426,6 +469,9 @@ def _run(
         checker.add("status", False, f"the item ended in error ({kind})")
         return checker
     if item.status != "done":
+        return checker
+    if problems := regex_problems(to_document(case.expect)):
+        checker.add("expect", None, "; ".join(problems))
         return checker
     calls = canonical_calls(item, aliases)
     expect = case.expect

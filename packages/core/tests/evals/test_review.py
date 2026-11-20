@@ -78,7 +78,7 @@ async def test_blind_task_when_served_then_payload_names_no_arm_model_or_reactio
     owner = Subject(tenant_id=tenant.id, platform="web", key="web:alex", role="admin")
     reader = Subject(tenant_id=tenant.id, platform="web", key="web:rae", role="member")
     evals = EvalService(db_session_factory, settings)
-    review = ReviewService(db_session_factory, settings)
+    review = ReviewService(db_session_factory, evals)
     await evals.import_bundle(owner, _chunks(_bundle()))
     await evals.share(
         owner, "support-basics", [Share(kind="person", id="web:rae", role="reviewer")]
@@ -91,6 +91,10 @@ async def test_blind_task_when_served_then_payload_names_no_arm_model_or_reactio
         assert word not in payload, f"the task leaks {word!r}"
     assert sorted(c.label for c in task.columns) == ["A", "B"], "columns carry neutral letters"
     assert all(c.arm is None for c in task.columns), "no column names its arm"
+
+    assert all(_RUN not in c.item.id for c in task.columns), "item ids are opaque"
+    comments = await review.task_comments(reader, task.id)
+    assert comments == [], "a fresh task has no comments"
 
     shown = await evals.items(reader, _RUN, page=Page(offset=0, limit=50))
     assert not {i.arm_id for i in shown} & {"baseline-a", "candidate-z"}, (

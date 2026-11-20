@@ -4462,7 +4462,8 @@
     'eval_review_next': dict({
       'description': '''
         Get your next review task from a queue (`run~queue`), or none when none is left.
-        The task is yours for 30 minutes. Blind queues show letters, never arm or model names.
+        The task is yours for 30 minutes. Columns are named A, B... by place; in a blind queue
+        nothing names an arm or a model.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4474,6 +4475,15 @@
         'required': list([
           'queue',
         ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_review_queues': dict({
+      'description': 'List the open eval review queues you may work, across every run you review.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
         'type': 'object',
       }),
     }),
