@@ -3,6 +3,7 @@ payload names an arm, a model or a model reaction."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -51,14 +52,18 @@ def _bundle() -> bytes:
         "layout": "side_by_side",
         "blind": True,
     }
-    return to_zip(
-        files
-        | {
-            base + "run.json": json.dumps(run).encode(),
-            base + "items.jsonl": "\n".join(json.dumps(i) for i in (first, second)).encode(),
-            base + "reviews.jsonl": json.dumps(queue).encode(),
-        }
-    )
+    changed = {
+        base + "run.json": json.dumps(run).encode(),
+        base + "items.jsonl": "\n".join(json.dumps(i) for i in (first, second)).encode(),
+        base + "reviews.jsonl": json.dumps(queue).encode(),
+    }
+    manifest = json.loads(files["bundle.json"])
+    manifest["contents"]["runs"][0]["item_count"] = 2
+    for entry in manifest["files"]:
+        if entry["path"] in changed:
+            data = changed[entry["path"]]
+            entry["sha256"], entry["size"] = hashlib.sha256(data).hexdigest(), len(data)
+    return to_zip(files | changed | {"bundle.json": json.dumps(manifest).encode()})
 
 
 async def _chunks(data: bytes) -> AsyncIterator[bytes]:

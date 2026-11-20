@@ -206,13 +206,6 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
     async def add_comment(caller: Caller, draft: CommentDraft) -> Comment:  # pyright: ignore[reportUnusedFunction]
         return await _call(review.comment(await subject(caller), draft))
 
-    @router.post("/comments/{comment_id}/resolve")
-    async def resolve_comment(  # pyright: ignore[reportUnusedFunction]
-        caller: Caller, comment_id: str, resolved: bool = True
-    ) -> Comment:
-        work = review.resolve_comment(await subject(caller), comment_id, resolved=resolved)
-        return await _call(work)
-
     @router.get("/items/{item_id}")
     async def get_item(  # pyright: ignore[reportUnusedFunction]
         caller: Caller, item_id: str, blind: bool = False

@@ -675,27 +675,6 @@ class ReviewService:
             rows = await store.comments_of_run(session, run_id=run.id)
         return [Comment.model_validate(r.document) for r in rows]
 
-    async def resolve_comment(self, actor: Subject, comment_id: str, *, resolved: bool) -> Comment:
-        """Mark a comment resolved or open again; its author or an editor."""
-        await self._evals.check_on(actor)
-        async with self._sessions() as session, session.begin():
-            row = await store.comment_by_key(session, tenant_id=actor.tenant_id, key=comment_id)
-            if row is None or row.run_id is None:
-                raise EvalNotFound("No such comment here.")
-            run = await store.run_by_id(session, row.run_id)
-            found, role = await self._evals.run_access(
-                session, actor, run.key if run else "", "review"
-            )
-            comment = Comment.model_validate(row.document)
-            if comment.author.id not in actor.ids and role not in ("editor", "owner"):
-                raise EvalForbidden("Only the author or an editor can resolve this comment.")
-            comment = comment.model_copy(update={"resolved": resolved})
-            await store.set_comment(
-                session, tenant_id=actor.tenant_id, key=comment_id, document=to_document(comment)
-            )
-            del found
-        return comment
-
 
 def _case_view(case: Case, names: frozenset[str] | None) -> CaseView:
     view = CaseView(
