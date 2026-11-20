@@ -317,7 +317,7 @@ def test_ledger_chain_verifies_and_detects_edits() -> None:
                 NOW,
                 "step.ready",
                 "a",
-                None,
+                "engine",
             )
             self.data, self.prev_hash = data, prev
             self.hash = event_hash(
@@ -327,7 +327,7 @@ def test_ledger_chain_verifies_and_detects_edits() -> None:
                 at=NOW,
                 type=self.type,
                 step="a",
-                actor=None,
+                actor="engine",
                 data=data,
             )
 

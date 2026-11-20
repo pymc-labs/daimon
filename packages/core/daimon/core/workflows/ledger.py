@@ -29,7 +29,7 @@ class Entry(Protocol):
     @property
     def step_key(self) -> str | None: ...
     @property
-    def actor(self) -> Mapping[str, JsonValue] | None: ...
+    def actor(self) -> str: ...
     @property
     def data(self) -> Mapping[str, JsonValue]: ...
     @property
@@ -50,7 +50,7 @@ def event_hash(
     at: datetime,
     type: str,
     step: str | None,
-    actor: Mapping[str, JsonValue] | None,
+    actor: str,
     data: Mapping[str, JsonValue],
 ) -> str:
     body: dict[str, JsonValue] = {
@@ -59,7 +59,7 @@ def event_hash(
         "at": at.isoformat(),
         "type": type,
         "step": step,
-        "actor": dict(actor) if actor is not None else None,
+        "actor": actor,
         "data": dict(data),
     }
     return hashlib.sha256(prev.encode() + canonical(body)).hexdigest()
