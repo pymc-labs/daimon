@@ -37,6 +37,7 @@ from daimon.core.evals.format import (
 from daimon.core.evals.history import turn_text
 from daimon.core.evals.scoring.checks import check_item
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
+from daimon.core.host_calls import WAKE_SEED
 from daimon.core.stores import eval_runs, eval_world, usage_events
 from daimon.core.stores import evals as store
 from daimon.core.turn.state import TextBlock
@@ -249,8 +250,9 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
                      format=message.format)  # fmt: skip
             surface.reply_to = message.id
         await script.happened(Seen("start"))
-        text, follow_up = turn_text(case), False
-        for turn in range(1 + (case.script.max_follow_ups if case.script else 0)):
+        text, follow_up, turn = turn_text(case), False, 0
+        follow_ups = case.script.max_follow_ups if case.script else 0
+        while True:
             surface.state, surface.error = type(surface.state)(), None
             usage = _add_usage(usage, await deps.turns.turn(TurnRequest(
                 item_id=item.id, tenant_id=item.tenant_id, case=case, arm=arm, text=text,
@@ -261,9 +263,17 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
             if surface.error is not None:
                 error = ItemError(kind="agent", message=type(surface.error).__name__)
                 break
-            if cancel.is_set() or not script.replies:
+            if cancel.is_set():
                 break
-            text, follow_up = script.replies.pop(0), True
+            turn += 1
+            if surface.wakes:
+                # An approved card's call runs before the agent hears that it ran.
+                text = f"{await surface.wakes.pop(0)()}\n\n{WAKE_SEED}"
+            elif script.replies and follow_ups > 0:
+                text, follow_ups = script.replies.pop(0), follow_ups - 1
+            else:
+                break
+            follow_up = True
             surface.reply_to = chat.events[-1].message_id
     # One item's failure, whatever it is, must not stop the worker: it is the item's error.
     except Exception as exc:
@@ -275,13 +285,15 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
         with contextlib.suppress(asyncio.CancelledError):
             await watcher
         await deps.turns.close(item.id)
-    return await _finish(deps, item, run_row, case, Suite.model_validate(suite_doc), arm, reserved,
-                         started_at, chat, transcript, usage, error, stopped.is_set())  # fmt: skip
+    suite = Suite.model_validate(suite_doc)
+    return await _finish(deps, item, run_row, case, suite, arm, reserved, started_at, surface,
+                         transcript, usage, error, stopped.is_set())  # fmt: skip
 
 
 async def _finish(
     deps: ItemDeps, item: store.ItemRow, run_row: store.RunRow, case: Case, suite: Suite, arm: Arm,
-    reserved: float, started_at: datetime, chat: ChatLog, transcript: list[TranscriptEvent],
+    reserved: float, started_at: datetime, surface: EvalSurfaceLifecycle,
+    transcript: list[TranscriptEvent],
     usage: Usage, error: ItemError | None, stopped: bool,
 ) -> RunItem:  # fmt: skip
     finished_at = deps.clock()
@@ -298,7 +310,8 @@ async def _finish(
     result = RunItem.model_validate({
         **item.document, "status": status, "error": to_document(error) if error else None,
         "started_at": started_at, "finished_at": finished_at,
-        "transcript": to_document(EventStream(events=transcript)), "chat": chat.events,
+        "transcript": to_document(EventStream(events=transcript)), "chat": surface.chat.events,
+        "outputs": surface.outputs or None,
         "world_calls": world_calls or None,
         "usage": usage.model_copy(update={
             "duration_ms": int((finished_at - started_at).total_seconds() * 1000),

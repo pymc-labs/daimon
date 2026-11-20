@@ -7,27 +7,39 @@ it needs no database or settings.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
+import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Annotated
 
 import typer
+import uvicorn
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, TENANT_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
 from daimon.core.evals.bundle import DirSource, open_path, to_zip
+from daimon.core.evals.chat.cards import listen_cards
 from daimon.core.evals.cost import default_cap
 from daimon.core.evals.draft import auxiliary_completer
+from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
 from daimon.core.evals.review import ReviewService, ScoreDraft
+from daimon.core.evals.runner.item import ItemDeps
+from daimon.core.evals.runner.turns import EvalTurns, PodSettings
+from daimon.core.evals.runner.worker import work
 from daimon.core.evals.runs import RunDraft, RunService
+from daimon.core.evals.sandbox import configured_ca, sandbox_runtime
+from daimon.core.evals.sandbox.runtime import registries
 from daimon.core.evals.scoring.client import MuxJudgeClient
 from daimon.core.evals.scoring.service import JudgeRequest, ScoringService
 from daimon.core.evals.scrub.engine import Scrubber
@@ -45,7 +57,12 @@ from daimon.core.evals.service import (
 )
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
 from daimon.core.evals.web_thread import WebChatSource
+from daimon.core.evals.world.dispatch import FakeWorld
+from daimon.core.evals.world.http_app import create_world_app
+from daimon.core.evals.world.simulator import ModelSimulator
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.turn.deps import build_turn_deps
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
@@ -623,3 +640,59 @@ def bundle_import(
             a, chunks(), accept_unscrubbed=accept_unscrubbed, passphrase=passphrase
         ),
     )
+
+
+@evals_app.command("worker")
+def worker(reap_every_s: Annotated[float, typer.Option(min=1)] = 600) -> None:
+    """Run queued eval items until stopped, serving the fake world their sandboxes reach."""
+    run_cli(_work(reap_every_s), console=_console)
+
+
+async def _work(reap_every_s: float) -> None:
+    async with build_runtime(load_settings()) as rt:
+        settings, evals = rt.settings, rt.settings.evals
+        if evals.sandbox_image is None or evals.world_url is None or evals.environment_key is None:
+            raise _Failed("set DAIMON_EVALS__SANDBOX_IMAGE, __WORLD_URL and __ENVIRONMENT_KEY")
+        artifacts = settings.artifacts and build_artifact_store(settings.artifacts)
+        simulator = ModelSimulator(rt.anthropic, rt.sessionmaker, evals.simulator_model,
+                                   evals.simulator_effort)  # fmt: skip
+        world = FakeWorld(rt.sessionmaker, simulator, objects=artifacts,
+                          git_root=Path(tempfile.gettempdir()) / "daimon-eval-git")  # fmt: skip
+        runtime = sandbox_runtime(evals)
+        place = FeaturePlace(await eval_tenant(rt.sessionmaker), "web")
+        features = await resolve_features(rt.sessionmaker, settings, place,
+                                          keys=("eval_package_registries",))  # fmt: skip
+        pods = PodSettings(
+            runtime=runtime, image=evals.sandbox_image, ca=configured_ca(evals),
+            world_url=evals.world_url, passthrough=frozenset(evals.passthrough_hosts),
+            executor_config={"ANTHROPIC_ENVIRONMENT_KEY": evals.environment_key.get_secret_value()},
+            registries=registries(features),
+        )  # fmt: skip
+        deps = build_turn_deps(settings, rt.anthropic, rt.sessionmaker, billing_config=None,
+                               deployment_default=rt.deployment_default,
+                               resolver_cache=rt.resolver_cache)  # fmt: skip
+        turns = EvalTurns(deps, world, pods)
+        rate = float(evals.sandbox_rate_usd_per_hour)
+        items = ItemDeps(rt.sessionmaker, turns, world, sandbox_rate_usd_per_hour=rate)
+        # Every interface: the item pods reach the world from their own network.
+        app, port = create_world_app(world), evals.world_port
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning"))
+        stop = asyncio.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+
+        async def reap() -> None:
+            while True:
+                if gone := await runtime.reap():
+                    _console.print(f"Removed {len(gone)} stray eval sandboxes.")
+                await asyncio.sleep(reap_every_s)
+
+        cards = listen_cards(rt.sessionmaker, turns.raise_card)
+        helpers = [asyncio.create_task(c) for c in (server.serve(), reap(), cards)]
+        try:
+            await work(items, concurrency=evals.worker_concurrency, stop=stop)
+        finally:
+            server.should_exit = True
+            for task in helpers:
+                task.cancel()
+            await asyncio.gather(*helpers, return_exceptions=True)

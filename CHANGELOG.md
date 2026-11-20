@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Eval runs with spending caps.** Estimate a run, start it with a cap, cancel it, or
   approve one above the admin limit, from the web API, MCP tools or `daimon evals runs`.
   Items play the case's script on a simulated chat and stop before passing the cap.
+  `daimon evals worker` runs each item as a real turn of a copy of the arm's agent in its
+  own sandbox, and the script presses its approve cards and receives its files.
 - **A fake world for eval cases.** A running case's web, GitHub, Google, git and
   MCP calls are answered from the case, its earlier writes or a checked
   simulation, and never reach real services.

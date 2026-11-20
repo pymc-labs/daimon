@@ -2995,6 +2995,19 @@ class EvalsSettings(BaseModel):
             "http://eval-worker:8090. Unset: no sandbox can be enclosed."
         ),
     )
+    world_port: int = Field(
+        default=8090,
+        ge=1,
+        le=65535,
+        description="Port the eval worker serves its fake world on, on every interface.",
+    )
+    environment_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Environment key the eval sandbox's executor polls its self-hosted environment "
+            "with. Unset: live arms cannot run."
+        ),
+    )
     sandbox_runtime: Literal["docker", "kubernetes"] | None = Field(
         default=None,
         description="Where eval sandbox pods run: a Docker host or a Kubernetes namespace.",

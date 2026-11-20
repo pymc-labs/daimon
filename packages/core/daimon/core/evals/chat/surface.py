@@ -4,6 +4,7 @@ events instead of posting it anywhere."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt
 from daimon.core.evals.chat.events import ChatLog, confirmation_card
 from daimon.core.evals.chat.previews import confirmation_payloads, message_payloads
 from daimon.core.evals.chat.script import ScriptPlayer, Seen
+from daimon.core.evals.format import BlobRef, Output
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -28,6 +30,13 @@ class EvalSurfaceLifecycle:
     reply_to: str | None = None
     state: TurnState = field(default_factory=TurnState)
     error: Exception | None = None
+    outputs: list[Output] = field(default_factory=list[Output])
+    wakes: list[Callable[[], Awaitable[str]]] = field(
+        default_factory=list[Callable[[], Awaitable[str]]]
+    )
+    """Approved calls waiting to run: each wake's prefix runs them, as the next turn."""
+    shown: int = 0
+    """How many of `outputs` the chat already shows."""
 
     async def on_render(self, state: TurnState) -> None:
         self.state = state
@@ -65,6 +74,13 @@ class EvalSurfaceLifecycle:
         pressed = await self.script.answer(card, confirmation_payloads(card_id, prompt))
         return "expired" if pressed is None else _ANSWERS.get(pressed.action, "denied")
 
+    def file(self, name: str, media_type: str, sha256: str, size: int, folder: str) -> None:
+        """A file the turn delivered: the chat shows it after the turn's reply."""
+        output = Output(id=f"out{len(self.outputs) + 1}", name=name, media_type=media_type,
+                        blob=BlobRef(sha256=sha256, size=size, media_type=media_type, name=name),
+                        source="sandbox", path=f"{folder}/{name}")  # fmt: skip
+        self.outputs.append(output)
+
     async def end_turn(self) -> str | None:
         """Post the turn's reply and play the script on it; the reply text, if any."""
         for block in self.state.content:
@@ -78,5 +94,8 @@ class EvalSurfaceLifecycle:
                           format="markdown", reply_to=self.reply_to,
                           platform_payloads=message_payloads(text))  # fmt: skip
             await self.script.happened(Seen("message", text=text))
+        if files := [o.id for o in self.outputs[self.shown :]]:
+            self.chat.add("file", files=files, reply_to=self.reply_to)
+            self.shown = len(self.outputs)
         await self.script.happened(Seen("turn_end", text=text))
         return text or None

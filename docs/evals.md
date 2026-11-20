@@ -210,6 +210,16 @@ waits for an admin. An item starts only while its estimate fits under the cap, s
 run that reaches it stops early as `partial` and keeps the items already done. An
 agent can start a run only on the person's card in chat.
 
+Eval workers run the queued items. Each item runs a copy of the arm's agent in
+its own sandbox. Set the sandbox settings,
+[`DAIMON_EVALS__WORLD_URL`](configuration.md#daimon_evals__world_url) and
+[`DAIMON_EVALS__ENVIRONMENT_KEY`](configuration.md#daimon_evals__environment_key),
+then start one or more:
+
+```bash
+daimon evals worker
+```
+
 ## Scoring
 
 Deterministic checks (call and effect matching in `strict`, `unordered`, `subset` or

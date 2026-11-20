@@ -293,6 +293,19 @@ Effort the eval world simulator runs at.
 Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
 http://eval-worker:8090. Unset: no sandbox can be enclosed.
 
+### `DAIMON_EVALS__WORLD_PORT`
+
+`int` · optional · default `8090`
+
+Port the eval worker serves its fake world on, on every interface.
+
+### `DAIMON_EVALS__ENVIRONMENT_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Environment key the eval sandbox's executor polls its self-hosted environment with.
+Unset: live arms cannot run.
+
 ### `DAIMON_EVALS__SANDBOX_RUNTIME`
 
 `'docker' | 'kubernetes' | None` · optional · default unset
