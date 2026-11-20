@@ -86,6 +86,9 @@ jobs:
       - name: lint migrations
         run: uv run python scripts/lint_migrations.py
 
+      - name: changelog fragments
+        run: uv run python scripts/changelog.py check
+
       - name: lint private material leakage
         run: bash scripts/lint_designators.sh
 
