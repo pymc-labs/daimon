@@ -645,6 +645,22 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
+    FeatureSpec(
+        key="audience_hold",
+        name="Rooms with outside people",
+        category="guardrails",
+        effect="guardrail",
+        values={"off": "Off", "shadow": "Report only"},
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "Checks who can see each room. Report only writes down what Daimon would hold "
+            "back and changes nothing."
+        ),
+        platforms=frozenset({"discord"}),
+        authority=_SERVER_ADMIN,
+    ),
 )
 
 _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(

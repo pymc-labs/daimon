@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A setting for rooms with outside people.** Server admins on Discord can set
+  "Rooms with outside people" to Off or Report only. It is off by default and
+  changes nothing yet: Report only is for a later check of who can see each room.
+
 - **A conversation moved to GPT keeps replying.** After `/model` picked a GPT
   model in a thread, every turn there failed with "Something went wrong on our
   side". Agents saved on a self-hosted model failed the same way. Threads that

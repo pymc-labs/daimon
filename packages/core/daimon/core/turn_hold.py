@@ -25,6 +25,9 @@ class RequesterOrg(StrEnum):
     HOST = "host"
     #: Verified to belong to another organisation.
     OTHER = "other"
+    #: A verified member of this server with no internal role. A client for this turn;
+    #: nothing is recorded about them.
+    OUTSIDER = "outsider"
     #: The platform could not say. Treated as another organisation for this turn only.
     UNKNOWN = "unknown"
 

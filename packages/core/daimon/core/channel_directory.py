@@ -24,6 +24,7 @@ from typing import Literal
 from daimon.core.access_policy import ChannelReaders, ChannelWriters, TenantAccessPolicy
 from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.billing import month_start
+from daimon.core.channel_audience import channels_with_outsiders
 from daimon.core.channel_budget import ChannelBudgetStatus, budget_period, is_budget_active
 from daimon.core.credit_views import billed, recent_start
 from daimon.core.errors import StoreError
@@ -38,7 +39,6 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_budgets import list_channel_budgets
 from daimon.core.stores.channel_directory import (
     list_configured_channel_ids,
-    list_shared_channel_ids,
 )
 from daimon.core.stores.direct_messages import list_dm_channel_ids
 from daimon.core.stores.domain import ChannelBudgetRow, ChannelNameRow
@@ -378,7 +378,7 @@ async def _read(
                 session, tenant_id=tenant_id, platform=platform, unnamed=True
             )
         },
-        shared=await list_shared_channel_ids(session, tenant_id=tenant_id, platform=platform),
+        shared=await channels_with_outsiders(session, tenant_id=tenant_id, platform=platform),
         budgets=await _budget_statuses(session, budgets, tenant_id=tenant_id, now=now),
         spend=fold_web_spend(totals, markup),
         dms=await list_dm_channel_ids(session, tenant_id=tenant_id),

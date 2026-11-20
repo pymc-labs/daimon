@@ -49,6 +49,7 @@ from daimon.core.authz import (
     build_turn_place,
     holds_agent_roles,
 )
+from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.channel_backend import (
     BackendUnsupported,
     backend_is_enabled,
@@ -136,7 +137,7 @@ from daimon.core.stores.identity import (
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
-from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
+from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
@@ -2072,8 +2073,9 @@ async def _record_requester(
 
     HOST: the adapter's live role, if any. OTHER: the foreign marker, and role USER
     whatever the caller passed, so a stored admin is demoted. UNKNOWN: nothing at
-    all, so a lookup that failed once never demotes or promotes a stored role. A
-    principal already marked foreign is written USER on any verdict but UNKNOWN,
+    all, so a lookup that failed once never demotes or promotes a stored role. OUTSIDER:
+    nothing, as for UNKNOWN. A principal already marked foreign is written USER on any
+    verdict but UNKNOWN and OUTSIDER,
     so a HOST claim never restores an admin role it lost.
     """
     if requester_org is RequesterOrg.OTHER:
@@ -2113,9 +2115,11 @@ async def _record_shared_channel(
             source=source,
         )
         return True
-    return await is_channel_shared(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
-    )
+    return (
+        await channel_has_outsiders(
+            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        )
+    ).contained
 
 
 def _require_turn_start(
@@ -2237,16 +2241,29 @@ async def _tightened_hold(
             if grant.dm_source is not None
             else admission.budget_channel_id
         )
-        if source is not None and await is_channel_shared(
-            session, tenant_id=grant.tenant_id, platform=grant.platform, channel_id=source
+        if (
+            source is not None
+            and (
+                await channel_has_outsiders(
+                    session, tenant_id=grant.tenant_id, platform=grant.platform, channel_id=source
+                )
+            ).contained
         ):
             raise DmSourceSealedError("dm_source_shared")
         return grant, shared
     client = grant.subject.client or (
         principal is not None and principal.foreign_home_id is not None
     )
-    shared = shared or await is_channel_shared(
-        session, tenant_id=grant.tenant_id, platform=grant.platform, channel_id=grant.channel_id
+    shared = (
+        shared
+        or (
+            await channel_has_outsiders(
+                session,
+                tenant_id=grant.tenant_id,
+                platform=grant.platform,
+                channel_id=grant.channel_id,
+            )
+        ).contained
     )
     if not (client or shared):
         return grant, shared

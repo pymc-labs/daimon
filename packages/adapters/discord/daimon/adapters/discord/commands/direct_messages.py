@@ -345,8 +345,10 @@ class DirectMessageCog(commands.Cog):
                 return _Eligibility(agents=route.agents)
             else:
                 name = route.agent
+            standing = RequesterOrg.HOST  # until `audience_hold` can be on
             admission = await admit_cold_dm(
                 runtime.turn_deps,
+                requester_org=standing,
                 tenant_id=tenant.id,
                 external_user_id=str(message.author.id),
                 channel_id=str(message.channel.id),
@@ -859,11 +861,12 @@ class DirectMessageCog(commands.Cog):
                 raise DaimonError("You need access to this channel's history to move it to DMs.")
             parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
             source_channel_id = str(parent_id or channel.id)
+            standing = RequesterOrg.HOST  # until `audience_hold` can be on
             admission = await admit(
                 runtime.turn_deps,
                 origin="chat",
                 tenant_id=tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=standing,
                 platform="discord",
                 external_user_id=str(member.id),
                 channel_id=source_channel_id,
@@ -1318,8 +1321,10 @@ class DirectMessageCog(commands.Cog):
                         )
                         return "\n".join(part for part in (again, prefix) if part)
 
+                    standing = RequesterOrg.HOST  # until `audience_hold` can be on
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
+                        requester_org=standing,
                         platform="discord",
                         route_key=str(message.channel.id),
                         external_user_id=str(message.author.id),

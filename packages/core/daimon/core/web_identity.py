@@ -275,7 +275,7 @@ class WebPrincipal:
         return Subject(
             is_admin=self.role is Role.ADMIN,
             platform_user_id=self.external_id,
-            client=self.org is RequesterOrg.OTHER,
+            client=self.org is not RequesterOrg.HOST,
         )
 
 
