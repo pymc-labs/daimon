@@ -159,11 +159,9 @@ jobs:
         if: steps.fresh.outputs.superseded != 'true'
         id: tags
         run: |
-          # Deterministic 7-char truncation, NOT `git rev-parse --short`:
-          # --short honors core.abbrev=auto and grows with the object count,
-          # which would silently change the tag scheme and break promote.yml's
-          # image-exists check (it truncates the input SHA to 7 chars).
-          SHA=$(git rev-parse HEAD | cut -c1-7)
+          # The full SHA: the staging tag promote.yml trusts, written only by the
+          # post-gate step below (never by a build), and the tag a promote copies to.
+          SHA=$(git rev-parse HEAD)
           BASE=${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO }}
           echo "daimon=$BASE/daimon:$SHA" >> "$GITHUB_OUTPUT"
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
@@ -247,11 +245,12 @@ jobs:
               echo "Prebuilt digests need the selective main CI path" >&2
               exit 1
             fi
+            # A run tag, never the SHA tag: these builds pass no gate before they push.
             echo "prebuilt=false" >> "$GITHUB_OUTPUT"
-            for image in daimon notebook report; do echo "build_$image=true" >> "$GITHUB_OUTPUT"; done
-            echo "daimon=${{ steps.tags.outputs.daimon }}" >> "$GITHUB_OUTPUT"
-            echo "notebook=${{ steps.tags.outputs.notebook }}" >> "$GITHUB_OUTPUT"
-            echo "report=${{ steps.tags.outputs.report }}" >> "$GITHUB_OUTPUT"
+            for image in daimon:daimon notebook:notebook-host report:report-host; do
+              echo "build_${image%%:*}=true" >> "$GITHUB_OUTPUT"
+              echo "${image%%:*}=$BASE/${image#*:}:$RUN_TAG" >> "$GITHUB_OUTPUT"
+            done
             exit 0
           fi
           if [ "${{ inputs.environment }}" != staging ]; then
@@ -261,7 +260,7 @@ jobs:
           # This run's candidate; else, unchanged since the last deploy, the image
           # the VM boots; else a build from source below. A malformed or missing
           # candidate fails rather than falling back to a build. A build here gets
-          # a run tag: the short-SHA tag promote.yml trusts comes only after the gates.
+          # a run tag: the SHA tag promote.yml trusts comes only after the gates.
           select_image() {
             local name="$1" package="$2" digest="$3" changed="$4" vm="$5" key="$6" ref=""
             if [ -n "$digest" ]; then
@@ -1050,8 +1049,8 @@ jobs:
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |
-          # promote.yml recognizes only the canonical short-SHA daimon tag.
-          # Publish that tag last, after all three images and deploy gates pass.
+          # promote.yml trusts only these full-SHA tags, and nothing else in any
+          # workflow writes them. Published last, daimon's last of all, after every gate.
           lookup_tag() {
             local package="$1" tag="$2"
             gcloud artifacts tags list --package="$package" --repository="$REPO" \

@@ -10,11 +10,11 @@ run-name: Promote ${{ inputs.sha }}
 # a checkout can read what production runs from the run list.
 #
 # Promotion is ARTIFACT-level: the validate job resolves the digests staging
-# tagged with the SHA's short form (main CI's staging deploy publishes those
-# tags only after every gate passed), and the production deploy copies exactly
-# those images into its own registry. `rebuild` builds from source at the SHA
-# instead, as promotes did before; docker builds are not reproducible, so that
-# path ships bytes that never soaked.
+# tagged with the full SHA, a tag only main CI's staging deploy writes, and only
+# after every gate passed (deploy.yml, "Mark tested staging images promotable").
+# The production deploy copies exactly those images into its own registry.
+# `rebuild` builds from source at the SHA instead, as promotes did before; docker
+# builds are not reproducible, so that path ships bytes that never soaked.
 on:
   workflow_dispatch:
     inputs:
@@ -80,33 +80,40 @@ jobs:
         with:
           skip_install: true
 
-      # deploy.yml tags images with the first 7 chars of the full commit SHA
-      # (a fixed `cut -c1-7`, matching this truncation exactly). A missing tag
-      # means staging never passed its gates at this SHA: fail closed, before
-      # the production reviewers are paged.
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        if: inputs.rebuild != true
+        with:
+          version: v0.22.1
+
+      # A missing full-SHA tag means staging never passed its gates at this SHA: fail
+      # closed, before the production reviewers are paged. The daimon image must also
+      # carry a release main reached by this SHA (an unchanged image is reused from an
+      # earlier one), so a tag pushed by hand onto another build is refused.
       - name: Resolve the soaked images for this SHA
         id: soaked
+        if: inputs.rebuild != true
         env:
           SHA: ${{ inputs.sha }}
-          REBUILD: ${{ inputs.rebuild }}
           REGISTRY: ${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ vars.GCP_AR_REPO }}
         run: |
-          SHORT=$(echo "$SHA" | cut -c1-7)
-          if [ "$REBUILD" = true ]; then
-            gcloud artifacts docker images describe "$REGISTRY/daimon:$SHORT" \
-              || { echo "No image at $REGISTRY/daimon:$SHORT; SHA was never built by CI" >&2; exit 1; }
-            exit 0
-          fi
+          gcloud auth configure-docker "$AR_HOST" --quiet
           for image in daimon:daimon notebook:notebook-host report:report-host; do
             name="${image%%:*}" package="${image#*:}"
-            digest=$(gcloud artifacts docker images describe "$REGISTRY/$package:$SHORT" \
+            digest=$(gcloud artifacts docker images describe "$REGISTRY/$package:$SHA" \
               --format='value(image_summary.digest)') || digest=""
             [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "No soaked image at $REGISTRY/$package:$SHORT: promote a SHA staging deployed" >&2
+              echo "No soaked image at $REGISTRY/$package:$SHA: promote a SHA main CI deployed to staging" >&2
               exit 1
             }
             echo "${name}_digest=$digest" >> "$GITHUB_OUTPUT"
+            [ "$name" != daimon ] || daimon="$digest"
           done
+          release=$(crane config "$REGISTRY/daimon@$daimon" \
+            | jq -r '.config.Env[]? | select(startswith("DAIMON_RELEASE=")) | ltrimstr("DAIMON_RELEASE=")')
+          [[ "$release" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$release" "$SHA" || {
+            echo "$REGISTRY/daimon:$SHA was built from '$release', not from main at or before $SHA" >&2
+            exit 1
+          }
           echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
 
   deploy:

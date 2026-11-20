@@ -685,7 +685,7 @@ jobs:
             daimon-harness:test bash -c \
             'mount -o remount,hidepid=2,gid=60002 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
-  # Unique candidate tags are deliberately not the 7-char SHA tags consumed
+  # Unique candidate tags are deliberately not the full-SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;
   # deploy.yml assigns promotable SHA tags only after all staging gates pass.
   docker-publish-candidate:

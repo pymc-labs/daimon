@@ -309,7 +309,7 @@ def test_prebuilt_staging_is_pinned_and_production_promotes_the_soaked_digests()
         for step in steps
         if step.get("name", "").startswith("Build + push")
     }
-    # A build lands on the tag the images step chose, never straight on the short SHA.
+    # A build lands on the tag the images step chose, never straight on the SHA tag.
     assert {
         step["with"]["tags"] for step in steps if step.get("name", "").startswith("Build + push")
     } == {f"${{{{ steps.images.outputs.{name} }}}}" for name in ("daimon", "notebook", "report")}
@@ -367,14 +367,19 @@ _RECORDED = {
 }
 _TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "report")}
 _RUN_TAG = "deploy-7-1"
+_BUILT = {
+    name: f"example.test/test-project/images/{pkg}:{_RUN_TAG}"
+    for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))
+}  # fmt: skip
 
 
 @pytest.mark.parametrize(
     ("environment", "selective", "digests", "changed", "expected"),
     [
-        # Manual and production deploys build every image from source.
-        ("staging", False, {}, (), {"prebuilt": "false", **_TAGS}),
-        ("production", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        # Manual and rebuild deploys build every image from source, under a run tag:
+        # only the post-gate step may write the SHA tag promote.yml trusts.
+        ("staging", False, {}, (), {"prebuilt": "false", **_BUILT}),
+        ("production", False, {}, (), {"prebuilt": "false", **_BUILT}),
         ("staging", False, _DIGEST, (), None),
         ("production", True, _DIGEST, (), None),
         # Main CI: this run's candidates, else the deployed image, else a build.
@@ -505,51 +510,55 @@ def test_unusable_deployed_image_is_rebuilt(tmp_path: Path, recorded: str, serve
 _SOURCE = "example.test/staging-project/images"
 
 
+_SHA = "abc1234" + "0" * 33
+_MAIN = "1" * 40
+
+
 @pytest.mark.parametrize(
-    ("rebuild", "tagged", "expected"),
+    ("tagged", "release", "expected"),
     [
-        (False, ("daimon", "notebook-host", "report-host"), {
+        (("daimon", "notebook-host", "report-host"), _MAIN, {
             **{f"{name}_digest": _DIGEST[name] for name in _TAGS}, "registry": _SOURCE,
         }),
-        (False, ("daimon", "notebook-host"), None),
-        # rebuild keeps the old single check and passes no digest, so the deploy builds.
-        (True, ("daimon",), {}),
-        (True, (), None),
+        (("daimon", "notebook-host"), _MAIN, None),
+        # A tag pushed by hand onto a build from a branch, or with no release at all.
+        (("daimon", "notebook-host", "report-host"), "2" * 40, None),
+        (("daimon", "notebook-host", "report-host"), "", None),
     ],
 )  # fmt: skip
-def test_promote_resolves_the_soaked_digests_unless_rebuilding(
-    tmp_path: Path, rebuild: bool, tagged: tuple[str, ...], expected: dict[str, str] | None
+def test_promote_resolves_the_soaked_digests_of_main_builds(
+    tmp_path: Path, tagged: tuple[str, ...], release: str, expected: dict[str, str] | None
 ) -> None:
-    """A SHA without all three soaked tags fails before reviewers are paged."""
+    """A SHA without all three full-SHA tags, or a daimon image main did not build, fails
+    before reviewers are paged."""
     steps = _workflow("promote.yml")["jobs"]["validate"]["steps"]
-    script = next(step["run"] for step in steps if step.get("id") == "soaked")
+    step = next(step for step in steps if step.get("id") == "soaked")
+    assert step["if"] == "inputs.rebuild != true", "rebuild needs no staging image"
     digests = {"daimon": _DIGEST["daimon"], "notebook-host": _DIGEST["notebook"],
                "report-host": _DIGEST["report"]}  # fmt: skip
     cases = "".join(
-        f'    *"{_SOURCE}/{package}:abc1234"*) echo "{digests[package]}" ;;\n' for package in tagged
+        f'    *"{_SOURCE}/{package}:{_SHA} "*) echo "{digests[package]}" ;;\n' for package in tagged
     )
-    fake = f'gcloud() {{\n  case "$*" in\n{cases}    *) return 1 ;;\n  esac\n}}\n'
+    fake = (
+        f'gcloud() {{\n  case "$* " in\n    *configure-docker*) ;;\n{cases}    *) return 1 ;;\n  esac\n}}\n'
+        f"crane() {{ echo '{{\"config\": {{\"Env\": [\"DAIMON_RELEASE={release}\"]}}}}'; }}\n"
+        f'git() {{ [ "$*" = "merge-base --is-ancestor {_MAIN} {_SHA}" ]; }}\n'
+    )
     output = tmp_path / "outputs"
-    env = {
-        **os.environ,
-        "GITHUB_OUTPUT": str(output),
-        "SHA": "abc1234" + "0" * 33,
-        "REBUILD": str(rebuild).lower(),
-        "REGISTRY": _SOURCE,
-    }
+    env = {**os.environ, "GITHUB_OUTPUT": str(output), "SHA": _SHA, "REGISTRY": _SOURCE}
     result = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        ["bash", "-e", "-o", "pipefail", "-c", fake + step["run"]],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
     if expected is None:
-        assert result.returncode != 0, "a SHA staging never tagged must not promote"
+        assert result.returncode != 0, "a SHA main CI never tagged after its gates must not promote"
+        assert "registry=" not in (output.read_text() if output.exists() else "")
         return
     assert result.returncode == 0, result.stderr
-    lines = output.read_text().splitlines() if output.exists() else []
-    assert dict(line.split("=", 1) for line in lines) == expected
+    assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == expected
 
 
 @pytest.mark.parametrize(
