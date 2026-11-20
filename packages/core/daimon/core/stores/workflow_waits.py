@@ -281,6 +281,7 @@ async def drop_expired_events(session: AsyncSession, *, now: datetime) -> None:
 
 class WaitPost(_Row):
     id: uuid.UUID
+    tenant_id: uuid.UUID
     wait_id: uuid.UUID
     platform: str
     channel_id: str
@@ -322,6 +323,24 @@ async def posts_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[WaitP
         .order_by(WorkflowWaitPost.created_at, WorkflowWaitPost.id)
     )
     return [WaitPost.model_validate(o) for o in found]
+
+
+async def post_by_message(
+    session: AsyncSession, *, platform: str, message_id: str
+) -> tuple[WaitPost, Wait] | None:
+    """The ask posted as `message_id`, whatever its wait's state: its buttons' presses."""
+    row = (
+        await session.execute(
+            select(WorkflowWaitPost, WorkflowWait)
+            .join(WorkflowWait, WorkflowWait.id == WorkflowWaitPost.wait_id)
+            .where(
+                WorkflowWaitPost.platform == platform,
+                WorkflowWaitPost.message_id == message_id,
+            )
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else (WaitPost.model_validate(row[0]), Wait.model_validate(row[1]))
 
 
 async def open_post_for(

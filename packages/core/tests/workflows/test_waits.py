@@ -239,7 +239,8 @@ async def test_an_admin_approves_a_publish_request_from_the_inbox(
 
 
 # Every surface that decides a wait calls `waits.decide_wait`; step tools and agents never do.
-DECIDERS = {"daimon/core/workflows/inbox.py"}
+# The inbox (web, MCP) and chat answers (`answers.py`, every chat adapter) are the two.
+DECIDERS = {"daimon/core/workflows/inbox.py", "daimon/core/workflows/answers.py"}
 NEVER = ("step_tools.py", "agent_step.py", "workflow_step.py")
 
 
