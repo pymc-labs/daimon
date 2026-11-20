@@ -6,10 +6,11 @@ import uuid
 from collections.abc import Iterable
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, cast
 
 from daimon.core._models import EvalRun, EvalRunItem
 from daimon.core.stores.evals import Document, ItemRow
-from sqlalchemy import ColumnElement, func, literal, select, update
+from sqlalchemy import ColumnElement, CursorResult, func, literal, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,19 @@ async def set_cap(session: AsyncSession, *, run_id: uuid.UUID, cap_usd: float | 
         .where(EvalRun.id == run_id)
         .values(cap_usd=None if cap_usd is None else Decimal(str(cap_usd)))
     )
+
+
+async def open_caps(session: AsyncSession, *, tenant_id: uuid.UUID) -> float:
+    """What a workspace's open runs are capped at together. Holds the workspace's run lock
+    until the transaction ends, so two starts never both pass a ceiling."""
+    key = func.hashtextextended(f"eval-runs:{tenant_id}", 0)
+    await session.execute(select(func.pg_advisory_xact_lock(key)))
+    total = await session.scalar(
+        select(func.coalesce(func.sum(EvalRun.cap_usd), 0)).where(
+            EvalRun.tenant_id == tenant_id, EvalRun.status.in_(OPEN_RUNS)
+        )
+    )
+    return float(total or 0)
 
 
 async def cap_of(session: AsyncSession, *, run_id: uuid.UUID) -> float | None:
@@ -63,14 +77,13 @@ async def prior_item_costs(
     return [float(c) for c in rows]
 
 
-async def claim_item(
-    session: AsyncSession, *, now: datetime, stale_before: datetime
-) -> ItemRow | None:
-    """Claim one item to run, skipping rows other workers hold: a pending item of an open
-    local run, or a running one whose worker went quiet before `stale_before` and has a try
-    left. Items of lost workers with no try left end in error first."""
+async def fail_lost_items(
+    session: AsyncSession, *, stale_before: datetime
+) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """End in error the running items whose worker went quiet before `stale_before` with no
+    try left; their run and item ids, so their holds are released and their runs ended."""
     lost = (EvalRunItem.status == "running") & (EvalRunItem.claimed_at < stale_before)
-    await session.execute(
+    rows = await session.execute(
         update(EvalRunItem)
         .where(lost, EvalRunItem.attempts >= MAX_ATTEMPTS)
         .values(
@@ -79,14 +92,25 @@ async def claim_item(
                 {"status": "error", "error": {"kind": "other", "message": "worker lost"}}
             ),
         )
+        .returning(EvalRunItem.run_id, EvalRunItem.id)
     )
+    return [(run_id, item_id) for run_id, item_id in rows.tuples()]
+
+
+async def claim_item(
+    session: AsyncSession, *, now: datetime, stale_before: datetime
+) -> ItemRow | None:
+    """Claim one item to run, skipping rows other workers hold: a pending item of an open
+    local run, or a running one whose worker went quiet before `stale_before` and has a try
+    left (`fail_lost_items` ends the others first)."""
+    lost = (EvalRunItem.status == "running") & (EvalRunItem.claimed_at < stale_before)
     row = await session.scalar(
         select(EvalRunItem)
         .join(EvalRun, EvalRun.id == EvalRunItem.run_id)
         .where(
             EvalRun.origin == "local",
             EvalRun.status.in_(OPEN_RUNS),
-            (EvalRunItem.status == "pending") | lost,
+            (EvalRunItem.status == "pending") | (lost & (EvalRunItem.attempts < MAX_ATTEMPTS)),
         )
         .order_by(EvalRunItem.created_at, EvalRunItem.key)
         .limit(1)
@@ -102,21 +126,37 @@ async def claim_item(
     return ItemRow.model_validate(row)
 
 
-async def heartbeat(session: AsyncSession, *, item_id: uuid.UUID, now: datetime) -> None:
-    await session.execute(
-        update(EvalRunItem).where(EvalRunItem.id == item_id).values(claimed_at=now)
-    )
+async def heartbeat(
+    session: AsyncSession, *, item_id: uuid.UUID, attempt: int, now: datetime
+) -> bool:
+    """Keep an item's claim fresh; False when another worker has taken it over."""
+    done = await session.execute(
+        update(EvalRunItem)
+        .where(EvalRunItem.id == item_id, EvalRunItem.attempts == attempt,
+               EvalRunItem.status == "running")
+        .values(claimed_at=now)
+    )  # fmt: skip
+    return cast(CursorResult[Any], done).rowcount > 0
 
 
 async def save_item(
-    session: AsyncSession, *, item_id: uuid.UUID, document: Document, blob_shas: Iterable[str] = ()
-) -> None:
-    """An item's result; its status column follows the document."""
-    await session.execute(
-        update(EvalRunItem)
-        .where(EvalRunItem.id == item_id)
-        .values(document=document, status=str(document["status"]), blob_shas=sorted(set(blob_shas)))
-    )
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    document: Document,
+    blob_shas: Iterable[str] = (),
+    attempt: int | None = None,
+) -> bool:
+    """An item's result; its status column follows the document. With `attempt`, only while
+    that try still holds the item: False when another worker has taken it over."""
+    query = update(EvalRunItem).where(EvalRunItem.id == item_id)
+    if attempt is not None:
+        query = query.where(EvalRunItem.attempts == attempt, EvalRunItem.status == "running")
+    done = await session.execute(
+        query.values(document=document, status=str(document["status"]),
+                     blob_shas=sorted(set(blob_shas)))
+    )  # fmt: skip
+    return cast(CursorResult[Any], done).rowcount > 0
 
 
 async def close_items(

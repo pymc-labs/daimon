@@ -13,7 +13,7 @@ from typing import Final
 from daimon.core.config import Settings
 from daimon.core.evals.access import Subject
 from daimon.core.evals.blind import new_run_id
-from daimon.core.evals.cost import estimate_run
+from daimon.core.evals.cost import estimate_run, priced
 from daimon.core.evals.format import (
     Approval,
     Arm,
@@ -131,6 +131,9 @@ class RunService:
             arms.append(Arm.model_validate(row.document))
         if not any(a.kind == "live" and a.live is not None for a in arms):
             raise EvalRefused("Pick at least one arm to run.")
+        if any(a.live is not None and not priced(a.live) for a in arms):
+            raise EvalRefused("An arm's model has no known price, so a cap can't hold it. "
+                              "Pick another model.")  # fmt: skip
         offered = {j.id: j for j in (pinned.defaults and pinned.defaults.judges) or []}
         if missing := [j for j in draft.judge_ids if j not in offered]:
             raise EvalNotFound(f"This suite has no judge {missing[0]}.")
@@ -165,15 +168,24 @@ class RunService:
             **plan.estimate.model_dump(), admin_approval_usd=self._settings.evals.admin_approval_usd
         )
 
+    async def _past_limits(self, session: AsyncSession, actor: Subject, cap_usd: float) -> bool:
+        """Whether the cap is past what the operator lets a workspace spend unasked: one run's
+        limit, or the workspace's open runs' together. Locks the workspace's run starts."""
+        limits = self._settings.evals
+        if cap_usd > limits.admin_approval_usd:
+            return True
+        open_caps = await eval_runs.open_caps(session, tenant_id=actor.tenant_id)
+        return open_caps + cap_usd > limits.workspace_cap_usd
+
     async def start(self, actor: Subject, draft: RunDraft, *, cap_usd: float) -> Run:
-        """Queue a run with a spending cap. A cap above the admin limit from anyone but an
-        admin leaves the run `estimated`, waiting for an admin (`approve`)."""
+        """Queue a run with a spending cap. The operator pays, so a cap past their limits
+        (`_past_limits`) from anyone else leaves the run `estimated`, waiting (`approve`)."""
         await self._evals.check_on(actor)
         if not cap_usd > 0:
             raise EvalRefused("Set a spend cap first.")
         now = self._clock()
-        waiting = cap_usd > self._settings.evals.admin_approval_usd and not actor.is_admin
         async with self._sessions() as session, session.begin():
+            waiting = not actor.operator and await self._past_limits(session, actor, cap_usd)
             plan = await self._plan(session, actor, draft)
             run_id = new_run_id()
             run = Run(
@@ -209,7 +221,8 @@ class RunService:
         return Approval(by=PrincipalRef(kind="person", id=actor.key), at=at, cap_usd=cap_usd)
 
     async def approve(self, actor: Subject, run_id: str, *, cap_usd: float) -> Run:
-        """An admin releases a run waiting for approval, with a cap."""
+        """An admin releases a run waiting for approval with a cap inside the operator's
+        limits; past them, only the operator can."""
         await self._evals.check_on(actor)
         if not actor.is_admin:
             raise EvalForbidden("Ask an admin or an owner.")
@@ -220,6 +233,8 @@ class RunService:
             row, _ = await self._evals.run_access(session, actor, run_id, "edit")
             if row.status != "estimated" or row.origin != "local":
                 raise EvalRefused("This run isn't waiting for approval.")
+            if not actor.operator and await self._past_limits(session, actor, cap_usd):
+                raise EvalForbidden("Ask the person who runs Daimon to approve this cap.")
 
             def approved(document: JsonObject) -> JsonObject:
                 ext = {k: v for k, v in (document.get("ext") or {}).items() if k != REQUESTED_CAP}  # pyright: ignore[reportAttributeAccessIssue,reportUnknownVariableType,reportUnknownMemberType]

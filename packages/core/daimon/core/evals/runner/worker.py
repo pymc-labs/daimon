@@ -10,7 +10,7 @@ from typing import Final
 
 import structlog
 from daimon.core.evals.format import RunItem
-from daimon.core.evals.runner.item import ItemDeps, run_item
+from daimon.core.evals.runner.item import ItemDeps, close_lost, run_item
 from daimon.core.stores import eval_runs
 
 log = structlog.get_logger()
@@ -22,6 +22,9 @@ STALE_AFTER: Final = timedelta(minutes=5)
 async def run_next(deps: ItemDeps) -> RunItem | None | bool:
     """Claim and run one item: its result (None: stopped by its run or cap), False if none."""
     now = deps.clock()
+    async with deps.sessions.begin() as session:
+        lost = await eval_runs.fail_lost_items(session, stale_before=now - STALE_AFTER)
+    await close_lost(deps.sessions, lost, deps.clock)
     async with deps.sessions.begin() as session:
         item = await eval_runs.claim_item(session, now=now, stale_before=now - STALE_AFTER)
     if item is None:

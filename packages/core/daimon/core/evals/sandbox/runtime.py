@@ -8,6 +8,7 @@ Both runtimes deliver the same files, built here.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import mimetypes
@@ -85,6 +86,13 @@ class PodSpec:
     registries: Literal["passthrough", "deny"] = "deny"
     clock: datetime | None = None
     limits: PodLimits = PodLimits()
+    #: The shared provider environment the pod's executor polls, if any (`environment_label`).
+    shared_environment: str | None = None
+
+
+def environment_label(environment_id: str) -> str:
+    """The label value of pods polling a shared environment: short, and valid on Kubernetes."""
+    return hashlib.sha256(environment_id.encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,10 @@ class SandboxRuntime(Protocol):
     async def stop(self, pod: PodHandle) -> None: ...
     async def reap(self) -> list[str]:
         """Remove eval pods past their deadline or finished, e.g. a crashed worker's."""
+        ...
+
+    async def stop_environment(self, environment_id: str) -> list[str]:
+        """Remove every pod polling the shared `environment_id`, e.g. one whose stop failed."""
         ...
 
 

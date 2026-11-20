@@ -4,13 +4,12 @@ the eval surface through a `TurnPort`, collect what happened, check it and settl
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 
 import structlog
 from daimon.core.evals import spend
@@ -30,6 +29,7 @@ from daimon.core.evals.format import (
     RunItem,
     Suite,
     TranscriptEvent,
+    TranscriptResult,
     TranscriptTool,
     Usage,
     WorldCall,
@@ -44,14 +44,50 @@ from daimon.core.stores import eval_runs, eval_world, usage_events
 from daimon.core.stores import evals as store
 from daimon.core.turn.state import TextBlock
 from pydantic_core import to_jsonable_python
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
 
 RESERVED: Final = "daimon.reserved_usd"
-"""What running items of a run hold against its cap (`ext`)."""
+"""What each running item of a run holds against its cap, by item id (`ext`)."""
 _OPEN: Final = ("approved", "running")
 _STOPPED: Final = frozenset({"cancelled", "partial", "failed", "done"})
+
+
+@dataclass
+class ItemMeter:
+    """An item's usage while it runs: its finished turns, and the running turn's so far
+    (`live`, which the port sets for the turn). Read against the cap while turns run, and
+    kept when a turn fails."""
+
+    done: Usage = field(default_factory=Usage)
+    live: Callable[[], Usage] | None = None
+    unpriced: bool = False
+    """A turn used tokens no known price covers: the agent's cost counts at the hold."""
+
+    def add(self, usage: Usage) -> None:
+        self.unpriced |= _unpriced(usage)
+        self.done = _add_usage(self.done, usage)
+
+    def settle(self) -> None:
+        """The running turn ended, however it ended: what it used is the item's."""
+        if self.live is not None:
+            live, self.live = self.live, None
+            self.add(live())
+
+    def usage(self) -> Usage:
+        return self.done if self.live is None else _add_usage(self.done, self.live())
+
+    def agent_usd(self, floor: float) -> float:
+        """What the agent's turns cost so far; at least `floor` once one had no price."""
+        live = self.live() if self.live is not None else Usage()
+        known = _add_usage(self.done, live).cost_usd or 0.0
+        return max(known, floor) if self.unpriced or _unpriced(live) else known
+
+
+def _unpriced(usage: Usage) -> bool:
+    return usage.cost_usd is None and bool(usage.input_tokens or usage.output_tokens)
 
 
 @dataclass(frozen=True)
@@ -66,12 +102,14 @@ class TurnRequest:
     world_token: str
     surface: EvalSurfaceLifecycle
     cancel: asyncio.Event
+    meter: ItemMeter
 
 
 class TurnPort(Protocol):
-    """Runs an item's turns: the first opens its session, follow-ups continue it."""
+    """Runs an item's turns: the first opens its session, follow-ups continue it. A turn
+    reports what it uses to `request.meter`, while it runs and when it ends or fails."""
 
-    async def turn(self, request: TurnRequest) -> Usage: ...
+    async def turn(self, request: TurnRequest) -> None: ...
     async def close(self, item_id: uuid.UUID) -> None: ...
 
 
@@ -86,19 +124,53 @@ class ItemDeps:
     presses: Presses | None = None
     requester: ModelSimulator | None = None
     """Credential presses and the simulated requester the script uses; none: not played."""
+    max_turns: int = 12
+    """Turns an item may take: its first, the script's follow-ups and approved calls' wakes."""
+    time_limit: timedelta = timedelta(minutes=30)
+
+
+@dataclass
+class _Running:
+    """What a running item shares with its watcher."""
+
+    item: store.ItemRow
+    estimate_usd: float
+    """The item's expected cost: its first hold, and the floor of an unpriced agent cost."""
+    hold_usd: float
+    started_at: datetime
+    cancel: asyncio.Event
+    meter: ItemMeter = field(default_factory=ItemMeter)
+    stopped: bool = False
+    """Its run stopped: cancelled, or at its cap."""
+    error: ItemError | None = None
+    """Why the watcher ended it: its time limit, or another worker took it over."""
 
 
 def _ext(run: Run) -> JsonObject:
     return dict(run.ext or {})
 
 
-def _reserved(run: Run) -> float:
+def _holds(run: Run) -> dict[str, float]:
     held = _ext(run).get(RESERVED)
-    return float(held) if isinstance(held, int | float) else 0.0
+    if not isinstance(held, dict):
+        return {}
+    return {str(k): float(v) for k, v in held.items() if isinstance(v, int | float)}  # pyright: ignore[reportUnknownVariableType,reportUnknownArgumentType]
 
 
-def _held(run: Run, usd: float) -> Run:
-    return run.model_copy(update={"ext": {**_ext(run), RESERVED: max(0.0, _reserved(run) + usd)}})
+def _reserved(run: Run) -> float:
+    return sum(_holds(run).values())
+
+
+def _spent(run: Run) -> float:
+    return (run.spend.total_usd or 0.0) if run.spend else 0.0
+
+
+def _held(run: Run, item_id: uuid.UUID, usd: float | None) -> Run:
+    """The run with the item holding `usd` against its cap; None releases its hold."""
+    holds = {k: v for k, v in _holds(run).items() if k != str(item_id)}
+    if usd is not None:
+        holds[str(item_id)] = usd
+    return run.model_copy(update={"ext": {**_ext(run), RESERVED: holds}})
 
 
 async def _end_run(session: AsyncSession, run_id: uuid.UUID, clock: Callable[[], datetime]) -> None:
@@ -128,35 +200,55 @@ async def _stop_run(session: AsyncSession, run_id: uuid.UUID, why: str) -> None:
     )  # fmt: skip
 
 
+async def close_lost(
+    sessions: async_sessionmaker[AsyncSession], lost: list[tuple[uuid.UUID, uuid.UUID]],
+    clock: Callable[[], datetime],
+) -> None:  # fmt: skip
+    """Release the holds of items whose worker was lost for good, and end their runs."""
+    for run_id, item_id in lost:
+        async with sessions.begin() as session:
+            await store.update_run(session, run_id=run_id, change=lambda d, i=item_id: to_document(
+                _held(Run.model_validate(d), i, None)))  # fmt: skip
+            await _end_run(session, run_id, clock)
+
+
 async def _hold(deps: ItemDeps, item: store.ItemRow) -> tuple[Run, float] | None:
-    """Hold the item's expected cost under the cap; None (item closed) when it may not run."""
+    """Hold the item's expected cost under the cap; None (item closed) when it may not run.
+    Decided under the run's row lock, so concurrent holds and settlements all count."""
+    refused: list[Literal["stopped", "cap"]] = []
+    next_usd = 0.0
+    now = deps.clock()
     async with deps.sessions.begin() as session:
-        row = await store.run_by_id(session, item.run_id)
-        assert row is not None
-        run = Run.model_validate(row.document)
-        cap = await eval_runs.cap_of(session, run_id=row.id)
-        next_usd = item_usd(run.estimate, item.arm_key) if run.estimate else 0.0
-        spent = (run.spend.total_usd or 0.0) if run.spend else 0.0
-        if run.status in _STOPPED or cap is None:
-            error = ItemError(kind="cancelled", message="the run stopped")
-            await _close_item(session, item, "cancelled", error)
-            await _end_run(session, row.id, deps.clock)
-            return None
-        if not fits(spent=spent, reserved=_reserved(run), next_usd=next_usd, cap=cap):
-            await _close_item(session, item, "skipped", ItemError(kind="cap",
-                              message="the next item would pass the spending cap"))  # fmt: skip
-            await _stop_run(session, row.id, "the next item would pass the spending cap")
-            await _end_run(session, row.id, deps.clock)
-            return None
-        now = deps.clock()
+        # Set when the run is approved; fixed while it is open.
+        cap = await eval_runs.cap_of(session, run_id=item.run_id)
 
         def started(document: JsonObject) -> JsonObject:
-            held = _held(Run.model_validate(document), next_usd)
+            nonlocal next_usd
+            run = Run.model_validate(document)
+            next_usd = item_usd(run.estimate, item.arm_key) if run.estimate else 0.0
+            if run.status in _STOPPED or cap is None:
+                refused.append("stopped")
+                return document
+            others = _reserved(_held(run, item.id, None))
+            if not fits(spent=_spent(run), reserved=others, next_usd=next_usd, cap=cap):
+                refused.append("cap")
+                return document
+            held = _held(run, item.id, next_usd)
             return to_document(held.model_copy(update={
                 "status": "running", "started_at": held.started_at or now,
             }))  # fmt: skip
 
-        updated = await store.update_run(session, run_id=row.id, change=started)
+        updated = await store.update_run(session, run_id=item.run_id, change=started)
+        if refused == ["stopped"]:
+            error = ItemError(kind="cancelled", message="the run stopped")
+            await _close_item(session, item, "cancelled", error)
+        elif refused == ["cap"]:
+            why = "the next item would pass the spending cap"
+            await _close_item(session, item, "skipped", ItemError(kind="cap", message=why))
+            await _stop_run(session, item.run_id, why)
+        if refused:
+            await _end_run(session, item.run_id, deps.clock)
+            return None
     return Run.model_validate(updated.document), next_usd
 
 
@@ -164,7 +256,7 @@ async def _close_item(
     session: AsyncSession, item: store.ItemRow, status: str, error: ItemError
 ) -> None:
     document: JsonObject = {**item.document, "status": status, "error": to_document(error)}
-    await eval_runs.save_item(session, item_id=item.id, document=document)
+    await eval_runs.save_item(session, item_id=item.id, document=document, attempt=item.attempts)
 
 
 def _transcript(
@@ -179,12 +271,47 @@ def _transcript(
     for block in surface.state.content:
         if isinstance(block, TextBlock):
             add(kind="assistant_text", text=block.text)
-        else:
-            surface_kind = "mcp" if block.mcp_server_name else "builtin"
-            add(kind="tool_call", call_id=block.id, tool=TranscriptTool(
-                name=block.name, server=block.mcp_server_name, surface=surface_kind,
-                input=to_document_value(block.input),
-            ))  # fmt: skip
+            continue
+        # The worker runs MCP tools as custom ones: the server is the one the tool stands for.
+        server = block.mcp_server_name or surface.tool_servers.get(block.name)
+        add(kind="tool_call", call_id=block.id, tool=TranscriptTool(
+            name=block.name, server=server, surface="mcp" if server else "builtin",
+            input=to_document_value(block.input),
+        ))  # fmt: skip
+        if block.status != "pending":
+            content = [{"type": "text", "text": c.text}
+                       for c in block.result_content or () if c.type == "text"]  # fmt: skip
+            add(kind="tool_result", call_id=block.id,
+                result={"content": content or None, "is_error": block.is_error})  # fmt: skip
+
+
+def link_world_calls(
+    events: list[TranscriptEvent], calls: list[WorldCall]
+) -> list[TranscriptEvent]:
+    """The transcript with each MCP tool call's result naming the world call that answered
+    it (same server and tool, in order), so the call is counted once, with its effects."""
+    free = [c for c in calls if c.surface == "mcp"]
+    results = {e.call_id: e for e in events if e.kind == "tool_result"}
+    linked: list[TranscriptEvent] = []
+    for event in events:
+        if event.kind == "tool_result" and event.call_id in results:
+            continue
+        linked.append(event)
+        tool = event.tool
+        if event.kind != "tool_call" or tool is None:
+            continue
+        found = next((c for c in free if c.tool == tool.name and c.server == tool.server), None)
+        if found is not None:
+            free.remove(found)
+        result = results.pop(event.call_id, None)
+        if found is None and result is None:
+            continue
+        shown = result.result if result and result.result else TranscriptResult()
+        if found is not None:
+            shown = shown.model_copy(update={"world_call": found.seq, "origin": found.origin})
+        linked.append(TranscriptEvent(seq=0, turn=event.turn, kind="tool_result",
+                                      call_id=event.call_id, result=shown))  # fmt: skip
+    return [e.model_copy(update={"seq": n}) for n, e in enumerate(linked, 1)]
 
 
 def to_document_value(value: dict[str, object]) -> JsonObject:
@@ -192,18 +319,62 @@ def to_document_value(value: dict[str, object]) -> JsonObject:
     return to_jsonable_python(value, fallback=str)
 
 
-async def _watch(
-    deps: ItemDeps, item: store.ItemRow, cancel: asyncio.Event, stopped: asyncio.Event
-) -> None:
-    """Keep the claim fresh, and interrupt the item when its run stops."""
-    while not cancel.is_set():
-        await asyncio.sleep(deps.poll_s)
-        async with deps.sessions.begin() as session:
-            await eval_runs.heartbeat(session, item_id=item.id, now=deps.clock())
+def _sandbox_usd(deps: ItemDeps, running: _Running, now: datetime) -> float:
+    return (now - running.started_at).total_seconds() / 3600 * deps.sandbox_rate_usd_per_hour
+
+
+async def _check(deps: ItemDeps, running: _Running) -> None:
+    """One look at a running item: keep its claim, end it at its time limit or when its run
+    stops, and grow its hold to what it has spent so far, stopping the run past its cap."""
+    item, now = running.item, deps.clock()
+    if now - running.started_at > deps.time_limit:
+        running.error = ItemError(kind="timeout", message="the item ran past its time limit")
+        running.cancel.set()
+        return
+    grown: float | None = None
+    async with deps.sessions.begin() as session:
+        if not await eval_runs.heartbeat(session, item_id=item.id, attempt=item.attempts,
+                                         now=now):  # fmt: skip
+            running.error = ItemError(kind="other", message="another worker took the item over")
+            running.cancel.set()
+            return
+        simulator_usd = await usage_events.cost_for_session(
+            session, tenant_id=EVAL_TENANT_ID, session_id=f"eval-item:{item.id}"
+        )
+        spent = (running.meter.agent_usd(running.estimate_usd) + simulator_usd
+                 + _sandbox_usd(deps, running, now))  # fmt: skip
+        over = False
+        if spent > running.hold_usd:
+            grown = spent
+            cap = await eval_runs.cap_of(session, run_id=item.run_id)
+
+            def grow(document: JsonObject) -> JsonObject:
+                nonlocal over
+                run = _held(Run.model_validate(document), item.id, spent)
+                over = cap is not None and _spent(run) + _reserved(run) > cap
+                return to_document(run)
+
+            row = await store.update_run(session, run_id=item.run_id, change=grow)
+            if over:
+                await _stop_run(session, item.run_id, "the run passed its spending cap")
+        else:
             row = await store.run_by_id(session, item.run_id)
-        if row is None or row.status in _STOPPED:
-            stopped.set()
-            cancel.set()
+    if grown is not None:
+        running.hold_usd = grown
+    if over or row is None or row.status in _STOPPED:
+        running.stopped = True
+        running.cancel.set()
+
+
+async def _watch(deps: ItemDeps, running: _Running) -> None:
+    """Check the item every `poll_s` until it ends."""
+    while not running.cancel.is_set():
+        await asyncio.sleep(deps.poll_s)
+        try:
+            await _check(deps, running)
+        # A failed check (the database away) is tried again: the item must keep its watcher.
+        except (SQLAlchemyError, OSError):
+            log.warning("eval_item.check_failed", item_id=str(running.item.id), exc_info=True)
 
 
 def _add_usage(total: Usage, more: Usage) -> Usage:
@@ -222,7 +393,8 @@ def _add_usage(total: Usage, more: Usage) -> Usage:
 
 
 async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
-    """Run one claimed item; its stored result, or None when the cap or the run stopped it."""
+    """Run one claimed item; its stored result, or None when the cap or the run stopped it
+    (or its result could not be stored, and it ended in error)."""
     held = await _hold(deps, item)
     if held is None:
         return None
@@ -240,7 +412,6 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
     assert revision is not None and suite_doc is not None
     case = Case.model_validate(revision.document)
     arm = next(a for a in run.arms if a.id == item.arm_key)
-    started_at = deps.clock()
     chat = ChatLog()
     reply = deps.requester
     script = ScriptPlayer(
@@ -248,10 +419,10 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
         simulate_reply=None if reply is None else partial(reply.requester_reply, item.id, case),
     )  # fmt: skip
     surface = EvalSurfaceLifecycle(chat, script)
-    cancel, stopped = script.stop, asyncio.Event()
-    watcher = asyncio.create_task(_watch(deps, item, cancel, stopped))
+    running = _Running(item, reserved, reserved, deps.clock(), script.stop)
+    cancel = running.cancel
+    watcher = asyncio.create_task(_watch(deps, running))
     transcript: list[TranscriptEvent] = []
-    usage = Usage()
     error: ItemError | None = None
     try:
         for message in case.turn.messages:
@@ -263,10 +434,11 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
         follow_ups = case.script.max_follow_ups if case.script else 0
         while True:
             surface.state, surface.error = type(surface.state)(), None
-            usage = _add_usage(usage, await deps.turns.turn(TurnRequest(
+            await deps.turns.turn(TurnRequest(
                 item_id=item.id, tenant_id=item.tenant_id, case=case, arm=arm, text=text,
                 follow_up=follow_up, world_token=token, surface=surface, cancel=cancel,
-            )))  # fmt: skip
+                meter=running.meter,
+            ))  # fmt: skip
             _transcript(transcript, turn, text, surface)
             await surface.end_turn()
             if surface.error is not None:
@@ -275,6 +447,11 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
             if cancel.is_set():
                 break
             turn += 1
+            more = bool(surface.wakes) or bool(script.replies and follow_ups > 0)
+            if more and turn >= deps.max_turns:
+                # An approval loop (each approved call's wake calls again) ends here.
+                error = ItemError(kind="cap", message="the item reached its turn limit")
+                break
             if surface.wakes:
                 # An approved card's call runs before the agent hears that it ran.
                 text = f"{await surface.wakes.pop(0)()}\n\n{WAKE_SEED}"
@@ -291,38 +468,80 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
     finally:
         cancel.set()
         watcher.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watcher
+        await asyncio.gather(watcher, return_exceptions=True)
+        running.meter.settle()
+    try:
         await deps.turns.close(item.id)
-    suite = Suite.model_validate(suite_doc)
-    return await _finish(deps, item, run_row, case, suite, arm, reserved, started_at, surface,
-                         transcript, usage, error, stopped.is_set())  # fmt: skip
+    # The pod may still run: the item fails, and the port keeps what it shares closed.
+    except Exception as exc:
+        log.warning("eval_item.close_failed", item_id=str(item.id), exc_info=True)
+        error = error or ItemError(kind="sandbox", message=type(exc).__name__)
+    error = running.error or error
+    try:
+        suite = Suite.model_validate(suite_doc)
+        return await _finish(deps, running, run_row, case, suite, arm, surface, transcript,
+                             error)  # fmt: skip
+    # A result that cannot be stored must not leave the item running, to be run again.
+    except Exception as exc:
+        log.exception("eval_item.finish_failed", item_id=str(item.id))
+        await _fail(deps, running, ItemError(kind="other", message=type(exc).__name__))
+        return None
+
+
+async def _settle(session: AsyncSession, deps: ItemDeps, running: _Running, *, saved: bool) -> None:
+    """Add what the item spent to its run and release its hold (unless another worker holds
+    the item now), stopping the run past its cap and ending it when nothing is left."""
+    item, now = running.item, deps.clock()
+    simulator_usd = await usage_events.cost_for_session(
+        session, tenant_id=EVAL_TENANT_ID, session_id=f"eval-item:{item.id}"
+    )
+    agent_usd = running.meter.agent_usd(running.estimate_usd)
+    sandbox_usd = _sandbox_usd(deps, running, now)
+    costs = (("agent", agent_usd), ("simulator", simulator_usd), ("sandbox", sandbox_usd))
+
+    def settled(document: JsonObject) -> JsonObject:
+        run = Run.model_validate(document)
+        run = _held(run, item.id, None) if saved else run
+        for category, usd in costs:
+            if usd:
+                run = spend.add_spend(run, category, usd)
+        return to_document(run)
+
+    updated = await store.update_run(session, run_id=item.run_id, change=settled)
+    cap = await eval_runs.cap_of(session, run_id=item.run_id)
+    if cap is not None and _spent(Run.model_validate(updated.document)) > cap:
+        await _stop_run(session, item.run_id, "the run passed its spending cap")
+    await _end_run(session, item.run_id, deps.clock)
+
+
+async def _fail(deps: ItemDeps, running: _Running, error: ItemError) -> None:
+    async with deps.sessions.begin() as session:
+        document: JsonObject = {**running.item.document, "status": "error",
+                                "error": to_document(error)}  # fmt: skip
+        saved = await eval_runs.save_item(session, item_id=running.item.id, document=document,
+                                          attempt=running.item.attempts)  # fmt: skip
+        await _settle(session, deps, running, saved=saved)
 
 
 async def _finish(
-    deps: ItemDeps, item: store.ItemRow, run_row: store.RunRow, case: Case, suite: Suite, arm: Arm,
-    reserved: float, started_at: datetime, surface: EvalSurfaceLifecycle,
-    transcript: list[TranscriptEvent],
-    usage: Usage, error: ItemError | None, stopped: bool,
+    deps: ItemDeps, running: _Running, run_row: store.RunRow, case: Case, suite: Suite, arm: Arm,
+    surface: EvalSurfaceLifecycle, transcript: list[TranscriptEvent], error: ItemError | None,
 ) -> RunItem:  # fmt: skip
-    finished_at = deps.clock()
+    item, finished_at, started_at = running.item, deps.clock(), running.started_at
     async with deps.sessions() as session:
         calls = await eval_world.list_calls(session, item_id=item.id)
         overlay = await eval_world.list_overlay(session, item_id=item.id)
-        simulator_usd = await usage_events.cost_for_session(
-            session, tenant_id=EVAL_TENANT_ID, session_id=f"eval-item:{item.id}"
-        )
     deps.world.forget(item.id)
-    sandbox_usd = (finished_at - started_at).total_seconds() / 3600 * deps.sandbox_rate_usd_per_hour
     world_calls = [WorldCall.model_validate(c) for c in calls]
-    status = "error" if error else ("cancelled" if stopped else "done")
+    status = "error" if error else ("cancelled" if running.stopped else "done")
+    events = link_world_calls(transcript, world_calls)
     result = RunItem.model_validate({
         **item.document, "status": status, "error": to_document(error) if error else None,
         "started_at": started_at, "finished_at": finished_at,
-        "transcript": to_document(EventStream(events=transcript)), "chat": surface.chat.events,
+        "transcript": to_document(EventStream(events=events)), "chat": surface.chat.events,
         "outputs": surface.outputs or None,
         "world_calls": world_calls or None,
-        "usage": usage.model_copy(update={
+        "usage": running.meter.usage().model_copy(update={
             "duration_ms": int((finished_at - started_at).total_seconds() * 1000),
         }),
         "enclosure": Enclosure(mode="enclosed", backend=arm.live.backend if arm.live else None,
@@ -331,27 +550,13 @@ async def _finish(
     })  # fmt: skip
     world = {(o.service, o.resource_key): o.data for o in overlay}
     scores = check_item(case, result, suite.tool_aliases or [], world=world, at=finished_at)
-    agent_usd = usage.cost_usd or 0.0
     async with deps.sessions.begin() as session:
-        await eval_runs.save_item(session, item_id=item.id, document=to_document(result))
-        await store.put_scores(
-            session, tenant_id=item.tenant_id, run_id=run_row.id,
-            scores=[to_document(s) for s in scores],
-        )  # fmt: skip
-
-        def settled(document: JsonObject) -> JsonObject:
-            run = _held(Run.model_validate(document), -reserved)
-            for category, usd in (("agent", agent_usd), ("simulator", simulator_usd),
-                                  ("sandbox", sandbox_usd)):  # fmt: skip
-                if usd:
-                    run = spend.add_spend(run, category, usd)
-            return to_document(run)
-
-        updated = await store.update_run(session, run_id=run_row.id, change=settled)
-        cap = await eval_runs.cap_of(session, run_id=run_row.id)
-        total = updated.document.get("spend") or {}
-        spent = total.get("total_usd") if isinstance(total, dict) else None  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
-        if cap is not None and isinstance(spent, int | float) and spent > cap:
-            await _stop_run(session, run_row.id, "the run passed its spending cap")
-        await _end_run(session, run_row.id, deps.clock)
+        saved = await eval_runs.save_item(session, item_id=item.id, document=to_document(result),
+                                          attempt=item.attempts)  # fmt: skip
+        if saved:
+            await store.put_scores(
+                session, tenant_id=item.tenant_id, run_id=run_row.id,
+                scores=[to_document(s) for s in scores],
+            )  # fmt: skip
+        await _settle(session, deps, running, saved=saved)
     return result

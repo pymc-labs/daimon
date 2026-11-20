@@ -297,14 +297,21 @@ http://eval-worker:8090. Unset: no sandbox can be enclosed.
 
 `int` · optional · default `8090`
 
-Port the eval worker serves its fake world on, on every interface.
+Port the eval worker serves its fake world on.
+
+### `DAIMON_EVALS__WORLD_HOST`
+
+`str` · optional · default `0.0.0.0`
+
+Address the eval worker serves its fake world on: the interface its sandbox pods reach.
+Default: every interface.
 
 ### `DAIMON_EVALS__ENVIRONMENT_ID`
 
 `str | None` · optional · default unset
 
 Self-hosted environment eval items run in, made in the provider's console. Items on it
-run one at a time. Unset: live arms cannot run.
+run one at a time, across workers. Unset: live arms cannot run.
 
 ### `DAIMON_EVALS__ENVIRONMENT_KEY`
 
@@ -392,7 +399,8 @@ DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none).
 
 Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its
 environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable inside
-the pod, so it carries no credential. Default: {} (none).
+the pod, so it carries no credential; the key reaches codex on stdin only. Default: {}
+(none).
 
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 
@@ -412,7 +420,15 @@ arm it judges. Empty: judging names its models.
 
 `float` · optional · default `25.0`
 
-Eval spending ceilings above this, in USD, need an admin to approve them.
+An eval run's spend cap above this, in USD, waits for the operator to approve it
+(`daimon evals runs approve`).
+
+### `DAIMON_EVALS__WORKSPACE_CAP_USD`
+
+`float` · optional · default `100.0`
+
+What one workspace's open eval runs may be capped at together, in USD; a run past it
+waits for the operator to approve it.
 
 ### `DAIMON_EVALS__WORKER_CONCURRENCY`
 

@@ -2999,13 +2999,20 @@ class EvalsSettings(BaseModel):
         default=8090,
         ge=1,
         le=65535,
-        description="Port the eval worker serves its fake world on, on every interface.",
+        description="Port the eval worker serves its fake world on.",
+    )
+    world_host: str = Field(
+        default="0.0.0.0",
+        description=(
+            "Address the eval worker serves its fake world on: the interface its sandbox "
+            "pods reach. Default: every interface."
+        ),
     )
     environment_id: str | None = Field(
         default=None,
         description=(
             "Self-hosted environment eval items run in, made in the provider's console. Items "
-            "on it run one at a time. Unset: live arms cannot run."
+            "on it run one at a time, across workers. Unset: live arms cannot run."
         ),
     )
     environment_key: SecretStr | None = Field(
@@ -3083,7 +3090,8 @@ class EvalsSettings(BaseModel):
         description=(
             "Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its "
             "environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable "
-            "inside the pod, so it carries no credential. Default: {} (none)."
+            "inside the pod, so it carries no credential; the key reaches codex on stdin only. "
+            "Default: {} (none)."
         ),
     )
     sandbox_rate_usd_per_hour: Decimal = Field(
@@ -3103,7 +3111,18 @@ class EvalsSettings(BaseModel):
     admin_approval_usd: float = Field(
         default=25.0,
         gt=0,
-        description="Eval spending ceilings above this, in USD, need an admin to approve them.",
+        description=(
+            "An eval run's spend cap above this, in USD, waits for the operator to approve it "
+            "(`daimon evals runs approve`)."
+        ),
+    )
+    workspace_cap_usd: float = Field(
+        default=100.0,
+        gt=0,
+        description=(
+            "What one workspace's open eval runs may be capped at together, in USD; a run "
+            "past it waits for the operator to approve it."
+        ),
     )
     worker_concurrency: int = Field(
         default=2, ge=1, le=32, description="Eval items one eval worker runs at once."

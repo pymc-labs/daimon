@@ -37,6 +37,8 @@ class EvalSurfaceLifecycle:
     """Approved calls waiting to run: each wake's prefix runs them, as the next turn."""
     shown: int = 0
     """How many of `outputs` the chat already shows."""
+    tool_servers: dict[str, str] = field(default_factory=dict[str, str])
+    """The MCP server each of the item's custom tools stands for, by tool name."""
 
     async def on_render(self, state: TurnState) -> None:
         self.state = state
@@ -85,9 +87,8 @@ class EvalSurfaceLifecycle:
         """Post the turn's reply and play the script on it; the reply text, if any."""
         for block in self.state.content:
             if isinstance(block, ToolUseBlock):
-                await self.script.happened(
-                    Seen("tool_call", tool=block.name, server=block.mcp_server_name)
-                )
+                server = block.mcp_server_name or self.tool_servers.get(block.name)
+                await self.script.happened(Seen("tool_call", tool=block.name, server=server))
         text = "\n\n".join(b.text for b in self.state.content if isinstance(b, TextBlock)).strip()
         if text:
             self.chat.add("message", message_id=self.chat.message_id(), text=text,

@@ -7,8 +7,10 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Final
 
-from daimon.core.evals.format import Arm, Case, Estimate, EstimateLine, JudgeConfig
+from daimon.core.config import load_billing_settings
+from daimon.core.evals.format import Arm, Case, Estimate, EstimateLine, JudgeConfig, LiveArm
 from daimon.core.pricing import side_call_rates
+from daimon.core.selfhosted_usage import selfhosted_prices
 
 AGENT_TOKENS: Final = (60_000, 3_000)
 """Input and output tokens of one item's turns when nothing better is known."""
@@ -34,6 +36,17 @@ def call_usd(model: str | None, tokens: tuple[int, int]) -> float:
     except KeyError:
         return UNPRICED_CALL_USD
     return (tokens[0] * rates.input + tokens[1] * rates.output) / 1_000_000
+
+
+def priced(live: LiveArm) -> bool:
+    """Whether Daimon knows the arm's model's price, so a cap can hold its spend."""
+    if live.backend == "harness":
+        return ("selfhosted", live.model) in selfhosted_prices(load_billing_settings().selfhosted)
+    try:
+        side_call_rates(live.model)
+    except KeyError:
+        return False
+    return True
 
 
 def _bounds(per_item: Sequence[float], items: int) -> tuple[float, float, float]:

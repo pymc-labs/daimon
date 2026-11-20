@@ -8,7 +8,9 @@ id, so the world answers their calls.
 
 Anthropic environment keys come only from its console, so the worker has one Anthropic eval
 environment. Its executor takes whichever session the environment hands out, so items on it
-run one at a time: each holds the environment from its first turn to its close. A Gemini item
+run one at a time, across workers: each holds a Postgres lock on it from its first turn to
+its close, and stops any pod left polling it before it starts. A pod that fails to stop keeps
+the lock until the worker restarts, so no other item meets it. A Gemini item
 makes an environment of its own (`runner.gemini`), a harness item's harness runs in its pod
 (`runner.harness`), and an OpenAI item's session gets an environment of its own that its pod
 serves (`runner.openai`), so those run side by side."""
@@ -16,6 +18,7 @@ serves (`runner.openai`), so those run side by side."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import secrets
 import shlex
@@ -41,7 +44,7 @@ from daimon.core.context_provider import (
 from daimon.core.defaults.ma_index import agent_id_in_tenant
 from daimon.core.defaults.metadata import build_metadata
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
+from daimon.core.evals.chat.cards import EvalCardNotice, pending_cards, press_eval_card
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Case, Usage
@@ -68,7 +71,7 @@ from daimon.core.evals.sandbox.runtime import (
     read_files,
     wait_ready,
 )
-from daimon.core.evals.world.dispatch import FakeWorld
+from daimon.core.evals.world.dispatch import DAIMON_SERVER, FakeWorld
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import current_eval_item
 from daimon.core.memory_resource import ensure_memory_store_and_mount
@@ -105,6 +108,8 @@ from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini import self_hosted_id
 from mux.profiles import CONTROL_PLANE_HOSTS, get_profile
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 log = structlog.get_logger()
 
@@ -146,6 +151,8 @@ class PodSettings:
 @dataclass
 class _Item:
     tenant_id: uuid.UUID
+    #: The run's workspace, which keeps the item's delivered files.
+    run_tenant_id: uuid.UUID
     case: Case
     surface: EvalSurfaceLifecycle
     name: str
@@ -202,6 +209,51 @@ class CaseContext:
                                status="ok")  # fmt: skip
 
 
+def principal_id(item_id: uuid.UUID, person: str) -> str:
+    """A case person's platform id in one item: no approval, role or state carries over."""
+    return f"{item_id.hex[:20]}:{person}"
+
+
+async def environment_lock(
+    engine: AsyncEngine, environment_id: str, cancel: asyncio.Event, poll_s: float = 5.0
+) -> AsyncConnection:
+    """A connection holding the Postgres lock on a shared environment, once no other worker
+    holds it; SandboxError when `cancel` is set first. `release_environment` frees it."""
+    key = f"eval-environment:{environment_id}"
+    while True:
+        conn = await engine.connect()
+        try:
+            held = await conn.scalar(text("select pg_try_advisory_lock(hashtextextended(:k, 0))"),
+                                     {"k": key})  # fmt: skip
+            await conn.commit()
+        except BaseException:
+            await conn.close()
+            raise
+        if held:
+            return conn
+        await conn.close()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(cancel.wait(), poll_s)
+        if cancel.is_set():
+            raise SandboxError("the shared eval environment stayed busy")
+
+
+async def release_environment(conn: AsyncConnection) -> None:
+    try:
+        await conn.execute(text("select pg_advisory_unlock_all()"))
+        await conn.commit()
+    except Exception:
+        # A dropped connection frees its locks.
+        await conn.invalidate()
+    finally:
+        await conn.close()
+
+
+def _engine(deps: TurnDeps) -> AsyncEngine:
+    bind = deps.sessionmaker.kw["bind"]
+    return bind.engine if isinstance(bind, AsyncConnection) else bind
+
+
 def _role(case: Case, person: str) -> Role:
     people = {p.id: p for p in case.surface.participants}
     found = people.get(person)
@@ -226,40 +278,86 @@ class EvalTurns:
                            if url is not None and secret is not None else None)  # fmt: skip
         self._items: dict[uuid.UUID, _Item] = {}
         self._environment = asyncio.Lock()
+        self._lock: AsyncConnection | None = None
+        #: A shared item's pod did not stop: the lock stays held until the worker restarts.
+        self._stuck = False
         self._tagged = False
+        self._raised: set[str] = set()
 
     async def raise_card(self, notice: EvalCardNotice) -> None:
         """A card a tool posted in an item's conversation: the script presses it."""
         item = self._items.get(notice.item_id)
-        if item is not None:
-            admin = _role(item.case, item.surface.script.requester) is Role.ADMIN
-            await press_eval_card(self.deps, item.tenant_id, item.surface, notice, is_admin=admin)
+        if item is not None and notice.card_id not in self._raised:
+            self._raised.add(notice.card_id)
+            requester = item.surface.script.requester
+            admin = _role(item.case, requester) is Role.ADMIN
+            await press_eval_card(self.deps, item.tenant_id, item.surface, notice, is_admin=admin,
+                                  clicker=principal_id(notice.item_id, requester))  # fmt: skip
 
-    async def turn(self, request: TurnRequest) -> Usage:
+    async def missed(self) -> list[EvalCardNotice]:
+        """Open cards of the running items, for after the card listener was away."""
+        threads = {item.name: item_id for item_id, item in self._items.items()}
+        tenant_id = await eval_tenant(self.deps.sessionmaker)
+        return await pending_cards(self.deps.sessionmaker, tenant_id, threads)
+
+    async def turn(self, request: TurnRequest) -> None:
         item = self._items.get(request.item_id) or await self._open(request)
         reset = current_eval_item.set(request.item_id)
         try:
-            return await self._turn(item, request)
+            await self._turn(item, request)
         finally:
             current_eval_item.reset(reset)
 
     async def close(self, item_id: uuid.UUID) -> None:
+        """Stop the item's pod and clean up; SandboxError when a shared item's pod did not
+        stop, which keeps the shared environment locked."""
         item = self._items.pop(item_id, None)
         if item is None:
             return
         self.context.by_channel.pop(item.name, None)
-        pod = item.pod
-        steps = ([lambda: self.pods.runtime.stop(pod)] if pod is not None else []) + item.cleanup
+        stopped = True
         try:
-            for step in steps:
+            if item.pod is not None:
+                try:
+                    await self.pods.runtime.stop(item.pod)
+                except Exception:
+                    stopped = False
+                    log.warning("eval_item.stop_failed", item_id=str(item_id), exc_info=True)
+            for step in item.cleanup:
                 try:
                     await step()
-                # Clean-up is best effort: `reap` removes pods left behind, archives can wait.
+                # Archives can wait; `reap` removes other pods left behind.
                 except Exception:
                     log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
         finally:
             if item.shared:
-                self._environment.release()
+                await self._release(stuck=not stopped)
+        if item.shared and not stopped:
+            raise SandboxError(f"the eval pod of item {item_id} did not stop")
+
+    async def _hold(self, cancel: asyncio.Event) -> None:
+        """Take the shared environment, then stop any pod still polling it."""
+        await self._environment.acquire()
+        try:
+            if self._stuck:
+                raise SandboxError("a shared eval pod did not stop; restart the eval worker")
+            self._lock = await environment_lock(_engine(self.deps), self.pods.environment_id,
+                                                cancel)  # fmt: skip
+            await self.pods.runtime.stop_environment(self.pods.environment_id)
+        except BaseException:
+            await self._release(stuck=False)
+            raise
+
+    async def _release(self, *, stuck: bool) -> None:
+        lock, self._lock = self._lock, None
+        self._stuck |= stuck
+        try:
+            if lock is not None and not stuck:
+                await release_environment(lock)
+            elif lock is not None:
+                self._lock = lock
+        finally:
+            self._environment.release()
 
     async def _open(self, request: TurnRequest) -> _Item:
         arm = request.arm
@@ -269,14 +367,14 @@ class EvalTurns:
             )
         shared = arm.live.backend == _SHARED
         if shared:
-            await self._environment.acquire()
+            await self._hold(request.cancel)
         try:
             return await self._opened(request, shared)
         except BaseException:
             if request.item_id in self._items:
                 await self.close(request.item_id)
             elif shared:
-                self._environment.release()
+                await self._release(stuck=False)
             raise
 
     async def _opened(self, request: TurnRequest, shared: bool) -> _Item:
@@ -293,7 +391,7 @@ class EvalTurns:
             accounts = {
                 person.id: (await identity.get_or_create_platform_principal(
                     session, tenant_id=tenant_id, platform=case.surface.platform,
-                    external_id=person.id,
+                    external_id=principal_id(request.item_id, person.id),
                 )).account_id
                 for person in case.surface.participants
             }  # fmt: skip
@@ -319,6 +417,10 @@ class EvalTurns:
         trusted = frozenset({DAIMON_SERVER_NAME})
         gated = session_tools_for_policy(deps.tool_safety, source_tools, trusted_servers=trusted)
         tools = custom_tools(gated or source_tools, daimon, case)
+        servers = {str(t["name"]): str(t["_server"]) for t in tools}
+        request.surface.tool_servers.update(
+            {n: DAIMON_SERVER if s == DAIMON_SERVER_NAME else s for n, s in servers.items()}
+        )
         if not shared:
             assert requester is not None, "the case's requester is a participant"
             item = await self._own(request, name, metadata, params.get("system"), tools,
@@ -331,8 +433,8 @@ class EvalTurns:
                 "tools": [t for t in source_tools if t.get("type") != "mcp_toolset"] + [
                     {k: v for k, v in t.items() if not k.startswith("_")} for t in tools],
             }, scope=scope, records=deps.sessionmaker)  # fmt: skip
-            item = _Item(tenant_id, case, request.surface, name, agent.id, request.world_token,
-                         True, tools)  # fmt: skip
+            item = _Item(tenant_id, request.tenant_id, case, request.surface, name, agent.id,
+                         request.world_token, True, tools)  # fmt: skip
             item.cleanup.append(partial(archive_agent, deps.anthropic, agent.id, scope=scope,
                                         records=deps.sessionmaker))  # fmt: skip
             self._items[request.item_id] = item
@@ -379,7 +481,7 @@ class EvalTurns:
         # The channel's name for the item's environment; the provider's is made below.
         await create_owned_environment(deps.anthropic, EnvironmentSpec(
             name=name, metadata=metadata), scope=scope, records=deps.sessionmaker)  # fmt: skip
-        item = _Item(tenant_id, request.case, request.surface, name, fork.id,
+        item = _Item(tenant_id, request.tenant_id, request.case, request.surface, name, fork.id,
                      request.world_token, False, tools)  # fmt: skip
         item.cleanup.append(partial(archive_agent, deps.anthropic, fork.id, scope=scope,
                                     records=deps.sessionmaker))  # fmt: skip
@@ -456,6 +558,7 @@ class EvalTurns:
             control_plane=CONTROL_PLANE_HOSTS[executor], passthrough=pods.passthrough,
             registries=pods.registries,
             clock=case.clock.now, limits=pods.limits,
+            shared_environment=pods.environment_id if executor == _SHARED else None,
         )  # fmt: skip
         pod = await pods.runtime.start(spec)
         await wait_ready(pods.runtime, pod)
@@ -475,7 +578,7 @@ class EvalTurns:
             await create_memory(deps.anthropic, mount["memory_store_id"], entry.path,
                                 entry.content, scope=scope)  # fmt: skip
 
-    async def _turn(self, item: _Item, request: TurnRequest) -> Usage:
+    async def _turn(self, item: _Item, request: TurnRequest) -> None:
         deps, case = self.deps, item.case
         if isinstance(item.runtime, TurnRuntime):
             # Given, not built, so no deployment setup runs for it (a tenant's environment).
@@ -485,10 +588,11 @@ class EvalTurns:
             # The channel names the arm's backend; the item's runtime serves its fork.
             deps = replace(deps, channel_backends=True, turn_runtime_factory=item.runtime)
         platform = case.surface.platform
-        requester = request.surface.script.requester
-        role = _role(case, requester)
+        role = _role(case, request.surface.script.requester)
+        requester = principal_id(request.item_id, request.surface.script.requester)
         with observe_turn(deps.sessionmaker, tenant_id=item.tenant_id, platform=platform,
                           channel_id=item.name, thread_id=item.name) as observation:  # fmt: skip
+            request.meter.live = partial(_usage, request, observation.billed_cost)
             admission = await admit(
                 deps, tenant_id=item.tenant_id, platform=platform, external_user_id=requester,
                 channel_id=item.name, thread_id=item.name, role=role, now=datetime.now(UTC),
@@ -530,21 +634,25 @@ class EvalTurns:
                     )  # fmt: skip
                 finally:
                     host_tools.reset(reset)
+                    request.meter.settle()
         if item.pod is not None:
             await sweep_outputs(PodOutputs(self.pods.runtime, item.pod),
                                 post=lambda f: self._keep(item, f))  # fmt: skip
-        state = request.surface.state
-        cost = observation.billed_cost(Decimal(1))
-        return Usage(
-            input_tokens=state.usage_totals.input_tokens or None,
-            output_tokens=state.usage_totals.output_tokens or None,
-            cache_read_tokens=state.usage_totals.cache_read_input_tokens or None,
-            cache_write_tokens=state.usage_totals.cache_creation_input_tokens or None,
-            cost_usd=float(cost) if cost is not None else None,
-        )
 
     async def _keep(self, item: _Item, file: DeliverableFile) -> None:
         """A delivered file: kept as a blob of the run's workspace and shown in the chat."""
         sha = hashlib.sha256(file.content).hexdigest()
-        await self.world.keep_blob(item.tenant_id, sha, file.mime_type, file.content)
+        await self.world.keep_blob(item.run_tenant_id, sha, file.mime_type, file.content)
         item.surface.file(file.filename, file.mime_type, sha, len(file.content), OUTPUTS_DIR)
+
+
+def _usage(request: TurnRequest, billed: Callable[[Decimal], Decimal | None]) -> Usage:
+    """What the running turn has used so far: its tokens, and their cost while all are priced."""
+    totals, cost = request.surface.state.usage_totals, billed(Decimal(1))
+    return Usage(
+        input_tokens=totals.input_tokens or None,
+        output_tokens=totals.output_tokens or None,
+        cache_read_tokens=totals.cache_read_input_tokens or None,
+        cache_write_tokens=totals.cache_creation_input_tokens or None,
+        cost_usd=float(cost) if cost is not None else None,
+    )

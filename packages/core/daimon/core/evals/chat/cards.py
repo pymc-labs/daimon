@@ -1,5 +1,7 @@
-"""Cards a tool posts in an eval item's conversation: the MCP process sends them to the eval
-worker over Postgres NOTIFY, where the item's script presses them through the real presses."""
+"""Cards a tool posts in an eval item's conversation: the MCP process names them to the eval
+worker over Postgres NOTIFY, and the worker loads each and lets the item's script press it
+through the real press. Cards posted while the listener was away are found again
+(`pending_cards`)."""
 
 from __future__ import annotations
 
@@ -15,7 +17,6 @@ from daimon.core import host_calls
 from daimon.core.evals.chat.events import posted_card
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.features.snapshot import deployment_on
-from daimon.core.posted_controls import PostedCard
 from daimon.core.stores import host_call_cards
 from daimon.core.turn.deps import TurnDeps
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -29,12 +30,13 @@ EVAL_CARD_CHANNEL: Final = "daimon_evals"
 
 
 class EvalCardNotice(BaseModel):
+    """Small, so it always fits a NOTIFY payload: the worker loads the card."""
+
     model_config = ConfigDict(frozen=True)
 
     item_id: uuid.UUID
-    #: "hcc:<id>": a host call's press id and message id; "cred:<token>": a credential request.
+    #: "hcc:<id>": a host call's press id and message id.
     card_id: str
-    card: PostedCard
 
 
 async def send_eval_card(session: AsyncSession, notice: EvalCardNotice) -> None:
@@ -44,19 +46,22 @@ async def send_eval_card(session: AsyncSession, notice: EvalCardNotice) -> None:
 
 async def press_eval_card(
     deps: TurnDeps, tenant_id: uuid.UUID, surface: EvalSurfaceLifecycle, notice: EvalCardNotice,
-    *, is_admin: bool,
+    *, is_admin: bool, clicker: str,
 ) -> None:  # fmt: skip
-    """Show the card and let the script press it: a credential request is saved or skipped
-    through the script's presses, a host call is pressed here as that person did. An
-    approved call's wake runs as the item's next turn."""
-    pressed = await surface.script.answer(posted_card(notice.card_id, notice.card))
+    """Show the open host call card and let the script press it as `clicker`, the requester
+    ("always" approves). An approved call's wake runs as the item's next turn."""
     kind, _, raw = notice.card_id.partition(":")
-    if pressed is None or kind != "hcc" or pressed.action not in ("approve", "deny"):
+    if kind != "hcc":
         return
-    clicker, record = surface.script.requester, uuid.UUID(raw)
+    record = uuid.UUID(raw)
     async with deps.sessionmaker() as session:
         row = await host_call_cards.get_card(session, tenant_id=tenant_id, card_id=record)
-    if row is None:
+    if row is None or row.status != "pending":
+        return
+    card = host_calls.requested_call_card(row)
+    pressed = await surface.script.answer(posted_card(notice.card_id, card))
+    action = "approve" if pressed and pressed.action == "always" else pressed and pressed.action
+    if action not in ("approve", "deny"):
         return
 
     async def current_admin(user_id: str) -> bool:
@@ -66,7 +71,7 @@ async def press_eval_card(
     press = await host_calls.press_host_call(
         sessionmaker=deps.sessionmaker,
         enabled=settings is not None and deployment_on(settings, "host_call_gate", row.platform),
-        tenant_id=tenant_id, card_id=record, action=pressed.action, clicker=clicker,
+        tenant_id=tenant_id, card_id=record, action=action, clicker=clicker,
         message_id=notice.card_id, current_admin=current_admin, now=datetime.now(UTC),
         queue_wake=False,
     )  # fmt: skip
@@ -80,12 +85,26 @@ async def press_eval_card(
         surface.wakes.append(prefix)
 
 
+async def pending_cards(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, threads: dict[str, uuid.UUID]
+) -> list[EvalCardNotice]:
+    """Open host call cards in the running items' conversations (`threads`: item by name)."""
+    if not threads:
+        return []
+    async with sessions() as session:
+        rows = await host_call_cards.list_cards(session, tenant_id=tenant_id, thread_ids=threads)
+    return [EvalCardNotice(item_id=threads[r.thread_id], card_id=f"hcc:{r.id}")
+            for r in rows if r.status == "pending"]  # fmt: skip
+
+
 async def listen_cards(
     sessions: async_sessionmaker[AsyncSession],
     handle: Callable[[EvalCardNotice], Awaitable[None]],
+    missed: Callable[[], Awaitable[list[EvalCardNotice]]],
     retry_s: float = 5,
 ) -> None:
-    """Deliver eval card notices to `handle` until cancelled; a lost connection reopens."""
+    """Deliver eval card notices to `handle` until cancelled; a lost connection reopens, and
+    then each card `missed` names is delivered too."""
     tasks: set[asyncio.Task[None]] = set()
 
     async def handled(notice: EvalCardNotice) -> None:
@@ -113,6 +132,10 @@ async def listen_cards(
                     lost = asyncio.Event()
                     raw.add_termination_listener(lambda _c, lost=lost: lost.set())  # pyright: ignore[reportUnknownLambdaType]
                     await raw.add_listener(EVAL_CARD_CHANNEL, on_payload)
+                    for notice in await missed():
+                        task = asyncio.create_task(handled(notice))
+                        tasks.add(task)
+                        task.add_done_callback(tasks.discard)
                     await lost.wait()
         except (OSError, SQLAlchemyError, asyncpg.PostgresError, asyncpg.InterfaceError) as err:  # pyright: ignore[reportUnknownMemberType]
             log.warning("eval_cards.connection_lost", err_type=type(err).__name__)

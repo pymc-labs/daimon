@@ -113,7 +113,8 @@ as `gh`, see the real clock instead of the case's.
 
 Limits: this encloses the agent's tools, not a hostile executor. A command the
 executor starts without a shell, such as the codex backend's `python3` or `curl`,
-and a direct run of the real shell binaries, run as the executor user. That user
+and a direct run of the real shell binaries, run as the executor user. The codex key
+reaches codex on stdin, so those commands never see it. The executor user
 reaches the provider's control plane and any
 [`passthrough_hosts`](configuration.md#daimon_evals__passthrough_hosts) untouched,
 and the gateway matches them by TLS server name, not by the request's Host header.
@@ -128,7 +129,8 @@ On Kubernetes, the eval worker's service account needs to create, read, list and
 delete pods, `pods/exec` and secrets in the namespace. The namespace needs the
 `privileged` pod security level. Pods get no service account token. Add a
 NetworkPolicy that admits connections to pods labelled `daimon.eval/item` only
-from the eval worker.
+from the eval worker. The worker reaches a harness pod over plain HTTP, so this
+policy keeps that traffic private.
 
 Sandbox tools trust an eval CA. Create its key once and store it as
 [`DAIMON_EVALS__CA_KEY`](configuration.md#daimon_evals__ca_key):
@@ -202,20 +204,24 @@ and import encrypted bundles from the command line or the web app.
 
 A run plays each case against each arm, `repeats` times. Each item gets a fresh
 session, the fake world and a simulated chat: the case's script plays the people,
-pressing buttons, reacting and replying.
+pressing buttons, reacting and replying. Where the case lets the simulator answer, it
+answers any agent reply that ends in a question mark, so the agent can steer it.
 
 ```bash
 daimon evals runs estimate draft.json        # low, expected and high cost in USD
 daimon evals runs start draft.json --cap 10  # start, spending at most 10 USD
 daimon evals runs show RUN_ID
 daimon evals runs cancel RUN_ID
-daimon evals runs approve RUN_ID --cap 40    # admins only
+daimon evals runs approve RUN_ID --cap 40    # the operator, past the limits below
 ```
 
-Every run needs a spending cap. A cap above
-[`DAIMON_EVALS__ADMIN_APPROVAL_USD`](configuration.md#daimon_evals__admin_approval_usd)
-waits for an admin. An item starts only while its estimate fits under the cap, so a
-run that reaches it stops early as `partial` and keeps the items already done. An
+Every run needs a spending cap, and the operator pays for it. A cap above
+[`DAIMON_EVALS__ADMIN_APPROVAL_USD`](configuration.md#daimon_evals__admin_approval_usd),
+or one that takes a workspace's open runs past
+[`DAIMON_EVALS__WORKSPACE_CAP_USD`](configuration.md#daimon_evals__workspace_cap_usd),
+waits for the operator. An item starts only while its estimate fits under the cap, so a
+run that reaches it stops early as `partial` and keeps the items already done. An item
+also stops at its turn and time limits. Arms need a model with a known price. An
 agent can start a run only on the person's card in chat.
 
 Eval workers run the queued items. Each item runs a copy of the arm's agent in

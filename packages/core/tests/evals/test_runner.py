@@ -10,6 +10,7 @@ import re
 import tarfile
 import uuid
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -21,13 +22,11 @@ from anthropic.types import MessageParam, ToolResultBlockParam
 from daimon.core._models import EvalRun
 from daimon.core.config import McpSettings, SelfhostedBillingSettings, SelfhostedModelPrice
 from daimon.core.confirmation import ConfirmationPrompt
-from daimon.core.credential_requests import mint_request_token
 from daimon.core.evals import spend
 from daimon.core.evals.access import Subject
-from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
+from daimon.core.evals.chat.cards import EvalCardNotice, pending_cards, press_eval_card
 from daimon.core.evals.chat.events import ChatLog
-from daimon.core.evals.chat.forms import CredentialPresses
-from daimon.core.evals.chat.script import HIDDEN, ScriptPlayer
+from daimon.core.evals.chat.script import ScriptPlayer
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
@@ -36,22 +35,31 @@ from daimon.core.evals.runner.harness import HarnessArms
 from daimon.core.evals.runner.item import ItemDeps, TurnRequest
 from daimon.core.evals.runner.openai import OpenAIArms
 from daimon.core.evals.runner.tools import McpService
-from daimon.core.evals.runner.turns import EvalTurns, PodSettings
+from daimon.core.evals.runner.turns import (
+    EvalTurns,
+    PodSettings,
+    environment_lock,
+    release_environment,
+)
 from daimon.core.evals.runner.worker import run_next
 from daimon.core.evals.runs import RunDraft, RunService
-from daimon.core.evals.sandbox.runtime import CommandResult, PodHandle, PodSpec
-from daimon.core.evals.service import EvalService, SuiteCasePick, SuiteDraft
+from daimon.core.evals.sandbox.runtime import CommandResult, PodHandle, PodSpec, SandboxError
+from daimon.core.evals.service import (
+    EvalForbidden,
+    EvalRefused,
+    EvalService,
+    SuiteCasePick,
+    SuiteDraft,
+)
 from daimon.core.evals.world.dispatch import FakeWorld
-from daimon.core.host_calls import WAKE_SEED, requested_call_card
+from daimon.core.host_calls import WAKE_SEED
 from daimon.core.output_delivery import DeliverableFile
-from daimon.core.posted_controls.cards import card_for_request
-from daimon.core.stores import credential_requests, host_call_cards, identity
 from daimon.core.stores import evals as store
-from daimon.core.stores.agent_files import list_agent_files
+from daimon.core.stores import host_call_cards, identity
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock, TurnState
 from daimon.testing.builders import plain_turn_deps
 from daimon.testing.eval_world import eval_case
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import bare_settings
 from mux.drivers.gemini.flash import FLASH_PRIMARY
@@ -64,7 +72,7 @@ from mux.testing.drivers.anthropic.ma import (
     send_events_response,
     sse_response,
 )
-from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_MODEL_ID, ma_session, ma_session_agent
 from mux.testing.drivers.gemini.fake import FakeTransport as GeminiFake
 from mux.testing.fake_model_server import FakeModelServer
 from mux.testing.fake_model_server.script import call_tool, say
@@ -96,7 +104,7 @@ class ModelTurns:
         )
         self._world, self._cost = world, cost_usd
 
-    async def turn(self, request: TurnRequest) -> Usage:
+    async def turn(self, request: TurnRequest) -> None:
         messages: list[MessageParam] = [{"role": "user", "content": request.text}]
         blocks: list[ContentBlock] = []
         while True:
@@ -126,7 +134,7 @@ class ModelTurns:
                 break
             messages.append({"role": "user", "content": results})
         await request.surface.on_terminal_success(TurnState(content=blocks))
-        return Usage(cost_usd=self._cost)
+        request.meter.add(Usage(cost_usd=self._cost))
 
     async def close(self, item_id: uuid.UUID) -> None:
         return None
@@ -158,7 +166,7 @@ async def _start(
     suite = await evals.save_suite(alex, SuiteDraft(
         id="runner", name="Runner", cases=[SuiteCasePick(id=ref.id)],
     ))  # fmt: skip
-    live = live or LiveArm(backend="anthropic", model="test-model")
+    live = live or LiveArm(backend="anthropic", model=DEFAULT_MODEL_ID)
     arm = await evals.save_arm(alex, Arm(id="arm-a", label="A", kind="live", live=live))
     runs = RunService(factory, settings, evals)
     draft = RunDraft(suite=SuitePin(id="runner", version=suite.version), arm_ids=[arm.id],
@@ -214,6 +222,67 @@ async def test_cap_when_next_item_would_pass_it_then_run_is_partial_after_the_fi
     run = await runs.status(alex, run_id)
     assert isinstance(run, Run) and run.status == "partial", run.status
     assert await run_next(deps) is False
+
+
+async def test_start_when_a_workspace_passes_its_open_cap_then_only_the_operator_approves(
+    db_committing_engine: AsyncEngine, db_clean: None
+) -> None:
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        runs, alex, run_id, per_item = await _start(db_session, db_session_factory, repeats=1,
+                                                    commit=True)  # fmt: skip
+    first = await runs.status(alex, run_id)
+    assert isinstance(first, Run)
+    evals = bare_settings().evals.model_copy(update={"workspace_cap_usd": per_item * 15})
+    settings = bare_settings().model_copy(update={"features": {"evals": "on"}, "evals": evals})
+    tight = RunService(db_session_factory, settings, EvalService(db_session_factory, settings))
+    draft = RunDraft(suite=first.suite, arm_ids=[a.id for a in first.arms])
+    waiting = await tight.start(alex, draft, cap_usd=per_item * 10)
+    assert waiting.status == "estimated", "the operator pays: an admin's run past it waits"
+    with pytest.raises(EvalForbidden):
+        await tight.approve(alex, waiting.id, cap_usd=per_item * 10)
+    operator = replace(alex, operator=True)
+    approved = await tight.approve(operator, waiting.id, cap_usd=per_item * 10)
+    assert approved.status == "approved"
+
+
+async def test_start_when_an_arm_model_has_no_price_then_the_run_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    runs, alex, run_id, _ = await _start(db_session, db_session_factory, repeats=1)
+    first = await runs.status(alex, run_id)
+    assert isinstance(first, Run)
+    evals = EvalService(db_session_factory, bare_settings().model_copy(
+        update={"features": {"evals": "on"}}))  # fmt: skip
+    live = LiveArm(backend="anthropic", model="unpriced-model")
+    arm = await evals.save_arm(alex, Arm(id="arm-x", label="X", kind="live", live=live))
+    with pytest.raises(EvalRefused, match="no known price"):
+        await runs.start(alex, RunDraft(suite=first.suite, arm_ids=[arm.id]), cap_usd=1)
+
+
+class SpendingTurns:
+    """A turn port whose one turn keeps spending until the item is stopped."""
+
+    async def turn(self, request: TurnRequest) -> None:
+        request.meter.live = lambda: Usage(cost_usd=1000.0)
+        try:
+            await asyncio.wait_for(request.cancel.wait(), 10)
+        finally:
+            request.meter.settle()
+
+    async def close(self, item_id: uuid.UUID) -> None:
+        return None
+
+
+async def test_cap_when_a_running_turn_passes_it_then_the_item_and_run_stop_mid_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runs, alex, run_id, _ = await _start(db_session, db_session_factory, repeats=1)
+    world = FakeWorld(db_session_factory, None, tmp_path)
+    await run_next(ItemDeps(db_session_factory, SpendingTurns(), world, poll_s=0.01))
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status in ("partial", "failed"), run.status
+    assert run.spend and run.spend.total_usd and run.spend.total_usd >= 1000, run.spend
 
 
 async def test_update_run_when_another_worker_settled_since_the_read_then_no_spend_is_lost(
@@ -274,6 +343,10 @@ class FakePods:
         self.stopped.append(pod.id)
 
     async def reap(self) -> list[str]:
+        return []
+
+    async def stop_environment(self, environment_id: str) -> list[str]:
+        self.stopped.append(f"environment:{environment_id}")
         return []
 
 
@@ -396,7 +469,10 @@ async def test_production_port_when_item_runs_then_fork_pod_turn_and_files_reach
     assert not any(c["kind"] == "environments" for c in created)
     (spec,) = pods.started
     assert spec.executor_config == {"KEY": "k", "ANTHROPIC_ENVIRONMENT_ID": "env_eval"}
-    assert pods.stopped == ["pod-1"], "the pod stops when the item ends"
+    assert spec.shared_environment == "env_eval"
+    assert pods.stopped == ["environment:env_eval", "pod-1"], (
+        "pods left on the shared environment stop first, the item's when it ends"
+    )
     assert [c["id"] for c in created if c["kind"] == "archive"] == ["ag_fork"]
     (result,) = (c for c in created if c.get("type") == "user.custom_tool_result")
     assert result["custom_tool_use_id"] == "evt_tool" and "42" in json.dumps(result["content"])
@@ -433,9 +509,11 @@ async def test_card_when_script_approves_then_call_is_approved_and_its_wake_queu
     deps = plain_turn_deps(None, db_session_factory, settings=bare_settings(), mcp=mcp)
     chat = ChatLog()
     surface = EvalSurfaceLifecycle(chat, ScriptPlayer(eval_case({}), chat))
-    notice = EvalCardNotice(item_id=uuid.uuid4(), card_id=card_id,
-                            card=requested_call_card(created.row))  # fmt: skip
-    await press_eval_card(deps, tenant.id, surface, notice, is_admin=False)
+    notice = EvalCardNotice(item_id=uuid.uuid4(), card_id=card_id)
+    assert await pending_cards(db_session_factory, tenant.id, {"eval-1": notice.item_id}) == [
+        notice
+    ], "a card posted while the listener was away is found again"
+    await press_eval_card(deps, tenant.id, surface, notice, is_admin=False, clicker="u1")
     assert [e.kind for e in chat.events] == ["card", "card_update"], "the script pressed it"
     async with db_session_factory() as session:
         row = await host_call_cards.get_card(session, tenant_id=tenant.id, card_id=created.row.id)
@@ -443,52 +521,23 @@ async def test_card_when_script_approves_then_call_is_approved_and_its_wake_queu
     assert len(surface.wakes) == 1, "the approved call waits for the next turn"
 
 
-async def test_credential_card_when_it_comes_as_a_notice_then_the_script_saves_the_key(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
-) -> None:
-    tenant = await make_tenant(db_session)
-    account = await make_account(db_session, tenant=tenant)
-    agent_id = uuid.uuid4()
-    row = await credential_requests.create_credential_request(
-        db_session, token=mint_request_token(), kind="env", tenant_id=tenant.id,
-        agent_id=agent_id, account_id=account.id, target="NOTES_TOKEN", mcp_server_url=None,
-        requester_platform_user_id="u1", channel_id="c", idempotency_key=uuid.uuid4(),
-        expires_at=datetime.now(UTC) + timedelta(minutes=30), target_ma_agent_id="ag",
-        target_name="acme", requested_work=None,
-    )  # fmt: skip
-    await db_session.commit()
-    chat = ChatLog()
-    case = eval_case({}, script={"defaults": {"credential_request": "submit_fake"}})
-    script = ScriptPlayer(case, chat, presses=CredentialPresses(db_session_factory))
-    notice = EvalCardNotice(item_id=uuid.uuid4(), card_id=f"cred:{row.token}",
-                            card=card_for_request(row, state="requested"))  # fmt: skip
-    deps = plain_turn_deps(None, db_session_factory, settings=bare_settings())
-    await press_eval_card(deps, tenant.id, EvalSurfaceLifecycle(chat, script), notice,
-                          is_admin=False)  # fmt: skip
-    async with db_session_factory() as session:
-        files = await list_agent_files(session, tenant_id=tenant.id, agent_id=agent_id)
-    assert [f.key for f in files] == ["NOTES_TOKEN"], "the fake key went through the real save"
-    shown = chat.events[-1].card
-    assert shown is not None and shown.answer is not None
-    assert shown.answer.fields == {"value": HIDDEN}, "the chat never shows the secret"
-
-
 class WakingTurns:
-    """A turn port whose first turn leaves one approved call's wake."""
+    """A turn port whose first `waking` turns each leave one approved call's wake."""
 
-    def __init__(self) -> None:
+    def __init__(self, waking: int = 1) -> None:
         self.turns: list[tuple[str, bool]] = []
+        self.waking = waking
 
-    async def turn(self, request: TurnRequest) -> Usage:
+    async def turn(self, request: TurnRequest) -> None:
         self.turns.append((request.text, request.follow_up))
-        if len(self.turns) == 1:
+        if len(self.turns) <= self.waking:
 
             async def ran() -> str:
                 return "Ran issue_write."
 
             request.surface.wakes.append(ran)
         await request.surface.on_terminal_success(TurnState(content=[TextBlock("text", "Ok.")]))
-        return Usage(cost_usd=0.01)
+        request.meter.add(Usage(cost_usd=0.01))
 
     async def close(self, item_id: uuid.UUID) -> None:
         return None
@@ -502,6 +551,29 @@ async def test_wake_when_a_call_was_approved_then_it_runs_as_the_next_turn(
     item = await run_next(ItemDeps(db_session_factory, turns, world))
     assert item and not isinstance(item, bool) and item.status == "done", item
     assert turns.turns[1:] == [(f"Ran issue_write.\n\n{WAKE_SEED}", True)], turns.turns
+
+
+async def test_wakes_when_every_turn_leaves_one_then_the_item_stops_at_its_turn_limit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    await _start(db_session, db_session_factory, repeats=1)
+    turns, world = WakingTurns(waking=100), FakeWorld(db_session_factory, None, tmp_path)
+    item = await run_next(ItemDeps(db_session_factory, turns, world, max_turns=3))
+    assert item and not isinstance(item, bool) and item.error is not None, item
+    assert (len(turns.turns), item.error.kind) == (3, "cap"), "wake turns count to the limit"
+
+
+async def test_environment_lock_when_another_worker_holds_it_then_the_item_waits_and_gives_up(
+    db_committing_engine: AsyncEngine, db_clean: None
+) -> None:
+    held = await environment_lock(db_committing_engine, "env_eval", asyncio.Event())
+    cancel = asyncio.Event()
+    cancel.set()
+    with pytest.raises(SandboxError):
+        await environment_lock(db_committing_engine, "env_eval", cancel, poll_s=0.01)
+    await release_environment(held)
+    again = await environment_lock(db_committing_engine, "env_eval", cancel)
+    await release_environment(again)
 
 
 def _interaction(id_: str, status: str, step: dict[str, Any]) -> JsonObject:

@@ -682,9 +682,9 @@ async def _work(reap_every_s: float) -> None:
         presses = CredentialPresses(rt.sessionmaker)
         items = ItemDeps(rt.sessionmaker, turns, world, sandbox_rate_usd_per_hour=rate,
                          presses=presses, requester=simulator)  # fmt: skip
-        # Every interface: the item pods reach the world from their own network.
         app, port = create_world_app(world), evals.world_port
-        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(app, host=evals.world_host, port=port,
+                                               log_level="warning"))  # fmt: skip
         stop = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
             asyncio.get_running_loop().add_signal_handler(sig, stop.set)
@@ -695,7 +695,7 @@ async def _work(reap_every_s: float) -> None:
                     _console.print(f"Removed {len(gone)} stray eval sandboxes.")
                 await asyncio.sleep(reap_every_s)
 
-        cards = listen_cards(rt.sessionmaker, turns.raise_card)
+        cards = listen_cards(rt.sessionmaker, turns.raise_card, turns.missed)
         helpers = [asyncio.create_task(c) for c in (server.serve(), reap(), cards)]
         try:
             await work(items, concurrency=evals.worker_concurrency, stop=stop)

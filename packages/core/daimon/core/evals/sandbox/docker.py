@@ -14,6 +14,7 @@ import json
 import ssl
 import struct
 import time
+from collections.abc import Callable
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -26,6 +27,7 @@ from daimon.core.evals.sandbox.runtime import (
     PodSpec,
     SandboxError,
     agent_command,
+    environment_label,
     gateway_tar,
     main_tar,
     pod_name,
@@ -41,6 +43,7 @@ _NET_CAPS: Final = ["NET_ADMIN", "NET_RAW", "DAC_READ_SEARCH", "SETUID", "SETGID
 _MAIN_CAPS: Final = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETPCAP", "KILL"]
 _ITEM_LABEL: Final = "daimon.eval.item"
 _EXPIRES_LABEL: Final = "daimon.eval.expires"
+_ENVIRONMENT_LABEL: Final = "daimon.eval.environment"
 _NET_LIMITS: Final = {"Memory": 512 << 20, "NanoCpus": 500_000_000, "PidsLimit": 256}
 
 
@@ -109,6 +112,8 @@ class DockerRuntime:
         name = pod_name(spec)
         expires = int(time.time()) + spec.limits.deadline_s
         labels = {_ITEM_LABEL: str(spec.item.id), _EXPIRES_LABEL: str(expires)}
+        if spec.shared_environment is not None:
+            labels[_ENVIRONMENT_LABEL] = environment_label(spec.shared_environment)
         try:
             net_host: dict[str, object] = {"CapDrop": ["ALL"], "CapAdd": _NET_CAPS, **_NET_LIMITS}
             if self.network:
@@ -195,20 +200,28 @@ class DockerRuntime:
             if reply.status_code not in (204, 404):
                 raise SandboxError(f"docker remove {pod.id}-{part}: {reply.status_code}")
 
-    async def reap(self) -> list[str]:
-        """Remove eval pods past their expiry, e.g. a crashed worker's."""
-        filters = json.dumps({"label": [_EXPIRES_LABEL]})
+    async def _remove(self, label: str, keep: Callable[[dict[str, str]], bool]) -> list[str]:
+        """Remove the pods whose containers carry `label` and whose labels `keep` picks."""
+        filters = json.dumps({"label": [label]})
         listed = await self._call(
             "GET", "/containers/json", params={"all": "1", "filters": filters}
         )
-        now = time.time()
         names = sorted(
             {
                 str(c["Names"][0]).lstrip("/").rsplit("-", 1)[0]
                 for c in listed.json()
-                if int(c["Labels"][_EXPIRES_LABEL]) < now
+                if keep(c["Labels"])
             }
         )
         for name in names:
             await self.stop(PodHandle(name, "docker"))
         return names
+
+    async def reap(self) -> list[str]:
+        """Remove eval pods past their expiry, e.g. a crashed worker's."""
+        now = time.time()
+        return await self._remove(_EXPIRES_LABEL, lambda labels: int(labels[_EXPIRES_LABEL]) < now)
+
+    async def stop_environment(self, environment_id: str) -> list[str]:
+        label = f"{_ENVIRONMENT_LABEL}={environment_label(environment_id)}"
+        return await self._remove(label, lambda _labels: True)

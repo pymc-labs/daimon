@@ -67,20 +67,15 @@ def _card_id(card: PostedCard) -> str:
     return pressable.rsplit(":", 1)[0]
 
 
-async def notify_eval_card(
-    runtime: McpRuntime, auth: AuthIdentity, card: PostedCard, card_id: str | None = None
-) -> str:
-    """Hand the card to the eval worker running the caller's item; `card_id` defaults to
-    the host call's."""
+async def notify_eval_card(runtime: McpRuntime, auth: AuthIdentity, card: PostedCard) -> str:
+    """Name the host call's card to the eval worker running the caller's item."""
     from daimon.core.evals.chat.cards import EvalCardNotice, send_eval_card
 
     if auth.eval_item_id is None:
         raise ToolError("I can't post a confirmation card in this conversation. Nothing changed.")
-    card_id = card_id or _card_id(card)
+    card_id = _card_id(card)
     async with runtime.session_factory.begin() as session:
-        await send_eval_card(
-            session, EvalCardNotice(item_id=auth.eval_item_id, card_id=card_id, card=card)
-        )
+        await send_eval_card(session, EvalCardNotice(item_id=auth.eval_item_id, card_id=card_id))
     return card_id
 
 

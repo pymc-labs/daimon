@@ -25,7 +25,6 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._own_card import notify_eval_card
 from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools.discord import (
@@ -76,7 +75,6 @@ from daimon.core.env_file import (
     env_name_problem,
     env_shadow_phrase,
 )
-from daimon.core.evals.eval_tenant import is_eval_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -89,7 +87,6 @@ from daimon.core.operation_policy import (
     TargetFacts,
     decide_operation,
 )
-from daimon.core.posted_controls.cards import card_for_request
 from daimon.core.stores.agent_files import agent_env_writes_allowed, get_agent_file
 from daimon.core.stores.credential_requests import (
     create_credential_request,
@@ -523,14 +520,8 @@ async def _mint_and_post(
             parent_channel_id=origin.parent_channel_id,
             origin_thread_id=origin.thread_id,
         )
-    in_eval = is_eval_tenant(auth.tenant_id)
     try:
-        if in_eval:
-            # An eval item's card goes to its simulated chat, whose script answers it.
-            message_id = await notify_eval_card(
-                runtime, auth, card_for_request(row, state="requested"), card_id=f"cred:{token}"
-            )
-        elif on_web:
+        if on_web:
             # The web process raises the card when the notice below arrives.
             message_id = str(row.idempotency_key)
         elif auth.platform == "slack":
@@ -591,7 +582,7 @@ async def _mint_and_post(
     # Only now that the replacement is visible: an edit that lands first would
     # point the reader at a "newer form below" that does not exist yet.
     for old in retired:
-        if on_web or in_eval:
+        if on_web:
             # A superseded web card fails on save; the web app shows the newer one.
             continue
         if auth.platform == "slack":
