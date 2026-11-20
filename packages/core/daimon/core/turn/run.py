@@ -662,11 +662,11 @@ def _install_audience_gate(
     lifecycle: TurnLifecycle,
     prior: OutputAuthorization | None,
 ) -> OutputAuthorization | None:
-    """The output latch of a turn: its earlier latch (a watch's, a DM's) and the audience check.
+    """The output guard of a turn: its earlier latch (a watch's, a DM's) and the audience check.
 
-    Installs it on the lifecycle and returns it. With no audience check to make (a
-    platform without `audience_hold`, or a turn with no room) it returns None and changes
-    nothing.
+    Installs the audience latch on the lifecycle and returns the combined guard. With no
+    audience check to make (a platform without `audience_hold`, or a turn with no room) it
+    returns None and changes nothing.
     """
     check = audience_output_check(
         deps.sessionmaker,
@@ -676,20 +676,23 @@ def _install_audience_gate(
         thread_id=admission.origin_thread_id,
         hold=admission.hold,
         agent=admission.agent.name,
+        mode=admission.audience_mode,
     )
     if check is None:
         return None
+    latch = OutputAuthorization(check)
 
     async def both() -> None:
         if prior is not None:
             await prior.check()
-        await check()
+        await latch.check()
 
-    guard = OutputAuthorization(both)
-    install = getattr(lifecycle, "set_output_authorization", None)
+    # The latch goes on the lifecycle apart from a watch's or direct message's own: a detached
+    # file sweep skips a turn that has the second, never one that has only this.
+    install = getattr(lifecycle, "set_audience_latch", None)
     if install is not None:
-        cast(Callable[[OutputAuthorization], None], install)(guard)
-    return guard
+        cast(Callable[[OutputAuthorization], None], install)(latch)
+    return OutputAuthorization(both)
 
 
 def _with_prefix(prefix: str, message: str) -> str:
@@ -2394,7 +2397,7 @@ async def run_prepared_turn_impl(
             prior=delivery or getattr(lifecycle, "output_authorization", None),
         )
         guard = audience_guard or delivery
-        if audience_guard is None and delivery is not None:
+        if delivery is not None:
             install = getattr(lifecycle, "set_output_authorization", None)
             if install is not None:
                 cast(Callable[[OutputAuthorization], None], install)(delivery)
@@ -2648,7 +2651,11 @@ async def run_prepared_turn_impl(
                         lifecycle=new_lifecycle,
                         prior=getattr(new_lifecycle, "output_authorization", None),
                     )
-                    with output_authorization(recovery_guard):
+                    with (
+                        output_authorization(recovery_guard)
+                        if recovery_guard is not None
+                        else contextlib.nullcontext()
+                    ):
                         recovered_state = await run_turn(
                             **_turn_port_kwargs(
                                 deps,

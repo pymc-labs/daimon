@@ -1187,3 +1187,129 @@ async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
         place=Place(),
     )
     assert bool(decision) is inside, decision.reason
+
+
+# ── The room audience (`audience_hold`): a card carries what the agent wrote ──
+
+
+class _RoomWorld:
+    """The audience of the card's room, changeable between the card and the click."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, mode: str = "on") -> None:
+        from daimon.core import audience_gate
+        from daimon.core.channel_audience import ChannelAudience
+        from daimon.core.turn import output as output_mod
+
+        self.contained = False
+        self.mode = mode
+
+        async def fact(
+            session: object, *, tenant_id: object, platform: str, channel_id: str
+        ) -> Any:
+            return ChannelAudience(
+                contained=self.contained, known=True, narrow=False, source="live"
+            )
+
+        monkeypatch.setattr(output_mod, "channel_has_outsiders", fact)
+        monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+
+    def hook_channel(self) -> tuple[Any, Any]:
+        from daimon.adapters.discord.tool_confirmation import (
+            _card_audience_check,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        class _Sessions:
+            def __call__(self) -> Any:
+                return MagicMock(
+                    __aenter__=AsyncMock(return_value=MagicMock()),
+                    __aexit__=AsyncMock(return_value=False),
+                )
+
+        channel = MagicMock(spec=discord.Thread)
+        channel.id = 900
+        channel.parent_id = 800
+        channel.send = AsyncMock(return_value=SimpleNamespace(id=5, edit=AsyncMock()))
+        admission = SimpleNamespace(
+            hold=None, agent=SimpleNamespace(name="helper"), audience_mode=self.mode
+        )
+        check = _card_audience_check(
+            channel,
+            SimpleNamespace(sessionmaker=_Sessions()),  # type: ignore[arg-type]
+            uuid.uuid4(),
+            admission,  # type: ignore[arg-type]
+        )
+        return channel, check
+
+
+def _agent_written_prompt() -> ConfirmationPrompt:
+    return _prompt().model_copy(
+        update={
+            "title": 'Send "Q3 numbers for ACME" to ceo@example.test?',
+            "visible_lines": ("Body preview: the churn figures are ...",),
+        }
+    )
+
+
+async def test_a_card_with_agent_written_text_is_not_posted_into_a_contained_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.turn.errors import AdmissionDenied
+
+    world = _RoomWorld(monkeypatch)
+    channel, check = world.hook_channel()
+    world.contained = True
+    monkeypatch.setattr(confirmation_module, "_card_audience_check", lambda *a, **k: check)
+    with pytest.raises(AdmissionDenied):
+        await discord_confirmation_hook(channel)(_agent_written_prompt())
+    channel.send.assert_not_awaited()
+
+    world.contained = False  # the same card posts where nobody outside can read
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_agent_written_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    assert "ceo@example.test" in _texts(channel.send.await_args.kwargs["view"])[0]
+    waiting.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await waiting
+
+
+async def test_a_card_in_mode_off_or_shadow_posts_in_a_contained_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for mode in ("off", "shadow"):
+        world = _RoomWorld(monkeypatch, mode=mode)
+        channel, check = world.hook_channel()
+        world.contained = True
+        monkeypatch.setattr(
+            confirmation_module, "_card_audience_check", lambda *a, _c=check, **k: _c
+        )
+        hook = discord_confirmation_hook(channel)
+        waiting = asyncio.create_task(hook(_agent_written_prompt()))
+        while not channel.send.await_count:
+            await asyncio.sleep(0)
+        waiting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await waiting
+
+
+async def test_the_answer_and_the_retire_edits_of_a_card_are_gated_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _RoomWorld(monkeypatch)
+    channel, check = world.hook_channel()
+    monkeypatch.setattr(confirmation_module, "_card_audience_check", lambda *a, **k: check)
+    message = channel.send.return_value
+    waiting = asyncio.create_task(discord_confirmation_hook(channel)(_agent_written_prompt()))
+    while not channel.send.await_count:
+        await asyncio.sleep(0)
+    view = channel.send.await_args.kwargs["view"]
+    world.contained = True  # an outsider joined while the card waited
+    click = _interaction(111)
+    await _buttons(view)[0].callback(click)
+    click.response.edit_message.assert_not_awaited()
+    notice = click.response.send_message.await_args.kwargs
+    assert notice["ephemeral"] is True
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation), "the person's answer still counts"
+    await result.retire_unsent()
+    message.edit.assert_not_awaited()

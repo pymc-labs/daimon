@@ -41,6 +41,7 @@ import uuid
 from dataclasses import dataclass
 
 from daimon.core.admin_actions import DelegatedAction, admin_for_action, is_personal_user_credential
+from daimon.core.channel_audience import AudienceMode
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.turn_hold import TurnHold
 
@@ -68,6 +69,9 @@ class AuthIdentity:
     verified_role_ids: tuple[str, ...] = ()
     # against the token row; None for every unheld credential.
     hold: TurnHold | None = None
+    # The `audience_hold` mode when the caller already knows it; None means the write guard
+    # reads it, once per call. `off` here skips the read (hand-built identities of tests).
+    audience_mode: AudienceMode | None = None
     # The principal was verified to belong to another organisation (read live from
     # the principal by the verifier): a client on every call, held credential or not.
     foreign_home_id: str | None = None

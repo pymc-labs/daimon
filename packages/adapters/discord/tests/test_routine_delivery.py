@@ -1497,3 +1497,39 @@ async def test_a_failed_mode_read_refuses_the_delivery(
     assert (outcome.status, outcome.note) == ("skipped", "audience_unreadable")
     channel.send.assert_not_awaited()
     assert dms.sent == []
+
+
+async def test_an_audience_change_between_chunks_stops_the_rest_of_the_result(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Every chunk asks the audience again: an outsider who joins after the first chunk
+    gets no later one, and nothing falls back to a direct message."""
+    row = await _stored(db_session, {"held": False})
+    row = row.model_copy(update={"delivery_payload": "x" * 2500})
+    channel = _text_channel()
+
+    async def send(*args: object, **kwargs: object) -> MagicMock:
+        audience.contained = {"555"}  # the room becomes one that outsiders can read
+        return SimpleNamespace(id=1)
+
+    channel.send = AsyncMock(side_effect=send)
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    assert channel.send.await_count == 1, "the second chunk was never sent"
+    assert dms.sent == []
+
+
+async def test_every_chunk_is_sent_while_the_audience_stays_the_same(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = await _stored(db_session, {"held": False})
+    row = row.model_copy(update={"delivery_payload": "x" * 2500})
+    channel = _text_channel()
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=1))
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered" and channel.send.await_count >= 2

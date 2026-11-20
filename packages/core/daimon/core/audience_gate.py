@@ -45,7 +45,10 @@ GATED_PLATFORMS: Final = frozenset({"discord"})
 #: against the code that makes each post (`test_audience_gate_exemptions.py`).
 POST_EXEMPTIONS: Final[dict[str, str]] = {
     "reaction": "An emoji carries no content.",
-    "turn_notice": "Fixed text or an error card in the room that started the turn.",
+    "turn_notice": (
+        "Fixed text or an error card in the room where the conversation started. Never text the "
+        "agent wrote: a confirmation card carries that and takes the gate."
+    ),
     "hand_over_notice_edit": "An edit of the bot's own fixed notice in the same room.",
     "setup_thread": "An admin's setup action, not agent output.",
     "support_escalation": "The person's own Ask-a-human action; the agent writes none of it.",
@@ -96,14 +99,19 @@ async def read_audience_mode(
     channel_id: str,
     parent_id: str | None = None,
     routine_id: uuid.UUID | None = None,
+    session: AsyncSession | None = None,
 ) -> AudienceMode:
-    """The mode for a destination: `off` for a platform that cannot set it, else read (raises)."""
+    """The mode for a destination: `off` for a platform that cannot set it, else read (raises).
+
+    With `session` the read runs in the caller's open transaction and opens no other.
+    """
     if platform not in GATED_PLATFORMS:
         return "off"
-    async with sessionmaker() as session:
-        return await audience_mode(
-            session, _place(tenant_id, platform, channel_id, parent_id, routine_id)
-        )
+    place = _place(tenant_id, platform, channel_id, parent_id, routine_id)
+    if session is not None:
+        return await audience_mode(session, place)
+    async with sessionmaker() as own:
+        return await audience_mode(own, place)
 
 
 def log_shadow_refusal(
@@ -112,7 +120,7 @@ def log_shadow_refusal(
     channel_id: str,
     agent: str | None,
     reason: str = AUDIENCE_CONTAINED,
-    kind: Literal["post_refused", "dm_refused"] = "post_refused",
+    kind: Literal["post_refused", "dm_refused", "fact_unreadable"] = "post_refused",
 ) -> None:
     """The shadow record of a post `on` would refuse. Never carries message text."""
     log.info(
@@ -123,6 +131,26 @@ def log_shadow_refusal(
         agent=agent,
         reason=reason,
     )
+
+
+async def _read_fact(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: AsyncSession | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel: str,
+) -> ChannelAudience:
+    if session is not None:
+        # A savepoint: a failed read leaves the caller's transaction usable.
+        async with session.begin_nested():
+            return await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=platform, channel_id=channel
+            )
+    async with sessionmaker() as own:
+        return await channel_has_outsiders(
+            own, tenant_id=tenant_id, platform=platform, channel_id=channel
+        )
 
 
 async def audience_fact(
@@ -137,11 +165,14 @@ async def audience_fact(
     routine_id: uuid.UUID | None = None,
     mode: AudienceMode | None = None,
     held_if_contained: bool = False,
+    session: AsyncSession | None = None,
 ) -> ChannelAudience | None:
     """The fact `authorize(POST, audience=...)` must enforce, or None when nothing is.
 
     None in mode `off` (nothing is read beyond the mode) and in `shadow` (a refusal is
-    logged, the post goes ahead). A failed read raises.
+    logged, the post goes ahead, also when the fact cannot be read). A failed read in
+    `on`, and a failed mode read, raise. With `session` every read runs in the caller's
+    open transaction and opens no other.
     """
     mode = mode or await read_audience_mode(
         sessionmaker,
@@ -150,13 +181,29 @@ async def audience_fact(
         channel_id=channel_id,
         parent_id=parent_id,
         routine_id=routine_id,
+        session=session,
     )
     if mode == "off":
         return None
-    async with sessionmaker() as session:
-        fact = await channel_has_outsiders(
-            session, tenant_id=tenant_id, platform=platform, channel_id=parent_id or channel_id
+    try:
+        fact = await _read_fact(
+            sessionmaker,
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel=parent_id or channel_id,
         )
+    except Exception as exc:
+        if mode != "shadow":
+            raise
+        log_shadow_refusal(
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            agent=agent,
+            reason=type(exc).__name__,
+            kind="fact_unreadable",
+        )
+        return None
     if mode == "shadow":
         if held_if_contained and fact.contained:
             hold = TurnHold(platform, parent_id or channel_id, client=False)

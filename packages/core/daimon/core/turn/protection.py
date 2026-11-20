@@ -70,23 +70,25 @@ async def protection_state(
     `PROTECTED`. Without it nothing about the audience is read.
     """
     try:
+        target = thread_id or channel_id
         async with sessionmaker() as session:
             policy = await load_access_policy(session, tenant_id=tenant_id)
-        target = thread_id or channel_id
-        fact = (
-            await audience_fact(
-                sessionmaker,
-                tenant_id=tenant_id,
-                platform=audience.platform,
-                channel_id=target,
-                parent_id=channel_id if thread_id else None,
-                hold=audience.hold,
-                agent=audience.agent,
-                held_if_contained=audience.held_if_contained,
+            # The mode and the fact are read in this same transaction: no second session.
+            fact = (
+                await audience_fact(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    platform=audience.platform,
+                    channel_id=target,
+                    parent_id=channel_id if thread_id else None,
+                    hold=audience.hold,
+                    agent=audience.agent,
+                    held_if_contained=audience.held_if_contained,
+                    session=session,
+                )
+                if audience is not None
+                else None
             )
-            if audience is not None
-            else None
-        )
         hold = audience.hold_for(fact, channel_id) if audience and fact else None
         if not _may_post(
             policy, Place(channel_id=target, parent_channel_id=channel_id), fact, hold

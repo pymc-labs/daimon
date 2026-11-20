@@ -63,6 +63,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.turn.output import audience_output_check
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -170,6 +171,9 @@ class _ConfirmationView(discord.ui.LayoutView):
         #: The posted card's ordering key for `edit_card_within`; set once the
         #: card is sent, before anyone can click it.
         self.card_key: object = ("discord-view", id(self))
+        #: The room-audience check (`audience_hold`), set with the card: its edit on an answer
+        #: carries the agent's text again.
+        self.audience_check: AudienceCheck | None = None
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(
             accent_colour=discord.Colour(
                 COLOR_AMBER
@@ -387,6 +391,15 @@ class _ConfirmationView(discord.ui.LayoutView):
             return
         # Answered: nothing on this card listens any more.
         self.stop()
+        if self.audience_check is not None and not await _audience_allows(self.audience_check):
+            # The room became one outsiders can read: the card keeps what it showed.
+            self.answered_edit_done.set()
+            await interaction.response.send_message(
+                embed=build_notice_embed(AUDIENCE_CARD_NOTE),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         answered = build_confirmation_card(
             self._prompt,
             state=answer,
@@ -468,6 +481,8 @@ def discord_confirmation_hook(
     which needs `client`. Anywhere else, or a DM without `client`, the clicker
     counts as no admin.
     """
+
+    card_check = _card_audience_check(channel, runtime, tenant_id, admission)
 
     async def role_guild() -> discord.Guild | None:
         if isinstance(channel, (discord.Thread, discord.TextChannel)):
@@ -615,6 +630,8 @@ def discord_confirmation_hook(
             how="once" if prompt.tool_rules_enabled else None,
         )
         try:
+            if card_check is not None:
+                await card_check()
             message = await channel.send(
                 view=_ConfirmationView(answered, prompt, answer=None, note=qa.NOTE),
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -629,7 +646,7 @@ def discord_confirmation_hook(
 
         async def retire_unsent() -> None:
             view.retired = True
-            await _retire(message, prompt, "stopped", note=qa.NOTE)
+            await _retire(message, prompt, "stopped", note=qa.NOTE, check=card_check)
 
         return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
 
@@ -653,12 +670,16 @@ def discord_confirmation_hook(
         )
         if (approved := await _qa_auto_approve(view, prompt)) is not None:
             return approved
+        if card_check is not None:
+            # The card carries what the agent wrote: it takes the same gate as an answer.
+            await card_check()
+        view.audience_check = card_check
         message = await channel.send(view=view, allowed_mentions=discord.AllowedMentions.none())
         view.card_key = ("discord", message.id)
 
         async def retire(state: ConfirmationCardState) -> None:
             view.retired = True
-            await _retire(message, prompt, state)
+            await _retire(message, prompt, state, check=card_check)
 
         async def remind() -> None:
             # Once, after a while: the requester is pinged in the card's own thread.
@@ -696,13 +717,67 @@ def discord_confirmation_hook(
     return _confirm
 
 
+AudienceCheck = Callable[[], Awaitable[None]]
+
+AUDIENCE_CARD_NOTE = (
+    "People outside the team can now read this channel, so this card was not updated."
+)
+
+
+async def _audience_allows(check: AudienceCheck) -> bool:
+    """False when the card's room may no longer take the agent's text, or cannot be checked."""
+    try:
+        await check()
+    except Exception as exc:
+        log.info("tool_confirmation.audience_refused", error_type=type(exc).__name__)
+        return False
+    return True
+
+
+def _card_audience_check(
+    channel: discord.abc.Messageable,
+    runtime: DiscordRuntime | None,
+    tenant_id: uuid.UUID | None,
+    admission: Admission | None,
+) -> AudienceCheck | None:
+    """The room-audience check (`audience_hold`) for cards posted into `channel`, the turn's room.
+
+    None where there is no room to check, or no turn to hold: a direct message, and a hook
+    built without its runtime, tenant or admission.
+    """
+    if runtime is None or tenant_id is None or admission is None:
+        return None
+    # A hand-built admission has no mode: it is off, like a server that never set it.
+    if getattr(admission, "audience_mode", "off") == "off":
+        return None
+    if isinstance(channel, discord.Thread):
+        room, thread = str(channel.parent_id), str(channel.id)
+    elif isinstance(channel, discord.TextChannel):
+        room, thread = str(channel.id), None
+    else:
+        return None
+    return audience_output_check(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=room,
+        thread_id=thread,
+        hold=admission.hold,
+        agent=admission.agent.name,
+        mode=admission.audience_mode,
+    )
+
+
 async def _retire(
     message: discord.Message,
     prompt: ConfirmationPrompt,
     state: ConfirmationCardState,
     *,
     note: str | None = None,
+    check: AudienceCheck | None = None,
 ) -> None:
+    if check is not None and not await _audience_allows(check):
+        return  # the room is one outsiders can read now: the card keeps what it showed
     card = build_confirmation_card(prompt, state=state)
     # Bounded for the turn, finished in the background (`edit_card_within`).
     await edit_card_within(

@@ -75,17 +75,39 @@ class OutputGate:
     """Keep the same latch on late cleanup and inherited background write tasks."""
 
     output_authorization: OutputAuthorization | None = None
+    #: The room-audience latch (`audience_hold`), kept apart from `output_authorization`: that
+    #: one restricts a watch's or direct message's output, and detached file sweeps read it as
+    #: such. This one never does.
+    audience_latch: OutputAuthorization | None = None
 
     def set_output_authorization(self, authorization: OutputAuthorization) -> None:
         self.output_authorization = authorization
 
+    def set_audience_latch(self, latch: OutputAuthorization) -> None:
+        self.audience_latch = latch
+
+    def _combined(self) -> OutputAuthorization | None:
+        first, second = self.output_authorization, self.audience_latch
+        if second is None:
+            return first
+        if first is None:
+            return second
+
+        async def both() -> None:
+            await first.check()
+            await second.check()
+
+        return OutputAuthorization(both)
+
     async def check_output(self) -> None:
         if self.output_authorization is not None:
             await self.output_authorization.check()
+        if self.audience_latch is not None:
+            await self.audience_latch.check()
 
     def guarded_output[**P, R](self, call: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         async def guarded(*args: P.args, **kwargs: P.kwargs) -> R:
-            with output_authorization(self.output_authorization):
+            with output_authorization(self._combined()):
                 await authorize_output()
                 return await call(*args, **kwargs)
 
@@ -101,13 +123,16 @@ def audience_output_check(
     thread_id: str | None,
     hold: TurnHold | None,
     agent: str | None,
+    mode: AudienceMode | None = None,
 ) -> Callable[[], Awaitable[None]] | None:
     """Gate A: the check a turn's output latch runs before each post and edit in its room.
 
     None when there is nothing to check: a platform with no `audience_hold`, or a turn
-    with no room (a direct message, the web app). The mode is read once, at the first
-    output; a failed read raises and that output is refused. A refusal is
-    `AdmissionDenied`, which the latch keeps for the rest of the turn.
+    with no room (a direct message, the web app). `mode` is the one the turn was admitted
+    under (`Admission.audience_mode`); with None it is read once, at the first output, and a
+    failed read raises and that output is refused. In `shadow` a fact that cannot be read is
+    logged and the output goes ahead; in `on` it refuses. A refusal is `AdmissionDenied`,
+    which the latch keeps for the rest of the turn.
     """
     if platform not in GATED_PLATFORMS or channel_id is None:
         return None
@@ -115,7 +140,7 @@ def audience_output_check(
     thread = None if thread == channel_id else thread
     destination = thread or channel_id
     parent = channel_id if thread else None
-    state: dict[str, AudienceMode | bool] = {}
+    state: dict[str, AudienceMode | bool] = {} if mode is None else {"mode": mode}
 
     async def check() -> None:
         mode = state.get("mode")
@@ -129,10 +154,22 @@ def audience_output_check(
             )
         if mode == "off":
             return
-        async with sessionmaker() as session:
-            fact = await channel_has_outsiders(
-                session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        try:
+            async with sessionmaker() as session:
+                fact = await channel_has_outsiders(
+                    session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+                )
+        except Exception as exc:
+            if mode != "shadow":
+                raise
+            log_shadow_refusal(
+                tenant_id=tenant_id,
+                channel_id=destination,
+                agent=agent,
+                reason=type(exc).__name__,
+                kind="fact_unreadable",
             )
+            return
         if audience_refusal(fact, hold, destination, parent) is None:
             return
         if mode == "shadow":

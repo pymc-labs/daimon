@@ -8,7 +8,7 @@ returns. `off` reads nothing, `shadow` logs, and a failed read refuses the post.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import discord
@@ -182,3 +182,98 @@ async def test_a_failed_read_refuses_the_post(
     world.mode = RuntimeError("database down")
     with pytest.raises(ToolError, match="could not be checked"):
         await require_channel_writable(runtime, _auth(tenant_id), channel_id="room-1")
+
+
+@pytest.mark.parametrize("stored", [None, "off"], ids=["unset", "off"])
+@pytest.mark.parametrize("supplied_policy", [False, True], ids=["loads-policy", "tidy-policy"])
+async def test_mode_off_adds_one_mode_read_in_the_session_that_is_open(
+    stored: str | None,
+    supplied_policy: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The real mode reader and no patching: a guarded write opens one session, for the
+    policy, the mode and (when on) the fact; and reads the feature rows once."""
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+    from sqlalchemy import event
+
+    runtime, tenant_id = await _setup(db_session, db_session_factory)
+    if stored is not None:
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant_id,
+            target=FeatureTarget("workspace"),
+            key="audience_hold",
+            value=stored,
+            set_by=None,
+            surface="chat",
+        )
+        await db_session.commit()
+
+    opened = 0
+    real_factory = runtime.session_factory
+
+    def counting() -> Any:
+        nonlocal opened
+        opened += 1
+        return real_factory()
+
+    runtime = McpRuntime(
+        session_factory=cast(Any, counting),
+        client=runtime.client,
+        settings=runtime.settings,
+        deployment_default=runtime.deployment_default,
+    )
+    statements: list[str] = []
+    engine = real_factory.kw["bind"].engine.sync_engine
+
+    def record(conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        await require_channel_writable(
+            runtime,
+            _auth(tenant_id),
+            channel_id="room-1",
+            policy=TenantAccessPolicy() if supplied_policy else None,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert opened == 1, "the policy, the mode and the fact share one session"
+    assert sum("feature_values" in s for s in statements) == 1, "one mode read"
+    assert not any("shared_channel" in s or "channel_audience" in s for s in statements), (
+        "mode off reads no fact"
+    )
+
+
+async def test_a_platform_without_audience_hold_opens_no_session_for_a_supplied_policy(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    runtime, tenant_id = await _setup(db_session, db_session_factory, "slack")
+    opened = 0
+
+    def counting() -> Any:
+        nonlocal opened
+        opened += 1
+        return db_session_factory()
+
+    runtime = McpRuntime(
+        session_factory=cast(Any, counting),
+        client=runtime.client,
+        settings=runtime.settings,
+        deployment_default=runtime.deployment_default,
+    )
+    await require_channel_writable(
+        runtime,
+        _auth(tenant_id, "slack"),
+        channel_id="C1",
+        policy=TenantAccessPolicy(),
+    )
+    assert opened == 0

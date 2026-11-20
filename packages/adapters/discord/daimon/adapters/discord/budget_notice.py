@@ -13,6 +13,9 @@ import aiohttp
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.audience_gate import audience_fact
+from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.channel_budget_notice import (
     AlertOutcome,
     BudgetAlert,
@@ -31,6 +34,7 @@ from daimon.core.stores.watches import (
     Unclear,
 )
 from daimon.core.turn.deps import TurnDeps
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -82,14 +86,54 @@ def discord_budget_notifier(
     return send
 
 
-def discord_budget_alerter(client: discord.Client) -> BudgetAlerter:
-    """Post the alert as a neutral card; `refused` when the channel is gone or closed to Daimon."""
+def discord_budget_alerter(
+    client: discord.Client, sessionmaker: async_sessionmaker[AsyncSession] | None = None
+) -> BudgetAlerter:
+    """Post the alert as a neutral card; `refused` when the channel is gone or closed to Daimon.
+
+    With `sessionmaker` the alert takes the room-audience gate (`audience_hold`) first: it
+    names another channel and what it spent, so a destination that outsiders can read gets
+    none (`refused`: the claim stays and the next multiple tries again). A background alert
+    runs under no hold. An audience that cannot be read is `failed`, tried again next poll.
+    The deployment's own alert channel, in another workspace, is the operator's and not gated.
+    """
+
+    async def audience_refuses(alert: BudgetAlert, channel: object) -> bool | None:
+        """True when the gate refuses, None when it cannot say, False when it passes."""
+        if sessionmaker is None or not alert.own:
+            return False
+        parent = str(channel.parent_id) if isinstance(channel, discord.Thread) else None
+        try:
+            fact = await audience_fact(
+                sessionmaker,
+                tenant_id=alert.tenant_id,
+                platform="discord",
+                channel_id=alert.destination_id,
+                parent_id=parent,
+                hold=None,
+            )
+        except Exception as exc:
+            log.warning("channel_budget.alert_audience_unreadable", err_type=type(exc).__name__)
+            return None
+        return fact is not None and not authorize(
+            TenantAccessPolicy(),
+            subject=Subject(),
+            action=Action.POST,
+            place=Place(channel_id=alert.destination_id, parent_channel_id=parent),
+            audience=fact,
+        )
 
     async def send(alert: BudgetAlert) -> AlertOutcome:
         try:
             channel_id = int(alert.destination_id)
             channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
             if not isinstance(channel, discord.abc.Messageable):
+                return "refused"
+            refused = await audience_refuses(alert, channel)
+            if refused is None:
+                return "failed"
+            if refused:
+                log.info("channel_budget.alert_refused", err_type="audience_contained")
                 return "refused"
             guild = client.get_guild(int(alert.workspace_id))
             ref = alert.channel_ref(f"<#{alert.channel_id}>", guild.name if guild else None)

@@ -35,7 +35,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.anthropic_guard import anthropic_disabled
-from daimon.core.audience_gate import audience_fact
+from daimon.core.audience_gate import GATED_PLATFORMS, audience_fact
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -67,6 +67,7 @@ from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
 from daimon.core.turn_hold import TurnHold
 from fastmcp.exceptions import ToolError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _log = structlog.get_logger(__name__)
 
@@ -123,11 +124,18 @@ _AMBIGUOUS_HOLD_MSG = (
 )
 
 
-async def load_channel_policy(runtime: McpRuntime, auth: AuthIdentity) -> TenantAccessPolicy:
-    """Load the caller's tenant policy; an unreadable one refuses the call."""
+async def load_channel_policy(
+    runtime: McpRuntime, auth: AuthIdentity, session: AsyncSession | None = None
+) -> TenantAccessPolicy:
+    """Load the caller's tenant policy; an unreadable one refuses the call.
+
+    With `session` the read runs in the caller's open transaction.
+    """
     try:
-        async with runtime.session_factory() as session:
+        if session is not None:
             return await load_access_policy(session, tenant_id=auth.tenant_id)
+        async with runtime.session_factory() as own:
+            return await load_access_policy(own, tenant_id=auth.tenant_id)
     except AccessPolicyUnreadable as exc:
         raise ToolError(_UNREADABLE_MSG) from exc
 
@@ -178,7 +186,6 @@ async def require_channel_writable(
     turn's verified place (`turn_origin_place`): a call from inside such a
     channel posts only there, and one from its setup thread may post into it.
     """
-    policy = policy if policy is not None else await load_channel_policy(runtime, auth)
     place = Place(
         channel_id=channel_id,
         parent_channel_id=parent_channel_id,
@@ -187,15 +194,23 @@ async def require_channel_writable(
     )
     subject = mcp_subject(auth)
     # Who can read the destination is read first and is final: a room that outsiders can
-    # read takes a post only from a turn held to it, whatever the rules below say.
-    audience = await _audience_for_post(
-        runtime,
-        auth,
-        channel_id=channel_id,
-        parent_channel_id=parent_channel_id,
-        own_dm=place.own_dm,
-        agent=agent,
-    )
+    # read takes a post only from a turn held to it, whatever the rules below say. The
+    # policy, the mode and the fact share one session; a server with no `audience_hold`
+    # (a platform that cannot set it, a requester's own DM) adds no read.
+    audience: ChannelAudience | None = None
+    if policy is None or _reads_audience(auth, place):
+        async with runtime.session_factory() as session:
+            if policy is None:
+                policy = await load_channel_policy(runtime, auth, session)
+            if _reads_audience(auth, place):
+                audience = await _audience_for_post(
+                    runtime,
+                    auth,
+                    session,
+                    channel_id=channel_id,
+                    parent_channel_id=parent_channel_id,
+                    agent=agent,
+                )
     # The credential's hold is decided first: it is the authority for a held turn, so
     # neither the quick paths below nor a model-supplied origin can widen it.
     first = authorize(
@@ -240,24 +255,31 @@ async def require_channel_writable(
         raise ToolError(_RUNS_IN_SEND_MSG)
 
 
+def _reads_audience(auth: AuthIdentity, place: Place) -> bool:
+    """The post is into a room on a platform that has `audience_hold`; a requester's own
+    direct message is no room."""
+    return not place.own_dm and auth.platform in GATED_PLATFORMS and auth.audience_mode != "off"
+
+
 async def _audience_for_post(
     runtime: McpRuntime,
     auth: AuthIdentity,
+    session: AsyncSession,
     *,
     channel_id: str,
     parent_channel_id: str | None,
-    own_dm: bool,
     agent: AgentRef | None,
 ) -> ChannelAudience | None:
     """The destination's audience when `audience_hold` is `on` for it, else None.
 
-    A requester's own direct message is no room. A failed read refuses the post.
+    Read in the caller's `session`. A failed read refuses the post.
     """
-    if own_dm or auth.platform is None:
-        return None
+    assert auth.platform is not None
     try:
         return await audience_fact(
             runtime.session_factory,
+            session=session,
+            mode=auth.audience_mode,
             tenant_id=auth.tenant_id,
             platform=auth.platform,
             channel_id=channel_id,

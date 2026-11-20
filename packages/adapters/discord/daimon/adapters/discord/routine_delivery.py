@@ -567,6 +567,36 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
             return await fallback("protected_channel")
         assert isinstance(channel, discord.Thread | discord.TextChannel)
+
+        async def still_deliverable() -> DeliveryOutcome | None:
+            """The audience check, asked again before each chunk: a room can become one that
+            outsiders read while a long result is still going out."""
+            # `shadow` logged its record at the first check; only `on` refuses a chunk.
+            if gate.mode != "on" or not gate.stored.recorded:
+                return None
+            try:
+                fresh = await gate.audience(target.channel_id, parent_channel_id)
+            except Exception as exc:
+                log.warning("routine.delivery_audience_unreadable", error_type=type(exc).__name__)
+                return DeliveryOutcome(status="skipped", note="audience_unreadable")
+            again = authorize(
+                policy,
+                subject=Subject(),
+                action=Action.POST,
+                surface=Surface.ROUTINE,
+                place=Place(
+                    channel_id=target.channel_id,
+                    parent_channel_id=parent_channel_id,
+                    category_id=category_id,
+                ),
+                hold=gate.post_hold,
+                audience=fresh,
+            )
+            if again.reason == "audience_contained":
+                log.info("routine.delivery_refused", routine_id=str(row.id), reason=again.reason)
+                return DeliveryOutcome(status="skipped", note="audience_contained")
+            return None
+
         delivery_id = uuid.uuid4()  # groups the chunks into one reply for delete_reply
 
         async def record(sent: discord.Message) -> None:
@@ -598,6 +628,8 @@ def make_discord_routine_poster(
             ):
                 if (refused := await creator_still_cleared(row)) is not None:
                     return refused
+                if (refused := await still_deliverable()) is not None:
+                    return refused
                 sent = await channel.send(
                     content=chunk, allowed_mentions=discord.AllowedMentions.none()
                 )
@@ -624,6 +656,8 @@ def make_discord_routine_poster(
             )
         ):
             if (refused := await creator_still_cleared(row)) is not None:
+                return refused
+            if (refused := await still_deliverable()) is not None:
                 return refused
             sent = await transport.send(
                 content=chunk,

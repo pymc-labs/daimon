@@ -30,13 +30,24 @@ UNKNOWN = ChannelAudience(contained=True, known=False, narrow=True, source="none
 HOLD = TurnHold("discord", "room-1", client=False)
 
 
+class _Session:
+    """A session stand-in: the mode and the fact are patched, so no row is read."""
+
+    @asynccontextmanager
+    async def begin_nested(self) -> Any:
+        yield self
+
+
 class _Sessions:
-    """A sessionmaker stand-in: the mode and the fact are patched, so no row is read."""
+    def __init__(self) -> None:
+        self.opened = 0
 
     def __call__(self) -> Any:
+        self.opened += 1
+
         @asynccontextmanager
         async def session() -> Any:
-            yield SimpleNamespace()
+            yield _Session()
 
         return session()
 
@@ -275,6 +286,7 @@ def test_a_turn_with_no_gated_room_installs_nothing(
         origin_thread_id=None,
         hold=None,
         agent=SimpleNamespace(name="helper"),
+        audience_mode=None,
     )
     guard = _install_audience_gate(
         SimpleNamespace(sessionmaker=_Sessions()),  # type: ignore[arg-type]
@@ -290,13 +302,17 @@ def test_a_turn_with_no_gated_room_installs_nothing(
 async def test_the_turn_latch_keeps_the_earlier_latch(world: _World) -> None:
     world.facts["room-1"] = OPEN
     installed: list[OutputAuthorization] = []
-    lifecycle = SimpleNamespace(set_output_authorization=installed.append)
+    latches: list[OutputAuthorization] = []
+    lifecycle = SimpleNamespace(
+        set_output_authorization=installed.append, set_audience_latch=latches.append
+    )
     admission = SimpleNamespace(
         private_dm_id=None,
         origin_channel_id="room-1",
         origin_thread_id="room-1",  # a thread equal to its channel is none
         hold=None,
         agent=SimpleNamespace(name="helper"),
+        audience_mode=None,
     )
     revoked = {"yes": False}
 
@@ -312,7 +328,8 @@ async def test_the_turn_latch_keeps_the_earlier_latch(world: _World) -> None:
         lifecycle=lifecycle,  # type: ignore[arg-type]
         prior=OutputAuthorization(earlier),
     )
-    assert guard is not None and installed == [guard]
+    # The audience latch goes apart from the earlier one, which a sweep reads as a restriction.
+    assert guard is not None and installed == [] and len(latches) == 1
     await guard.check()
     revoked["yes"] = True
     with pytest.raises(AdmissionDenied) as denied:
@@ -475,3 +492,148 @@ async def test_delivery_gate(
     )
     assert decision.allowed is not refuses
     assert gate.keeps_inside(held_today=False) is keeps_inside
+
+
+# ── Review fixes: shadow never blocks, and mode `off` adds no read ───────────
+
+
+class _FailingFacts(_World):
+    """A world whose fact read fails while the mode read works."""
+
+    async def _fact(
+        self, session: object, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+    ) -> ChannelAudience:
+        self.fact_reads += 1
+        raise RuntimeError("registry down")
+
+
+@pytest.fixture
+def failing(monkeypatch: pytest.MonkeyPatch) -> _FailingFacts:
+    return _FailingFacts(monkeypatch)
+
+
+async def test_shadow_logs_a_failed_fact_read_and_posts(failing: _FailingFacts) -> None:
+    failing.mode = "shadow"
+    gate, send = _guarded(failing)
+    with capture_logs() as logs:
+        for _ in range(2):
+            await gate.guarded_output(send)(content="the secret text")  # type: ignore[call-arg]
+    assert send.await_count == 2
+    records = [log for log in logs if log["event"] == "audience.shadow"]
+    assert [(r["kind"], r["reason"]) for r in records] == [("fact_unreadable", "RuntimeError")] * 2
+    assert "secret" not in str(logs)
+
+
+async def test_on_keeps_a_failed_fact_read_closed_and_a_mode_error_explicit(
+    failing: _FailingFacts,
+) -> None:
+    gate, send = _guarded(failing)
+    with pytest.raises(RuntimeError, match="registry down"):
+        await gate.guarded_output(send)()
+    send.assert_not_awaited()
+    failing.mode = RuntimeError("database down")
+    gate, send = _guarded(failing)
+    with pytest.raises(RuntimeError, match="database down"):
+        await gate.guarded_output(send)()
+    failing.mode = "shadow"  # a mode that resolved, then a fact that did not, is the shadow case
+    failing.mode = RuntimeError("database down")
+    gate, send = _guarded(failing)
+    with pytest.raises(RuntimeError, match="database down"):
+        await gate.guarded_output(send)()
+
+
+async def test_audience_fact_in_shadow_posts_when_the_fact_cannot_be_read(
+    failing: _FailingFacts,
+) -> None:
+    failing.mode = "shadow"
+    args: dict[str, Any] = {
+        "tenant_id": TENANT,
+        "platform": "discord",
+        "channel_id": "room-1",
+        "parent_id": None,
+        "hold": None,
+    }
+    with capture_logs() as logs:
+        assert await audience_fact(_Sessions(), **args) is None  # type: ignore[arg-type]
+    assert [log["kind"] for log in logs if log["event"] == "audience.shadow"] == ["fact_unreadable"]
+    failing.mode = "on"
+    with pytest.raises(RuntimeError, match="registry down"):
+        await audience_fact(_Sessions(), **args)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("admitted", ["off", "shadow", "on"])
+async def test_a_turn_admitted_under_a_mode_reads_no_mode_and_opens_no_session_in_off(
+    world: _World, admitted: str
+) -> None:
+    """The mode comes from the admission snapshot: the latch asks the database nothing for it."""
+    world.facts["room-1"] = OPEN
+    sessions = _Sessions()
+    check = audience_output_check(
+        sessions,  # type: ignore[arg-type]
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="room-1",
+        thread_id=None,
+        hold=None,
+        agent="helper",
+        mode=admitted,  # type: ignore[arg-type]
+    )
+    assert check is not None
+    for _ in range(3):
+        await check()
+    assert world.mode_reads == 0
+    assert sessions.opened == (0 if admitted == "off" else 3), "only the fact is read"
+
+
+async def test_the_mode_is_read_once_per_turn_when_admission_gave_none(world: _World) -> None:
+    world.mode = "off"
+    gate, send = _guarded(world)
+    for _ in range(4):
+        await gate.guarded_output(send)()
+    assert world.mode_reads == 1
+
+
+async def test_protection_state_reads_the_mode_and_fact_in_its_own_session(
+    world: _World, policy: None
+) -> None:
+    sessions = _Sessions()
+    world.facts["room-1"] = OPEN
+    for mode in ("off", "shadow", "on"):
+        world.mode = mode
+        sessions.opened = 0
+        state = await protection_state(
+            sessions,  # type: ignore[arg-type]
+            tenant_id=TENANT,
+            channel_id="room-1",
+            audience=PostAudience("discord"),
+        )
+        assert state is ProtectionState.UNPROTECTED
+        assert sessions.opened == 1, f"one session for the policy, the mode and the fact ({mode})"
+
+
+def test_admission_reads_the_mode_from_its_snapshot_and_the_turn_asks_for_it() -> None:
+    from daimon.core.features.resolver import ResolvedFeature
+    from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot
+    from daimon.core.turn.admission import (
+        _TURN_FEATURE_KEYS,  # pyright: ignore[reportPrivateUsage]
+        Admission,
+    )
+
+    assert "audience_hold" in _TURN_FEATURE_KEYS
+    place = FeaturePlace.of(TENANT, "discord", "room-1", None)
+
+    def mode_of(snapshot: FeatureSnapshot | None) -> Any:
+        return Admission.audience_mode.fget(
+            SimpleNamespace(
+                resolved=lambda key: (  # type: ignore[union-attr,arg-type]
+                    snapshot.features.get(key) if snapshot is not None else None
+                )
+            )
+        )
+
+    for value in ("on", "shadow", "off"):
+        snap = FeatureSnapshot(
+            place, 1, {"audience_hold": ResolvedFeature("audience_hold", value, "workspace")}
+        )
+        assert mode_of(snap) == value
+    assert mode_of(None) is None, "a hand-built admission reads the mode at the first output"
