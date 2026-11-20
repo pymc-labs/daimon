@@ -73,13 +73,13 @@ def _real_host() -> Iterator[str]:
         subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
 
-def _as_executor(pod: str, *argv: str) -> str:
+def _as_executor(pod: str, *argv: str) -> tuple[str, str]:
     env = [arg for name, value in _EXEC_ENV.items() for arg in ("-e", f"{name}={value}")]
     done = subprocess.run(
         ["docker", "exec", "-u", "exec", "-w", "/workspace", *env, f"{pod}-main", *argv],
         capture_output=True, text=True, timeout=300,
     )  # fmt: skip
-    return done.stdout + done.stderr
+    return done.stdout, done.stderr
 
 
 async def test_pod_reaches_only_the_world(
@@ -129,12 +129,13 @@ async def test_pod_reaches_only_the_world(
             await run("ln -s /run/eval/main /workspace/out")
             leaked = await runtime.files(pod, "/workspace/out")
             assert not leaked, f"files are read with the agent's rights: {leaked}"
-            verdicts = await asyncio.to_thread(
+            verdicts, errors = await asyncio.to_thread(
                 _as_executor, pod.id, "/opt/venv/bin/python", "-m", "daimon_eval_sandbox",
                 "probe", "isolation",
             )  # fmt: skip
+            assert verdicts, f"the isolation probe ran: {errors}"
             failed = {k: v for k, v in json.loads(verdicts).items() if v != "pass"}
-            assert not failed, f"every executor command path runs as the agent: {verdicts}"
+            assert not failed, f"every executor command path runs as the agent: {verdicts}{errors}"
         except AssertionError as exc:
             raise AssertionError(f"{exc}\n{await runtime.logs(pod.id)}") from exc
         finally:

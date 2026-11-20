@@ -81,7 +81,7 @@ def _uid_via(shell: list[str]) -> str:
     return done.stdout.strip()
 
 
-async def _anthropic_tools() -> tuple[str, str]:
+async def _anthropic_tools() -> tuple[str, str, str]:
     """The real Anthropic toolset as the worker installs it: bash's uid, and what `read`
     returns for a workspace file only the executor may read (it runs as the agent, so no
     link the agent swaps in can reach past the agent's own rights)."""
@@ -95,11 +95,13 @@ async def _anthropic_tools() -> tuple[str, str]:
     secret.chmod(0o600)
     tools = {tool.name: tool for tool in agent_tools(AgentToolContext("/workspace"))}
     uid = str(await tools["bash"].call({"command": "id -u"})).strip()
+    # A restart kills the shell, which the executor uid may do only through agent-exec.
+    restarted = str(await tools["bash"].call({"restart": True}))
     try:
         read = str(await tools["read"].call({"file_path": str(secret)}))
     except ToolError as error:
         read = str(error.content)
-    return uid, read
+    return uid, read, restarted
 
 
 def isolation() -> dict[str, Verdict]:
@@ -107,8 +109,9 @@ def isolation() -> dict[str, Verdict]:
     verdicts: dict[str, Verdict] = {
         " ".join(shell): _verdict(_uid_via(shell) == _AGENT_UID) for shell in shells
     }
-    uid, read = asyncio.run(_anthropic_tools())
+    uid, read, restarted = asyncio.run(_anthropic_tools())
     verdicts["anthropic bash"] = _verdict(uid == _AGENT_UID)
+    verdicts["anthropic bash restart"] = _verdict(restarted == "bash session restarted")
     verdicts["anthropic read"] = _verdict("EXECUTOR-ONLY" not in read)
     # Unreadable binaries are undumpable: what they start cannot read their memory or env.
     for binary in ("codex", "gemini-api"):
