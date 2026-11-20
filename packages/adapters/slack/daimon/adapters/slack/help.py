@@ -16,10 +16,10 @@ from typing import Any
 import structlog
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime, resolve_bot_display_name
 from daimon.core.errors import DaimonError
 from daimon.core.platform_words import DESCRIPTIONS, WORDS
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from slack_sdk.errors import SlackApiError
 
 log = structlog.get_logger()

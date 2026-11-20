@@ -6,8 +6,8 @@ from typing import Any, Final
 
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.modal_limits import finish_modal
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.github_panel import GrantsPanel
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 
 ACTION_OPEN: Final = "agent_setup__github_repos"
 ACTION_BACK: Final = "agent_setup__github_back"

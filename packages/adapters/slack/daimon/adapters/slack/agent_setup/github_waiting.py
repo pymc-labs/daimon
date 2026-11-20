@@ -15,7 +15,6 @@ from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.modal_limits import finish_modal
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_panel import safe_github_error
@@ -30,6 +29,7 @@ from daimon.core.github_request_decisions import (
     decline,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
+from daimon.core.slack_mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.core.stores.github_access import list_authorized_repos
 from daimon.core.stores.github_access_requests import (
     AccessRequest,

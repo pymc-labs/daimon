@@ -34,7 +34,6 @@ from daimon.adapters.slack.agent_setup.read import (
 )
 from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.credential_submissions import post_ephemeral
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
@@ -53,6 +52,7 @@ from daimon.core.native_admins import AdminCaller, load_live_subject
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.permissions import any_agent_rules
 from daimon.core.roster import RosterAgent
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token

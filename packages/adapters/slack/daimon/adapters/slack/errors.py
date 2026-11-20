@@ -16,7 +16,6 @@ import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.blockkit import ERROR_COLOR
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget import ChannelBudgetError
@@ -25,6 +24,7 @@ from daimon.core.cron import InvalidScheduleError
 from daimon.core.errors import AgentNameCollision, TurnError, UserFacingError
 from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.session_fence_retry import FenceUnavailable
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
