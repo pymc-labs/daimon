@@ -3486,8 +3486,8 @@ async def test_a_trusted_identity_relay_server_is_read_upstream_with_the_operato
                     "name": "tracker",
                     "url": "https://tracker.example.com/mcp",
                     "auth": "bearer",
-                    "workspaces": ["discord:1"],
-                    "agents": ["daimon"],
+                    "workspaces": [f"discord:{tenant.external_id}"],
+                    "agents": ["relay-agent"],
                 }
             ],
             "bearers": {"tracker": "operator-key"},
@@ -3509,6 +3509,7 @@ async def test_a_trusted_identity_relay_server_is_read_upstream_with_the_operato
         account_id=account.id,
         agent=ma_agent(
             id="ag_1",
+            name="relay-agent",
             tenant_id=tenant.id,
             mcp_servers=[
                 {"name": "tracker", "type": "url", "url": relay_url(public_url, "tracker")}

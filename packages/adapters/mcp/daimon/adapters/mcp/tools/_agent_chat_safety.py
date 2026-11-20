@@ -205,7 +205,12 @@ def _annotations_for(
         session_factory=runtime.session_factory,
         tenant_id=auth.tenant_id,
         fernet=runtime.fernet,
-        relays=relay_catalogues(runtime.settings.mcp_identity, public_url=_public_url(runtime)),
+        relays=relay_catalogues(
+            runtime.settings.mcp_identity,
+            public_url=_public_url(runtime),
+            workspace=f"{auth.platform}:{auth.external_id}",
+            agent_name=session.agent.name,
+        ),
     )
 
 

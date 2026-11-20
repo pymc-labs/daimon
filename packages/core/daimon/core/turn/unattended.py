@@ -48,7 +48,7 @@ from daimon.core.mcp_tool_annotations import (
     agent_mcp_token_for,
     mcp_annotation_lookup,
     no_mcp_token,
-    relay_catalogues,
+    tenant_relay_catalogues,
 )
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -588,7 +588,13 @@ async def dm_session_authority(
         fernet=deps.fernet,
         entry_point=entry_point,
         routine_sandbox_tools=builtins,
-        relays=relay_catalogues(deps.settings.mcp_identity, public_url=deps.public_url)
+        relays=await tenant_relay_catalogues(
+            deps.settings.mcp_identity,
+            public_url=deps.public_url,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=actual.agent.name,
+        )
         if deps.settings is not None
         else None,
     )
