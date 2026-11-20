@@ -272,11 +272,13 @@ JSON or YAML file of known private names added to every scrub.
 `str | None` · optional · default unset
 
 Model that drafts case expectations. Unset: the side-call model.
+
 ### `DAIMON_EVALS__SIMULATOR_MODEL`
 
-`str` · optional · default `claude-opus-5-5`
+`str | None` · optional · default unset
 
-Anthropic model that answers eval world calls nobody recorded.
+Anthropic model that answers eval world calls nobody recorded. Unset: the side-call
+model.
 
 ### `DAIMON_EVALS__SIMULATOR_EFFORT`
 

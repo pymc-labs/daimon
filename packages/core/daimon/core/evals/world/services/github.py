@@ -2,7 +2,8 @@
 simulated answers checked against GitHub's published descriptions.
 
 `github_rest.json` (response schemas of the routed operations) and `github.graphql` (the public
-schema, descriptions dropped) are vendored by `scripts/vendor_github_api.py`. Resource keys:
+schema, descriptions dropped) are vendored by `scripts/vendor_github_api.py`. GraphQL answers
+are checked only where the `evals` extra (graphql-core) is installed. Resource keys:
 repo `owner/repo`, issue and pull `owner/repo#n`, content `owner/repo:path`.
 """
 
@@ -15,16 +16,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import urlsplit
 
 import jsonschema
 from daimon.core.evals.format import Body, Effect, ExchangeResponse, HttpResponse, JsonObject
 from daimon.core.evals.world.model import HttpCall, ItemRef, WorldRequest, body_json
 from daimon.core.evals.world.overlay import Overlay
-from graphql import GraphQLError, GraphQLResolveInfo, GraphQLSchema, build_schema, parse, validate
-from graphql.execution import execute_sync  # pyright: ignore[reportUnknownVariableType]
 from pydantic import JsonValue
+
+if TYPE_CHECKING:
+    from graphql import GraphQLResolveInfo, GraphQLSchema
 
 HOSTS: Final = frozenset({"api.github.com"})
 _HERE: Final = Path(__file__).parent
@@ -120,6 +122,8 @@ def _rest() -> JsonObject:
 
 @cache
 def graphql_schema() -> GraphQLSchema:
+    from graphql import build_schema
+
     return build_schema((_HERE / "github.graphql").read_text())
 
 
@@ -133,6 +137,11 @@ def graphql_problem(query: str, variables: JsonValue, answer: JsonValue) -> str 
     the answer's data run through the query (types, nullability, enum values)."""
     if not isinstance(answer, dict):
         return "A GraphQL answer is a JSON object."
+    try:
+        from graphql import GraphQLError, parse, validate
+        from graphql.execution import execute_sync  # pyright: ignore[reportUnknownVariableType]
+    except ImportError:
+        return None
     try:
         document = parse(query)
     except GraphQLError as exc:
@@ -226,6 +235,13 @@ class GithubService:
         fields = args if isinstance(args, dict) else None
         return (Effect(verb=found[0].verb, target=target, args=fields),)
 
+    def resource(self, request: WorldRequest) -> tuple[str, str] | None:
+        if request.surface != "http":
+            return None
+        found = route_of(*self._split(request))
+        key = _key(*found) if found else None
+        return (found[0].resource, key) if found and found[0].resource and key else None
+
     def _identity(self, item: ItemRef) -> JsonObject:
         who = next((i for i in item.case.world.identities or () if i.service == "github"), None)
         login = who.login if who else "octocat"
@@ -306,7 +322,9 @@ class GithubService:
             return
         found = route_of(http.method, urlsplit(http.url).path)
         data = body_json(answer.body)
-        if found is None or not 200 <= answer.status < 300 or not isinstance(data, dict):
+        if http.method.upper() == "GET" or found is None or not isinstance(data, dict):
+            return  # reads change nothing
+        if not 200 <= answer.status < 300:
             return
         route, params = found
         repo = f"{params.get('owner')}/{params.get('repo')}"

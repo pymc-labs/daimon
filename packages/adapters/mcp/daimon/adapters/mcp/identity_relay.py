@@ -9,6 +9,7 @@ included, is passed back unchanged.
 
 from __future__ import annotations
 
+import json
 import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -18,9 +19,12 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.eval_mcp import answer_relayed
 from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
+from daimon.core.evals.eval_tenant import is_eval_tenant
+from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
@@ -44,7 +48,7 @@ from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -212,9 +216,11 @@ def build_identity_relay_route(
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
     anthropic: AsyncAnthropic | None = None,
+    world: FakeWorld | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
-    the key of each server whose auth is bearer. A server with neither is refused (503)."""
+    the key of each server whose auth is bearer. A server with neither is refused (503).
+    An eval caller is answered by its item's fake world and never relayed."""
     keys = bearers or {}
 
     async def handler(request: Request) -> Response:
@@ -239,6 +245,15 @@ def build_identity_relay_route(
             return Response(status_code=403)
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return Response(status_code=403)
+        if is_eval_tenant(tenant_id):
+            body = await read_capped_body(request) if request.method == "POST" else None
+            if body is None:
+                return Response(status_code=405 if request.method != "POST" else 413)
+            try:
+                message: JsonValue = json.loads(body)
+            except ValueError:
+                return Response(status_code=400)
+            return await answer_relayed(world, claims, server.name, message)
         platform = str(claims.get("platform") or "")
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None

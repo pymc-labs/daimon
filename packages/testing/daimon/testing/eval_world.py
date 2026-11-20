@@ -6,8 +6,19 @@ import uuid
 from typing import Any
 
 from daimon.core._models import EvalCase, EvalCaseRevision, EvalRun, EvalRunItem, EvalSuite
+from daimon.core.evals.eval_tenant import EVAL_WORKSPACE
 from daimon.core.evals.format import Case, case_hash, to_document
+from daimon.core.stores.domain import PlatformPrincipalRow
+from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def make_eval_principal(session: AsyncSession) -> PlatformPrincipalRow:
+    """An account in the eval tenant, made with it."""
+    tenant = await make_tenant(session, platform="cli", workspace_id=EVAL_WORKSPACE)
+    return await make_platform_principal(
+        session, platform="cli", external_id="eval-runner", tenant=tenant
+    )
 
 
 def eval_case(world: dict[str, Any], **extra: Any) -> Case:  # noqa: ANN401 - case fields

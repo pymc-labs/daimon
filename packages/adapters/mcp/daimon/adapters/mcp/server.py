@@ -764,6 +764,7 @@ def create_mcp_app(
                 anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
+                world=eval_world,
             ),
             methods=RELAY_METHODS,
         )

@@ -2970,9 +2970,12 @@ class EvalsSettings(BaseModel):
         default=None,
         description="Model that drafts case expectations. Unset: the side-call model.",
     )
-    simulator_model: str = Field(
-        default="claude-opus-5-5",
-        description="Anthropic model that answers eval world calls nobody recorded.",
+    simulator_model: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic model that answers eval world calls nobody recorded. Unset: the "
+            "side-call model."
+        ),
     )
     simulator_effort: Literal["none", "low", "medium", "high"] = Field(
         default="low", description="Effort the eval world simulator runs at."

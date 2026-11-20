@@ -92,7 +92,7 @@ or an MCP tool, is answered by a fake world built from the case:
 
 When nothing can answer, or the case's call limits run out, the call is refused.
 Every call is logged with the effects it would have had, such as a created issue.
-Pushes go to a private copy of the repository for that run only. Set the
+Pushes go to a private copy of the repository for that item only. Set the
 simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__simulator_model).
 
 ## Who can do what

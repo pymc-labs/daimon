@@ -1,11 +1,10 @@
 """Whether a live request asks what a recorded exchange answered: `exact`, `normalized`,
-`keys`, `semantic` (case-format "Matching"). Pure; the semantic judge is passed in."""
+`keys`, `semantic` (case-format "Matching"). Pure; the dispatcher asks the semantic judge."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
-from collections.abc import Awaitable, Callable
 from urllib.parse import parse_qsl, urlsplit
 
 from daimon.core.evals.effects import pointer_get
@@ -20,18 +19,15 @@ from daimon.core.evals.format import (
 from daimon.core.evals.world.model import WorldRequest, body_json
 from pydantic import JsonValue
 
-#: Asks the simulator model whether two requests to `service` ask the same thing.
-SameJudge = Callable[[str, JsonValue, JsonValue], Awaitable[bool]]
 
-
-def _clean(value: JsonValue) -> JsonValue:
+def clean(value: JsonValue) -> JsonValue:
     """Whitespace collapsed in strings, nulls dropped from objects."""
     if isinstance(value, str):
         return " ".join(value.split())
     if isinstance(value, dict):
-        return {k: _clean(v) for k, v in value.items() if v is not None}
+        return {k: clean(v) for k, v in value.items() if v is not None}
     if isinstance(value, list):
-        return [_clean(v) for v in value]
+        return [clean(v) for v in value]
     return value
 
 
@@ -114,34 +110,27 @@ def static_match(exchange: Exchange, request: WorldRequest) -> bool | None:
     if mode == "semantic":
         return None
     ignore = match.ignore if match else None
-    recorded = _clean(_without(match_document(exchange.request, request.tool_info), ignore))
-    live = _clean(_without(match_document(request.request, request.tool_info), ignore))
-    if mode == "keys":
-        keys = match.keys if match and match.keys else []
-        return all(pointer_get(recorded, k) == pointer_get(live, k) for k in keys)
+    recorded = clean(_without(match_document(exchange.request, request.tool_info), ignore))
+    live = clean(_without(match_document(request.request, request.tool_info), ignore))
+    if mode == "keys" and match and match.keys:  # no keys: compared as `normalized`
+        return all(pointer_get(recorded, k) == pointer_get(live, k) for k in match.keys)
     return canonical_json(recorded) == canonical_json(live)
 
 
-async def matches(exchange: Exchange, request: WorldRequest, same: SameJudge) -> bool:
-    found = static_match(exchange, request)
-    if found is not None:
-        return found
-    return await same(
-        exchange.service or request.service,
-        match_document(exchange.request, request.tool_info),
-        match_document(request.request, request.tool_info),
-    )
-
-
 def sim_key(request: WorldRequest, overlay_digest: str) -> str:
-    """The cache key of a simulated answer: the normalized request plus the overlay state."""
+    """The cache key of a simulated answer: the normalized request, the representation it
+    accepts and the overlay state."""
+    http = request.request.http
+    headers = (http.headers or {}) if http else {}
+    accept = next((v for k, v in headers.items() if k.lower() == "accept"), None)
     document: JsonValue = {
         "surface": request.surface,
         "service": request.service,
         "server": request.server,
         "tool": request.tool,
-        "request": _clean(match_document(request.request, request.tool_info)),
+        "request": clean(match_document(request.request, request.tool_info)),
         "overlay": overlay_digest,
+        "accept": accept.lower() if accept else None,
     }
     return hashlib.sha256(canonical_json(document)).hexdigest()
 

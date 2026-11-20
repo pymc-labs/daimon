@@ -129,6 +129,11 @@ class GoogleService:
         file_id = match.groupdict().get("id")
         return (Effect(verb=verb, target=f"google:{file_id}" if file_id else None),)
 
+    def resource(self, request: WorldRequest) -> tuple[str, str] | None:
+        found = _route(request)
+        file_id = found[1].groupdict().get("id") if found else None
+        return ("file", file_id) if file_id else None
+
     def answer(
         self, item: ItemRef, request: WorldRequest, overlay: Overlay
     ) -> ExchangeResponse | None:
@@ -190,7 +195,7 @@ class GoogleService:
         if answer is None or not 200 <= answer.status < 300 or not isinstance(data, dict):
             return
         found = _route(request)
-        if found is None or found[0] not in ("google.drive.file.create", "google.drive.file.read"):
+        if found is None or found[0] != "google.drive.file.create":
             return
         file_id = next(
             (data[k] for k in ("id", "documentId", "spreadsheetId", "presentationId") if k in data),

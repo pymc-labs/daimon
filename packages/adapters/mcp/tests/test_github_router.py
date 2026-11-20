@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import httpx
 import pytest
@@ -37,6 +37,7 @@ from daimon.core.config import (
     McpSettings,
     Settings,
 )
+from daimon.core.evals.eval_tenant import EVAL_TENANT_ID
 from daimon.core.github_app_auth import PERMISSION_PROFILES
 from daimon.core.github_router_tokens import GrantedRepo, GrantView
 from daimon.core.ma_identity import derive_agent_uuid
@@ -244,6 +245,15 @@ async def test_each_call_goes_with_its_owner_installation_token(router: _Router)
     assert [r.github_repo_ids for r in rows] == [[1], [2]]
     assert rows[0].github_token_id == router.backend.tokens["acme"].token_id
     assert all(r.github_session_id == "sesn_router" for r in rows)
+
+
+async def test_an_eval_session_when_it_calls_then_it_is_refused_and_nothing_goes_upstream(
+    router: _Router,
+) -> None:
+    router.backend.caller = replace(router.backend.caller, tenant_id=EVAL_TENANT_ID)
+    response = await router.post(_call(1, "acme", "app"))
+    assert response.status_code == 403, "an eval session never reaches GitHub"
+    assert router.upstream.requests == [], "nothing went upstream"
 
 
 async def test_a_refusal_is_a_jsonrpc_error_and_never_goes_upstream(router: _Router) -> None:

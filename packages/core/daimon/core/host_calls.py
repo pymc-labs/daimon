@@ -438,6 +438,7 @@ async def _run_one(
     # The confirmed call is as held, sealed and Slack-bound as the turn that runs it.
     flags = current_execution_flags.get() or ExecutionFlags()
     jti = uuid.uuid4()
+    item = row.reference.get("eval_item")
     async with runner.sessionmaker.begin() as session:
         minted = await mint_agent_mcp_token(
             session,
@@ -454,6 +455,7 @@ async def _run_one(
             hold=flags.hold,
             slack_turn_context_id=flags.slack_turn_context_id,
             seal_ids=flags.seal_ids,
+            eval_item_id=uuid.UUID(item) if isinstance(item, str) else None,
         )
     claims = pyjwt.decode(
         minted, runner.secret, algorithms=["HS256"], options={"verify_exp": False}

@@ -1370,7 +1370,6 @@ dependencies = [
     { name = "cryptography" },
     { name = "daimon-mux", extra = ["anthropic"] },
     { name = "google-auth" },
-    { name = "graphql-core" },
     { name = "httpx" },
     { name = "httpx-sse" },
     { name = "jsonschema" },
@@ -1383,6 +1382,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sentry-sdk" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "structlog" },
     { name = "tenacity" },
 ]
@@ -1390,6 +1390,7 @@ dependencies = [
 [package.optional-dependencies]
 evals = [
     { name = "faker" },
+    { name = "graphql-core" },
     { name = "pdfplumber" },
     { name = "presidio-analyzer" },
 ]
@@ -1407,7 +1408,7 @@ requires-dist = [
     { name = "daimon-mux", extras = ["anthropic"], editable = "packages/mux" },
     { name = "faker", marker = "extra == 'evals'", specifier = ">=30" },
     { name = "google-auth", specifier = ">=2,<3" },
-    { name = "graphql-core", specifier = ">=3.2,<4" },
+    { name = "graphql-core", marker = "extra == 'evals'", specifier = ">=3.2,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx-sse", specifier = ">=0.4" },
     { name = "jsonschema", specifier = ">=4.23" },
@@ -1422,6 +1423,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sentry-sdk", specifier = ">=2.61" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "starlette", specifier = ">=0.40" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tenacity", specifier = ">=9.0" },
 ]

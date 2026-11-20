@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import json
 import subprocess
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import pytest
 import uvicorn
 from daimon.core.evals.format import Case, WorldCall
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
@@ -20,7 +22,7 @@ from daimon.core.stores import eval_world, evals
 from daimon.core.stores.evals import BlobRow
 from daimon.testing.eval_world import eval_case, make_running_item
 from daimon.testing.factories import make_tenant
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -34,7 +36,9 @@ class ScriptedSimulator:
         self.asked.append(context)
         return SimAnswer(parse_answer(context.request, json.dumps(self.reply)), "scripted")
 
-    async def same(self, service: str, recorded: JsonValue, live: JsonValue) -> bool:
+    async def same(
+        self, item_id: uuid.UUID, service: str, recorded: JsonValue, live: JsonValue
+    ) -> bool:
         return False
 
 
@@ -142,6 +146,16 @@ async def _git(*args: str, cwd: Path | None = None) -> str:
     out, err = await process.communicate()
     assert process.returncode == 0, f"git {args[0]} failed: {err.decode()}"
     return out.decode()
+
+
+@pytest.mark.parametrize(
+    "url", ["https://github.com/../../x/github.com/acme/app", "https://../../../../home/app/repo"]
+)
+def test_a_repo_url_with_dot_segments_is_refused(url: str) -> None:
+    repo = {"url": url, "default_branch": "main",
+            "bundle": {"sha256": "0" * 64, "size": 1, "media_type": "application/x-git-bundle"}}  # fmt: skip
+    with pytest.raises(ValidationError, match="plain path segments"):
+        eval_case({"repos": [repo]})
 
 
 async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(

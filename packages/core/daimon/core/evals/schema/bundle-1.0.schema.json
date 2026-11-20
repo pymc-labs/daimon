@@ -634,7 +634,7 @@
       "required": ["url", "default_branch", "bundle"],
       "additionalProperties": false,
       "properties": {
-        "url": {"type": "string", "format": "uri", "description": "Clone URL as the agent uses it (fake owner and name)."},
+        "url": {"type": "string", "format": "uri", "pattern": "^https://[a-z0-9-]+(\\.[a-z0-9-]+)*(/(?!\\.\\.?(/|$))[A-Za-z0-9_.-]+)+/?$", "description": "Clone URL as the agent uses it (fake owner and name)."},
         "default_branch": {"type": "string"},
         "bundle": {"$ref": "#/$defs/BlobRef", "description": "A git bundle with the refs below. Pushes land in a per-item copy."},
         "refs": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},

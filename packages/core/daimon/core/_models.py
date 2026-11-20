@@ -1579,6 +1579,8 @@ class McpToken(Base):
     # 'token' for a key shown once on screen). Display only; NULL for older keys and
     # for every other kind of credential.
     client: Mapped[str | None]
+    # The eval item the credential answers for: server-set at mint, read by the verifier.
+    eval_item_id: Mapped[uuid.UUID | None]
 
 
 class CodingKeyClaim(Base):
@@ -6143,6 +6145,7 @@ class EvalWorldCall(Base):
     reason: Mapped[str | None]
     exchange_id: Mapped[str | None]
     sim_key: Mapped[str | None]
+    model_calls: Mapped[int] = mapped_column(server_default=text("0"))
     document: Mapped[dict[str, Any]]
     created_at: Mapped[TsNow]
 

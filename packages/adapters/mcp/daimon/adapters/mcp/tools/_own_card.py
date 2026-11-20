@@ -10,6 +10,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import turn_origin_place
 from daimon.core.access_policy import DM_SCOPE_PREFIX, place_thread_id
+from daimon.core.evals.eval_tenant import is_eval_tenant
 from daimon.core.posted_controls import PostedCard
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
@@ -18,7 +19,10 @@ from fastmcp.exceptions import ToolError
 async def post_own_card(
     runtime: McpRuntime, auth: AuthIdentity, *, origin: TurnOriginRow, card: PostedCard
 ) -> str:
-    """Post `card` into the verified origin's thread; the posted message's id."""
+    """Post `card` into the verified origin's thread; the posted message's id. An eval
+    caller's card never reaches a real chat."""
+    if is_eval_tenant(auth.tenant_id):
+        raise ToolError("I can't post a confirmation card in this conversation. Nothing changed.")
     place = turn_origin_place(origin)
     if origin.platform == "slack":
         from daimon.adapters.mcp.tools.slack._credential_button import post_slack_control_card

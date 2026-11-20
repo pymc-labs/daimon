@@ -1190,6 +1190,8 @@ class McpTokenRow(BaseModel):
     purpose: McpTokenPurpose | None = None
     # The coding tool a coding key was made for, when it was made for one.
     client: str | None = None
+    # The eval item the credential answers for; None outside evals.
+    eval_item_id: uuid.UUID | None = None
 
 
 class CodingKeyClaimRow(BaseModel):

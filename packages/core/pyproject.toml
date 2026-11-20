@@ -21,8 +21,8 @@ dependencies = [
     "pydantic-settings>=2.5",
     "cryptography>=43",
     "jsonschema>=4.23",
-    "graphql-core>=3.2,<4",
     "pyyaml>=6.0",
+    "starlette>=0.40",
     "sentry-sdk>=2.61",
     "structlog>=24.1",
     "tenacity>=9.0",
@@ -37,9 +37,10 @@ dependencies = [
 # Scrubbing real conversations into shareable eval cases. The eval worker image and
 # operators who build suites install this extra; other images stay lean. Image OCR
 # uses the `tesseract` binary when it is on PATH, and name detection needs a spaCy model
-# (see docs/evals.md).
+# (see docs/evals.md). graphql-core checks simulated GitHub GraphQL answers.
 evals = [
     "faker>=30",
+    "graphql-core>=3.2,<4",
     "presidio-analyzer>=2.2,<3",
     "pdfplumber>=0.11,<1",
 ]
