@@ -10,15 +10,17 @@ registry has no `on` value yet.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
 from daimon.adapters.discord import private_answer
 from daimon.adapters.discord.bot import (
+    _private_offer_for,  # pyright: ignore[reportPrivateUsage]
     _TurnFailureSurface,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.discord.commands import direct_messages
@@ -104,7 +106,7 @@ async def _tenant(
     return tenant.id
 
 
-def _offer(tenant_id: uuid.UUID, *, mode: str = "on", roles: tuple[str, ...] = (INTERNAL,)):
+def _offer(tenant_id: uuid.UUID, *, roles: tuple[str, ...] = (INTERNAL,)):
     return PrivateOffer(
         tenant_id=tenant_id,
         asker_id=ASKER,
@@ -113,7 +115,6 @@ def _offer(tenant_id: uuid.UUID, *, mode: str = "on", roles: tuple[str, ...] = (
         agent="helper",
         agent_ref=AgentRef.of("helper"),
         question=QUESTION,
-        mode=mode,  # type: ignore[arg-type]
         role_ids=roles,
     )
 
@@ -204,14 +205,72 @@ async def test_the_offer_card_shows_for_an_internal_asker_only_and_never_in_shad
     )
     _MODE["value"] = "shadow"
     with capture_logs() as logs:
-        assert not await show_private_offer(
-            bot, _offer(tenant_id, mode="shadow"), send=send, refused=False
-        )
+        assert not await show_private_offer(bot, _offer(tenant_id), send=send, refused=False)
     send.assert_not_awaited()
     offers = [e for e in logs if e.get("kind") == "private_offer"]
     assert [(e["event"], e["channel_id"], e["reason"]) for e in offers] == [
         ("audience.shadow", ROOM, "room_contained")
     ]
+
+
+@pytest.mark.parametrize("now", ["off", "shadow"])
+async def test_a_mode_changed_during_the_turn_decides_the_card(
+    db_session_factory: async_sessionmaker[AsyncSession], now: str
+) -> None:
+    """The turn was admitted in mode `on`; the server changed mode before it ended."""
+    tenant_id = await _tenant(db_session_factory, "720000956")
+    bot, _cog = _world(db_session_factory)
+    send = AsyncMock()
+    _MODE["value"] = now
+
+    with capture_logs() as logs:
+        assert not await show_private_offer(bot, _offer(tenant_id), send=send, refused=False)
+
+    send.assert_not_awaited()
+    shadow = [e["kind"] for e in logs if e["event"] == "audience.shadow"]
+    assert ("private_offer" in shadow) is (now == "shadow")
+
+
+async def test_a_follow_up_without_a_mention_gets_the_offer(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A person's follow-up in a followed contained thread is answered unprompted; it
+    earns the offer as a mention does. A bot's unprompted message does not."""
+    tenant_id = await _tenant(db_session_factory, "720000957")
+    bot, _cog = _world(db_session_factory)
+    admission = cast(
+        Any,
+        SimpleNamespace(
+            audience_mode="on",
+            agent=SimpleNamespace(name="helper", metadata={}),
+            config=SimpleNamespace(agent_name="helper"),
+        ),
+    )
+    follow_up = MagicMock(spec=discord.Message)
+    follow_up.author = _member(ASKER, INTERNAL)
+    follow_up.author.bot = False
+
+    def offer_for(message: Any) -> PrivateOffer | None:
+        return _private_offer_for(
+            message,
+            admission,
+            tenant_id=tenant_id,
+            channel_id=ROOM,
+            question=QUESTION,
+            unprompted=True,
+        )
+
+    offer = offer_for(follow_up)
+    assert offer is not None and offer.role_ids == (INTERNAL,)
+    send = AsyncMock()
+    thread_offer = replace(offer, thread_id=THREAD)
+    assert await show_private_offer(bot, thread_offer, send=send, refused=False)
+    assert send.await_args.args[0].description == OFFER_AFTER_ANSWER
+
+    other_bot = MagicMock(spec=discord.Message)
+    other_bot.author = _member(SOMEONE_ELSE, INTERNAL)
+    other_bot.author.bot = True
+    assert offer_for(other_bot) is None
 
 
 async def test_no_offer_card_where_dms_are_off(

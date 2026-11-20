@@ -630,6 +630,40 @@ class _TurnFailureSurface:
     audience_refused: Callable[[], bool] | None = None
 
 
+def _private_offer_for(
+    message: discord.Message,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    question: str,
+    unprompted: bool,
+) -> PrivateOffer | None:
+    """The Private answer this turn may offer its asker (`audience_hold` `on` or `shadow`).
+
+    A person's message earns one: a mention, or a follow-up in a thread the bot follows
+    (`unprompted`; participation takes people's messages only). An unprompted message
+    by a bot never does. Timers, watches and routines do not start turns here.
+    """
+    if admission.audience_mode not in ("on", "shadow"):
+        return None
+    if unprompted and message.author.bot:
+        return None
+    from daimon.adapters.discord.private_answer import PrivateOffer
+
+    agent = admission.agent
+    author = message.author
+    return PrivateOffer(
+        tenant_id=tenant_id,
+        asker_id=author.id,
+        channel_id=channel_id,
+        agent=admission.config.agent_name or agent.name,
+        agent_ref=build_agent_ref(agent.name, agent.metadata or {}, admission.config.agent_name),
+        question=question,
+        role_ids=tuple(member_role_ids(author)) if isinstance(author, discord.Member) else None,
+    )
+
+
 # Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
 _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
@@ -5618,23 +5652,14 @@ class DaimonBot(commands.Bot):
         is_admin = admission.is_admin
 
         agent = admission.agent
-        if not unprompted and admission.audience_mode in ("on", "shadow"):
-            from daimon.adapters.discord.private_answer import PrivateOffer
-
-            surface.private_offer = PrivateOffer(
-                tenant_id=tenant_id,
-                asker_id=message.author.id,
-                channel_id=parent_channel_id,
-                agent=admission.config.agent_name or agent.name,
-                agent_ref=build_agent_ref(
-                    agent.name, agent.metadata or {}, admission.config.agent_name
-                ),
-                question=content_override if content_override is not None else message.content,
-                mode=admission.audience_mode,
-                role_ids=tuple(member_role_ids(author))
-                if isinstance(author, discord.Member)
-                else None,
-            )
+        surface.private_offer = _private_offer_for(
+            message,
+            admission,
+            tenant_id=tenant_id,
+            channel_id=parent_channel_id,
+            question=content_override if content_override is not None else message.content,
+            unprompted=unprompted,
+        )
 
         # --- Create thread + status embed BEFORE session create ---
         # MA sessions.create can hold its HTTP response for minutes while it

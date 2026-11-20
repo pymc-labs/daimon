@@ -33,7 +33,6 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import member_role_ids
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.authz import AgentRef
-from daimon.core.channel_audience import AudienceMode
 from daimon.core.private_answer import (
     PrivateAnswerRefusal,
     offer_private_answer,
@@ -102,7 +101,6 @@ class PrivateOffer:
     agent: str
     agent_ref: AgentRef
     question: str
-    mode: AudienceMode
     role_ids: tuple[str, ...] | None = None
     thread_id: str | None = None
 
@@ -143,21 +141,24 @@ async def show_private_offer(
     """Post the offer card when the room, the mode and the asker call for it.
 
     `send` posts into the turn's thread (or its channel); `refused` picks the line
-    for an answer gate A stopped. Mode `shadow` logs `private_offer` and posts
-    nothing. Never raises: the offer is extra to the turn.
+    for an answer gate A stopped. The mode is read again here: a server switched to
+    `off` during the turn shows nothing, and one switched to `shadow` logs
+    `private_offer` and posts nothing. Never raises: the offer is extra to the turn.
     """
     try:
         offers = _offers(bot)
         if offers is None:
             return False
         async with bot.runtime.sessionmaker() as session:
+            # The mode now, not the one the turn was admitted in: it may have changed.
+            mode = await read_mode(session, tenant_id=offer.tenant_id, channel_id=offer.channel_id)
             show = await offer_private_answer(
                 session,
                 tenant_id=offer.tenant_id,
                 user_id=str(offer.asker_id),
                 channel_id=offer.channel_id,
                 thread_id=offer.thread_id,
-                mode=offer.mode,
+                mode=mode,
                 agent=offer.agent,
                 agent_ref=offer.agent_ref,
                 event_role_ids=offer.role_ids,
