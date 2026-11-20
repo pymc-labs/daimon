@@ -802,13 +802,14 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: (inputs.environment == 'staging' && (steps.plan.outputs.smoke == 'true' || steps.refresh.outputs.smoke == 'true')) && steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.smoke == 'true' || steps.refresh.outputs.smoke == 'true') && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
-          # here (unlike the worker refresh step above): a staging deploy that
-          # could not be smoke-verified must fail loudly, not read green. If the
-          # workers VM is stopped, the SSH command below fails and so does this step.
+          # here (unlike the worker refresh step above): a deploy that could not
+          # be smoke-verified must fail loudly, not read green. Production runs
+          # one billed turn on its dedicated smoke tenant. If the workers VM is
+          # stopped, the SSH command below fails and so does this step.
           gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
             --tunnel-through-iap --command '
               export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
@@ -921,7 +922,7 @@ jobs:
         if: ((steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile) != '') && steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
         # that restarts an adapter that reconciles installs, AND every production
-        # promote — unlike the smoke turn above, which is scoped to staging only.
+        # promote, like the smoke turn above.
         # A production install drifting from the shipped spec is exactly the
         # failure mode this step exists to catch.
         #

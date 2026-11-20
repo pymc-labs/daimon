@@ -326,6 +326,8 @@ def test_prebuilt_staging_is_pinned_and_production_promotes_the_soaked_digests()
     assert without_freshness(crane["if"]) == (
         "inputs.environment == 'production' && inputs.source_registry != ''"
     )
+    smoke = next(step for step in steps if step.get("name") == "Post-deploy smoke turn")
+    assert "inputs.environment" not in smoke["if"], "production promotes run the smoke turn too"
 
     promote = _workflow("promote.yml")
     assert promote["run-name"] == "Promote ${{ inputs.sha }}", "the release proposal reads the SHA"
