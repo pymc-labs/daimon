@@ -215,6 +215,7 @@ source_modules = [
     "daimon.core.channel_rules",
     "daimon.core.channel_skills",
     "daimon.core.channel_tidy",
+    "daimon.core.chat_history",
     "daimon.core.checkpoint_prompt",
     "daimon.core.coding_key_connect",
     "daimon.core.coding_key_prompts",
