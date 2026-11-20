@@ -19,7 +19,8 @@ A suite has an id, a name and the cases it pins. Each change to a suite saves
 a new version, so results always name the version they ran.
 
 A case is one JSON document in the bundle format. Saving a case again adds a
-revision and a new suite version. Its hash covers every field, so any edit shows.
+revision; saving the suite pins it in a new version. Its hash covers every field, so
+any edit shows. Files a case uses come into the suite with a bundle import.
 
 Check a case before you save it:
 
@@ -41,12 +42,14 @@ daimon evals cases validate case.json
 Members create suites and own what they create. Owners share a suite with people
 or groups. Group membership is checked live. When the platform cannot say, access is denied.
 
-A suite that is not scrubbed cannot be shared.
+Shares reach only scrubbed suites, cases and runs. Content that is not scrubbed is
+for owners and admins, even on a shared suite.
 
 ## Bundles
 
 A bundle is a zip with a `bundle.json` manifest, suites, runs and blobs. The
-manifest lists every file with its sha256. Edits outside Daimon break validation.
+manifest lists every file with its sha256, so accidental damage shows. Only a
+signature from a trusted key proves who wrote a bundle.
 
 Validate a bundle folder, zip or encrypted file. This works offline, with no
 database:
@@ -65,19 +68,26 @@ daimon evals bundle export --suite support-basics --out support.zip
 daimon evals bundle import support.zip
 ```
 
-Export replaces people with neutral labels. Only an owner or an admin can keep
-identities or export content that is not scrubbed. Import refuses a bundle that is
-not scrubbed unless an owner or an admin accepts it with `--accept-unscrubbed`.
+Import also takes a bundle folder. Export replaces people with neutral labels.
+Only an admin can keep identities. Only an owner or an admin can export content
+that is not scrubbed. Import refuses a bundle that is not scrubbed unless an owner
+or an admin accepts it with `--accept-unscrubbed`.
+
+Imported runs are records: unfinished ones arrive cancelled and never run here.
+File contents live in the [artifact store](configuration.md#daimon_artifacts__backend)
+when one is set up, otherwise in the database.
 
 ### Signatures and encryption
 
 Set [`DAIMON_EVALS__SIGNING_KEY`](configuration.md#daimon_evals__signing_key) to sign
-exported bundles. Import checks signatures from the keys in
-[`DAIMON_EVALS__TRUSTED_KEYS`](configuration.md#daimon_evals__trusted_keys). A bad
-signature from a trusted key is refused.
+exported bundles. With
+[`DAIMON_EVALS__TRUSTED_KEYS`](configuration.md#daimon_evals__trusted_keys) set,
+import takes only bundles signed by those keys or this deployment's key. A bad
+signature from a trusted key is always refused.
 
 A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
-passphrase another way than the file.
+passphrase another way than the file. MCP tools never take a passphrase: export
+and import encrypted bundles from the command line or the web app.
 
 ## Where to use it
 

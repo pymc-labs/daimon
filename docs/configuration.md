@@ -232,8 +232,8 @@ exports are unsigned.
 
 `list[str]` · optional · default unset
 
-Base64 Ed25519 public keys whose bundle signatures import checks. A bundle signed by one
-of them with a bad signature is refused.
+Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only bundles
+signed by one of them or by this deployment's signing key.
 
 ### `DAIMON_EVALS__SOURCE_LABEL`
 
@@ -245,7 +245,7 @@ Label this deployment writes as the source of the bundles it exports.
 
 `int` · optional · default `512`
 
-Largest eval bundle import accepts, unpacked, in MiB.
+Largest eval bundle import accepts, in MiB.
 
 ## Long Jobs
 

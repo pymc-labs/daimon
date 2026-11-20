@@ -283,7 +283,7 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_bundle_export` | all callers | Export suites and runs as a bundle. |
 | `eval_bundle_import` | all callers | Import a bundle uploaded with create_file_upload_url. |
 | `eval_case_get` | all callers | Read one eval case as JSON. |
-| `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision. |
+| `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision; eval_suite_update pins it. |
 | `eval_case_validate` | all callers | Check an eval case against the format without saving it: problems and warnings. |
 | `eval_cases_list` | all callers | List the cases of an eval suite version. |
 | `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
