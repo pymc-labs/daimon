@@ -22,7 +22,7 @@ from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import tenants, workflow_runs
-from daimon.core.workflows import runs, triggers
+from daimon.core.workflows import runs, triggers, waits
 from daimon.core.workflows.engine import RunEnd
 from daimon.core.workflows.features import KEYS, workflow_features
 from sqlalchemy.exc import SQLAlchemyError
@@ -61,7 +61,7 @@ class WorkflowEngine:
         self.owner = owner or f"{socket.gethostname()}:{uuid.uuid4().hex[:8]}"
         self.clock = clock
         self.tasks: dict[uuid.UUID, tuple[asyncio.Task[None], int]] = {}
-        self.wake = {"starts": asyncio.Event(), "steps": asyncio.Event()}
+        self.wake = {"starts": asyncio.Event(), "steps": asyncio.Event(), "waits": asyncio.Event()}
 
     async def drain(self) -> None:
         """Wait for the running step tasks (the `--once` path and tests)."""
@@ -126,13 +126,22 @@ async def steps_step(engine: WorkflowEngine) -> None:
 
 @scheduler_step
 async def waits_step(engine: WorkflowEngine) -> None:
-    """Recheck blocked steps and time out runs past their deadline."""
+    """Recheck blocked steps, hand held events to event waits, expire and remind waits,
+    and time out runs past their deadline."""
     now = engine.clock()
     async with engine.sm() as session:
         blocked = await workflow_runs.due_waits(session, kind="blocked", now=now, limit=_BATCH)
+        due = [
+            w
+            for kind in ("approval", "timer", "event")
+            for w in await workflow_runs.due_waits(session, kind=kind, now=now, limit=_BATCH)
+        ]
         overdue = await workflow_runs.overdue_runs(session, now=now, limit=_BATCH)
     for wait in blocked:
         await runs.recheck_blocked(engine.sm, engine.settings, wait, now=now)
+    await waits.match_events(engine.sm, engine.settings, now=now)
+    for wait in due:
+        await waits.on_due(engine.sm, engine.settings, wait, now=now)
     end = RunEnd("timed_out", reason="deadline", message="The run passed its deadline")
     for run_id in overdue:
         await runs.stop_run(engine.sm, engine.settings, run_id=run_id, end=end, now=now)
@@ -235,7 +244,11 @@ async def run_loops(
 
 
 async def _listen(engine: WorkflowEngine, db: AsyncEngine) -> None:
-    channels = {runs.START_CHANNEL: engine.wake["starts"], runs.READY_CHANNEL: engine.wake["steps"]}
+    channels = {
+        runs.START_CHANNEL: engine.wake["starts"],
+        runs.READY_CHANNEL: engine.wake["steps"],
+        runs.WAITS_CHANNEL: engine.wake["waits"],
+    }
     while True:
         try:
             await _listen_once(db, channels)

@@ -196,6 +196,7 @@ from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
+from daimon.core.workflows import waits as workflow_waits
 from daimon.core.workflows.agent_step import AgentStepExecutor
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
@@ -2171,7 +2172,9 @@ async def run(
     stop_event = asyncio.Event()
     lane_turn = workflows.HeadlessLaneTurn(client, sm, settings, deployment_default, resolver_cache)
     workflow_engine = workflows.WorkflowEngine(
-        sm, settings, {"agent": AgentStepExecutor(sm, settings, lane_turn)}
+        sm,
+        settings,
+        {"agent": AgentStepExecutor(sm, settings, lane_turn), **workflow_waits.executors(sm)},
     )
     loop = asyncio.get_running_loop()
 
