@@ -134,6 +134,7 @@ class RunRow(_Row):
 
 class ItemRow(_Row):
     id: uuid.UUID
+    tenant_id: uuid.UUID
     run_id: uuid.UUID
     key: str
     case_key: str

@@ -399,7 +399,11 @@ class EvalService:
         await self._check_on(actor)
 
     async def version_access(
-        self, session: AsyncSession, actor: Subject, suite_id: str, version: int | None,
+        self,
+        session: AsyncSession,
+        actor: Subject,
+        suite_id: str,
+        version: int | None,
         action: Action,
     ) -> tuple[store.SuiteRow, SuiteRole, int]:
         """A suite version the actor may `action`, with their role and the version's number."""

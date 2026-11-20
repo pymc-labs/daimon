@@ -17,11 +17,12 @@ import pytest
 from aioresponses import aioresponses as AioResponsesMock
 from daimon.adapters.slack.attachments import ProxyUrlContext
 from daimon.adapters.slack.context import (
-    _render_message,
-    _user_query_open_tag,
+    _history_message,  # pyright: ignore[reportPrivateUsage]
     build_context_xml,
     build_delta_xml,
 )
+from daimon.core.chat_history import render_message
+from daimon.core.chat_history import user_query_open_tag as _user_query_open_tag
 from daimon.core.slack_file_token import verify_file_token
 from daimon.core.untrusted import UNTRUSTED_NOTE
 from slack_sdk.web.async_client import AsyncWebClient
@@ -295,7 +296,7 @@ def test_render_message_emits_proxy_attachment_for_history_file() -> None:
         "files": [{"id": "F9", "name": "old.csv", "mimetype": "text/csv"}],
     }
     ctx = ProxyUrlContext(public_url="https://mcp.example.com", secret="s", team_id="T1", now=1000)
-    lines = _render_message(msg, proxy=ctx)
+    lines = render_message(_history_message(msg, proxy=ctx))
     joined = "\n".join(lines)
     assert "old.csv" in joined and "<attachment" in joined, "history file rendered as attachment"
     token = joined.split("/slack/file/")[1].split('"')[0]
@@ -305,7 +306,7 @@ def test_render_message_emits_proxy_attachment_for_history_file() -> None:
 def test_render_message_omits_attachments_when_no_proxy_configured() -> None:
     """When the proxy is unconfigured, history files are omitted (no attachment)."""
     msg = {"user": "U1", "ts": "1.0", "text": "hi", "files": [{"id": "F9", "name": "x"}]}
-    lines = _render_message(msg, proxy=None)
+    lines = render_message(_history_message(msg, proxy=None))
     assert "<attachment" not in "\n".join(lines), "no attachment lines when proxy unconfigured"
 
 
@@ -569,10 +570,10 @@ def test_render_message_keeps_the_words_of_daimons_notice_cards() -> None:
     card = {"fallback": "Which repo should I use?", "color": "#5865F2"}
     msg = {"user": "U1", "bot_id": "B1", "ts": "1.0", "text": "<@U2>", "attachments": [card]}
     assert "&lt;@U2&gt;\nWhich repo should I use?</message>" in "\n".join(
-        _render_message(msg, proxy=None)
+        render_message(_history_message(msg, proxy=None))
     )
     unfurl = {"user": "U3", "ts": "2.0", "text": "see", "attachments": [{"fallback": "a link"}]}
-    assert "a link" not in "\n".join(_render_message(unfurl, proxy=None)), "only bot cards"
+    assert "a link" not in "\n".join(render_message(_history_message(unfurl, proxy=None))), "only bot cards"
 
 
 async def test_a_chat_history_of_none_reads_no_thread_messages() -> None:
