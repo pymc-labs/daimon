@@ -318,11 +318,11 @@ _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
 # Any other host name, unless it is a public service's (subdomains included); the TLDs leave
-# out file extensions ("notes.md", "app.py").
+# out file extensions ("notes.md", "app.py"), and a country may follow one ("shop.com.pk").
 _PUBLIC_HOST: Final = re.compile(
     r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ai|dev|app|so|me|us"
     r"|uk|de|fr|nl|eu|ca|au|in|jp|ch|se|no|fi|dk|es|it|pl|be|at|br|nz|sg|ie|il|xyz|info|biz"
-    r"|cloud|tech|site|online|gg|ly|tv|fm)(?![\w-]|\.[a-z])",
+    r"|cloud|tech|site|online|gg|ly|tv|fm)(?:\.[a-z]{2})?(?![\w-]|\.[a-z])",
     re.IGNORECASE,
 )
 _PUBLIC_SERVICES: Final = frozenset(

@@ -402,6 +402,7 @@ def test_text_when_word_inside_another_or_url_scheme_then_kept(text: str, kept: 
         "288838c5-de50-80c4-b6fb-f19866be187c",
         "288838c5de5080c4b6fbf19866be187c",
         "files.personal-site.co.uk",
+        "shop.personal-site.com.pk",
     ],
 )
 def test_text_when_tailnet_ip_hex_id_or_private_host_then_faked_same_shape(real: str) -> None:
