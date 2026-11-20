@@ -674,3 +674,60 @@ async def test_an_ungated_read_checks_place_and_responder_but_never_a_card(
         gated=False,
     )
     assert gap == expected, f"responder={responder} private={private} place={place}: {gap}"
+
+
+async def test_a_session_bound_without_the_identity_servers_still_proves_its_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contained room's session runs the agent without its signed-identity servers."""
+    from daimon.core.relay_scope import without_identity_relays
+
+    agent = ma_agent(
+        id="agent",
+        tools=[
+            *AGENT.tools,
+            *(
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": n,
+                    "configs": [],
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                }
+                for n in ("grove", "tools")
+            ),
+        ],
+        mcp_servers=[
+            *AGENT.mcp_servers,
+            {"name": "grove", "type": "url", "url": "https://mcp.example/mcp-identity/grove"},
+            {"name": "tools", "type": "url", "url": "https://mcp.example/mcp-identity/tools"},
+        ],
+    )
+    stripped, names = without_identity_relays(agent, public_url="https://mcp.example/mcp")
+    assert names == {"grove", "tools"} and [s.name for s in stripped.mcp_servers] == ["daimon-mcp"]
+    monkeypatch.setattr(_session_gate, "retrieve_agent", AsyncMock(return_value=agent))
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+
+    async def proven(bound: Any) -> bool:
+        recorded = hash_tools(
+            session_tools(
+                bound,
+                frozenset[str](),
+                tool_safety=POLICY,
+                public_url="https://mcp.example/mcp",
+                asks_before_publishing=True,
+            )
+        )
+        return await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+            _runtime(),
+            AUTH,
+            cast(Any, SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=recorded))),
+            tool_name="publish_report",
+            ma_agent_id="agent",
+            reported_tools_sha256=hash_tools(agent.tools),
+        )
+
+    assert await proven(stripped), "bound without the identity servers"
+    assert await proven(agent), "bound with them, as before"

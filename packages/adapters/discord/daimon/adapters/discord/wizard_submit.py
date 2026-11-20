@@ -77,7 +77,7 @@ from daimon.adapters.discord.bot import (
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
 )
-from daimon.adapters.discord.checks import is_member_guild_admin
+from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -112,6 +112,7 @@ from daimon.core.agent_identity import (
     is_builtin_agent,
     resolve_agent_identity,
 )
+from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.errors import DaimonError
 from daimon.core.ma_resolver import MAResolverMissError
@@ -132,7 +133,6 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -484,7 +484,17 @@ async def run_wizard_submit_turn_observed(
         )
         # The protection check above cached any parent it had to fetch.
         category_id, category_unresolved = await _resolve_category(channel, fetch=False)
-        standing = RequesterOrg.HOST  # until `audience_hold` can be on
+        async with bot.runtime.sessionmaker() as session:
+            standing = await requester_standing(
+                session,
+                tenant_id=row.tenant_id,
+                user_id=str(interaction.user.id),
+                channel_id=parent_channel_id,
+                event_role_ids=member_role_ids(author)
+                if isinstance(author, discord.Member)
+                else None,
+                resolver=bot.runtime.turn_deps.membership_resolver,
+            )
         try:
             admission = await admit(
                 bot.runtime.turn_deps,

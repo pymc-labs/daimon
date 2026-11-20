@@ -24,6 +24,7 @@ from daimon.adapters.discord.bot import (
 from daimon.adapters.discord.checks import (
     is_member_daimon_admin,
     is_member_guild_admin,
+    member_role_ids,
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
@@ -39,6 +40,12 @@ from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.channel_audience import (
+    audience_mode,
+    channel_has_outsiders,
+    log_shadow,
+    requester_standing,
+)
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, env_admits, env_dm_policy
 from daimon.core.direct_messages import (
@@ -64,6 +71,7 @@ from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -84,7 +92,6 @@ from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.workspace_settings import set_dms
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -105,6 +112,8 @@ _ACCESS_DENIALS: frozenset[AdmissionDenialReason] = frozenset(
         "writers_none",
         "runs_elsewhere",
         "own_agents_only",
+        # A person with no internal role has room turns only (`audience_hold` on).
+        "client_requester",
     }
 )
 _DM_FAILURES = (
@@ -345,7 +354,15 @@ class DirectMessageCog(commands.Cog):
                 return _Eligibility(agents=route.agents)
             else:
                 name = route.agent
-            standing = RequesterOrg.HOST  # until `audience_hold` can be on
+            async with runtime.sessionmaker() as session:
+                standing = await requester_standing(
+                    session,
+                    tenant_id=tenant.id,
+                    user_id=str(message.author.id),
+                    is_dm=True,
+                    event_role_ids=subject.role_ids,
+                    resolver=runtime.turn_deps.membership_resolver,
+                )
             admission = await admit_cold_dm(
                 runtime.turn_deps,
                 requester_org=standing,
@@ -861,7 +878,43 @@ class DirectMessageCog(commands.Cog):
                 raise DaimonError("You need access to this channel's history to move it to DMs.")
             parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
             source_channel_id = str(parent_id or channel.id)
-            standing = RequesterOrg.HOST  # until `audience_hold` can be on
+            async with runtime.sessionmaker() as session:
+                mode = await audience_mode(session, FeaturePlace(tenant_id, "discord"))
+                standing = await requester_standing(
+                    session,
+                    tenant_id=tenant_id,
+                    user_id=str(member.id),
+                    channel_id=source_channel_id,
+                    is_dm=True,
+                    event_role_ids=member_role_ids(member),
+                    resolver=runtime.turn_deps.membership_resolver,
+                    mode=mode,
+                )
+                # A contained room (an unknown one too) does not move to a DM.
+                room = (
+                    await channel_has_outsiders(
+                        session,
+                        tenant_id=tenant_id,
+                        platform="discord",
+                        channel_id=source_channel_id,
+                        thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
+                        mode=mode,
+                    )
+                    if mode != "off"
+                    else None
+                )
+            if room is not None and room.source == "facts" and room.contained:
+                raise DaimonError(
+                    "This room has people outside the team, so it can't move to a DM."
+                )
+            if room is not None and room.shadow is not None and room.shadow.contained:
+                log_shadow(
+                    "dm_refused",
+                    tenant_id=tenant_id,
+                    channel_id=source_channel_id,
+                    agent=None,
+                    reason="room_contained",
+                )
             admission = await admit(
                 runtime.turn_deps,
                 origin="chat",
@@ -1321,7 +1374,15 @@ class DirectMessageCog(commands.Cog):
                         )
                         return "\n".join(part for part in (again, prefix) if part)
 
-                    standing = RequesterOrg.HOST  # until `audience_hold` can be on
+                    async with runtime.sessionmaker() as session:
+                        standing = await requester_standing(
+                            session,
+                            tenant_id=conversation.tenant_id,
+                            user_id=str(message.author.id),
+                            is_dm=True,
+                            event_role_ids=subject.role_ids,
+                            resolver=runtime.turn_deps.membership_resolver,
+                        )
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         requester_org=standing,

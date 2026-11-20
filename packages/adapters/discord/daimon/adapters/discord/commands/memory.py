@@ -13,11 +13,12 @@ from typing import cast
 
 import anthropic
 import structlog
-from daimon.adapters.discord.checks import require_registered_guild
+from daimon.adapters.discord.checks import member_role_ids, require_registered_guild
 from daimon.adapters.discord.errors import generate_request_id, render_error
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
@@ -39,7 +40,6 @@ from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
-from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -83,7 +83,15 @@ async def _resolve_agent(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         channel = interaction.channel
         parent = channel.parent_id if isinstance(channel, discord.Thread) else None
-        standing = RequesterOrg.HOST  # until `audience_hold` can be on
+        user = interaction.user
+        standing = await requester_standing(
+            session,
+            tenant_id=tenant_id,
+            user_id=str(user.id),
+            channel_id=str(parent if parent is not None else interaction.channel_id),
+            event_role_ids=member_role_ids(user) if isinstance(user, discord.Member) else None,
+            resolver=runtime.turn_deps.membership_resolver,
+        )
         hold = await held_place(
             session,
             tenant_id=tenant_id,

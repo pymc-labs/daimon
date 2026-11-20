@@ -1363,6 +1363,9 @@ async def run_channel_timer(
     """
     if row.reason != "timer":
         raise DirectMessageAccessRevoked("invoker_not_allowed", message="Not a timer.")
+    if requester_org is RequesterOrg.OUTSIDER:
+        # A timer is a standing task, and a person with no internal role has room turns only.
+        raise DirectMessageAccessRevoked("client_requester", message="Timers are for the team.")
     channel_id = row.parent_channel_id
     scope_id = f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}"
     owner = row.requester_external_user_id

@@ -9,6 +9,8 @@ import discord
 import pytest
 from daimon.adapters.discord.commands import direct_messages
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
+from daimon.core.channel_audience import ChannelAudience
+from daimon.core.turn_hold import RequesterOrg
 
 
 def _sealed_admission() -> MagicMock:
@@ -32,6 +34,7 @@ async def test_dm_move_from_a_sealed_channel_refuses_before_history(
     monkeypatch: pytest.MonkeyPatch, channel_type: type[Any]
 ) -> None:
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(direct_messages, "audience_mode", AsyncMock(return_value="off"))
     monkeypatch.setattr(direct_messages, "is_member_daimon_admin", AsyncMock(return_value=False))
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=_sealed_admission()))
     start_dm = AsyncMock()
@@ -74,6 +77,7 @@ async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_not
 ) -> None:
     """A thread-created notice in the parent carries the (sealed) thread's name."""
     monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(direct_messages, "audience_mode", AsyncMock(return_value="off"))
     monkeypatch.setattr(direct_messages, "is_member_daimon_admin", AsyncMock(return_value=False))
     monkeypatch.setattr(
         direct_messages,
@@ -139,3 +143,45 @@ async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_not
     assert any("a reply" in text for text in texts)
     assert start_dm.await_args.kwargs["source_channel_id"] == "100"
     assert start_dm.await_args.kwargs["source_thread_id"] is None
+
+
+async def test_dm_move_from_a_contained_room_is_refused_before_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mode on: a contained room, or one with unknown facts, does not move to a DM."""
+    monkeypatch.setattr(direct_messages, "require_dm_enabled", AsyncMock())
+    monkeypatch.setattr(direct_messages, "is_member_daimon_admin", AsyncMock(return_value=False))
+    monkeypatch.setattr(direct_messages, "audience_mode", AsyncMock(return_value="on"))
+    monkeypatch.setattr(direct_messages, "audience_mode", AsyncMock(return_value="on"))
+    monkeypatch.setattr(
+        direct_messages, "requester_standing", AsyncMock(return_value=RequesterOrg.HOST)
+    )
+    contained = ChannelAudience(contained=True, known=False, narrow=True, source="facts")
+    monkeypatch.setattr(direct_messages, "channel_has_outsiders", AsyncMock(return_value=contained))
+    admit = AsyncMock()
+    monkeypatch.setattr(direct_messages, "admit", admit)
+
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 200
+    channel.history = MagicMock(side_effect=_history)
+    member = MagicMock()
+    member.id = 7
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.id = 1
+    guild.owner_id = 99
+    guild.fetch_member = AsyncMock(return_value=member)
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.channel = channel
+    interaction.user.id = 7
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    cog = DirectMessageCog(MagicMock())
+    await DirectMessageCog.dm.callback.__wrapped__(cog, interaction, "move")  # pyright: ignore[reportFunctionMemberAccess]
+
+    admit.assert_not_awaited()
+    channel.history.assert_not_called()
+    assert "outside the team" in interaction.followup.send.await_args.kwargs["embed"].description

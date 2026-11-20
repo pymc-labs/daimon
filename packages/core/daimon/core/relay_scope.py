@@ -13,12 +13,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.mcp_identity import identity_relay_urls, relay_base
+from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_server_url import canonical_mcp_url
+
+if TYPE_CHECKING:
+    from anthropic.types.beta import BetaManagedAgentsAgent
 
 #: Features that read or write long-term memory, forced off for these agents.
 RELAY_AGENT_OFF_FEATURES: Final = (
@@ -47,6 +51,43 @@ def agent_has_identity_relay(
         canonical_mcp_url(url)[len(base) :] not in unscoped
         for url in identity_relay_urls(server_urls, public_url=public_url)
     )
+
+
+def identity_relay_server_names(
+    agent: BetaManagedAgentsAgent, *, public_url: str | None
+) -> frozenset[str]:
+    """The names of the agent's signed-identity servers, scoped or not.
+
+    A contained room leaves all of them out (`without_identity_relays`), including the ones
+    that set `channel_scoped=false`: there is no reader list to cut their answers to.
+    """
+    if public_url is None:
+        return frozenset()
+    relay = {
+        canonical_mcp_url(url)
+        for url in identity_relay_urls(
+            (server.url for server in agent.mcp_servers), public_url=public_url
+        )
+    }
+    return frozenset(
+        server.name for server in agent.mcp_servers if canonical_mcp_url(server.url) in relay
+    )
+
+
+def without_identity_relays(
+    agent: BetaManagedAgentsAgent, *, public_url: str | None
+) -> tuple[BetaManagedAgentsAgent, frozenset[str]]:
+    """The agent without its signed-identity servers and their toolsets, and their names."""
+    names = identity_relay_server_names(agent, public_url=public_url)
+    if not names:
+        return agent, names
+    stripped = agent.model_copy(
+        update={
+            "mcp_servers": list(visible_mcp_servers(agent, names)),
+            "tools": list(visible_tools(agent, names)),
+        }
+    )
+    return stripped, names
 
 
 def relay_seal_ids(*, channel_id: str, thread_id: str | None) -> frozenset[str]:

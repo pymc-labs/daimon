@@ -111,6 +111,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
+from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import drain_budget_notices, run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
@@ -251,7 +252,6 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
-from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
@@ -4142,6 +4142,15 @@ class DaimonBot(commands.Bot):
                 if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
                 else Role.USER
             )
+            async with self.runtime.sessionmaker() as session:
+                standing = await requester_standing(
+                    session,
+                    tenant_id=row.tenant_id,
+                    user_id=row.requester_external_user_id,
+                    channel_id=row.parent_channel_id,
+                    event_role_ids=member_role_ids(member),
+                    resolver=self.membership_resolver,
+                )
             try:
                 reply = await run_channel_timer(
                     self.runtime.turn_deps,
@@ -4150,6 +4159,7 @@ class DaimonBot(commands.Bot):
                     role=role,
                     role_ids=tuple(member_role_ids(member)),
                     category_id=access.category_id,
+                    requester_org=standing,
                 )
             except DirectMessageAccessRevoked as error:
                 log.info("timer.refused", place="channel", reason=error.reason)
@@ -4173,8 +4183,18 @@ class DaimonBot(commands.Bot):
         )
 
         async def run_turn() -> str:
+            async with self.runtime.sessionmaker() as session:
+                standing = await requester_standing(
+                    session,
+                    tenant_id=row.tenant_id,
+                    user_id=row.requester_external_user_id,
+                    is_dm=True,
+                    resolver=self.membership_resolver,
+                )
             try:
-                reply = await run_dm_timer(self.runtime.turn_deps, row, prompt=seed)
+                reply = await run_dm_timer(
+                    self.runtime.turn_deps, row, prompt=seed, requester_org=standing
+                )
             except DirectMessageAccessRevoked as error:
                 log.info("timer.refused", place="dm", reason=error.reason)
                 raise AdmissionDenied(reason="invoker_not_allowed") from None
@@ -4236,10 +4256,19 @@ class DaimonBot(commands.Bot):
         if watch.delivery == "dm":
 
             async def run_turn(current: WatchRow) -> str:
+                async with self.runtime.sessionmaker() as session:
+                    standing = await requester_standing(
+                        session,
+                        tenant_id=row.tenant_id,
+                        user_id=current.owner_external_id,
+                        is_dm=True,
+                        resolver=self.membership_resolver,
+                    )
                 try:
                     reply = await run_dm_watch(
                         self.runtime.turn_deps,
                         row,
+                        requester_org=standing,
                         owner_user_id=current.owner_external_id,
                         prompt=seed,
                         source=DmSource(
@@ -4448,7 +4477,17 @@ class DaimonBot(commands.Bot):
             if not post_state.may_post:
                 raise AdmissionDenied(reason="writers_none")
             category_id, category_unresolved = await _resolve_category(thread, fetch=False)
-        standing = RequesterOrg.HOST  # until `audience_hold` can be on
+        async with self.runtime.sessionmaker() as session:
+            standing = await requester_standing(
+                session,
+                tenant_id=tenant_id,
+                user_id=row.requester_external_user_id,
+                channel_id=row.parent_channel_id,
+                # A failed lookup reads as no roles (`requester_role`): leave it to the
+                # member mirror and one fresh fetch rather than call it an outsider.
+                event_role_ids=tuple(_role_ids) or None,
+                resolver=self.membership_resolver,
+            )
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -5375,7 +5414,17 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
-        standing = RequesterOrg.HOST  # until `audience_hold` can be on
+        async with self.runtime.sessionmaker() as session:
+            standing = await requester_standing(
+                session,
+                tenant_id=tenant_id,
+                user_id=str(author.id),
+                channel_id=parent_channel_id,
+                event_role_ids=member_role_ids(author)
+                if isinstance(author, discord.Member)
+                else None,
+                resolver=self.membership_resolver,
+            )
         try:
             admission = await admit(
                 self.runtime.turn_deps,

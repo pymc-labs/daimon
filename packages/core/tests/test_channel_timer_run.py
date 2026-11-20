@@ -203,3 +203,26 @@ async def test_a_channel_timer_refuses_a_row_that_is_not_a_timer(
         await run_channel_timer(deps_for(None, db_session_factory), row, prompt="x", role=Role.USER)
 
     admit.assert_not_awaited()
+
+
+async def test_a_channel_timer_of_a_requester_with_no_internal_role_does_not_run(
+    db_session_factory: async_sessionmaker, monkeypatch
+) -> None:
+    """The internal role was removed: the timer is refused before admission."""
+    from daimon.core.turn_hold import RequesterOrg
+
+    tenant, account, row = await seed(db_session_factory)
+    admit, _bind, run = patch_world(monkeypatch, admission_for(tenant, account.id, "ag_target"))
+
+    with pytest.raises(DirectMessageAccessRevoked) as caught:
+        await run_channel_timer(
+            deps_for(None, db_session_factory),
+            row,
+            prompt="x",
+            role=Role.USER,
+            requester_org=RequesterOrg.OUTSIDER,
+        )
+
+    assert caught.value.reason == "client_requester"
+    admit.assert_not_awaited()
+    run.assert_not_awaited()

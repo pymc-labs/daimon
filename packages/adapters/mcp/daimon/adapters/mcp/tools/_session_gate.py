@@ -29,6 +29,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_personal_servers import visible_tools
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.relay_scope import without_identity_relays
 from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import MaTool, hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
@@ -250,6 +251,40 @@ async def _recorded_as_gated(
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
         records=runtime.session_factory,
     )
+    public_url = runtime.settings.mcp.public_url
+    # A contained room's session is bound without the signed-identity servers
+    # (`Admission.agent`), so the same agent without them is the other recorded shape.
+    stripped, names = without_identity_relays(
+        agent, public_url=None if public_url is None else str(public_url)
+    )
+    for candidate in (agent, stripped) if names else (agent,):
+        if await _recorded_as_gated_for(
+            runtime,
+            auth,
+            live,
+            candidate,
+            tool_name=tool_name,
+            reported_tools_sha256=reported_tools_sha256,
+            reported_agent=agent,
+        ):
+            return True
+    return False
+
+
+async def _recorded_as_gated_for(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    live: ThreadSessionRow,
+    agent: BetaManagedAgentsAgent,
+    *,
+    tool_name: str,
+    reported_tools_sha256: str,
+    reported_agent: BetaManagedAgentsAgent,
+) -> bool:
+    recorded = live.effective_config
+    if recorded is None:
+        return False
+    public_url = runtime.settings.mcp.public_url
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -258,12 +293,13 @@ async def _recorded_as_gated(
         server_urls={server.name: server.url for server in agent.mcp_servers},
     )
     # MA reporting the agent's own tools means it left the overrides out.
+    # `reported_agent` is the agent as MA holds it, with any identity servers.
     if reported_tools_sha256 not in {
+        hash_tools(reported_agent.tools),
         hash_tools(agent.tools),
         hash_tools(visible_tools(agent, hidden)),
     }:
         return False
-    public_url = runtime.settings.mcp.public_url
     toolsets = await _candidate_toolsets(runtime, auth, live, agent)
     # The bind may have been made with other rules than today's, so both the
     # current set and none are tried; neither matching reads as not gated.

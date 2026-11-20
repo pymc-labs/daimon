@@ -49,7 +49,14 @@ from daimon.core.authz import (
     build_turn_place,
     holds_agent_roles,
 )
-from daimon.core.channel_audience import AudienceMode, channel_has_outsiders, mode_of
+from daimon.core.channel_audience import (
+    AudienceMode,
+    ChannelAudience,
+    audience_mode,
+    channel_has_outsiders,
+    log_shadow,
+    mode_of,
+)
 from daimon.core.channel_backend import (
     BackendUnsupported,
     backend_is_enabled,
@@ -110,7 +117,9 @@ from daimon.core.permissions import (
 )
 from daimon.core.relay_scope import (
     agent_has_identity_relay,
+    identity_relay_server_names,
     relay_seal_ids,
+    without_identity_relays,
     without_long_term_memory,
 )
 from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
@@ -236,6 +245,13 @@ class AdmissionGrant:
     # The platform admitted on; `reauthorize` rereads the requester's foreign
     # marker and the channel's shared record with it. None only in hand-built grants.
     platform: str | None = None
+    # A DM that has no source by design (a private answer): the agent's budget channel
+    # is its spend channel only, never a source whose seal could refuse it. False: the
+    # source was not recorded, and the budget channel stands in for it.
+    dm_no_source: bool = False
+    # The room is narrow by its stored facts (mode `on`): its memory is read-only, the
+    # agent pinned to it included.
+    narrow_room: bool = False
 
 
 @dataclass(frozen=True)
@@ -678,6 +694,7 @@ async def admit(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
@@ -726,6 +743,7 @@ async def admit(
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 dm_agent_name=dm_agent_name,
+                dm_no_source=dm_no_source,
                 cold_dm=cold_dm,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
@@ -858,6 +876,7 @@ async def admit_impl(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
@@ -894,6 +913,7 @@ async def admit_impl(
         is_dm=is_dm,
         dm_source_channel_id=dm_source_channel_id,
         dm_agent_name=dm_agent_name,
+        dm_no_source=dm_no_source,
         cold_dm=cold_dm,
         category_id=category_id,
         category_unresolved=category_unresolved,
@@ -932,6 +952,7 @@ async def _admit_gates(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
     category_unresolved: bool = False,
@@ -980,18 +1001,28 @@ async def _admit_gates(
         )
         shared = False
         source_shared = False
+        # Only a Discord server has a mode; every other platform is `off`.
+        mode: AudienceMode = (
+            await audience_mode(session, FeaturePlace(tenant_id, platform, channel_id))
+            if platform == "discord"
+            else "off"
+        )
+        audience: ChannelAudience | None = None
         # A DM has no channel of its own to share; /dm-me asks about the channel
         # it copies history from.
         shared_place = dm_source_channel_id if is_dm else channel_id
         if shared_place is not None:
-            shared = await _record_shared_channel(
+            audience = await _record_shared_channel(
                 session,
                 tenant_id=tenant_id,
                 platform=platform,
                 channel_id=shared_place,
+                thread_id=None if is_dm else thread_id,
                 requester_org=requester_org,
                 channel_shared=channel_shared,
+                mode=mode,
             )
+            shared = audience.contained
             source_shared = is_dm and shared
             shared = shared and not is_dm
         await session.commit()
@@ -1507,6 +1538,19 @@ async def _admit_gates(
 
     # An agent with a signed-identity MCP server answers with what its channel's
     # readers can read, so its turn stays in that channel (`daimon.core.relay_scope`).
+    # A room whose stored facts say outsiders can read it (mode `on`) answers with no
+    # signed-identity server at all, so such an agent is no relay agent there: its turn is
+    # a plain hold with the room's own memory (`daimon.core.relay_scope`).
+    if not is_dm:
+        agent = _without_identity_servers(
+            deps,
+            agent,
+            mode=mode,
+            audience=audience,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            agent_name=config.agent_name,
+        )
     relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
         (server.url for server in agent.mcp_servers),
         public_url=deps.public_url,
@@ -1520,6 +1564,14 @@ async def _admit_gates(
         )
         subject = replace(subject, is_admin=False)
         effective_admin = False
+    if mode == "shadow" and not is_dm and audience is not None:
+        _log_shadow_hold(
+            audience.shadow,
+            hold=hold,
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            agent_name=config.agent_name,
+        )
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
@@ -1539,6 +1591,8 @@ async def _admit_gates(
         platform=platform,
         cold_dm=cold_dm or dm_agent_name is not None,
         hold=hold,
+        dm_no_source=dm_no_source,
+        narrow_room=_narrow_by_facts(audience, mode) and not is_dm,
     )
     if agent_invoker_roles(policy, grant.agent.names):
         # Role gates always use fresh registered Discord membership, including
@@ -2100,16 +2154,22 @@ async def _record_shared_channel(
     tenant_id: uuid.UUID,
     platform: str,
     channel_id: str,
+    thread_id: str | None = None,
     requester_org: RequesterOrg,
     channel_shared: bool | None,
-) -> bool:
-    """Whether the channel is shared with another organisation, recording it when learned.
+    mode: AudienceMode | None = None,
+) -> ChannelAudience:
+    """The channel's audience, recording it as shared when learned.
 
     The platform's live signal wins as the recorded source; a verified `OTHER`
-    requester also reveals it. An `UNKNOWN` requester never marks a channel.
+    requester also reveals it. An `UNKNOWN` requester never marks a channel. A Discord
+    turn never writes the permanent mark: its audience is live, so a room opens again
+    when its outsider leaves.
     """
     source: Literal["platform", "client"] | None = None
-    if channel_shared is True:
+    if platform == "discord":
+        pass
+    elif channel_shared is True:
         source = "platform"
     elif requester_org is RequesterOrg.OTHER:
         source = "client"
@@ -2121,12 +2181,70 @@ async def _record_shared_channel(
             channel_id=channel_id,
             source=source,
         )
-        return True
-    return (
-        await channel_has_outsiders(
-            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        return ChannelAudience(contained=True, known=True, narrow=False, source="registry")
+    return await channel_has_outsiders(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        mode=mode,
+    )
+
+
+def _narrow_by_facts(audience: ChannelAudience | None, mode: AudienceMode) -> bool:
+    """Whether the stored facts call the room narrow, in mode `on`."""
+    return mode == "on" and audience is not None and audience.source == "facts" and audience.narrow
+
+
+def _without_identity_servers(
+    deps: TurnDeps,
+    agent: BetaManagedAgentsAgent,
+    *,
+    mode: AudienceMode,
+    audience: ChannelAudience | None,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    agent_name: str | None,
+) -> BetaManagedAgentsAgent:
+    """The agent as its room runs it: with no signed-identity server in a contained room.
+
+    Only the stored facts of a Discord room in mode `on` take the servers away. Mode
+    `shadow` leaves them and logs the agents that would lose them.
+    """
+    if audience is None or not identity_relay_server_names(agent, public_url=deps.public_url):
+        return agent
+    if mode == "on" and audience.source == "facts" and audience.contained:
+        return without_identity_relays(agent, public_url=deps.public_url)[0]
+    if mode == "shadow" and audience.shadow is not None and audience.shadow.contained:
+        log_shadow(
+            "tool_removed",
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            agent=agent_name,
+            reason="identity_server",
         )
-    ).contained
+    return agent
+
+
+def _log_shadow_hold(
+    shadow: ChannelAudience | None,
+    *,
+    hold: TurnHold | None,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    agent_name: str | None,
+) -> None:
+    """Log a turn that mode `on` would hold and that nothing holds today."""
+    if shadow is None or not shadow.contained or hold is not None:
+        return
+    log_shadow(
+        "turn_held",
+        tenant_id=tenant_id,
+        channel_id=channel_id,
+        agent=agent_name,
+        reason="room_contained" if shadow.known else "room_unknown",
+    )
 
 
 def _require_turn_start(
@@ -2221,17 +2339,19 @@ def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
 
 async def _tightened_hold(
     session: AsyncSession, admission: Admission, grant: AdmissionGrant
-) -> tuple[AdmissionGrant, bool]:
-    """The grant and shared flag with what was learned since admission; never relaxed.
+) -> tuple[AdmissionGrant, bool, ChannelAudience | None]:
+    """The grant, shared flag and the room's audience, with what was learned since admission;
+    never relaxed.
 
     A requester marked foreign, or a channel recorded as shared, since the turn
     was admitted holds it to its channel now, drops its admin standing and makes
-    the subject a client. Whatever the admission already held stays held.
+    the subject a client. Whatever the admission already held stays held. The audience
+    is None for a DM and for a grant with no platform or requester.
     """
     shared = admission.shared_channel
     external_id = grant.subject.platform_user_id
     if grant.platform is None or external_id is None:
-        return grant, shared
+        return grant, shared, None
     principal = await find_platform_principal(
         session, tenant_id=grant.tenant_id, platform=grant.platform, external_id=external_id
     )
@@ -2243,9 +2363,13 @@ async def _tightened_hold(
             raise AdmissionDenied(reason="client_requester")
         # A DM moved from a channel is budgeted to it, so that is its source
         # even when the DM path has not attached the source's seal facts.
+        # A DM that has no source by design (a private answer) has none: the budget
+        # channel stands in for a source only when none was recorded.
         source = (
             grant.dm_source.channel_id
             if grant.dm_source is not None
+            else None
+            if grant.dm_no_source
             else admission.budget_channel_id
         )
         if (
@@ -2257,24 +2381,24 @@ async def _tightened_hold(
             ).contained
         ):
             raise DmSourceSealedError("dm_source_shared")
-        return grant, shared
+        return grant, shared, None
     client = grant.subject.client or (
         principal is not None and principal.foreign_home_id is not None
     )
-    shared = (
-        shared
-        or (
-            await channel_has_outsiders(
-                session,
-                tenant_id=grant.tenant_id,
-                platform=grant.platform,
-                channel_id=grant.channel_id,
-            )
-        ).contained
+    audience = await channel_has_outsiders(
+        session,
+        tenant_id=grant.tenant_id,
+        platform=grant.platform,
+        channel_id=grant.channel_id,
+        thread_id=grant.thread_id,
     )
+    shared = shared or audience.contained
+    platform = grant.platform
+    if _narrow_by_facts(audience, "on") and not grant.narrow_room:
+        grant = replace(grant, narrow_room=True)
     if not (client or shared):
-        return grant, shared
-    hold = TurnHold(grant.platform, grant.channel_id, client)
+        return grant, shared, audience
+    hold = TurnHold(platform, grant.channel_id, client)
     if grant.hold is not None:
         hold = TurnHold(
             hold.platform,
@@ -2283,7 +2407,7 @@ async def _tightened_hold(
             relay=grant.hold.relay,
         )
     subject = replace(grant.subject, is_admin=False, client=hold.client)
-    return replace(grant, subject=subject, hold=hold), shared
+    return replace(grant, subject=subject, hold=hold), shared, audience
 
 
 async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
@@ -2319,7 +2443,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
                 or not await dm_enabled(session, tenant_id=grant.tenant_id)
             ):
                 raise AdmissionDenied(reason="invoker_not_allowed")
-        grant, shared_channel = await _tightened_hold(session, admission, grant)
+        grant, shared_channel, audience = await _tightened_hold(session, admission, grant)
     if grant.subject.platform_user_id is not None and (
         policy.invoker_role_ids
         or agent_invoker_roles(policy, grant.agent.names)
@@ -2381,8 +2505,14 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     rules = await daimon_rule_set_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
+    # A room that became contained since admission answers with no signed-identity
+    # server: the session is built from this agent.
+    agent = admission.agent
+    if audience is not None and audience.source == "facts" and audience.contained:
+        agent = without_identity_relays(agent, public_url=deps.public_url)[0]
     if (
-        grant == admission.grant
+        agent is admission.agent
+        and grant == admission.grant
         and shared_channel == admission.shared_channel
         and seal_ids == admission.origin_seal_ids
         and memory_read_only == admission.memory_read_only
@@ -2394,6 +2524,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     return replace(
         admission,
+        agent=agent,
         grant=grant,
         hold=grant.hold,
         shared_channel=shared_channel,
@@ -2509,7 +2640,9 @@ async def _dm_memory_read_only(deps: TurnDeps, grant: AdmissionGrant) -> bool:
 def _memory_read_only(
     policy: TenantAccessPolicy, grant: AdmissionGrant, sealed: bool, dm_read_only: bool
 ) -> bool:
-    return (sealed and not _is_own_agent(policy, grant)) or dm_read_only
+    """A sealed room is read-only for every agent but its own; a narrow room (by its
+    stored facts) is read-only for its own agent too."""
+    return (sealed and not _is_own_agent(policy, grant)) or dm_read_only or grant.narrow_room
 
 
 async def _awaits_its_switch_here(
