@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, Unpack
 
 from daimon.core._models import (
     Workflow,
@@ -154,6 +154,32 @@ async def save_draft(
         )
     ).scalar_one_or_none()
     return None if orm is None else WorkflowRow.model_validate(orm)
+
+
+class Settings(TypedDict, total=False):
+    name: str
+    visibility: Visibility
+    home_channel_id: str | None
+    monthly_cap_usd: Decimal | None
+    owner_account_id: uuid.UUID | None
+    #: Replaces the draft without a new revision: a rename kept in step with the settings.
+    draft_spec: dict[str, Any]
+
+
+async def update_settings(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    workflow_id: uuid.UUID,
+    **changes: Unpack[Settings],
+) -> None:
+    """Change the fields given; versions and the draft's revision are not touched."""
+    if changes:
+        await session.execute(
+            update(Workflow)
+            .where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
+            .values(**changes)
+        )
 
 
 async def set_status(

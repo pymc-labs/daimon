@@ -73,6 +73,8 @@ class Start:
     label: str | None = None
     budget_usd: Decimal | None = None
     pinned: dict[str, dict[str, Any]] = field(default_factory=dict[str, dict[str, Any]])
+    #: The run the pinned outputs came from, for the run page.
+    pinned_from: uuid.UUID | None = None
     fork_of: tuple[uuid.UUID, str] | None = None
     rerun_of: uuid.UUID | None = None
     parent_run_id: uuid.UUID | None = None
@@ -409,7 +411,13 @@ async def start_run(
             forked_from_run_id=start.fork_of[0] if start.fork_of else None,
             forked_from_step=start.fork_of[1] if start.fork_of else None,
             test_options=(
-                {"spec": spec_document, "pinned": start.pinned} if start.mode == "test" else None
+                {
+                    "spec": spec_document,
+                    "pinned": start.pinned,
+                    "pinned_from": str(start.pinned_from) if start.pinned_from else None,
+                }
+                if start.mode == "test"
+                else None
             ),
         )
         queued = [Event("run.queued", None, {"trigger": start.trigger_kind})]

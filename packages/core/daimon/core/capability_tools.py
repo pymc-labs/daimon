@@ -31,6 +31,23 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "run_routine",
         }
     ),
+    "workflows": frozenset(
+        {
+            "list_workflows",
+            "get_workflow",
+            "create_workflow",
+            "edit_workflow_draft",
+            "validate_workflow",
+            "publish_workflow",
+            "run_workflow",
+            "list_workflow_runs",
+            "get_workflow_run",
+            "cancel_workflow_run",
+            "retry_workflow_run",
+            "fork_workflow_run",
+            "set_workflow_paused",
+        }
+    ),
     "long_jobs": frozenset({"start_long_job", "get_long_job", "list_long_jobs", "cancel_long_job"}),
     "compute": frozenset(
         {

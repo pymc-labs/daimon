@@ -1110,7 +1110,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Workflows",
         "People can build and run workflows. Off stops their runs here.",
         tiers=_WORKFLOW_TIERS,
-        binds="turn",
         default="off",
         authority=_ADMIN,
     ),
