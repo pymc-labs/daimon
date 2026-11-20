@@ -63,7 +63,11 @@ def test_a_narrowed_record_stays_narrowed() -> None:
             "mcp_server_name": "daimon-mcp",
             "default_config": {"enabled": True, "permission_policy": allow},
             "configs": [
-                {"name": "memory_write", "enabled": True, "permission_policy": {"type": "always_ask"}}
+                {
+                    "name": "memory_write",
+                    "enabled": True,
+                    "permission_policy": {"type": "always_ask"},
+                }
             ],
         },
         {"type": "mcp_toolset", "mcp_server_name": "unlisted", "default_config": {"enabled": True}},
