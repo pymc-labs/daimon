@@ -18,10 +18,13 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
+from daimon.core.audience_gate import read_audience_mode
+from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.config import SignedIdentityServer
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
@@ -202,6 +205,38 @@ async def _listed_as_builtin(
     )
 
 
+async def _held_in_audience_mode_on(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    raw_hold: object,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+) -> bool:
+    """Whether a held token is one of a room outsiders may read, or nobody can vouch for, in
+    mode `on`. Such a session mounts no signed-identity server there, so the token is a
+    leftover. A relay-only hold of an internal room (`relay=True`) keeps working: the room's
+    facts are read again here. An unreadable hold, mode or fact counts as yes: fail closed."""
+    try:
+        hold = parse_hold_claim(raw_hold)
+        async with sessionmaker() as session:
+            mode = await read_audience_mode(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=hold.platform,
+                channel_id=hold.channel_id,
+                session=session,
+            )
+            if mode != "on":
+                return False
+            audience = await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=hold.platform, channel_id=hold.channel_id
+            )
+    except Exception:
+        log.warning("mcp_identity.relay_hold_unreadable", exc_info=True)
+        return True
+    return audience.contained
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -240,6 +275,12 @@ def build_identity_relay_route(
         if claims.get(TOKEN_KIND_CLAIM) != "agent":
             return Response(status_code=403)
         platform = str(claims.get("platform") or "")
+        if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
+            sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
+        ):
+            # A held session is in a room outsiders may read, or nobody can vouch for: in
+            # `on` it mounts no signed-identity server, so this token is a leftover. Refused.
+            return Response(status_code=403)
         workspace = claims.get("external_id")
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:

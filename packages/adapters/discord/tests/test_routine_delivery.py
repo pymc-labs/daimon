@@ -1455,12 +1455,28 @@ async def test_a_legacy_result_keeps_todays_logic(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    audience.mode = "off"  # `on` counts a legacy result as unheld
     audience.contained = {"555"}
     row = await _stored(db_session, None)
     channel = _text_channel()
     outcome = await _poster(db_session_factory, channel)(row)
     assert outcome.status == "delivered"
     channel.send.assert_awaited_once()
+
+
+async def test_a_legacy_result_counts_as_unheld_in_mode_on(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
 
 
 async def test_shadow_delivers_and_logs_the_refusal(
@@ -1533,3 +1549,73 @@ async def test_every_chunk_is_sent_while_the_audience_stays_the_same(
     channel.send = AsyncMock(return_value=SimpleNamespace(id=1))
     outcome = await _poster(db_session_factory, channel)(row)
     assert outcome.status == "delivered" and channel.send.await_count >= 2
+
+
+@pytest.mark.parametrize(
+    ("mode", "roles", "delivered"),
+    [
+        ("on", ("4001",), True),
+        ("on", ("4002",), False),
+        ("on", None, False),
+        ("shadow", ("4002",), True),
+        ("off", ("4002",), True),
+    ],
+)
+async def test_a_channel_routines_dm_fallback_rechecks_the_owners_standing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    roles: tuple[str, ...] | None,
+    delivered: bool,
+) -> None:
+    """The fallback DM (and its files) goes only to an owner who still holds an internal
+    role in `on`; a failed lookup is an unknown standing, which `on` refuses."""
+    from daimon.core.config import DirectMessagePolicy
+
+    async def read(*_args: object, **_kwargs: object) -> str:
+        return mode
+
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", read)
+    async with db_session_factory() as session:
+        row = await _routine(session)
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=row.tenant_id,
+            policy=TenantAccessPolicy(internal_role_ids=("4001",)),
+        )
+        # An open room: a room with no fact is narrow in `on`, and a narrow room keeps its
+        # results inside (no DM fallback).
+        from datetime import UTC, datetime, timedelta
+
+        from daimon.core.audience_facts import RoomFacts
+        from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+
+        now = datetime.now(UTC)
+        await publish_facts(
+            session,
+            tenant_id=row.tenant_id,
+            rooms={"555": StoredRoom(RoomFacts(contained=False, narrow=False))},
+            now=now,
+            fresh_until=now + timedelta(minutes=10),
+        )
+
+    calls = 0
+
+    async def member(*_args: object) -> Membership:
+        nonlocal calls
+        calls += 1
+        if roles is None and calls > 1:
+            raise RuntimeError("lookup failed")
+        return Membership(is_member=True, role_ids=roles or ("4001",))
+
+    dms = _Dms()
+    poster = make_discord_routine_poster(
+        db_session_factory,
+        fetch_channel=AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone")),
+        open_dm=dms.open,
+        dm_policy=lambda _: DirectMessagePolicy(),
+        membership_resolver=CachedMembershipResolver(member),  # type: ignore[arg-type]
+    )
+    result = await poster(row)
+    assert bool(dms.sent) is delivered, result

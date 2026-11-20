@@ -461,7 +461,7 @@ def test_the_stored_hold_round_trips_and_null_is_legacy() -> None:
     [
         ("off", {"held": False}, False, False),
         ("shadow", {"held": False}, False, False),
-        ("on", None, False, False),  # legacy: today's logic
+        ("on", None, True, False),  # no stored hold counts as unheld in on
         ("on", {"held": False}, True, False),  # made outside, room now contained
         (
             "on",

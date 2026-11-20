@@ -39,8 +39,13 @@ import structlog
 from daimon.adapters.discord.member_sync import tenant_of
 from daimon.adapters.discord.outsiders import guild_rooms
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
+from daimon.core.stores.access_policy import (
+    AccessPolicyUnreadable,
+    load_access_policy,
+    lock_policy_writes_shared,
+)
 from daimon.core.stores.audience_facts import StoredRoom
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
@@ -115,6 +120,9 @@ class AudienceSync:
         self._epoch = 0
         self._locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._pending: dict[uuid.UUID, asyncio.Task[None]] = {}
+        # Servers whose facts were retired because their role lists moved or a policy write
+        # was in progress: never renewed, computed again at the next tick.
+        self._dirty: set[uuid.UUID] = set()
         # The roles each server's facts were last computed with.
         self._roles: dict[uuid.UUID, tuple[tuple[str, ...], tuple[str, ...]]] = {}
 
@@ -206,6 +214,15 @@ class AudienceSync:
             fresh_until = now + self._fresh_for
             if reconciled_at is not None:
                 fresh_until = min(fresh_until, reconciled_at + self._reconcile_limit)
+            # The only place the policy fence is held, and only to the end of this transaction:
+            # a policy write cannot commit between the role lists checked here and the facts
+            # written from them. A busy fence or changed role lists retire the facts.
+            try:
+                await lock_policy_writes_shared(session, tenant_id=tenant_id)
+            except FenceUnavailable:
+                return await self._retire_stale(session, tenant_id, now, why="policy_busy")
+            if await _policy_roles(session, tenant_id) != policy_roles:
+                return await self._retire_stale(session, tenant_id, now, why="roles_changed")
             generation = await facts_store.publish_facts(
                 session,
                 tenant_id=tenant_id,
@@ -214,6 +231,7 @@ class AudienceSync:
                 fresh_until=fresh_until,
             )
         self._live.add(tenant_id)
+        self._dirty.discard(tenant_id)
         self._roles[tenant_id] = policy_roles
         if reconciled:
             self._reconciled[tenant_id] = now
@@ -227,6 +245,21 @@ class AudienceSync:
             reconciled=reconciled,
         )
         return True
+
+    async def _retire_stale(
+        self, session: AsyncSession, tenant_id: uuid.UUID, now: datetime, *, why: str
+    ) -> bool:
+        """Facts computed from role lists that may be out of date must not stand: make every
+        room unknown now (this needs no policy fence) and mark the server dirty. A dirty
+        server is never renewed; the next tick computes it again."""
+        self._live.discard(tenant_id)
+        self._dirty.add(tenant_id)
+        self._roles.pop(tenant_id, None)
+        self._baseline.pop(tenant_id, None)
+        self._members_loaded.discard(tenant_id)
+        await facts_store.mark_unknown(session, tenant_id=tenant_id, now=now)
+        log.warning("discord.audience.publish_stale", tenant_id=str(tenant_id), why=why)
+        return False
 
     async def reconcile(self, guild: discord.Guild) -> bool:
         """Read the server's roles and channels by REST and re-chunk its members, then
@@ -279,6 +312,7 @@ class AudienceSync:
         self._members_loaded.clear()
         self._baseline.clear()
         self._reconciled.clear()
+        self._dirty.clear()
         for task in self._pending.values():
             task.cancel()
         self._pending.clear()
@@ -346,6 +380,7 @@ class AudienceSync:
                 or last is None
                 or now - last >= self._reconcile_every
                 or self._roles.get(tenant_id) != roles
+                or tenant_id in self._dirty
             ) and await self.reconcile(guild):
                 reconciled_now.add(tenant_id)
         await self._renew(by_tenant, reconciled_now)
@@ -359,6 +394,7 @@ class AudienceSync:
             for tenant_id in self._live
             if tenant_id in by_tenant
             and tenant_id not in skip
+            and tenant_id not in self._dirty
             and (last := self._reconciled.get(tenant_id)) is not None
         }
         limits = {t: limit for t, limit in limits.items() if limit > now}

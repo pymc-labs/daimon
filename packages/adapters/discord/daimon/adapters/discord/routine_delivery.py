@@ -56,6 +56,7 @@ from daimon.core.routine_delivery import (
     clear_creator,
     delivery_target,
     discord_creator_may_post,
+    private_delivery_refusal,
     render_fallback_dm,
     render_fallback_post,
     tenant_dm_still_open,
@@ -224,6 +225,7 @@ def make_discord_routine_poster(
             "routine_dms_disabled": "Routine DMs are disabled for this server.",
             "restricted_source": "A restricted source cannot deliver by DM.",
             "agent_not_allowed": "The agent is not allowed to run privately.",
+            "owner_outside_team": "The owner holds no internal role, so the result can't go by DM.",
             "destination_unavailable": "The routine server or recipient is unavailable.",
         }
         return DeliveryOutcome(
@@ -457,6 +459,15 @@ def make_discord_routine_poster(
             if held_now or gate.keeps_inside(held_now):
                 return False
             if await creator_still_cleared(row) is not None:
+                return False
+            # Every DM send of a channel routine (the fallback and its attachments) asks
+            # again whether the owner is still inside the team (`on` only).
+            if (
+                await private_delivery_refusal(
+                    sessionmaker, row, membership_resolver=membership_resolver
+                )
+                is not None
+            ):
                 return False
             if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
                 return False
