@@ -17,6 +17,7 @@ from daimon.core.evals.format import Case, ExchangeRequest, HttpRequest, WorldCa
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
 from daimon.core.evals.world.http_app import create_world_app
 from daimon.core.evals.world.model import HttpCall, ItemRef, WorldRequest
+from daimon.core.evals.world.services.git import GitReply
 from daimon.core.evals.world.simulator import SimAnswer, SimContext, build_prompt, parse_answer
 from daimon.core.stores import eval_world, evals
 from daimon.core.stores.evals import BlobRow
@@ -109,6 +110,75 @@ async def test_simulated_github_answer_when_invalid_twice_then_denied(
     assert "number" in problem, f"the retry is told what was wrong: {problem}"
 
 
+async def test_simulator_when_the_model_api_fails_then_the_call_is_denied_and_counted_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    class Failing(ScriptedSimulator):
+        async def answer(self, context: SimContext) -> SimAnswer:
+            self.asked.append(context)
+            raise ConnectionError("model API down")
+
+    simulator = Failing({})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    item = await _item(db_session, db_session_factory, world, eval_case({}))
+    answer = await world.http(item, _get("https://api.example.com/v1/plan"))
+    assert (answer.origin, answer.reason) == ("denied", "simulator_error"), "denied, not raised"
+    assert len(simulator.asked) == 1, "one attempt, no retry"
+    async with db_session_factory() as session:
+        stats = await eval_world.call_stats(session, item_id=item.id)
+    assert stats.model_calls == 1, "the failed attempt counts against the budget"
+
+
+async def test_simulator_when_calls_overlap_then_max_calls_holds(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class Slow(ScriptedSimulator):
+        async def answer(self, context: SimContext) -> SimAnswer:
+            started.set()
+            await release.wait()
+            return await super().answer(context)
+
+    simulator = Slow({"status": 200, "body": {"ok": True}})
+    world = FakeWorld(db_session_factory, simulator, tmp_path)
+    case = eval_case({"simulator": {"max_calls": 1}})
+    item = await _item(db_session, db_session_factory, world, case)
+    first = asyncio.create_task(world.http(item, _get("https://api.example.com/v1/a")))
+    await started.wait()
+    second = await world.http(item, _get("https://api.example.com/v1/b"))
+    release.set()
+    assert (second.origin, second.reason) == ("denied", "simulator_max_calls"), (
+        "the call in flight holds the only model call"
+    )
+    assert (await first).origin == "simulated", "the call that reserved it is answered"
+    assert len(simulator.asked) == 1, "the cap was not overspent"
+
+
+async def test_git_when_calls_overlap_then_one_runs_at_a_time_per_item(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    active, peak = 0, 0
+
+    class Slow:
+        async def serve(self, *_args: object) -> GitReply:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+            return GitReply(200, {}, b"", ())
+
+    world = FakeWorld(db_session_factory, None, tmp_path)
+    world.git = Slow()  # pyright: ignore[reportAttributeAccessIssue]
+    repo = {"url": "https://github.com/acme/app", "default_branch": "main",
+            "bundle": {"sha256": "0" * 64, "size": 1, "media_type": "application/x-git-bundle"}}  # fmt: skip
+    item = await _item(db_session, db_session_factory, world, eval_case({"repos": [repo]}))
+    url = "https://github.com/acme/app.git/info/refs?service=git-upload-pack"
+    await asyncio.gather(*(world.http(item, _get(url)) for _ in range(3)))
+    assert peak == 1, "reading the bundle, serving and recording are one step per item"
+
+
 def repo_bundle(tmp_path: Path) -> bytes:
     repo = tmp_path / "source"
     git = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com"]
@@ -170,8 +240,8 @@ async def test_a_request_blob_when_the_deployment_has_an_object_store_then_it_is
     assert list(objects.kept.values()) == [b"\xff\xfe"], "the bytes go to the object store"
     async with db_session_factory() as session:
         kept = await evals.blob_content(session, tenant_id=item.tenant_id, sha256=sha)
-        assert kept is None, "the database keeps only the blob's row"
-        assert await world._read_blob(session, item.tenant_id, sha) == b"\xff\xfe"  # pyright: ignore[reportPrivateUsage]
+    assert kept is None, "the database keeps only the blob's row"
+    assert await world._read_blob(item.tenant_id, sha) == b"\xff\xfe"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
