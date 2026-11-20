@@ -116,7 +116,8 @@ async def test_unscrubbed_bundle_when_imported_then_only_an_accepting_admin_succ
     report = await service.import_bundle(admin, _chunks(data), accept_unscrubbed=True)
     assert report.runs == [RUN], "an accepting admin imports it"
     sam = Subject(tenant_id=admin.tenant_id, platform="web", key="sam", role="member")
-    await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
+    with pytest.raises(EvalForbidden, match="not scrubbed"):
+        await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
     with pytest.raises(EvalNotFound):
         await service.run(sam, RUN)  # the run came unscrubbed: shares never reach it
 
@@ -211,8 +212,6 @@ async def test_suite_when_imported_from_an_unscrubbed_bundle_then_its_version_is
         assert suite is not None
         scrub = await store.version_scrub(session, suite_id=suite.id, version=1)
     assert (scrub, suite.scrub_status) == ("unscrubbed", "unscrubbed"), "the manifest's word holds"
-    with pytest.raises(EvalForbidden, match="not scrubbed"):
-        await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
 
 
 async def test_run_when_a_reviewer_reads_it_then_arms_and_item_ids_are_neutral(
