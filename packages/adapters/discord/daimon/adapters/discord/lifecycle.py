@@ -45,6 +45,7 @@ from daimon.adapters.discord.tables import render_discord_tables
 from daimon.adapters.discord.thread_gone import ThreadStopped
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.features.model_input import ANSWER_MESSAGES
@@ -55,6 +56,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as EmbedState
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
 from daimon.core.turn.output import OutputGate
@@ -474,6 +476,9 @@ class DiscordTurnLifecycle(OutputGate):
         self._card_discard_failed = False
         self._last_flush: float = 0.0
         self._terminal: bool = False
+        # The room became contained mid-turn and its output gate refused a write: no more
+        # progress writes, and no retry of the refused one.
+        self._output_refused: bool = False
         self._progress_edits: set[asyncio.Task[None]] = set()
         self._progress_settled = asyncio.Event()
         self._progress_settled.set()
@@ -1025,6 +1030,10 @@ class DiscordTurnLifecycle(OutputGate):
                 await self._edit_message(
                     message, progress=True, embeds=embeds, view=self._cancel_view
                 )
+        except AdmissionDenied as refusal:
+            if refusal.detail != AUDIENCE_CONTAINED:
+                log.warning("turn.progress_edit_failed", exc_info=True)
+            raise
         except Exception:
             log.warning("turn.progress_edit_failed", exc_info=True)
             raise
@@ -1607,13 +1616,21 @@ class DiscordTurnLifecycle(OutputGate):
         # Sole delivery path. Sealed answers first, then the embed
         # flush -- matches on_terminal_success's existing order, so a sealed
         # answer never trails behind an embed that already moved past it.
-        if self._terminal or self._thread_stopped():
+        if self._terminal or self._thread_stopped() or self._output_refused:
             return
         self._state = update_activity(self._state, state)
         await self._persist_sealed_responses(state)
         if self._unprompted and self._message_ref is None and not _has_visible_output(state):
             return  # nothing to show yet, and nobody asked: stay invisible
-        await self._maybe_flush()
+        try:
+            await self._maybe_flush()
+        except AdmissionDenied as refusal:
+            if refusal.detail != AUDIENCE_CONTAINED:
+                raise
+            # The gate is right to refuse; the card has nothing more to say. The turn ends
+            # through its own path, which renders the refusal once.
+            self._output_refused = True
+            log.info("turn.progress_stopped", reason=AUDIENCE_CONTAINED)
 
     async def _discard_embed(self) -> None:
         """Delete the embed this turn posted, if any, and forget it. Best effort."""
