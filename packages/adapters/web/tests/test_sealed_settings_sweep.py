@@ -158,6 +158,16 @@ _DM_ROUTING = (
     "answers only in its home"
 )
 
+_WORKFLOW = (
+    "a workflow of the caller: its draft, versions, runs and triggers, held by the workflow's "
+    "roles (core/workflows/access.py); content side, as a routine. It names channels and "
+    "agents but changes no channel's or agent's settings"
+)
+_HOOK = (
+    "an outside sender's delivery to a workflow trigger: signed by the trigger's secret, no "
+    "caller; it starts a run and changes no channel's or agent's settings"
+)
+
 #: Every other mutating route, with why it is not swept.
 EXEMPT: dict[str, str] = {
     "POST /auth/logout": ("signs the caller out"),
@@ -302,6 +312,29 @@ EXEMPT: dict[str, str] = {
     "POST /api/admin/dm/rules": _DM_ROUTING,
     "PATCH /api/admin/dm/rules/{position}": _DM_ROUTING,
     "DELETE /api/admin/dm/rules/{position}": _DM_ROUTING,
+    "POST /api/workflows": _WORKFLOW,
+    "POST /api/workflows/runs/{run_id}/cancel": _WORKFLOW,
+    "POST /api/workflows/runs/{run_id}/redrive": _WORKFLOW,
+    "POST /api/workflows/runs/{run_id}/decide": _WORKFLOW,
+    "POST /api/workflows/runs/{run_id}/rerun": _WORKFLOW,
+    "POST /api/workflows/runs/{run_id}/fork": _WORKFLOW,
+    "POST /api/workflows/inbox/{item_id}/decide": _WORKFLOW,
+    "PATCH /api/workflows/{workflow_id}": _WORKFLOW,
+    "DELETE /api/workflows/{workflow_id}": _WORKFLOW,
+    "PUT /api/workflows/{workflow_id}/draft": _WORKFLOW,
+    "DELETE /api/workflows/{workflow_id}/draft": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/draft/publish": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/draft/request": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/validate": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/versions/{number}/restore": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/runs": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/triggers/{key}/preview": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/triggers/{key}/listen": _WORKFLOW,
+    "DELETE /api/workflows/{workflow_id}/triggers/{key}/listen": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/triggers/{key}/rotate": _WORKFLOW,
+    "POST /api/workflows/{workflow_id}/triggers/{key}/deliveries/{delivery}/replay": _WORKFLOW,
+    "POST /hooks/w/{trigger_id}": _HOOK,
+    "POST /hooks/w/{trigger_id}/test": _HOOK,
     "DELETE /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "PATCH /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "POST /{path:path}": "the app's page fallback: it serves the page and changes nothing",

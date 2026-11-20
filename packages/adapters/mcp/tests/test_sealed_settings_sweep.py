@@ -251,6 +251,8 @@ _READS = "reads only; changes nothing"
 _LIVE = "needs live provider (a chat platform, Microsoft or Fly call); posts or edits content, not a setting. Its channel is checked by the isolation view"
 _TURN = "starts or ends a turn or session; not a channel or agent setting. Access is the isolation view and the turn gate"
 _SCHEDULED = "a routine, timer, watch or long job of the caller; content side, as web SAVE_ROUTINE. The reader rule applies when it runs"
+_WORKFLOW = "a workflow of the caller, held by the workflow's roles; content side, as a routine. It names channels and agents but changes no channel's or agent's settings"
+_STEP = "a running workflow step's own result or question, held by the step's grant (its attempt id); it changes no channel's or agent's settings"
 _TENANT = "tenant-wide: people, admins, credits, allowances, promo codes, invites, support or providers; not scoped to a channel or an agent"
 _OWN = "the caller's own data or preference"
 _NEW = "creates or edits a tenant library item or a new agent or environment; it changes no private channel and no agent's own setup"
@@ -259,6 +261,24 @@ _CARD = "needs live provider (a request card posted into a channel); the agent a
 
 #: Every other tool of `/mcp`, with why it is not swept.
 EXEMPT: dict[str, str] = {
+    "list_workflows": _READS,
+    "get_workflow": _READS,
+    "validate_workflow": _READS,
+    "list_workflow_runs": _READS,
+    "get_workflow_run": _READS,
+    "create_workflow": _WORKFLOW,
+    "edit_workflow_draft": _WORKFLOW,
+    "publish_workflow": _WORKFLOW,
+    "run_workflow": _WORKFLOW,
+    "cancel_workflow_run": _WORKFLOW,
+    "retry_workflow_run": _WORKFLOW,
+    "fork_workflow_run": _WORKFLOW,
+    "set_workflow_paused": _WORKFLOW,
+    "complete_step": _STEP,
+    "fail_step": _STEP,
+    "finish_early": _STEP,
+    "step_context": _STEP,
+    "ask_human": _STEP,
     "add_server_skill": _NEW,
     "approve_reach": _LIVE,
     "approve_server_skill_update": _NEW,
