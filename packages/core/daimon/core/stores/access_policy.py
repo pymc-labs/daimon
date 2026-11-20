@@ -146,10 +146,10 @@ async def lock_policy_writes_exclusive(session: AsyncSession, *, tenant_id: uuid
         raise PolicyBusyError() from None
 
 
-#: An admin save that meets a holder tries again for about POLICY_WRITE_TIMEOUT_S: a message
-#: tidy can hold the fence across platform I/O for up to 15 s. A waiting try holds no lock.
-POLICY_LOCK_RETRY_S = 0.25
-POLICY_LOCK_ATTEMPTS = int(POLICY_WRITE_TIMEOUT_S / POLICY_LOCK_RETRY_S)
+#: An admin save that meets a short holder (a fact publish) tries again this often, this long.
+#: A caller-owned transaction must not wait longer in the pool: a long holder still gets 409.
+POLICY_LOCK_ATTEMPTS = 6
+POLICY_LOCK_RETRY_S = 0.1
 
 
 async def lock_policy_writes_exclusive_retrying(
@@ -399,7 +399,7 @@ async def _load_stored_policy(session: AsyncSession, *, tenant_id: uuid.UUID) ->
 async def set_access_policy(
     session: AsyncSession, *, tenant_id: uuid.UUID, policy: TenantAccessPolicy
 ) -> None:
-    await lock_policy_writes_exclusive_retrying(session, tenant_id=tenant_id)
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     if not await _roles_supported(session, tenant_id, policy):
         raise ValueError(
@@ -454,7 +454,7 @@ async def set_access_policy(
 
 async def clear_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     """Delete the tenant's row, putting it back on the open default. True if one existed."""
-    await lock_policy_writes_exclusive_retrying(session, tenant_id=tenant_id)
+    await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
     await _role_lists_changed(session, tenant_id, TenantAccessPolicy())
     result = await session.execute(
