@@ -19,6 +19,7 @@ from typing import Final, Literal, Protocol
 
 from daimon.core.evals.sandbox.ca import EvalCA
 from daimon.core.evals.world.model import ItemRef
+from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.output_delivery import DeliverableFile
 
 Executor = Literal["anthropic", "openai", "gemini", "harness", "probe"]
@@ -92,6 +93,11 @@ class SandboxRuntime(Protocol):
     ) -> CommandResult: ...
     async def files(self, pod: PodHandle, root: str) -> list[DeliverableFile]: ...
     async def stop(self, pod: PodHandle) -> None: ...
+
+
+def registries(features: FeatureSnapshot) -> Literal["passthrough", "deny"]:
+    """Whether the gateway lets package downloads reach the real registries."""
+    return "deny" if features.value("eval_package_registries") == "deny" else "passthrough"
 
 
 def pod_name(spec: PodSpec) -> str:

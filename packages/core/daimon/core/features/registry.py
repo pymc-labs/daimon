@@ -697,6 +697,22 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
     ),
     FeatureSpec(
+        key="eval_package_registries",
+        name="Package registries in eval sandboxes",
+        category="guardrails",
+        effect="guardrail",
+        values={"passthrough": "Reach package registries", "deny": "Block package registries"},
+        default="passthrough",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "Package installs in an eval sandbox download from the real registries, read only. "
+            "Block sends them to the simulated world like any other request."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="host_call_gate",
         name="Approve cards for OpenAI and Gemini",
         category="guardrails",

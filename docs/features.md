@@ -97,6 +97,7 @@ one turned Off since.
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
+| Package registries in eval sandboxes | `eval_package_registries` | Guardrail | Reach package registries | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -1071,6 +1072,18 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | Levels | Deployment |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
+
+## Package registries in eval sandboxes
+
+Package installs in an eval sandbox download from the real registries, read only. Block sends them to the simulated world like any other request.
+
+| | |
+| --- | --- |
+| Key | `eval_package_registries` |
+| Values | `passthrough` (Reach package registries), `deny` (Block package registries) |
+| Default | `passthrough` |
+| Levels | Deployment |
+| Combines | Stricter wins |
 
 ## Approve cards for OpenAI and Gemini
 
