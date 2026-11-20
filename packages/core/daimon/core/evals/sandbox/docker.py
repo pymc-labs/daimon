@@ -132,7 +132,7 @@ class DockerRuntime:
             )
             await wait_ready(self, PodHandle(name, "docker"))
         except (SandboxError, httpx.HTTPError) as exc:
-            logs = await self._logs(name)
+            logs = await self.logs(name)
             await self.stop(PodHandle(name, "docker"))
             raise SandboxError(f"{exc}\n{logs}") from exc
         return PodHandle(name, "docker", address)
@@ -157,8 +157,8 @@ class DockerRuntime:
             raise SandboxError(f"docker archive {root}: {reply.status_code}")
         return untar_files(reply.content, root)
 
-    async def _logs(self, name: str) -> str:
-        """The containers' log tails, for a pod that failed to start."""
+    async def logs(self, name: str) -> str:
+        """The pod's container log tails, for diagnosing a failed pod."""
         tails: list[str] = []
         for part in ("net", "main"):
             reply = await self.client.get(

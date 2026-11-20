@@ -65,7 +65,7 @@ async def test_pod_reaches_only_the_world(
 
             async def run(command: str) -> tuple[int, str]:
                 done = await runtime.run(pod, command, timeout_s=60)
-                return done.exit_code, done.stdout.decode()
+                return done.exit_code, (done.stdout + done.stderr).decode()
 
             assert "recorded" in (await run("curl -sS https://api.example.com/v1/ping"))[1]
             assert "simulated" in (await run("curl -sS https://unknown.example.org/x"))[1]
@@ -74,5 +74,7 @@ async def test_pod_reaches_only_the_world(
             raw = await run("timeout 10 bash -c 'echo > /dev/tcp/192.0.2.1/22'")
             assert raw[0] != 0, "a raw TCP connection is refused"
             assert (await run("id -u"))[1].strip() == "10001", "commands run as the agent"
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}\n{await runtime.logs(pod.id)}") from exc
         finally:
             await runtime.stop(pod)
