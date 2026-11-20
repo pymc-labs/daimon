@@ -429,7 +429,7 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
     } - {_TURN_PATH}
     assert as_built == _KEPT_AS_BUILT.keys(), (
         "a session reused outside the turn path's drift check (`session_compat`) keeps its "
-        "tools as built: list it with a reason and say so in docs/features.md"
+        "tools as built: list it with a reason and say so in its spec in features/registry.py"
     )
     for path, call in calls:
         assert any(k.arg == "toolset" for k in call.keywords), (
