@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 239 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -768,6 +768,19 @@ post_wizard: the agent-facing tool that posts a multi-step form.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `post_wizard` | Discord callers, Teams callers | Post a multi-step form in the channel instead of asking in prose. |
+
+## `workflow_step`
+
+The tools a workflow step's agent finishes its step with
+(`daimon.core.workflows.step_tools`).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `ask_human` | all callers | Ask a person a question from your workflow step. |
+| `complete_step` | all callers | Finish your workflow step with its output, a markdown summary and its route if any. |
+| `fail_step` | all callers | End your workflow step as failed, with why. |
+| `finish_early` | all callers | End the whole workflow run early as done, because there is nothing to do. |
+| `step_context` | all callers | Read your workflow step's brief again, with the outputs of the steps before it. |
 
 ## Hub login mounts: `hub`
 
