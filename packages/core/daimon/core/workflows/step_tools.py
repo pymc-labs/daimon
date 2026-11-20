@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Literal
 
+from daimon.core.capability_tools import WORKFLOW_STEP_TOOLS
 from daimon.core.stores import workflow_runs
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, step_events
 from daimon.core.stores.workflow_runs import AttemptRow, RunRow, StepRow
@@ -26,9 +27,7 @@ from daimon.core.workflows.spec import AgentNode, Spec
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
-STEP_TOOLS: Final = frozenset(
-    {"complete_step", "fail_step", "finish_early", "step_context", "ask_human"}
-)
+STEP_TOOLS: Final = WORKFLOW_STEP_TOOLS
 MAX_REJECTIONS: Final = 3
 BRIEF_SENT: Final = "step.brief_sent"
 RECORDED: Final = "step.output_recorded"

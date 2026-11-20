@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
 
+from daimon.core.capability_tools import WORKFLOW_AUTHORING_TOOLS
 from daimon.core.config import Settings
 from daimon.core.headless_runner import StepTurn
 from daimon.core.stores import workflow_runs
@@ -49,15 +50,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 Writes = Literal["refuse", "propose", "allow"]
 READ_BUILTINS: Final = frozenset({"read", "glob", "grep", "web_fetch", "web_search"})
 #: Daimon tools a step never calls: no step builds more automation.
-AUTHORING_TOOLS: Final = frozenset(
-    {
-        "create_routine",
-        "update_routine",
-        "delete_routine",
-        "set_routine_sandbox_tools",
-        "run_routine",
-    }
-)
+AUTHORING_TOOLS: Final = WORKFLOW_AUTHORING_TOOLS | {
+    "create_routine",
+    "update_routine",
+    "delete_routine",
+    "set_routine_sandbox_tools",
+    "run_routine",
+}
 OWN_TOOLS: Final = frozenset(
     {PROXY_TOOL_NAME, SEARCH_TOOL_NAME, "update_plan", *step_tools.STEP_TOOLS}
 )
@@ -129,7 +128,7 @@ def step_decider(
                     if inner.input.get("step") != str(attempt_id):
                         return _deny(f'Refused {inner.tool_name}: pass step="{attempt_id}".')
                     return ToolConfirmationResult(allow=True)
-                if inner.tool_name in AUTHORING_TOOLS or "workflow" in inner.tool_name:
+                if inner.tool_name in AUTHORING_TOOLS:
                     return _deny(
                         f"Refused {inner.tool_name}: a workflow step cannot change automations."
                     )
