@@ -28,7 +28,7 @@ def _ci() -> dict[str, Any]:
     [
         ("README.md", "docs"),
         ("docs/quickstart.md", "docs"),
-        ("docs/mcp-tools.md", "mcp-catalogue"),
+        ("docs/mcp-tools.md", "docs"),
         ("defaults/skills/x/SKILL.md", "core"),
         ("packages/adapters/web/daimon/adapters/web/app.py", "web"),
         ("packages/adapters/web/README.md", "web"),

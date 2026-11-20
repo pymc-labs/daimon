@@ -95,14 +95,16 @@ jobs:
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
 
-      - name: config reference check
-        run: uv run python scripts/generate_config_reference.py --check
+      # Built by the docs workflow and never committed: run, not compared, so a
+      # generator that stops working fails here before it fails there.
+      - name: config reference builds
+        run: uv run python scripts/generate_config_reference.py
 
-      - name: mcp tool catalogue check
-        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
+      - name: mcp tool catalogue builds
+        run: uv run python scripts/generate_mcp_tool_catalogue.py
 
-      - name: feature reference check
-        run: uv run python scripts/generate_feature_reference.py --check
+      - name: feature reference builds
+        run: uv run python scripts/generate_feature_reference.py
 
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
