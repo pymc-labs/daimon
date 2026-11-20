@@ -42,8 +42,9 @@ async def create_thread(
         agent_id=agent_id,
         agent_name=agent_name,
         title=title,
-        subject=subject,
     )
+    if subject is not None:  # unset stays SQL NULL; an explicit None would store JSON null
+        orm.subject = subject
     session.add(orm)
     await session.flush()
     await session.refresh(orm)
