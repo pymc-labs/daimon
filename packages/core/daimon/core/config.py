@@ -2969,13 +2969,15 @@ class EvalsSettings(BaseModel):
     docker_host: str = Field(
         default="unix:///var/run/docker.sock",
         description=(
-            "Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS files."
+            "Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS "
+            "files."
         ),
     )
     docker_network: str | None = Field(
         default=None,
         description=(
-            "Docker network for eval pods; it must reach the eval world URL. Unset: the default bridge."
+            "Docker network for eval pods; it must reach the eval world URL. Unset: the default "
+            "bridge."
         ),
     )
     docker_tls_ca: Path | None = Field(
@@ -2995,7 +2997,9 @@ class EvalsSettings(BaseModel):
     )
     sandbox_image: str | None = Field(
         default=None,
-        description="Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...).",
+        description=(
+            "Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...)."
+        ),
     )
     ca_key: SecretStr | None = Field(
         default=None,

@@ -65,6 +65,8 @@ def _purpose() -> Purpose:
     return Field(
         default="agent", exclude_if=lambda v: v == "agent", json_schema_extra={ADDITIVE: True}
     )
+
+
 # A concrete MCP tool can be unavailable while the rest of its server survives.
 MCPToolDrop = Annotated[
     str, StringConstraints(pattern=r"^mcp_tool:[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
