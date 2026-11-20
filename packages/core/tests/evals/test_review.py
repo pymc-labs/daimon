@@ -134,8 +134,8 @@ async def test_blind_task_when_served_then_payload_names_no_arm_model_or_reactio
 async def test_blind_comment_when_made_or_listed_then_it_names_no_author(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    _, review, _, reader = await _world(db_session, db_session_factory)
-    task = await review.next(reader, f"{_RUN}~q2")
+    _, review, _, reader, run_id = await _world(db_session, db_session_factory)
+    task = await review.next(reader, f"{run_id}~q2")
     assert task is not None
     made = await review.comment(
         reader, CommentDraft(text="Looks fine.", task_id=task.id, target="A")
@@ -143,7 +143,7 @@ async def test_blind_comment_when_made_or_listed_then_it_names_no_author(
     [listed] = await review.task_comments(reader, task.id)
     for comment in (made, listed):
         payload = comment.model_dump_json(by_alias=True)
-        assert "web:rae" not in payload and _RUN not in payload, "no author or item id"
+        assert "web:rae" not in payload and run_id not in payload, "no author or item id"
         assert comment.author.display_name and comment.author.display_name.startswith("Reviewer")
     assert made.author == listed.author, "one reviewer keeps one alias in the task"
 

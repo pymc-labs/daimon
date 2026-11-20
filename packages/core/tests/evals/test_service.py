@@ -193,8 +193,12 @@ async def test_imported_run_when_unfinished_then_stored_as_cancelled_record(
     )
     [run_id] = (await service.import_bundle(alex, _chunks(data))).runs
     run = await service.run(alex, run_id)
-    assert isinstance(run, Run) and run.id.startswith("run-"), "a new id: the bundle's may name an arm"
-    assert run.ext is not None and run.ext["daimon.imported_id"] == RUN, "the bundle's id stays a note"
+    assert isinstance(run, Run) and run.id.startswith("run-"), (
+        "a new id: the bundle's may name an arm"
+    )
+    assert run.ext is not None and run.ext["daimon.imported_id"] == RUN, (
+        "the bundle's id stays a note"
+    )
     assert (run.status, run.origin.kind, run.approval) == ("cancelled", "imported", None), run
     assert run.origin.deployment == "example", "the origin names the source deployment"
     async with db_session_factory() as session:

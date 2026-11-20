@@ -573,7 +573,9 @@ def test_render_message_keeps_the_words_of_daimons_notice_cards() -> None:
         render_message(_history_message(msg, proxy=None))
     )
     unfurl = {"user": "U3", "ts": "2.0", "text": "see", "attachments": [{"fallback": "a link"}]}
-    assert "a link" not in "\n".join(render_message(_history_message(unfurl, proxy=None))), "only bot cards"
+    assert "a link" not in "\n".join(render_message(_history_message(unfurl, proxy=None))), (
+        "only bot cards"
+    )
 
 
 async def test_a_chat_history_of_none_reads_no_thread_messages() -> None:
