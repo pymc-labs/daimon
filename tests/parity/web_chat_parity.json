@@ -95,6 +95,9 @@
   "PATCH /api/credits/allowances/{allowance_id}": {
    "tool": "set_allowance_amount"
   },
+  "PATCH /api/evals/suites/{suite_id}": {
+   "tool": "eval_suite_update"
+  },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
   },
@@ -240,6 +243,21 @@
     "teams": "daimon.adapters.teams.billing_panel"
    }
   },
+  "POST /api/evals/arms": {
+   "tool": "eval_arm_create"
+  },
+  "POST /api/evals/bundles/export": {
+   "tool": "eval_bundle_export"
+  },
+  "POST /api/evals/bundles/import": {
+   "tool": "eval_bundle_import"
+  },
+  "POST /api/evals/cases/validate": {
+   "tool": "eval_case_validate"
+  },
+  "POST /api/evals/suites": {
+   "tool": "eval_suite_create"
+  },
   "POST /api/integrations/tokens": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
@@ -356,6 +374,12 @@
   },
   "PUT /api/chat/sessions/{session_id}/model": {
    "tool": "set_thread_model"
+  },
+  "PUT /api/evals/suites/{suite_id}/cases/{case_id}": {
+   "tool": "eval_case_put"
+  },
+  "PUT /api/evals/suites/{suite_id}/shares": {
+   "tool": "eval_suite_share"
   },
   "PUT /api/features": {
    "tool": "change_setting",
