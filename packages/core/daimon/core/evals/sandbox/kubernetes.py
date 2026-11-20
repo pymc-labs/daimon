@@ -3,7 +3,9 @@
 One pod per item: an init container (`NET_ADMIN`) sets the packet rules, a gateway sidecar
 runs as its own uid, and `main` has no network capabilities. Configs and keys travel in a
 per-pod Secret mounted only where needed; workspace files arrive by exec (tar on stdin) and
-`main` waits for the ready marker they end with. The pod gets no service account token.
+`main` waits for the ready marker they end with. The pod gets no service account token,
+runs under the runtime's default seccomp profile with resource limits and a deadline, and
+owns its Secret, so deleting the pod (`stop`, `reap`) deletes the keys too.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import httpx
 from daimon.core.evals.format import JsonObject
 from daimon.core.evals.sandbox.runtime import (
     GATEWAY_UID,
+    MAX_OUTPUT_BYTES,
     CommandResult,
     PodHandle,
     PodSpec,
@@ -32,7 +35,7 @@ from daimon.core.evals.sandbox.runtime import (
     main_config,
     main_tar,
     pod_name,
-    untar_files,
+    read_files,
     wait_ready,
 )
 from daimon.core.output_delivery import DeliverableFile
@@ -46,18 +49,25 @@ _PYTHON: Final = ["/opt/venv/bin/python", "-m", "daimon_eval_sandbox"]
 _MAIN_CAPS: Final = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETPCAP", "KILL"]
 _START_S: Final = 300
 _STDOUT, _STDERR, _STATUS = 1, 2, 3
+_ITEM_LABEL: Final = "daimon.eval/item"
+_SIDECAR: Final[JsonObject] = {"cpu": "500m", "memory": "512Mi", "ephemeral-storage": "1Gi"}
 
 
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def secret_manifest(spec: PodSpec, name: str) -> JsonObject:
+def secret_manifest(spec: PodSpec, name: str, pod_uid: str) -> JsonObject:
+    owner: JsonObject = {"apiVersion": "v1", "kind": "Pod", "name": name, "uid": pod_uid}
     return {
         "apiVersion": "v1",
         "kind": "Secret",
         "type": "Opaque",
-        "metadata": {"name": name, "labels": {"daimon.eval/item": str(spec.item.id)}},
+        "metadata": {
+            "name": name,
+            "labels": {_ITEM_LABEL: str(spec.item.id)},
+            "ownerReferences": [owner],
+        },
         "data": {
             "gateway-config.json": _b64(gateway_config(spec)),
             "gateway-ca.pem": _b64(spec.ca.gateway_pem),
@@ -74,14 +84,27 @@ def _secret_volume(volume: str, name: str, items: dict[str, tuple[str, int]]) ->
 
 def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
     no_caps: JsonObject = {"drop": ["ALL"]}
+    gateway_mount: JsonObject = {
+        "name": "gateway",
+        "mountPath": "/run/eval/gateway",
+        "readOnly": True,
+    }
+    limits = spec.limits
+    main: JsonObject = {
+        "cpu": f"{int(limits.cpus * 1000)}m",
+        "memory": f"{limits.memory_mb}Mi",
+        "ephemeral-storage": f"{limits.disk_mb}Mi",
+    }
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {"name": name, "labels": {"daimon.eval/item": str(spec.item.id)}},
+        "metadata": {"name": name, "labels": {_ITEM_LABEL: str(spec.item.id)}},
         "spec": {
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
             "enableServiceLinks": False,
+            "activeDeadlineSeconds": limits.deadline_s,
+            "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
             "initContainers": [
                 {
                     "name": "net-init",
@@ -91,6 +114,8 @@ def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
                         "runAsUser": 0,
                         "capabilities": {**no_caps, "add": ["NET_ADMIN", "NET_RAW"]},
                     },
+                    "resources": {"requests": _SIDECAR, "limits": _SIDECAR},
+                    "volumeMounts": [gateway_mount],
                 }
             ],
             "containers": [
@@ -105,9 +130,8 @@ def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
                         "allowPrivilegeEscalation": False,
                         "capabilities": no_caps,
                     },
-                    "volumeMounts": [
-                        {"name": "gateway", "mountPath": "/run/eval/gateway", "readOnly": True}
-                    ],
+                    "resources": {"requests": _SIDECAR, "limits": _SIDECAR},
+                    "volumeMounts": [gateway_mount],
                 },
                 {
                     "name": "main",
@@ -118,6 +142,7 @@ def pod_manifest(spec: PodSpec, name: str) -> JsonObject:
                         "runAsUser": 0,
                         "capabilities": {**no_caps, "add": [*_MAIN_CAPS]},
                     },
+                    "resources": {"requests": main, "limits": main},
                     "volumeMounts": [
                         {"name": "main", "mountPath": "/run/eval/main", "readOnly": True},
                         {"name": "state", "mountPath": "/run/eval/state"},
@@ -195,7 +220,7 @@ class KubernetesRuntime:
             + [("command", arg) for arg in argv]
         )
         url = f"{self.api.replace('https://', 'wss://')}{self._path('pods', name)}/exec?{query}"
-        out, err, status = bytearray(), bytearray(), cast(JsonObject, {})
+        out, err, status = bytearray(), bytearray(), cast(JsonObject | None, None)
         async with (
             asyncio.timeout(timeout_s),
             connect(
@@ -220,9 +245,13 @@ class KubernetesRuntime:
                         err += payload
                     elif channel == _STATUS:
                         status = cast(JsonObject, json.loads(payload))
+                    if len(out) + len(err) > MAX_OUTPUT_BYTES:
+                        raise SandboxError(f"command output is over {MAX_OUTPUT_BYTES} bytes")
             except ConnectionClosed:
                 pass
-        return CommandResult(exit_code(status) if status else 0, bytes(out), bytes(err))
+        if status is None:
+            raise SandboxError(f"exec in {name} ended without an exit status")
+        return CommandResult(exit_code(status), bytes(out), bytes(err))
 
     async def _wait_running(self, name: str) -> JsonObject:
         deadline = time.monotonic() + _START_S
@@ -243,8 +272,9 @@ class KubernetesRuntime:
         name = pod_name(spec)
         handle = PodHandle(name, "kubernetes")
         try:
-            await self._call("POST", self._path("secrets"), secret_manifest(spec, name))
-            await self._call("POST", self._path("pods"), pod_manifest(spec, name))
+            created = await self._call("POST", self._path("pods"), pod_manifest(spec, name))
+            uid = str(cast(JsonObject, created["metadata"])["uid"])
+            await self._call("POST", self._path("secrets"), secret_manifest(spec, name, uid))
             status = await self._wait_running(name)
             loaded = await self._exec(
                 name,
@@ -264,10 +294,7 @@ class KubernetesRuntime:
         return await self._exec(pod.id, agent_command(command), None, timeout_s)
 
     async def files(self, pod: PodHandle, root: str) -> list[DeliverableFile]:
-        listed = await self._exec(
-            pod.id, ["sh", "-c", 'test -d "$0" && tar -c -C "$0" . || true', root], None, 300
-        )
-        return untar_files(listed.stdout, root) if listed.stdout else []
+        return await read_files(self, pod, root)
 
     async def stop(self, pod: PodHandle) -> None:
         for kind in ("pods", "secrets"):
@@ -276,3 +303,16 @@ class KubernetesRuntime:
             )
             if reply.status_code not in (200, 202, 404):
                 raise SandboxError(f"kubernetes delete {kind}/{pod.id}: {reply.status_code}")
+
+    async def reap(self) -> list[str]:
+        """Delete finished eval pods (past their deadline, or a crashed worker's) and Secrets."""
+        query = urlencode({"labelSelector": _ITEM_LABEL})
+        listed = await self._call("GET", f"{self._path('pods')}?{query}")
+        names = [
+            str(cast(JsonObject, pod["metadata"])["name"])
+            for pod in cast(list[JsonObject], listed.get("items") or [])
+            if cast(JsonObject, pod.get("status") or {}).get("phase") in ("Failed", "Succeeded")
+        ]
+        for name in names:
+            await self.stop(PodHandle(name, "kubernetes"))
+        return names

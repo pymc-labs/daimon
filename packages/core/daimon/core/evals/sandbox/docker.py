@@ -3,19 +3,24 @@
 A pod is a `net` container (packet rules, then the gateway as its own uid) and a `main`
 container sharing its network namespace with no network capabilities. Files go in through
 the archive endpoint before each container starts, so secrets never touch argv or env.
+Each pod has cpu, memory and pids limits and an expiry label `reap` acts on; Docker has no
+per-container disk cap.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 import struct
+import time
 from typing import Final
 from urllib.parse import urlsplit
 
 import httpx
 from daimon.core.config import EvalsSettings
 from daimon.core.evals.sandbox.runtime import (
+    MAX_OUTPUT_BYTES,
     CommandResult,
     PodHandle,
     PodSpec,
@@ -24,15 +29,19 @@ from daimon.core.evals.sandbox.runtime import (
     gateway_tar,
     main_tar,
     pod_name,
-    untar_files,
+    read_files,
     wait_ready,
 )
 from daimon.core.output_delivery import DeliverableFile
 
 _PYTHON: Final = ["/opt/venv/bin/python", "-m", "daimon_eval_sandbox"]
-_NET_CAPS: Final = ["NET_ADMIN", "NET_RAW", "SETUID", "SETGID", "SETPCAP"]
+#: DAC_READ_SEARCH lets the root packet-rule step read the gateway's own config.
+_NET_CAPS: Final = ["NET_ADMIN", "NET_RAW", "DAC_READ_SEARCH", "SETUID", "SETGID", "SETPCAP"]
 #: What the main entrypoint needs to set up and drop to the executor; no network caps.
 _MAIN_CAPS: Final = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETPCAP", "KILL"]
+_ITEM_LABEL: Final = "daimon.eval.item"
+_EXPIRES_LABEL: Final = "daimon.eval.expires"
+_NET_LIMITS: Final = {"Memory": 512 << 20, "NanoCpus": 500_000_000, "PidsLimit": 256}
 
 
 def docker_client(settings: EvalsSettings) -> httpx.AsyncClient:
@@ -61,6 +70,8 @@ def demux(stream: bytes) -> tuple[bytes, bytes]:
 
 class DockerRuntime:
     def __init__(self, client: httpx.AsyncClient, *, network: str | None = None) -> None:
+        if network in ("host", "none") or (network or "").startswith("container:"):
+            raise SandboxError(f"eval pods need a network of their own, not {network!r}")
         self.client = client
         self.network = network
 
@@ -96,9 +107,10 @@ class DockerRuntime:
 
     async def start(self, spec: PodSpec) -> PodHandle:
         name = pod_name(spec)
-        labels = {"daimon.eval.item": str(spec.item.id)}
+        expires = int(time.time()) + spec.limits.deadline_s
+        labels = {_ITEM_LABEL: str(spec.item.id), _EXPIRES_LABEL: str(expires)}
         try:
-            net_host: dict[str, object] = {"CapDrop": ["ALL"], "CapAdd": _NET_CAPS}
+            net_host: dict[str, object] = {"CapDrop": ["ALL"], "CapAdd": _NET_CAPS, **_NET_LIMITS}
             if self.network:
                 net_host["NetworkMode"] = self.network
             net = await self._create(
@@ -121,6 +133,9 @@ class DockerRuntime:
                         "NetworkMode": f"container:{net}",
                         "CapDrop": ["ALL"],
                         "CapAdd": _MAIN_CAPS,
+                        "Memory": spec.limits.memory_mb << 20,
+                        "NanoCpus": int(spec.limits.cpus * 1e9),
+                        "PidsLimit": spec.limits.pids,
                     },
                 },
                 main_tar(spec, configs=True),
@@ -141,21 +156,25 @@ class DockerRuntime:
         body = {"Cmd": agent_command(command), "AttachStdout": True, "AttachStderr": True}
         made = await self._call("POST", f"/containers/{pod.id}-main/exec", json=body)
         exec_id = str(made.json()["Id"])
-        async with asyncio.timeout(timeout_s):
-            stream = await self._call(
+        stream = bytearray()
+        async with (
+            asyncio.timeout(timeout_s),
+            self.client.stream(
                 "POST", f"/exec/{exec_id}/start", json={"Detach": False, "Tty": False}
-            )
-        out, err = demux(stream.content)
+            ) as reply,
+        ):
+            if reply.status_code >= 400:
+                raise SandboxError(f"docker exec {pod.id}: {reply.status_code}")
+            async for chunk in reply.aiter_bytes():
+                stream += chunk
+                if len(stream) > MAX_OUTPUT_BYTES:
+                    raise SandboxError(f"command output is over {MAX_OUTPUT_BYTES} bytes")
+        out, err = demux(bytes(stream))
         state = (await self._call("GET", f"/exec/{exec_id}/json")).json()
         return CommandResult(int(state.get("ExitCode") or 0), out, err)
 
     async def files(self, pod: PodHandle, root: str) -> list[DeliverableFile]:
-        reply = await self.client.get(f"/containers/{pod.id}-main/archive", params={"path": root})
-        if reply.status_code == 404:
-            return []
-        if reply.status_code >= 400:
-            raise SandboxError(f"docker archive {root}: {reply.status_code}")
-        return untar_files(reply.content, root)
+        return await read_files(self, pod, root)
 
     async def logs(self, name: str) -> str:
         """The pod's container log tails, for diagnosing a failed pod."""
@@ -175,3 +194,21 @@ class DockerRuntime:
             )
             if reply.status_code not in (204, 404):
                 raise SandboxError(f"docker remove {pod.id}-{part}: {reply.status_code}")
+
+    async def reap(self) -> list[str]:
+        """Remove eval pods past their expiry, e.g. a crashed worker's."""
+        filters = json.dumps({"label": [_EXPIRES_LABEL]})
+        listed = await self._call(
+            "GET", "/containers/json", params={"all": "1", "filters": filters}
+        )
+        now = time.time()
+        names = sorted(
+            {
+                str(c["Names"][0]).lstrip("/").rsplit("-", 1)[0]
+                for c in listed.json()
+                if int(c["Labels"][_EXPIRES_LABEL]) < now
+            }
+        )
+        for name in names:
+            await self.stop(PodHandle(name, "docker"))
+        return names

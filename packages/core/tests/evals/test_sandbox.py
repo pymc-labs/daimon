@@ -14,7 +14,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from daimon.core.evals.sandbox.ca import EvalCA, eval_ca
-from daimon.core.evals.sandbox.docker import demux
+from daimon.core.evals.sandbox.docker import DockerRuntime, demux
 from daimon.core.evals.sandbox.kubernetes import exit_code, pod_manifest, secret_manifest
 from daimon.core.evals.sandbox.parity import missing_packages
 from daimon.core.evals.sandbox.runtime import (
@@ -74,10 +74,29 @@ def test_kubernetes_pod_has_no_token_and_main_has_no_network_caps() -> None:
     main_caps = containers["main"]["securityContext"]["capabilities"]["add"]  # type: ignore[index]
     assert not {"NET_ADMIN", "NET_RAW"} & set(main_caps), "main cannot change the packet rules"
     assert containers["gateway"]["securityContext"]["runAsUser"] == 61000, "gateway uid"  # type: ignore[index]
-    data = secret_manifest(_spec(), "eval-x")["data"]
+    assert pod["securityContext"] == {"seccompProfile": {"type": "RuntimeDefault"}}, "seccomp"
+    assert pod["activeDeadlineSeconds"] == 4 * 3600, "the pod stops at its deadline"
+    limits = containers["main"]["resources"]["limits"]  # type: ignore[index]
+    assert limits == {"cpu": "2000m", "memory": "4096Mi", "ephemeral-storage": "20480Mi"}, "caps"
+    secret = secret_manifest(_spec(), "eval-x", "pod-uid")
+    owner = secret["metadata"]["ownerReferences"][0]  # type: ignore[index,call-overload]
+    assert owner["uid"] == "pod-uid", "the Secret goes when its pod does"  # type: ignore[index]
+    data = secret["data"]
     assert isinstance(data, dict) and set(data) == {
         "gateway-config.json", "gateway-ca.pem", "main-pod.json", "main-ca.crt"
     }, "one Secret carries both containers' files"  # fmt: skip
+
+
+@pytest.mark.parametrize("name", ["LD_PRELOAD", "FAKETIME", "BASH_ENV", "A=B", "1X"])
+def test_agent_env_refuses_loader_clock_and_bad_names(name: str) -> None:
+    with pytest.raises(SandboxError):
+        main_config(_spec(env={name: "x"}))
+
+
+@pytest.mark.parametrize("network", ["host", "none", "container:abc"])
+def test_docker_pods_need_their_own_network(network: str) -> None:
+    with pytest.raises(SandboxError):
+        DockerRuntime(None, network=network)  # type: ignore[arg-type]
 
 
 def test_workspace_files_land_as_the_agent_and_end_with_the_ready_marker() -> None:
