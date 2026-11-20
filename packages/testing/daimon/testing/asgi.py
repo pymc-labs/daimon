@@ -83,6 +83,7 @@ async def mcp_session(
     token: str,
     method: str,
     params: dict[str, object] | None = None,
+    path: str = "/mcp",
 ) -> dict[str, object]:
     """Initialize an MCP session against `app`, then execute one JSON-RPC method.
 
@@ -99,14 +100,14 @@ async def mcp_session(
         asgi_lifespan(app),
         httpx.AsyncClient(transport=transport, base_url="http://t") as client,
     ):
-        init_resp = await client.post("/mcp", json=INIT_BODY, headers=headers)
+        init_resp = await client.post(path, json=INIT_BODY, headers=headers)
         assert init_resp.status_code == 200, f"initialize failed: {init_resp.text}"
         session_id = init_resp.headers.get("mcp-session-id")
         if session_id:
             headers["Mcp-Session-Id"] = session_id
 
         body = {"jsonrpc": "2.0", "id": 2, "method": method, "params": params or {}}
-        resp = await client.post("/mcp", json=body, headers=headers)
+        resp = await client.post(path, json=body, headers=headers)
         assert resp.status_code == 200, f"{method} failed ({resp.status_code}): {resp.text}"
         return parse_jsonrpc_response(resp)
 
@@ -117,6 +118,7 @@ async def call_mcp_tool(
     token: str,
     name: str,
     arguments: dict[str, object] | None = None,
+    path: str = "/mcp",
 ) -> dict[str, object]:
     """`mcp_session` for the common case: one `tools/call` of `name`."""
     return await mcp_session(
@@ -124,4 +126,5 @@ async def call_mcp_tool(
         token=token,
         method="tools/call",
         params={"name": name, "arguments": arguments or {}},
+        path=path,
     )
