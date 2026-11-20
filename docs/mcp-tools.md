@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 249 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 255 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -286,8 +286,14 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision; eval_suite_update pins it. |
 | `eval_case_validate` | all callers | Check an eval case against the format without saving it: problems and warnings. |
 | `eval_cases_list` | all callers | List the cases of an eval suite version. |
+| `eval_comment_add` | all callers | Comment on an eval item or case, or from inside a review task by column letter. |
+| `eval_compare` | all callers | Compare the arms of an eval run side by side, case by case, with each item's replies and scores. |
 | `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
 | `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |
+| `eval_judge_run` | all callers | Estimate what judging an eval run with models would cost. |
+| `eval_review_next` | all callers | Get your next review task from a queue (`run~queue`), or none when none is left. |
+| `eval_review_queues` | all callers | List the open eval review queues you may work, across every run you review. |
+| `eval_review_submit` | all callers | Submit your scores for a review task: one per criterion the task asks for, naming the column (A, B...) each is about. |
 | `eval_suite_create` | all callers | Create an eval suite with no cases; you own it. |
 | `eval_suite_get` | all callers | Read an eval suite: its cases, weights and defaults. |
 | `eval_suite_share` | all callers | Replace who an eval suite is shared with: people or groups, as viewer, reviewer or editor. |
