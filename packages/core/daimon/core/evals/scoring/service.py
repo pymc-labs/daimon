@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import asyncio
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -65,8 +66,13 @@ class JudgeRequest(_Out):
     """Set: the person approves the estimate and this spending ceiling, and judging runs."""
 
 
+class JudgeEstimate(Estimate):
+    admin_approval_usd: float
+    """Ceilings above this need an admin to approve them."""
+
+
 class JudgeOutcome(_Out):
-    estimate: Estimate
+    estimate: JudgeEstimate
     ran: bool
     scores: int = 0
     spent_usd: float = 0.0
@@ -116,6 +122,22 @@ def _code_scores(case: Case, item: RunItem, aliases: Sequence[ToolAlias]) -> lis
     return check_item(case, item, aliases, at=item.finished_at)
 
 
+def _new_scores(
+    items: Sequence[RunItem],
+    cases: Mapping[str, Case],
+    aliases: Sequence[ToolAlias],
+    known: set[str],
+) -> list[Score]:
+    """Code scores not stored yet. Run in a thread: a pattern may take its whole time limit."""
+    return [
+        score
+        for item in items
+        if (case := cases.get(item.case.id)) is not None
+        for score in _code_scores(case, item, aliases)
+        if score.id not in known
+    ]  # fmt: skip
+
+
 class ScoringService:
     def __init__(
         self,
@@ -160,13 +182,7 @@ class ScoringService:
         ]
         by_case = {c.id: c for c in cases}
         known = {s.id for s in stored}
-        computed = [
-            score
-            for item in items
-            if (case := by_case.get(item.case.id)) is not None
-            for score in _code_scores(case, item, aliases)
-            if score.id not in known
-        ]
+        computed = await asyncio.to_thread(_new_scores, items, by_case, aliases, known)
         return _Loaded(
             run_row=row, role=role, run=Run.model_validate(row.document), suite=suite,
             items=items, secret=secret, cases=cases,
@@ -248,7 +264,10 @@ class ScoringService:
         items = [i for i in found.items if i.status == "done"]
         try:
             planned = await plan_calls(deps, found.run, config, items, cases, aliases)
-            guess = estimate(planned, batch=deps.batch is not None, at=self._clock())
+            guess = JudgeEstimate(
+                **dict(estimate(planned, batch=deps.batch is not None, at=self._clock())),
+                admin_approval_usd=limit,
+            )
             if cap is None:
                 return JudgeOutcome(estimate=guess, ran=False)
             meter = JudgeMeter(cap_usd=cap)

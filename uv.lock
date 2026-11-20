@@ -1263,7 +1263,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.8" },
     { name = "python-ulid", specifier = ">=3.1,<4" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "regex", specifier = ">=2024.11" },
+    { name = "regex", specifier = ">=2024.11,<2027" },
     { name = "sentry-sdk", specifier = ">=2.61" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.1" },

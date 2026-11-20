@@ -196,16 +196,24 @@ def _units(
     for i in live:
         groups[(i.case_key, i.repeat)].append(i)
     if queue.layout == "single":
-        return [
+        units = [
             _Unit(handle(secret, "unit", i.key), i.case_key, i.repeat, (i.key,))
             for g in groups.values()
             for i in g
         ]
-    return [
-        _Unit(handle(secret, "unit", case, str(repeat)), case, repeat, tuple(i.key for i in g))
-        for (case, repeat), g in groups.items()
-        if len(g) >= 2
-    ]
+    else:
+        units = [
+            _Unit(handle(secret, "unit", case, str(repeat)), case, repeat, tuple(i.key for i in g))
+            for (case, repeat), g in groups.items()
+            if len(g) >= 2
+        ]
+    return sorted(units, key=lambda u: u.key)  # raw arm, case or repeat order tells arms
+
+
+def _author(secret: str, queue_ref: str, key: str) -> PrincipalRef:
+    """A blind reader's stand-in for a comment's author: stable in one queue, naming no one."""
+    alias = f"Reviewer {handle(secret, 'author', queue_ref, key)[2:6]}"
+    return PrincipalRef(kind="label", id=alias, display_name=alias)
 
 
 def _comment_prefix(secret: str, queue_ref: str) -> str:
@@ -513,7 +521,8 @@ class ReviewService:
             if not blind:
                 found.append(comment)
             elif comment.id.startswith(prefix):
-                found.append(_hide(comment, ids, names))
+                author = _author(secret, _ref(run.key, row.key), comment.author.id)
+                found.append(_hide(comment, ids, names, author))
         return found
 
     async def task_comments(
@@ -699,6 +708,7 @@ class ReviewService:
             item_id, case_id, anchors = draft.item_id, draft.case_id, draft.anchors
             key = f"c-{uuid.uuid4().hex}"
             secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            hide: Callable[[Comment], Comment] | None = None
             if draft.task_id:
                 row, queue = await self._queue(session, run, queue_key)
                 blind = queue.blind or is_blind(role)
@@ -706,6 +716,12 @@ class ReviewService:
                 columns = await self._columns(
                     session, actor, run, row, unit, _reviewer(actor, by), secret, blind=blind
                 )
+                if blind:
+                    hide = partial(
+                        _hide, by_id={c.item.id: c for c in columns},
+                        names=arm_names(Run.model_validate(run.document)),
+                        author=_author(secret, _ref(run.key, row.key), actor.key),
+                    )  # fmt: skip
                 by_label = {c.label: c for c in columns}
                 if draft.target is not None and draft.target not in by_label:
                     raise EvalRefused("Name a column of this task.")
@@ -726,7 +742,7 @@ class ReviewService:
                 session, tenant_id=actor.tenant_id, run_id=run.id, suite_id=run.suite_id,
                 document=to_document(comment),
             )  # fmt: skip
-        return comment
+        return hide(comment) if hide else comment
 
     async def comments(self, actor: Subject, run_id: str) -> list[Comment]:
         """Every comment on a run; reviewers get theirs with each task instead."""
@@ -777,14 +793,16 @@ def _unanswered(
     return missing
 
 
-def _hide(comment: Comment, by_id: Mapping[str, _Column], names: frozenset[str]) -> Comment:
+def _hide(
+    comment: Comment, by_id: Mapping[str, _Column], names: frozenset[str], author: PrincipalRef
+) -> Comment:
     """A comment for a blind reader: item ids as the items' opaque ids, anchors by neutral
-    ids, no model names."""
+    ids, no model names, and `author` in place of who wrote it."""
 
     def opaque(item_id: str) -> str:
         return by_id[item_id].opaque_id if item_id in by_id else ""
 
-    update: dict[str, object] = {}
+    update: dict[str, object] = {"author": author}
     if comment.item_id:
         update["item_id"] = opaque(comment.item_id)
     if comment.anchors:
