@@ -6163,6 +6163,11 @@ class WorkflowRun(Base):
             postgresql_where=text("parent_run_id IS NOT NULL"),
         ),
         Index(
+            "ix_workflow_runs_parent_step",
+            "parent_step_id",
+            postgresql_where=text("parent_step_id IS NOT NULL"),
+        ),
+        Index(
             "ix_workflow_runs_forked_from",
             "forked_from_run_id",
             postgresql_where=text("forked_from_run_id IS NOT NULL"),

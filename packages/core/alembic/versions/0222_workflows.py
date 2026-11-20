@@ -392,6 +392,13 @@ def create_tables() -> None:
         unique=False,
         postgresql_where=sa.text("parent_run_id IS NOT NULL"),
     )
+    op.create_index(
+        "ix_workflow_runs_parent_step",
+        "workflow_runs",
+        ["parent_step_id"],
+        unique=False,
+        postgresql_where=sa.text("parent_step_id IS NOT NULL"),
+    )
     op.create_index("ix_workflow_runs_run_as", "workflow_runs", ["run_as_account_id"], unique=False)
     op.create_index(
         "ix_workflow_runs_workflow_created",
