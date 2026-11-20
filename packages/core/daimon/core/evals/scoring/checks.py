@@ -16,6 +16,7 @@ from fnmatch import fnmatchcase
 from hashlib import sha256
 from typing import Final
 
+import regex
 from daimon.core.evals.effects import (
     CanonicalCall,
     canonical_calls,
@@ -51,21 +52,18 @@ _ALWAYS_HARD: Final = ("status", "forbidden_calls", "forbidden_effects")
 MAX_PATTERN: Final = 500
 MAX_SUBJECT: Final = 100_000
 """Characters a pattern is matched against; the rest is not searched."""
-_NESTED: Final = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]")
-_BACKREF: Final = re.compile(r"\\[1-9]|\(\?P=")
+REGEX_SECONDS: Final = 0.25
+"""How long one pattern may run: a case is untrusted, and no pattern shape is safe to assume."""
 
 
 def pattern_problem(pattern: str) -> str | None:
-    """Why a case's `regex` pattern can't be used, or None. Repeated groups that repeat
-    inside and back references are refused: they can take exponential time."""
+    """Why a case's `regex` pattern can't be used, or None."""
     if len(pattern) > MAX_PATTERN:
         return f"is longer than {MAX_PATTERN} characters"
     try:
-        re.compile(pattern)
-    except re.error as exc:
+        regex.compile(pattern)
+    except regex.error as exc:
         return f"is not a valid pattern ({exc})"
-    if _NESTED.search(pattern) or _BACKREF.search(pattern):
-        return "repeats a repeated group or refers back, which can run too long"
     return None
 
 
@@ -156,7 +154,13 @@ def check_value(check: Check, found: bool, value: JsonValue) -> bool:
             pattern = check.pattern
             if pattern is None or pattern_problem(pattern):
                 return False
-            return re.search(pattern, _text(value)[:MAX_SUBJECT]) is not None
+            try:
+                return (
+                    regex.search(pattern, _text(value)[:MAX_SUBJECT], timeout=REGEX_SECONDS)
+                    is not None
+                )
+            except TimeoutError:
+                return False  # a pattern that runs too long matches nothing
         case "contains":
             return _contains(value, check.value)
         case "one_of":

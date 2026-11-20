@@ -84,8 +84,8 @@ class _Loaded:
     suite: Suite | None
     items: list[RunItem]
     """With their transcripts read from blobs."""
-    item_ids: dict[str, str]
-    """Item id to the opaque id the item view takes."""
+    secret: str
+    """The workspace's secret behind every blind handle, label and shuffle."""
     cases: list[Case]
     scores: list[Score]
     """Stored scores, and the code checks of items that have none stored."""
@@ -136,7 +136,8 @@ class ScoringService:
 
     async def _load(self, actor: Subject, run_id: str, action: Literal["view", "edit"]) -> _Loaded:
         """The run with what scoring needs: items with transcripts, and code checks."""
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             row, role = await self._evals.run_access(session, actor, run_id, action)
             document = await store.suite_document(
                 session, suite_id=row.suite_id, version=row.suite_version
@@ -168,7 +169,7 @@ class ScoringService:
         ]
         return _Loaded(
             run_row=row, role=role, run=Run.model_validate(row.document), suite=suite,
-            items=items, item_ids={r.key: str(r.id) for r in item_rows}, cases=cases,
+            items=items, secret=secret, cases=cases,
             scores=stored + computed,
         )  # fmt: skip
 
@@ -193,7 +194,7 @@ class ScoringService:
         found = await self._load(actor, run_id, "view")
         return build_comparison(
             found.run, found.items, found.scores, found.cases, blind=is_blind(found.role, blind),
-            arms=arms, item_ids=found.item_ids,
+            secret=found.secret, arms=arms,
         )  # fmt: skip
 
     def _config(self, request: JudgeRequest, run: Run) -> JudgeConfig:
@@ -256,7 +257,8 @@ class ScoringService:
                     deps, found.run, config, items, cases, aliases=aliases, meter=meter
                 )
             finally:
-                await self._record(actor, found, config, meter, cap)
+                if meter.spent_usd:
+                    await self._record(actor, found, config, meter, cap)
         except (JudgeUnpriced, JudgeUnavailable) as exc:
             raise EvalRefused(str(exc)) from None
         models = {m.model for m in config.models}
