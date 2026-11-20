@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
+from daimon.core.slack_mrkdwn import escape_mrkdwn_preserving_mentions
 
 
 def github_card_blocks(

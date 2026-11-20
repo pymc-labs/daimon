@@ -91,7 +91,7 @@ _ALLOWED_TEXT: dict[tuple[str, str], str] = {
         "packages/adapters/discord/daimon/adapters/discord/agent_setup/mcp_access.py",
         "claude mcp add",
     ): "a shell command the person pastes",
-    ("packages/adapters/discord/daimon/adapters/discord/context.py", "a turn starts when"): (
+    ("packages/core/daimon/core/chat_history.py", "a turn starts when"): (
         "a hint to the model; never shown"
     ),
     ("packages/core/daimon/core/github_app_session.py", "session creation failed"): (

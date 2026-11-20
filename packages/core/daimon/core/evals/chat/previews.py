@@ -1,12 +1,12 @@
-"""What each platform would have shown: its message splitting, and Slack and Teams card JSON
-from the core builders, for the review view's raw tab."""
+"""What each platform would have shown: an answer in its markdown dialect and message size,
+and Slack and Teams card JSON from the core builders, for the review view's raw tab."""
 
 from __future__ import annotations
 
 from typing import Final
 
 from daimon.core.confirmation import ConfirmationPrompt
-from daimon.core.evals.format import Platform, PlatformPayloads
+from daimon.core.evals.format import PlatformPayloads
 from daimon.core.message_split import split_fenced
 from daimon.core.posted_controls.cards import PostedCard
 from daimon.core.posted_controls.confirmation import (
@@ -15,17 +15,34 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.slack_blocks import build_card_blocks
 from daimon.core.posted_controls.teams_card import build_adaptive_card, teams_wording
+from daimon.core.slack_mrkdwn import SLACK_LIMIT, answer_chunks
+from daimon.core.teams_markdown import escape_dollars
 from pydantic import TypeAdapter
 
-#: A message's longest text on each platform, as its adapter posts replies.
-LIMITS: Final[dict[Platform, int]] = {"discord": 2000, "slack": 11800, "teams": 28000}
+#: A message's longest text on each platform, as its adapter posts replies (Slack's is
+#: `SLACK_LIMIT`).
+DISCORD_LIMIT: Final = 1900
+TEAMS_LIMIT: Final = 4000
 _PAYLOADS: Final = TypeAdapter(PlatformPayloads)
 
 
 def message_payloads(text: str) -> PlatformPayloads:
-    """The chunks a reply posts as on each platform; the web shows it whole."""
+    """An answer as each platform posts it. Discord renders markdown as written. Slack gets
+    native markdown blocks, entities escaped outside code. Teams gets Extended Markdown, its
+    dollar signs escaped so prices are not read as math. The web shows the answer whole."""
+    slack = answer_chunks(text, limit=SLACK_LIMIT)
     return _PAYLOADS.validate_python(
-        {p: {"messages": split_fenced(text, limit)} for p, limit in LIMITS.items()}
+        {
+            "discord": {"messages": split_fenced(text, DISCORD_LIMIT)},
+            "slack": {
+                "messages": slack,
+                "blocks": [{"type": "markdown", "text": chunk} for chunk in slack],
+            },
+            "teams": {
+                "messages": [escape_dollars(c) for c in split_fenced(text, TEAMS_LIMIT)],
+                "text_format": "extendedmarkdown",
+            },
+        }
     )
 
 

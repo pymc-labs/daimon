@@ -9,12 +9,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import Final, Protocol
 
 import structlog
 from daimon.core.evals import spend
 from daimon.core.evals.chat.events import ChatLog
-from daimon.core.evals.chat.script import ScriptPlayer, Seen
+from daimon.core.evals.chat.script import Presses, ScriptPlayer, Seen
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.cost import fits, item_usd
 from daimon.core.evals.eval_tenant import EVAL_TENANT_ID
@@ -37,6 +38,7 @@ from daimon.core.evals.format import (
 from daimon.core.evals.history import turn_text
 from daimon.core.evals.scoring.checks import check_item
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
+from daimon.core.evals.world.simulator import ModelSimulator
 from daimon.core.host_calls import WAKE_SEED
 from daimon.core.stores import eval_runs, eval_world, usage_events
 from daimon.core.stores import evals as store
@@ -81,6 +83,9 @@ class ItemDeps:
     sandbox_rate_usd_per_hour: float = 0.0
     poll_s: float = 5.0
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    presses: Presses | None = None
+    requester: ModelSimulator | None = None
+    """Credential presses and the simulated requester the script uses; none: not played."""
 
 
 def _ext(run: Run) -> JsonObject:
@@ -237,7 +242,11 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
     arm = next(a for a in run.arms if a.id == item.arm_key)
     started_at = deps.clock()
     chat = ChatLog()
-    script = ScriptPlayer(case, chat)
+    reply = deps.requester
+    script = ScriptPlayer(
+        case, chat, presses=deps.presses,
+        simulate_reply=None if reply is None else partial(reply.requester_reply, item.id, case),
+    )  # fmt: skip
     surface = EvalSurfaceLifecycle(chat, script)
     cancel, stopped = script.stop, asyncio.Event()
     watcher = asyncio.create_task(_watch(deps, item, cancel, stopped))

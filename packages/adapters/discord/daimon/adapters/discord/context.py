@@ -8,16 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
 import structlog
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
+from daimon.core.chat_history import (
+    ContextOptions,
+    HistoryAttachment,
+    HistoryMessage,
+    discord_head,
+    render_context,
+    render_message,
+)
 from daimon.core.features.model_input import CHANNEL_BACKFILL
 from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
-from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
 
 import discord
@@ -59,64 +66,14 @@ def _strip_bot_mention(
     return re.sub(rf"<@!?{bot_user_id}>", lambda _: f"@{bot_display_name}", content)
 
 
-def _render_location(thread: discord.Thread) -> list[str]:
-    """Render the parent-channel and current-thread elements for a turn.
-
-    Both ids are exposed and differentiated by ``role`` so the agent can target
-    the thread (not the parent channel) when asked to post "here". Names ride
-    alongside the ids so the agent can say where it is, not just post there;
-    ``thread.parent`` is None when the parent is not in the client cache, so the
-    channel name is emitted only when it resolves.
-
-    The thread hint is deliberately scoped to *posting*. ``channel_id`` is
-    overloaded across the toolset: for the send and credential-request tools it
-    means "where to put this message", and the thread id is right; for the
-    scope tools (``set_agent_default``, ``clear_agent_default``,
-    ``explain_agent_resolution``) it means "which scope to key on", and only
-    the parent channel id is ever right. A hint phrased as a blanket rule for
-    every ``channel_id`` parameter taught the second case wrongly, so each
-    role carries its own hint instead.
-    """
-    thread_hint = "to post a message in this thread, pass this id as channel_id"
-    channel_hint = (
-        "the channel these turns belong to; agent-default and routing scopes key on this id, "
-        "never on the thread id"
+def _head(thread: discord.Thread) -> list[str]:
+    """The parent-channel and current-thread elements for a turn, as the agent reads them.
+    `thread.parent` is None when the parent is not in the client cache, so the channel name
+    is emitted only when it resolves."""
+    parent = thread.parent
+    return discord_head(
+        str(thread.parent_id), None if parent is None else parent.name, str(thread.id), thread.name
     )
-    channel_name = "" if thread.parent is None else f" name={quoteattr(thread.parent.name)}"
-    return [
-        f"<channel platform={quoteattr('discord')} id={quoteattr(str(thread.parent_id))}"
-        f" role={quoteattr('parent_channel')}{channel_name}"
-        f" hint={quoteattr(channel_hint)}/>",
-        f"<thread platform={quoteattr('discord')} id={quoteattr(str(thread.id))}"
-        f" role={quoteattr('current_thread')} hint={quoteattr(thread_hint)}"
-        f" name={quoteattr(thread.name)}/>",
-    ]
-
-
-#: Why the agent may not see a message someone says they sent. Without it the
-#: agent, asked about an earlier mention answered in a sibling thread, reads
-#: the gap in its own context as a delivery failure and tells the user the
-#: message "never reached me", which is false: every thread is its own session.
-_DELIVERY_HINT = (
-    "a turn starts when someone addresses you (an @mention or a reply to one of your posts) "
-    "or, in a thread you follow, when you choose to answer; you see this thread's earlier "
-    "messages as history, but every thread is a separate conversation with its own session, "
-    "so you cannot see what was said or answered in other threads. If asked about an earlier "
-    "message you have no record of, explain that it may be in another thread or was not "
-    "addressed to you, and that other threads are separate conversations; never say it did "
-    "not reach you or that you did not receive it. When the user_query has a reply_to id, "
-    "the person is replying to that message: find it by that id in the history or in the "
-    "reply_targets block, and answer about that message, not the latest one. "
-    "The user_query message_id and channel_id identify the request message itself and "
-    "where the human posted it, which may differ from your response thread. For merged "
-    "requests, query_sources lists each original message with its own message_id, "
-    "channel_id, text and optional reply_to; cite those ids for each source"
-)
-
-
-def _render_delivery() -> str:
-    """The trusted note on what reaches the agent, emitted on every thread turn."""
-    return f"<delivery hint={quoteattr(_DELIVERY_HINT)}/>"
 
 
 def _reply_target_id(msg: discord.Message) -> int | None:
@@ -245,39 +202,45 @@ async def _reply_target_lines(
             target_id = _reply_target_id(replying)
             if target_id is None:
                 continue
-            origin = f" reply_from={quoteattr(str(replying.id))}"
+            origin = {"reply_from": str(replying.id)}
             if composite:
                 excerpt = _strip_bot_mention(
                     replying.content, bot_user_id, bot_display_name=bot_display_name
                 )[:REPLY_EXCERPT_MAX_CHARS]
-                origin += (
-                    f" reply_from_author={quoteattr(replying.author.display_name)}"
-                    f" reply_from_excerpt={quoteattr(excerpt)}"
-                )
+                origin["reply_from_author"] = replying.author.display_name
+                origin["reply_from_excerpt"] = excerpt
+            origin_text = "".join(f" {k}={quoteattr(v)}" for k, v in origin.items())
             # A merged query has no single `reply_to`, so every reply in it keeps
             # an entry naming its target, even when the target is shown elsewhere.
             if target_id in rendered_ids or target_id in query_ids:
                 if composite:
-                    body.append(f'<message id={quoteattr(str(target_id))} shown="true"{origin}/>')
+                    body.append(
+                        f'<message id={quoteattr(str(target_id))} shown="true"{origin_text}/>'
+                    )
                 continue
             target = await _resolve_reply_target(home, replying)
             if target is None:
                 if composite:
                     body.append(
-                        f'<message id={quoteattr(str(target_id))} unavailable="true"{origin}/>'
+                        f'<message id={quoteattr(str(target_id))} unavailable="true"{origin_text}/>'
                     )
                 continue
             if isinstance(target, discord.DeletedReferencedMessage):
-                body.append(f'<message id={quoteattr(str(target_id))} deleted="true"{origin}/>')
+                body.append(
+                    f'<message id={quoteattr(str(target_id))} deleted="true"{origin_text}/>'
+                )
                 continue
             body.extend(
-                _render_message(
-                    target,
-                    bot_user_id,
-                    bot_display_name=bot_display_name,
-                    omit_oversized_image_urls=omit_oversized_image_urls,
-                    max_content_chars=REPLY_TARGET_MAX_CHARS,
-                    extra_attrs=origin,
+                render_message(
+                    _history_message(
+                        target,
+                        bot_user_id,
+                        bot_display_name=bot_display_name,
+                        omit_oversized_image_urls=omit_oversized_image_urls,
+                        max_content_chars=REPLY_TARGET_MAX_CHARS,
+                        extra_attrs=origin,
+                    ),
+                    "discord",
                 )
             )
         except Exception:
@@ -399,149 +362,156 @@ async def input_context(
     return "\n".join(lines)
 
 
-def _render_message(
+def _history_message(
     msg: discord.Message,
     bot_user_id: int | None,
     *,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,
     max_content_chars: int | None = None,
-    extra_attrs: str = "",
-) -> list[str]:
-    """Render a single message as XML lines.
+    extra_attrs: Mapping[str, str] | None = None,
+) -> HistoryMessage:
+    """A Discord message as a neutral history message.
 
     Every message carries its ``id``, and ``reply_to`` when it is a Discord reply,
     so the agent can tell which message a reply points at.
     ``max_content_chars`` bounds the text (a marked cut) and ``extra_attrs`` appends
-    ready-made attributes; both serve the ``<reply_targets>`` block.
+    attributes; both serve the ``<reply_targets>`` block.
 
-    Image attachments over the API's pixel cap are marked ``oversized="true"``
+    Image attachments over the API's pixel cap are marked ``oversized``
     and carry a warning, because the agent otherwise sees a plain URL, curls it,
-    ``read``s it at full size, and the resulting rejection is terminal — it
+    ``read``s it at full size, and the resulting rejection is terminal: it
     kills the session and (before recovery existed) the whole thread.
 
     ``omit_oversized_image_urls`` drops those URLs entirely rather than merely
     warning. Set only on a dead-session recovery reseed: there the previous
     session provably died, so a prompt-level warning the model may ignore is
-    not good enough — withholding the URL is what actually breaks the
+    not good enough; withholding the URL is what actually breaks the
     recover-replay-die loop.
     """
     reply_to = _reply_target_id(msg)
-    attrs = (
-        f" id={quoteattr(str(msg.id))}"
-        f" author_name={quoteattr(msg.author.display_name)}"
-        f" user_id={quoteattr(str(msg.author.id))}"
-        f" is_bot={quoteattr(str(msg.author.bot).lower())}"
-        f" timestamp={quoteattr(msg.created_at.isoformat())}"
-        + (f" reply_to={quoteattr(str(reply_to))}" if reply_to is not None else "")
-    )
     text = _strip_bot_mention(msg.content, bot_user_id, bot_display_name=bot_display_name)
     if not text.strip():
         text = _embed_text(msg)
+    extra: dict[str, str] = {}
     if max_content_chars is not None and len(text) > max_content_chars:
         text = text[:max_content_chars] + _TRUNCATION_MARK
-        attrs += ' truncated="true"'
-    attrs += extra_attrs
-    content = escape(text)
-
-    if not msg.attachments:
-        return [f"<message{attrs}>{content}</message>"]
-
-    lines = [f"<message{attrs}>", content, "<attachments>"]
-    for att in msg.attachments:
-        oversized = is_oversized_image(att)
-        att_attrs = f" filename={quoteattr(att.filename)}"
-        if not (oversized and omit_oversized_image_urls):
-            att_attrs += f" url={quoteattr(att.url)}"
-        att_attrs += (
-            f" content_type={quoteattr(att.content_type or 'unknown')}"
-            f" size={quoteattr(str(att.size))}"
+        extra["truncated"] = "true"
+    extra.update(extra_attrs or {})
+    attachments = [
+        HistoryAttachment(
+            name=att.filename,
+            url=None
+            if (oversized := is_oversized_image(att)) and omit_oversized_image_urls
+            else att.url,
+            media_type=att.content_type or "unknown",
+            size=att.size,
+            width=att.width,
+            height=att.height,
+            oversized=oversized,
         )
-        if att.width is not None and att.height is not None:
-            att_attrs += f" width={quoteattr(str(att.width))} height={quoteattr(str(att.height))}"
-        if oversized:
-            att_attrs += ' oversized="true"'
-            att_attrs += " note=" + quoteattr(
-                "Larger than "
-                f"{MAX_VISION_IMAGE_DIMENSION}px on an edge. Do NOT read this at full "
-                "size — that inlines it at its original dimensions and the request is "
-                "rejected terminally, which kills this conversation. Downscale a copy "
-                "first, then read the copy."
-                if not omit_oversized_image_urls
-                else "Larger than "
-                f"{MAX_VISION_IMAGE_DIMENSION}px on an edge. Its URL is withheld: "
-                "reading it at full size already ended a conversation in this thread."
-            )
-        lines.append(f"<attachment{att_attrs}/>")
-    lines.append("</attachments>")
-    lines.append("</message>")
-    return lines
-
-
-def _request_identity_attrs(message: discord.Message) -> str:
-    """Button input IDs identify interactions, not citable Discord messages."""
-    if isinstance(message, ButtonMessage):
-        return ' kind="button"'
-    return (
-        f" message_id={quoteattr(str(message.id))} channel_id={quoteattr(str(message.channel.id))}"
+        for att in msg.attachments
+    ]
+    return HistoryMessage(
+        user_id=str(msg.author.id),
+        username=msg.author.display_name,
+        is_bot=msg.author.bot,
+        timestamp=msg.created_at.isoformat(),
+        text=text,
+        attachments=attachments,
+        message_id=str(msg.id),
+        reply_to=None if reply_to is None else str(reply_to),
+        extra_attrs=extra,
     )
 
 
-def _render_user_query(
+def _request(
     trigger: discord.Message,
     bot_user_id: int | None,
     *,
     bot_display_name: str,
-    is_admin: bool,
-    unprompted: bool = False,
     query_text: str | None = None,
-    query_messages: Sequence[discord.Message] = (),
-) -> str:
-    """Render the ``<user_query>`` element for a turn's trigger message.
+) -> HistoryMessage:
+    """The request message as the ``<user_query>`` reads it: author, time, and ids naming the
+    person's actual message (a button press has none), independent of the response thread.
 
-    ``reply_to`` names the message the trigger replies to. A composite query
-    carries no single ``reply_to``: ``query_sources`` maps each request to its
-    target, and ``<reply_targets>`` supplies the targets' content.
-
-    ``message_id`` and ``channel_id`` identify the human's actual message,
-    independently of the response thread. Composite ``query_sources`` retain
-    every source's identity and text, including repeated text and non-replies.
-
-    All three builders use this renderer so initial, delta and reseeded
-    context carry the same author, timestamp and permission attributes.
-    ``is_admin`` uses the lowercase literal ``"true"``/``"false"`` so the
-    model knows whether the caller can make an admin-gated change.
+    All three builders use it so initial, delta and reseeded context carry the same author,
+    timestamp and permission attributes.
     """
-    composite = len(query_messages) > 1
-    reply_to = _reply_target_id(trigger) if not composite else None
-    attrs = (
-        _request_identity_attrs(trigger) + f" author_name={quoteattr(trigger.author.display_name)}"
-        f" user_id={quoteattr(str(trigger.author.id))}"
-        f" timestamp={quoteattr(trigger.created_at.isoformat())}"
-        f" is_admin={quoteattr('true' if is_admin else 'false')}"
-        + (f" reply_to={quoteattr(str(reply_to))}" if reply_to is not None else "")
-        + (' unprompted="true"' if unprompted else "")
+    reply_to = _reply_target_id(trigger)
+    text = trigger.content if query_text is None else query_text
+    return HistoryMessage(
+        user_id=str(trigger.author.id),
+        username=trigger.author.display_name,
+        is_bot=trigger.author.bot,
+        timestamp=trigger.created_at.isoformat(),
+        text=_strip_bot_mention(text, bot_user_id, bot_display_name=bot_display_name),
+        message_id=None if isinstance(trigger, ButtonMessage) else str(trigger.id),
+        channel_id=str(trigger.channel.id),
+        reply_to=None if reply_to is None else str(reply_to),
     )
-    content = escape(
-        _strip_bot_mention(
-            trigger.content if query_text is None else query_text,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-        )
+
+
+async def _context_xml(
+    thread_or_channel: discord.abc.Messageable,
+    messages: Sequence[discord.Message],
+    trigger: discord.Message,
+    *,
+    block: str,
+    block_attrs: Mapping[str, str],
+    head: Sequence[str],
+    queries: Sequence[discord.Message],
+    query_text: str | None,
+    key_names: Sequence[str],
+    is_admin: bool,
+    unprompted: bool,
+    bot_user_id: int | None,
+    bot_display_name: str,
+    omit_oversized_image_urls: bool,
+    wrapped: bool = True,
+    extra_tail: Sequence[str] = (),
+) -> str:
+    """The three builders' shared rendering: history, reply targets, then the request.
+
+    ``reply_to`` names the message the trigger replies to. A composite query carries no
+    single ``reply_to``: ``query_sources`` maps each request to its target, and
+    ``<reply_targets>`` supplies the targets' content.
+    """
+    tail = await _reply_target_lines(
+        thread_or_channel,
+        queries,
+        {m.id for m in messages},
+        bot_user_id=bot_user_id,
+        bot_display_name=bot_display_name,
+        omit_oversized_image_urls=omit_oversized_image_urls,
     )
-    if composite:
-        sources: list[str] = []
-        for message in query_messages:
-            target_id = _reply_target_id(message)
-            source_attrs = _request_identity_attrs(message) + (
-                f" reply_to={quoteattr(str(target_id))}" if target_id is not None else ""
+    return render_context(
+        "discord",
+        [
+            _history_message(
+                m,
+                bot_user_id,
+                bot_display_name=bot_display_name,
+                omit_oversized_image_urls=omit_oversized_image_urls,
             )
-            text = escape(
-                _strip_bot_mention(message.content, bot_user_id, bot_display_name=bot_display_name)
-            )
-            sources.append(f"<message{source_attrs}>{text}</message>")
-        content += "<query_sources>" + "".join(sources) + "</query_sources>"
-    return f"<user_query{attrs}>{content}</user_query>"
+            for m in messages
+        ],
+        _request(trigger, bot_user_id, bot_display_name=bot_display_name, query_text=query_text),
+        ContextOptions(
+            channel_id="",
+            block=block,
+            block_attrs=block_attrs,
+            key_names=key_names,
+            is_admin=is_admin,
+            head=head,
+            tail=[*tail, *extra_tail],
+            unprompted=unprompted,
+            query_sources=[
+                _request(q, bot_user_id, bot_display_name=bot_display_name) for q in queries
+            ],
+            wrapped=wrapped,
+        ),
+    )
 
 
 async def build_context_xml(
@@ -621,52 +591,23 @@ async def build_context_xml(
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
 
-    lines: list[str] = [
-        "<context>",
-        *_render_location(thread),
-        _render_delivery(),
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
-    body = [
-        line
-        for msg in messages
-        for line in _render_message(
-            msg,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
-    ]
-    lines.extend(untrusted_block("thread_history", body, _HISTORY_SOURCE))
-    queries = tuple(query_messages) or (trigger,)
-    lines.extend(
-        await _reply_target_lines(
-            thread,
-            queries,
-            {m.id for m in messages},
-            bot_user_id=bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
+    xml = await _context_xml(
+        thread,
+        messages,
+        trigger,
+        block="thread_history",
+        block_attrs=_HISTORY_SOURCE,
+        head=_head(thread),
+        queries=tuple(query_messages) or (trigger,),
+        query_text=query_text,
+        key_names=key_names,
+        is_admin=is_admin,
+        unprompted=unprompted,
+        bot_user_id=bot_user_id,
+        bot_display_name=bot_display_name,
+        omit_oversized_image_urls=omit_oversized_image_urls,
     )
-    lines.append("</context>")
-
-    # user_query sits outside <context>, separated by a blank line
-    lines.append("")
-    lines.append(
-        _render_user_query(
-            trigger,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            is_admin=is_admin,
-            unprompted=unprompted,
-            query_text=query_text,
-            query_messages=queries,
-        )
-    )
-
-    return "\n".join(lines), image_atts
+    return xml, image_atts
 
 
 async def build_delta_xml(
@@ -753,51 +694,23 @@ async def build_delta_xml(
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
 
-    lines: list[str] = [
-        "<context>",
-        *_render_location(thread),
-        _render_delivery(),
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
-    body = [
-        line
-        for msg in messages
-        for line in _render_message(
-            msg,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
-    ]
-    lines.extend(untrusted_block("thread_delta", body, _HISTORY_SOURCE))
-    queries = tuple(query_messages) or (trigger,)
-    lines.extend(
-        await _reply_target_lines(
-            thread,
-            queries,
-            {m.id for m in messages},
-            bot_user_id=bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
+    xml = await _context_xml(
+        thread,
+        messages,
+        trigger,
+        block="thread_delta",
+        block_attrs=_HISTORY_SOURCE,
+        head=_head(thread),
+        queries=tuple(query_messages) or (trigger,),
+        query_text=query_text,
+        key_names=key_names,
+        is_admin=is_admin,
+        unprompted=unprompted,
+        bot_user_id=bot_user_id,
+        bot_display_name=bot_display_name,
+        omit_oversized_image_urls=omit_oversized_image_urls,
     )
-    lines.append("</context>")
-
-    lines.append("")
-    lines.append(
-        _render_user_query(
-            trigger,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            is_admin=is_admin,
-            unprompted=unprompted,
-            query_text=query_text,
-            query_messages=queries,
-        )
-    )
-
-    return "\n".join(lines), image_atts
+    return xml, image_atts
 
 
 async def build_channel_context_xml(
@@ -893,48 +806,26 @@ async def build_channel_context_xml(
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
 
-    lines: list[str] = [
-        *_render_location(thread),
-        _render_delivery(),
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
-    body = [
-        line
-        for msg in messages
-        for line in _render_message(
-            msg,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
-    ]
-    lines.extend(
-        untrusted_block("channel_context", body, {"count": str(len(messages)), **_HISTORY_SOURCE})
+    xml = await _context_xml(
+        channel,
+        messages,
+        trigger,
+        block="channel_context",
+        block_attrs={"count": str(len(messages)), **_HISTORY_SOURCE},
+        head=_head(thread),
+        queries=queries,
+        query_text=query_text,
+        key_names=key_names,
+        is_admin=is_admin,
+        unprompted=False,
+        bot_user_id=bot_user_id,
+        bot_display_name=bot_display_name,
+        omit_oversized_image_urls=omit_oversized_image_urls,
+        wrapped=False,
+        extra_tail=(
+            untrusted_block("recent_channel_files", older_files, _HISTORY_SOURCE)
+            if older_files
+            else ()
+        ),
     )
-    lines.extend(
-        await _reply_target_lines(
-            channel,
-            queries,
-            {m.id for m in messages},
-            bot_user_id=bot_user_id,
-            bot_display_name=bot_display_name,
-            omit_oversized_image_urls=omit_oversized_image_urls,
-        )
-    )
-    if older_files:
-        lines.extend(untrusted_block("recent_channel_files", older_files, _HISTORY_SOURCE))
-
-    lines.append("")
-    lines.append(
-        _render_user_query(
-            trigger,
-            bot_user_id,
-            bot_display_name=bot_display_name,
-            is_admin=is_admin,
-            query_text=query_text,
-            query_messages=queries,
-        )
-    )
-
-    return "\n".join(lines), image_atts
+    return xml, image_atts

@@ -4,8 +4,9 @@ act (press a button, react, reply, stop); defaults answer whatever no step does.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from daimon.core.evals.chat.events import ChatLog, answered
 from daimon.core.evals.effects import glob_matches
@@ -27,6 +28,21 @@ from daimon.core.evals.scoring.checks import check_value
 EventKind = Literal["card", "message", "reaction", "form", "credential_request", "tool_call",
                     "turn_end", "start"]  # fmt: skip
 MAX_WAIT_MS: Final = 10_000
+FAKE_SECRET: Final = "eval-fake-secret"
+HIDDEN: Final = "[secret]"
+SUBMIT: Final = CardButton(id="submit", label="Submit", style="primary", action="submit")
+
+
+class Presses(Protocol):
+    """The real submit paths a card's answer enters; a card's id is its request token."""
+
+    async def submit_credential(self, token: str, value: str) -> bool: ...
+
+    async def skip_credential(self, token: str) -> bool: ...
+
+
+RequesterReply = Callable[[str], Awaitable[str | None]]
+"""The simulated requester: the agent's question in, the person's reply out."""
 
 
 @dataclass(frozen=True)
@@ -79,6 +95,11 @@ async def pick_button(card: NeutralCard, choice: ButtonChoice | None) -> CardBut
     return None
 
 
+def _redacted(card: NeutralCard, fields: dict[str, str] | None) -> dict[str, str] | None:
+    secret = {f.id for f in card.fields or [] if f.kind == "secret"}
+    return fields and {k: HIDDEN if k in secret else v for k, v in fields.items()}
+
+
 def _default(card: NeutralCard, defaults: ScriptDefaults) -> ButtonChoice | None:
     if card.kind in ("confirmation", "host_call", "provider_action"):
         rule = defaults.confirmation
@@ -101,6 +122,9 @@ class ScriptPlayer:
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     replies: list[str] = field(default_factory=list[str])
     """Follow-up messages the script sent, for the next turn."""
+    presses: Presses | None = None
+    simulate_reply: RequesterReply | None = None
+    _form: dict[str, str] | None = None
     _hits: dict[str, int] = field(default_factory=dict[str, int])
     _fired: set[str] = field(default_factory=set[str])
 
@@ -141,12 +165,47 @@ class ScriptPlayer:
         """Show `card` and press what the script, or else its defaults, press on it."""
         self.chat.add("card", card=card, platform_payloads=payloads)
         kind: EventKind = "credential_request" if card.kind == "credential_request" else "card"
+        defaults = self.script.defaults or ScriptDefaults()
+        self._form = None
         pressed = await self.happened(Seen(kind, card=card))
-        if pressed is None and (choice := _default(card, self.script.defaults or ScriptDefaults())):
-            pressed = await pick_button(card, choice)
+        fields, self._form = self._form, None
+        if pressed is None and fields is None:
+            if card.kind == "credential_request" and defaults.credential_request == "submit_fake":
+                fields = {f.id: FAKE_SECRET for f in card.fields or [] if f.kind == "secret"}
+                pressed = SUBMIT
+            elif choice := _default(card, defaults):
+                pressed = await pick_button(card, choice)
+        if pressed is not None:
+            await self._press(card, pressed, fields)
+        shown = _redacted(card, fields)
         self.chat.add("card_update", self.requester if pressed else "bot",
-                      card=answered(card, pressed, self.requester))  # fmt: skip
+                      card=answered(card, pressed, self.requester, shown))  # fmt: skip
+        if pressed is None and card.kind == "question" and defaults.question == "simulate":
+            await self.question(card.body or card.headline or "")
         return pressed
+
+    async def _press(
+        self, card: NeutralCard, button: CardButton, fields: dict[str, str] | None
+    ) -> None:
+        """Send the answer where a person's press sends it."""
+        if card.kind == "credential_request" and self.presses is not None:
+            secret = next((f.id for f in card.fields or [] if f.kind == "secret"), None)
+            if button.action == "skip":
+                await self.presses.skip_credential(card.id)
+            elif fields and secret in fields:
+                await self.presses.submit_credential(card.id, fields[secret])
+        elif fields and card.kind in ("form", "question"):
+            self.replies.append("\n".join(f"{k}: {v}" for k, v in fields.items()))
+
+    async def question(self, text: str) -> None:
+        """Answer an unscripted question as the requester would, when the case asks for it."""
+        if (self.script.defaults or ScriptDefaults()).question != "simulate" or not text.strip():
+            return
+        if self.simulate_reply is None or not (reply := await self.simulate_reply(text)):
+            return
+        self.chat.add("message", self.requester, message_id=self.chat.message_id(), text=reply,
+                      scripted="simulated")  # fmt: skip
+        self.replies.append(reply)
 
     async def _act(
         self, step: ScriptStep, action: ScriptAction, card: NeutralCard | None
@@ -155,6 +214,11 @@ class ScriptPlayer:
         match action.action:
             case "click" if card is not None:
                 return await pick_button(card, action.button)
+            case "submit_form" if card is not None:
+                self._form = dict(action.fields or {})
+                return next(
+                    (b for b in card.buttons or [] if b.action in ("submit", "save")), SUBMIT
+                )
             case "react" | "unreact":
                 kind = "reaction_add" if action.action == "react" else "reaction_remove"
                 self.chat.add(kind, who, emoji=action.emoji, message_id=action.target or

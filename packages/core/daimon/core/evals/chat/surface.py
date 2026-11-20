@@ -93,7 +93,10 @@ class EvalSurfaceLifecycle:
             self.chat.add("message", message_id=self.chat.message_id(), text=text,
                           format="markdown", reply_to=self.reply_to,
                           platform_payloads=message_payloads(text))  # fmt: skip
+            before = len(self.script.replies)
             await self.script.happened(Seen("message", text=text))
+            if len(self.script.replies) == before and text.endswith("?"):
+                await self.script.question(text)
         if files := [o.id for o in self.outputs[self.shown :]]:
             self.chat.add("file", files=files, reply_to=self.reply_to)
             self.shown = len(self.outputs)

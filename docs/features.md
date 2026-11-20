@@ -651,7 +651,7 @@ Report only changes nothing.
 | | |
 | --- | --- |
 | Key | `audience_hold` |
-| Values | `off` (Off), `shadow` (Report only) |
+| Values | `off` (Off), `shadow` (Report only), `on` (On) |
 | Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Stricter wins |

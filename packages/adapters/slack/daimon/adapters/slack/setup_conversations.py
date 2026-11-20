@@ -8,7 +8,6 @@ from typing import Any
 import aiohttp
 from daimon.adapters.slack.admin import ADMIN_NOUN, resolve_is_admin
 from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -20,6 +19,7 @@ from daimon.core.setup_conversations import (
     resolve_setup_agents,
     setup_thread_name,
 )
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import mark_channel_status
 from daimon.core.stores.thread_agent_bindings import (

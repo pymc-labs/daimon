@@ -23,7 +23,6 @@ from daimon.adapters.slack.agent_setup.read import load_panel_roster
 from daimon.adapters.slack.agent_setup.state import PanelMetadata, encode_panel_metadata
 from daimon.adapters.slack.credential_submissions import post_ephemeral
 from daimon.adapters.slack.modal_limits import finish_modal
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.coding_keys import (
@@ -36,6 +35,7 @@ from daimon.core.coding_keys import (
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.identity import get_or_create_platform_principal
 from slack_sdk.web.async_client import AsyncWebClient
 

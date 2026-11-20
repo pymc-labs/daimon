@@ -14,7 +14,7 @@ import json
 from typing import Any, Final, cast
 
 from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS, finish_modal
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.support_rows import LimitView
 from daimon.core.support import (
     CHOOSE_OPTION,

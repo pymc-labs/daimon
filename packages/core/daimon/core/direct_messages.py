@@ -25,6 +25,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
+from daimon.core.channel_audience import requester_standing
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.dm_access import DmAgent, dm_agent_of, permits_dm
@@ -46,6 +47,7 @@ from daimon.core.setup_conversations import BoundAgentUnavailable
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import (
     COLD_DM_ORIGIN,
+    PRIVATE_ANSWER_ORIGIN,
     DirectMessageRow,
     OwnerDmFence,
     claim_message,
@@ -204,6 +206,8 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
     if conversation.claimed_at is not None and current.claimed_at != conversation.claimed_at:
         raise DirectMessageAccessRevoked("claim_superseded", message="This reply was replaced.")
     membership_unknown = subject.verified_membership is None
+    # What the lookup just proved; an unknown lookup proves no role (`on` then refuses).
+    resolved_roles = subject.role_ids
     if membership_unknown:
         admitted = reply.grant.subject
         subject = replace(
@@ -216,6 +220,10 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         raise DirectMessageAccessRevoked(
             "delivery_access_revoked", message="Private access revoked."
         )
+    if conversation.platform == "discord" and await _recipient_is_outsider(
+        deps, conversation, resolved_roles
+    ):
+        raise DirectMessageAccessRevoked("delivery_outsider", message="Private access revoked.")
     if _source_is_sealed(policy, conversation):
         await _quarantine(deps, conversation)
     agent_subject = replace(subject, is_admin=False)
@@ -236,6 +244,31 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
     await _require_dm_grant(deps, reply, subject=agent_subject, policy=policy)
     if membership_unknown:
         raise DirectMessageMembershipUnknown()
+
+
+async def _recipient_is_outsider(
+    deps: TurnDeps, conversation: DirectMessageRow, role_ids: tuple[str, ...]
+) -> bool:
+    """Whether `audience_hold` is `on` and the recipient holds no internal role now.
+
+    The roles are the ones just resolved for this delivery; none when the lookup failed, so
+    an unknown standing refuses in `on`. Mode `shadow` logs and allows."""
+    async with deps.sessionmaker() as session:
+        standing = await requester_standing(
+            session,
+            tenant_id=conversation.tenant_id,
+            user_id=conversation.external_user_id,
+            is_dm=True,
+            event_role_ids=role_ids,
+        )
+    if standing is not RequesterOrg.OUTSIDER:
+        return False
+    _log.info(
+        "audience.private_delivery_refused",
+        tenant_id=str(conversation.tenant_id),
+        scope_id=conversation.scope_id,
+    )
+    return True
 
 
 async def _require_dm_grant(
@@ -595,10 +628,12 @@ async def admit_cold_dm(
     agent_name: str | None = None,
     platform: str = "discord",
     requester_org: RequesterOrg = RequesterOrg.HOST,
+    dm_no_source: bool = False,
 ) -> Admission:
     """Check a cold agent without creating one or changing channel routing.
 
     `agent_name` is the agent routing chose; without one the workspace default answers.
+    `dm_no_source` admits a Private answer: a DM with no source by design.
     """
     await require_dm_enabled(deps, tenant_id=tenant_id)
     async with deps.sessionmaker() as session:
@@ -620,6 +655,7 @@ async def admit_cold_dm(
         verified_membership=verified_membership,
         is_dm=True,
         dm_agent_name=name,
+        dm_no_source=dm_no_source,
     )
 
 
@@ -636,6 +672,7 @@ async def start_cold_dm(
     platform: str = "discord",
     groups: frozenset[str] | None = None,
     channel_id: str | None = None,
+    private_answer: bool = False,
 ) -> DirectMessageRow | None:
     """Create a source-free private scope, compare-and-setting the active route.
 
@@ -646,6 +683,8 @@ async def start_cold_dm(
     saves it as their agent in this workspace (they chose it from a list). `groups` are
     the person's looked-up groups (`lookup_dm_groups`); None takes them from the admission.
     `channel_id` is the platform's DM channel when the route key is not it (Slack).
+    `private_answer` records the scope as a Private answer: no source by design, and no
+    imported earlier conversation.
     """
     conversation = DirectMessageRow(
         platform=platform,
@@ -656,7 +695,7 @@ async def start_cold_dm(
         workspace_id=workspace_id,
         channel_id=channel_id or route_key,
         scope_id=f"{DM_SCOPE_PREFIX}{uuid.uuid4()}",
-        source_url=COLD_DM_ORIGIN,
+        source_url=PRIVATE_ANSWER_ORIGIN if private_answer else COLD_DM_ORIGIN,
         context="",
         memory_read_only=admission.memory_read_only,
         history=[],
@@ -689,12 +728,16 @@ async def start_cold_dm(
         # An imported earlier conversation is used once, by the first private start on
         # the agent it was imported for: with several DM agents, a start on another
         # agent must not use it up.
-        carried = await take_carry_over(
-            session,
-            tenant_id=tenant_id,
-            platform=conversation.platform,
-            external_user_id=external_user_id,
-            agent_name=dm_agent.name,
+        carried = (
+            None
+            if private_answer
+            else await take_carry_over(
+                session,
+                tenant_id=tenant_id,
+                platform=conversation.platform,
+                external_user_id=external_user_id,
+                agent_name=dm_agent.name,
+            )
         )
         if carried is not None:
             conversation = conversation.model_copy(
@@ -1059,6 +1102,8 @@ async def reply_to_dm_result(
                 is_dm=True,
                 dm_source_channel_id=conversation.source_channel_id,
                 cold_dm=conversation.is_cold,
+                # A Private answer has no source on its follow-ups either.
+                dm_no_source=conversation.private_answer,
                 now=now,
             )
             if admission.account_id != conversation.account_id:
