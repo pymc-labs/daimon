@@ -247,6 +247,25 @@ Label this deployment writes as the source of the bundles it exports.
 
 Largest eval bundle import accepts, unpacked, in MiB.
 
+### `DAIMON_EVALS__SIMULATOR_MODEL`
+
+`str` · optional · default `claude-opus-5-5`
+
+Anthropic model that answers eval world calls nobody recorded.
+
+### `DAIMON_EVALS__SIMULATOR_EFFORT`
+
+`'none' | 'low' | 'medium' | 'high'` · optional · default `low`
+
+Effort the eval world simulator runs at.
+
+### `DAIMON_EVALS__WORLD_URL`
+
+`str | None` · optional · default unset
+
+Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
+http://eval-worker:8090. Unset: no sandbox can be enclosed.
+
 ## Long Jobs
 
 Read from `daimon.core.config.LongJobsSettings`. Prefix `DAIMON_LONG_JOBS__`.
