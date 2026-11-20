@@ -37,25 +37,35 @@ def merge_with_baseline(
 
     A room also in `baseline` is contained or narrow if either says so, so only the next
     reconcile can relax what a reconcile found. A room not in `baseline` (new since) keeps
-    the cache result, and a room missing from `cache` is dropped. Pure.
+    the cache result, and a room missing from `cache` is dropped. A thread is then never
+    more open than its merged parent, because a new thread inherits a parent the cache may
+    hold stale. Pure.
     """
-    merged: dict[str, StoredRoom] = {}
-    for channel_id, room in cache.items():
-        before = (baseline or {}).get(channel_id)
-        if before is None or not room.facts.known:
-            merged[channel_id] = room
-            continue
-        facts = room.facts
-        merged[channel_id] = StoredRoom(
-            RoomFacts(
-                contained=facts.contained or before.facts.contained,
-                narrow=facts.narrow or before.facts.narrow,
-                outsiders_count=facts.outsiders_count,
-                team_shut_out_count=facts.team_shut_out_count,
-            ),
-            room.parent_id,
-        )
+    merged = {
+        channel_id: _tighter(room, (baseline or {}).get(channel_id))
+        for channel_id, room in cache.items()
+    }
+    for channel_id, room in merged.items():
+        parent = merged.get(room.parent_id) if room.parent_id is not None else None
+        if parent is not None and parent.parent_id is None:
+            merged[channel_id] = _tighter(room, parent)
     return merged
+
+
+def _tighter(room: StoredRoom, other: StoredRoom | None) -> StoredRoom:
+    """`room`, contained or narrow where `other` is too. An unknown room stays unknown."""
+    if other is None or not room.facts.known:
+        return room
+    facts = room.facts
+    return StoredRoom(
+        RoomFacts(
+            contained=facts.contained or other.facts.contained,
+            narrow=facts.narrow or other.facts.narrow,
+            outsiders_count=facts.outsiders_count,
+            team_shut_out_count=facts.team_shut_out_count,
+        ),
+        room.parent_id,
+    )
 
 
 @dataclass(frozen=True)

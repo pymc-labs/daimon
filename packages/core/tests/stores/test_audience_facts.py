@@ -196,6 +196,17 @@ def test_a_new_room_keeps_the_cache_result_and_a_missing_room_is_dropped() -> No
     assert store.merge_with_baseline(cache, None) == cache, "no baseline: the cache result"
 
 
+def test_a_new_thread_is_never_more_open_than_its_reconciled_parent() -> None:
+    # The cache holds the parent stale (open); the reconcile saw it contained. A public
+    # thread created since inherits the stale parent in the cache.
+    cache = {"room": StoredRoom(OPEN), "new": StoredRoom(OPEN, parent_id="room")}
+    merged = store.merge_with_baseline(cache, {"room": StoredRoom(CONTAINED)})
+
+    assert merged["room"].facts.contained
+    assert merged["new"].facts.contained, "the thread follows its merged parent"
+    assert merged["new"].parent_id == "room"
+
+
 def test_an_unknown_room_stays_unknown_whatever_the_baseline_says() -> None:
     merged = store.merge_with_baseline(_rooms(x=UNKNOWN_FACTS), _rooms(x=OPEN))
 
