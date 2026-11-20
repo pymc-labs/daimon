@@ -131,9 +131,10 @@ class DockerRuntime:
                 (str(n["IPAddress"]) for n in networks.values() if n.get("IPAddress")), None
             )
             await wait_ready(self, PodHandle(name, "docker"))
-        except (SandboxError, httpx.HTTPError):
+        except (SandboxError, httpx.HTTPError) as exc:
+            logs = await self._logs(name)
             await self.stop(PodHandle(name, "docker"))
-            raise
+            raise SandboxError(f"{exc}\n{logs}") from exc
         return PodHandle(name, "docker", address)
 
     async def run(self, pod: PodHandle, command: str, *, timeout_s: float = 300) -> CommandResult:
@@ -155,6 +156,17 @@ class DockerRuntime:
         if reply.status_code >= 400:
             raise SandboxError(f"docker archive {root}: {reply.status_code}")
         return untar_files(reply.content, root)
+
+    async def _logs(self, name: str) -> str:
+        """The containers' log tails, for a pod that failed to start."""
+        tails: list[str] = []
+        for part in ("net", "main"):
+            reply = await self.client.get(
+                f"/containers/{name}-{part}/logs", params={"stdout": 1, "stderr": 1, "tail": 50}
+            )
+            out, err = demux(reply.content) if reply.status_code == 200 else (b"", b"")
+            tails.append(f"[{part}]\n{(out + err).decode(errors='replace')}")
+        return "\n".join(tails)
 
     async def stop(self, pod: PodHandle) -> None:
         for part in ("main", "net"):

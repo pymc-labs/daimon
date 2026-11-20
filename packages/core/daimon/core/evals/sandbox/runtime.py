@@ -23,20 +23,15 @@ from daimon.core.evals.sandbox.ca import EvalCA
 from daimon.core.evals.world.model import ItemRef
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.output_delivery import DeliverableFile
+from mux.contracts.ids import Provider
+from mux.profiles import CONTROL_PLANE_HOSTS
 
-Executor = Literal["anthropic", "openai", "gemini", "harness", "probe"]
+#: The worker the pod runs: a provider's environment worker, or "probe" (none).
+Executor = Provider | Literal["probe"]
 #: The image's uids (`apps/eval-sandbox/image`).
 AGENT_UID: Final = 10001
 GATEWAY_UID: Final = 61000
 AGENT_SHELL: Final = "/opt/eval/agent-bin/bash"
-#: Control-plane hosts each executor's worker dials; the harness brings its own.
-CONTROL_PLANE: Final[Mapping[Executor, frozenset[str]]] = {
-    "anthropic": frozenset({"api.anthropic.com"}),
-    "openai": frozenset({"api.openai.com", "codex-cloud-environments.chatgpt.com"}),
-    "gemini": frozenset({"generativelanguage.googleapis.com"}),
-    "harness": frozenset(),
-    "probe": frozenset(),
-}
 _MAX_FILES_BYTES: Final = 256 * 1024 * 1024
 
 
@@ -100,14 +95,17 @@ class SandboxRuntime(Protocol):
 async def wait_ready(runtime: SandboxRuntime, pod: PodHandle, timeout_s: float = 300) -> None:
     """Until the agent shell works: files in, gateway up, eval CA trusted."""
     deadline = time.monotonic() + timeout_s
+    last = ""
     while time.monotonic() < deadline:
         try:
-            if (await runtime.run(pod, "true", timeout_s=30)).exit_code == 0:
+            result = await runtime.run(pod, "true", timeout_s=30)
+            if result.exit_code == 0:
                 return
-        except SandboxError:
-            pass
+            last = f"exit {result.exit_code}: {result.stderr[-500:].decode(errors='replace')}"
+        except SandboxError as exc:
+            last = str(exc)
         await asyncio.sleep(1)
-    raise SandboxError(f"eval pod {pod.id} was not ready in {timeout_s:.0f}s")
+    raise SandboxError(f"eval pod {pod.id} was not ready in {timeout_s:.0f}s ({last})")
 
 
 def registries(features: FeatureSnapshot) -> Literal["passthrough", "deny"]:
@@ -125,7 +123,11 @@ def agent_command(command: str) -> list[str]:
 
 
 def gateway_config(spec: PodSpec) -> bytes:
-    hosts = sorted(spec.control_plane | CONTROL_PLANE[spec.executor] | spec.passthrough)
+    hosts = sorted(
+        spec.control_plane
+        | (frozenset[str]() if spec.executor == "probe" else CONTROL_PLANE_HOSTS[spec.executor])
+        | spec.passthrough
+    )
     return json.dumps(
         {
             "world_url": spec.world_url,

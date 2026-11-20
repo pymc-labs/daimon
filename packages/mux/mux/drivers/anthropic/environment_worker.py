@@ -1,4 +1,4 @@
-"""The Anthropic self-hosted environment worker for an eval pod.
+"""The Anthropic self-hosted environment worker for an eval pod (`apps/eval-sandbox`).
 
 It runs as the executor uid with the environment key in its own environment. Its bash
 tool is started through the agent wrapper, so commands run as the agent uid with the

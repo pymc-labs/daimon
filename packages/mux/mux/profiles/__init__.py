@@ -214,6 +214,7 @@ def meters_cache_writes_for(provider: Provider) -> bool:
 
 
 __all__ = [
+    "CONTROL_PLANE_HOSTS",
     "DAIMON_RECORD_PROVIDERS",
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
@@ -245,6 +246,13 @@ class BackendSelection:
 
 
 #: Everyday names for a provider beyond its id, display name and model family.
+#: Control-plane hosts a provider's self-hosted environment worker dials; selfhosted brings its own.
+CONTROL_PLANE_HOSTS: Mapping[Provider, frozenset[str]] = {
+    "anthropic": frozenset({"api.anthropic.com"}),
+    "openai": frozenset({"api.openai.com", "codex-cloud-environments.chatgpt.com"}),
+    "gemini": frozenset({"generativelanguage.googleapis.com"}),
+    "selfhosted": frozenset(),
+}
 PROVIDER_ALIASES: Mapping[str, Provider] = {"chatgpt": "openai", "google": "gemini"}
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {

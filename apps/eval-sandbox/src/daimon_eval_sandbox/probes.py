@@ -35,7 +35,7 @@ NETWORK: Final[dict[str, list[str]]] = {
 EXECUTORS: Final[dict[str, list[str]]] = {
     "codex": ["codex", "--version"],
     "gemini-api": ["gemini-api", "version"],
-    "anthropic": ["/opt/venv/bin/python", "-c", "import anthropic.lib.environments"],
+    "anthropic": ["/opt/venv/bin/python", "-c", "import mux.drivers.anthropic.environment_worker"],
     "harness": ["/opt/venv/bin/python", "-c", "import daimon_harness"],
 }
 Verdict = Literal["pass", "fail", "skipped"]

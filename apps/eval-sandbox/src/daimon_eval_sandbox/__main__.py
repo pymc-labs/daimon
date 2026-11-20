@@ -154,7 +154,7 @@ def executor_argv(executor: str, env: dict[str, str]) -> list[str]:
                 "--workdir",
                 WORKSPACE,
             ]
-        case "harness":
+        case "selfhosted":
             return [*python, "daimon_harness"]
         case "probe":
             return ["sleep", "infinity"]
@@ -174,7 +174,7 @@ def _main() -> None:
     executor = str(pod["executor"])
     env = {**EXEC_ENV, **_strings(pod.get("exec_env"))}
     argv = executor_argv(executor, env)
-    if executor == "harness":  # the harness runs as root and drops each tool to its own uid
+    if executor == "selfhosted":  # the harness runs as root and drops each tool to its own uid
         env |= {"HOME": "/root"}
         command = argv
     else:
@@ -218,7 +218,7 @@ def main() -> None:
     elif role == "main":
         _main()
     elif role == "anthropic-worker":
-        from daimon_eval_sandbox.anthropic_worker import run
+        from mux.drivers.anthropic.environment_worker import run
 
         asyncio.run(run())
     elif role == "manifest":

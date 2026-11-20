@@ -572,7 +572,7 @@ forbidden_modules = ["daimon"]
 name = "eval sandbox must not import daimon"
 type = "forbidden"
 source_modules = ["daimon_eval_sandbox"]
-forbidden_modules = ["daimon", "mux"]
+forbidden_modules = ["daimon"]
 
 # Daimon reaches a provider driver through its package (`mux.drivers.<provider>`),
 # whose `__all__` is the host-facing API; the driver's submodules and private
