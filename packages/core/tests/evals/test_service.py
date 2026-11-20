@@ -21,6 +21,7 @@ from daimon.core.evals.service import (
     EvalRefused,
     EvalService,
     ExportRequest,
+    Page,
     SuiteCasePick,
     SuiteDraft,
     SuitePick,
@@ -116,7 +117,8 @@ async def test_unscrubbed_bundle_when_imported_then_only_an_accepting_admin_succ
     report = await service.import_bundle(admin, _chunks(data), accept_unscrubbed=True)
     assert report.runs == [RUN], "an accepting admin imports it"
     sam = Subject(tenant_id=admin.tenant_id, platform="web", key="sam", role="member")
-    await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
+    with pytest.raises(EvalForbidden, match="not scrubbed"):
+        await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
     with pytest.raises(EvalNotFound):
         await service.run(sam, RUN)  # the run came unscrubbed: shares never reach it
 
@@ -221,3 +223,35 @@ async def test_trusted_keys_when_set_then_only_bundles_they_signed_import(
         await service.import_bundle(admin, _chunks(to_zip(_files())))
     report = await service.import_bundle(admin, _chunks(_edited({}, lambda m: sign(m, key))))
     assert report.signature == "valid", "a bundle a trusted key signed imports"
+
+
+async def test_suite_when_imported_from_an_unscrubbed_bundle_then_its_version_is_unscrubbed(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    service, admin, _ = await _setup(db_session, db_session_factory, "admin")
+    data = _edited({}, lambda m: m | {"scrub": {"status": "unscrubbed", "unchecked_blobs": 0}})
+    await service.import_bundle(admin, _chunks(data), accept_unscrubbed=True)
+    async with db_session_factory() as session:
+        suite = await store.suite_by_key(session, tenant_id=admin.tenant_id, key=SUITE)
+        assert suite is not None
+        scrub = await store.version_scrub(session, suite_id=suite.id, version=1)
+    assert (scrub, suite.scrub_status) == ("unscrubbed", "unscrubbed"), "the manifest's word holds"
+
+
+async def test_run_when_a_reviewer_reads_it_then_arms_and_item_ids_are_neutral(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    service, alex, _ = await _setup(db_session, db_session_factory, "member")
+    sam = Subject(tenant_id=alex.tenant_id, platform="web", key="sam", role="member")
+    await service.import_bundle(alex, _chunks(to_zip(_files())))
+    await service.share(alex, SUITE, [Share(kind="person", id="sam", role="reviewer")])
+    run = await service.run(sam, RUN)
+    assert [(a.id, a.label) for a in run.arms] == [("Arm 1", "Arm 1")], "arms are labelled"
+    assert run.blind_labels is None and run.name is None, "nothing maps a label back"
+    [summary] = await service.items(sam, RUN, Page())
+    assert summary.arm_id == "Arm 1" and summary.key == summary.id, "no arm in the item key"
+    item = await service.item(sam, summary.id)
+    assert (item.id, item.arm_id) == (summary.id, "Arm 1"), "nor in the item id"
+    owner = await service.run(alex, RUN)
+    assert [a.id for a in owner.arms] == ["baseline-a"], "the owner sees the real run"
+    assert [a.id for a in (await service.run(alex, RUN, blind=True)).arms] == ["Arm 1"]

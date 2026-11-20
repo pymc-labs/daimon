@@ -9,6 +9,7 @@ import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from daimon.core.evals.bundle import DirSource
 from daimon.core.evals.from_thread import (
     ThreadCall,
@@ -18,6 +19,7 @@ from daimon.core.evals.from_thread import (
     ThreadRecord,
     build_cases,
 )
+from daimon.core.evals.scrub import detect
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import KnownEntities
 from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, scrub_path
@@ -129,4 +131,23 @@ def test_bundle_when_scrubbed_offline_then_valid_stable_and_nothing_left(tmp_pat
     )
     assert leftovers_of(tmp_path / "out", scrubber)[0].kind != "person", "nothing found again"
     again = scrub_path(tmp_path / "out", None, scrubber)
-    assert again.replaced == {}, "a second pass changes nothing"
+    # A real name can equal a fake, so names are replaced again; ids, emails and repos are not.
+    assert set(again.replaced) <= {"company", "handle", "person", "project"}, again.replaced
+    assert again.leftovers == [], "a second pass leaves nothing either"
+
+
+def test_ner_when_prefetched_then_one_batch_and_find_reuses_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches: list[list[str]] = []
+
+    def analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+        batches.append(texts)
+        return [[(0, 3, "person")] for _ in texts]
+
+    monkeypatch.setattr(detect, "_engine", lambda model: object())
+    monkeypatch.setattr(detect, "_analyze", analyze)
+    ner = detect.Ner("model")
+    ner.prefetch(["Ann wrote", "Ann wrote", "Bob said"])
+    assert [(h.start, h.end, h.kind) for h in ner.find("Bob said")] == [(0, 3, "person")]
+    assert batches == [["Ann wrote", "Bob said"]]

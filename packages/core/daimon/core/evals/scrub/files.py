@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import io
 import json
+import posixpath
 import re
+import urllib.parse
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Final, Literal, Protocol, cast
@@ -47,9 +50,13 @@ _AUTHOR_TAGS: Final = frozenset(
     {"creator", "lastModifiedBy", "Company", "Manager", "HyperlinkBase"}
 )
 _AUTHOR_ATTRS: Final = {"author": "Author", "initials": "A", "userId": "", "providerId": ""}
+# Attributes people write in: alt text, titles and tooltips get name detection too.
+_PROSE_ATTRS: Final = frozenset({"descr", "title", "tooltip", "alt"})
+_PATH_ATTRS: Final = frozenset({"Target", "PartName"})
 _MAX_PART: Final = 64 * 1024 * 1024
 _MAX_UNPACKED: Final = 256 * 1024 * 1024
 _MAX_PARTS: Final = 10_000
+_MAX_DEPTH: Final = 3
 _PDF_LINES: Final = 58
 _PDF_WIDTH: Final = 92
 
@@ -130,7 +137,24 @@ def _dump(value: JsonValue, indent: int | None = 2) -> bytes:
 # ---------- Office ----------
 
 
-def _rewrite_xml(data: bytes, rw: Rewriter) -> bytes:
+@dataclass(frozen=True)
+class _Xml:
+    data: bytes
+    root: ET.Element
+    paragraphs: list[tuple[list[ET.Element], str]]
+    inside: set[int]
+
+    def strings(self) -> list[JsonValue]:
+        """Everything a person may have written in the part, paragraphs joined across runs."""
+        found: list[JsonValue] = [joined for _, joined in self.paragraphs]
+        for el in self.root.iter():
+            if id(el) not in self.inside:
+                found += [t for t in (el.text, el.tail) if t and t.strip()]
+            found += list(el.attrib.values())
+        return found
+
+
+def _parse_xml(data: bytes) -> _Xml:
     if b"<!DOCTYPE" in data[:4096]:
         raise ValueError("DTD in XML")
     for _, ns in ET.iterparse(io.BytesIO(data), events=("start-ns",)):
@@ -145,7 +169,11 @@ def _rewrite_xml(data: bytes, rw: Rewriter) -> bytes:
         runs = [r for r in para.iter() if r.tag in _RUNS and id(r) not in inside]
         inside.update(id(r) for r in runs)
         paragraphs.append((runs, "".join(r.text or "" for r in runs)))
-    rw.learn([joined for _, joined in paragraphs])  # a name found once is replaced everywhere
+    return _Xml(data, root, paragraphs, inside)
+
+
+def _rewrite_xml(xml: _Xml, rw: Rewriter, renamed: Mapping[str, str], name: str) -> bytes:
+    data, root, paragraphs, inside = xml.data, xml.root, xml.paragraphs, xml.inside
     for runs, joined in paragraphs:
         scrubbed = rw.text(joined)
         if runs and scrubbed != joined:
@@ -159,9 +187,16 @@ def _rewrite_xml(data: bytes, rw: Rewriter) -> bytes:
             el.text = ""
         elif id(el) not in inside and el.text and el.text.strip():
             el.text = rw.text(el.text)
+        if el.tail and el.tail.strip():
+            el.tail = rw.text(el.tail)
         for key, val in el.attrib.items():
-            name = key.rsplit("}", 1)[-1]
-            el.set(key, _AUTHOR_ATTRS[name] if name in _AUTHOR_ATTRS else rw.text(val, names=False))
+            attr = key.rsplit("}", 1)[-1]
+            if attr in _AUTHOR_ATTRS:
+                el.set(key, _AUTHOR_ATTRS[attr])
+                continue
+            if attr in _PATH_ATTRS and el.get("TargetMode") != "External":
+                val = _retarget(name, val, renamed)
+            el.set(key, rw.text(val, names=attr in _PROSE_ATTRS))
     head = re.match(rb"(<\?xml[^>]*\?>\s*)?", data)
     prolog = head.group(0) if head else b""
     body = ET.tostring(root, encoding="unicode")
@@ -172,9 +207,46 @@ def _rewrite_xml(data: bytes, rw: Rewriter) -> bytes:
     return prolog + body.encode()
 
 
-def _office(data: bytes, media_type: str, rw: Rewriter) -> Rebuilt:
+@dataclass
+class _Budget:
+    """What one Office file may unpack, embedded files included."""
+
+    parts: int = _MAX_PARTS
+    size: int = _MAX_UNPACKED
+
+    def take(self, infos: list[zipfile.ZipInfo]) -> None:
+        self.parts -= len(infos)
+        self.size -= sum(i.file_size for i in infos)
+        if self.parts < 0 or self.size < 0 or any(i.file_size > _MAX_PART for i in infos):
+            raise ValueError("Office file too large to rebuild")
+
+
+def _xml_part(name: str) -> bool:
+    return bool(_XML_PARTS.search(name)) or name == "[Content_Types].xml"
+
+
+def _retarget(part: str, target: str, renamed: Mapping[str, str]) -> str:
+    """`target` (a relationship target or a content type's part name) after renaming."""
+    if target.startswith("/"):
+        path = target[1:]
+    else:
+        source = PurePosixPath(part).parent.parent if part.endswith(".rels") else ""
+        path = posixpath.normpath(posixpath.join(str(source), target))
+    if (new := renamed.get(urllib.parse.unquote(path))) is None:
+        return target
+    head, slash, _ = target.rpartition("/")
+    return f"{head}{slash}{new}"
+
+
+def _office(
+    data: bytes, media_type: str, rw: Rewriter, budget: _Budget | None = None, depth: int = 0
+) -> Rebuilt:
     """Every part rewritten: XML with fakes, images redacted, embedded Office files rebuilt the
-    same way, and every other binary (OLE objects, EMF, SVG, fonts) blanked: none is kept."""
+    same way, and every other binary (OLE objects, EMF, SVG, fonts) blanked: none is kept.
+    Binary parts are renamed (`media/part3.png`), since file names name people too."""
+    if depth > _MAX_DEPTH:
+        raise ValueError("Office files nested too deep")
+    budget = budget or _Budget()
     out = io.BytesIO()
     flagged = False
     with (
@@ -182,25 +254,32 @@ def _office(data: bytes, media_type: str, rw: Rewriter) -> Rebuilt:
         zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst,
     ):
         infos = src.infolist()
-        if len(infos) > _MAX_PARTS or sum(i.file_size for i in infos) > _MAX_UNPACKED:
-            raise ValueError("Office file too large to rebuild")
+        budget.take(infos)
+        renamed = {
+            i.filename: f"part{n}{PurePosixPath(i.filename).suffix}"
+            for n, i in enumerate(infos)
+            if not i.is_dir() and not _xml_part(i.filename)
+        }
+        xml = {i.filename: _parse_xml(src.read(i)) for i in infos if _xml_part(i.filename)}
+        # A name found anywhere in the file is replaced everywhere in it.
+        rw.learn([t for x in xml.values() for t in x.strings()])
         for info in infos:
-            if info.file_size > _MAX_PART:
-                raise ValueError("Office part too large to rebuild")
-            part = src.read(info)
-            suffix = PurePosixPath(info.filename).suffix.lower()
-            if _XML_PARTS.search(info.filename) or info.filename == "[Content_Types].xml":
-                part = _rewrite_xml(part, rw)
+            name = info.filename
+            suffix = PurePosixPath(name).suffix.lower()
+            if name in xml:
+                part = _rewrite_xml(xml.pop(name), rw, renamed, name)
             elif suffix in _IMAGE_SUFFIXES:
-                part = redact_image(part, rw)[0]  # same format, so the part keeps its name
+                part = redact_image(src.read(info), rw)[0]  # same format, so the suffix stays
                 flagged = True
             elif suffix in _OOXML_SUFFIXES:
-                part = _office(part, media_type, rw).data
+                part = _office(src.read(info), media_type, rw, budget, depth + 1).data
                 flagged = True
-            elif not info.is_dir():
-                part = _BLANK_SVG if suffix == ".svg" else b""
-                flagged = True
-            dst.writestr(zipfile.ZipInfo(info.filename, (1980, 1, 1, 0, 0, 0)), part)
+            else:
+                part = _BLANK_SVG if suffix == ".svg" and not info.is_dir() else b""
+                flagged = flagged or not info.is_dir()
+            if name in renamed:
+                name = str(PurePosixPath(name).with_name(renamed[name]))
+            dst.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), part)
     return Rebuilt(out.getvalue(), media_type, "rebuilt", flagged)
 
 

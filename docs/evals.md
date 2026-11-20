@@ -81,7 +81,8 @@ daimon evals bundle leftovers clean/ --entities names.yaml --salt my-workspace -
 
 Both print counts and places, never the text they found, and exit 1 unless the bundle
 is fully scrubbed. Reuse the same key, `--salt` and `--map` for every bundle of a suite
-so fakes stay the same.
+so fakes stay the same. Scrub each raw bundle once: a second scrub fakes its names again.
+Add `--jobs 2` or more to run the names model in that many processes; each loads it.
 The map holds only hashes and fakes, but keep it private.
 ## The world a case runs in
 

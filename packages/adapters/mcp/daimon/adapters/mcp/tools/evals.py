@@ -217,7 +217,8 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def eval_bundle_export(ctx: Context, request: ExportRequest) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
         """Export suites and runs as a bundle. People are replaced by labels unless an admin
-        keeps them. Returns a short-lived download link. Encrypted bundles are exported from the
+        keeps them. Returns a short-lived download link; the file stays in the deployment's
+        artifact storage until its retention removes it. Encrypted bundles are exported from the
         command line."""
         store = runtime.artifact_store
         if store is None or runtime.settings.artifacts is None:

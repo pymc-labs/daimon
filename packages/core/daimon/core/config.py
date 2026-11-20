@@ -2946,7 +2946,7 @@ class EvalsSettings(BaseModel):
         description="Label this deployment writes as the source of the bundles it exports.",
     )
     max_bundle_mb: int = Field(
-        default=512, gt=0, description="Largest eval bundle import accepts, in MiB."
+        default=128, gt=0, description="Largest eval bundle import or export handles, in MiB."
     )
     scrub_key: SecretStr | None = Field(
         default=None,
