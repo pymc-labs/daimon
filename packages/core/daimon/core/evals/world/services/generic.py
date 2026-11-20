@@ -16,6 +16,9 @@ class GenericService:
     def effects(self, request: WorldRequest) -> tuple[Effect, ...]:
         return ()
 
+    def resource(self, request: WorldRequest) -> tuple[str, str] | None:
+        return None
+
     def answer(
         self, item: ItemRef, request: WorldRequest, overlay: Overlay
     ) -> ExchangeResponse | None:

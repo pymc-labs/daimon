@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 Document = dict[str, JsonValue]
 RUNNING = "running"
+#: Cache keys of semantic-match verdicts, kept beside simulated answers but never exported.
+VERDICT_PREFIX = "same:"
 
 
 class _Row(BaseModel):
@@ -45,7 +47,7 @@ class OverlayRow(_Row):
 class CallStats(_Row):
     next_seq: int
     total: int
-    written: int  # simulator model answers, the ones `simulator.max_calls` counts
+    model_calls: int  # simulator and judge model calls, the ones `simulator.max_calls` counts
     used_exchanges: frozenset[str]
 
 
@@ -92,12 +94,12 @@ async def lock_running_item(session: AsyncSession, *, item_id: uuid.UUID) -> boo
 
 
 async def call_stats(session: AsyncSession, *, item_id: uuid.UUID) -> CallStats:
-    total, last, written = (
+    total, last, model_calls = (
         await session.execute(
             select(
                 func.count(),
                 func.coalesce(func.max(EvalWorldCall.seq), 0),
-                func.count().filter(EvalWorldCall.reason == "written"),
+                func.coalesce(func.sum(EvalWorldCall.model_calls), 0),
             ).where(EvalWorldCall.item_id == item_id)
         )
     ).one()
@@ -107,13 +109,18 @@ async def call_stats(session: AsyncSession, *, item_id: uuid.UUID) -> CallStats:
         )
     )
     return CallStats(
-        next_seq=last + 1, total=total, written=written,
+        next_seq=last + 1, total=total, model_calls=model_calls,
         used_exchanges=frozenset(u for u in used if u is not None),
     )  # fmt: skip
 
 
 async def record_call(
-    session: AsyncSession, *, item_id: uuid.UUID, tenant_id: uuid.UUID, document: Document
+    session: AsyncSession,
+    *,
+    item_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    document: Document,
+    model_calls: int = 0,
 ) -> None:
     def text(key: str) -> str | None:
         value = document.get(key)
@@ -126,6 +133,7 @@ async def record_call(
             item_id=item_id, seq=seq, tenant_id=tenant_id, surface=text("surface"),
             service=text("service"), origin=text("origin"), reason=text("reason"),
             exchange_id=text("exchange_id"), sim_key=text("sim_key"), document=document,
+            model_calls=model_calls,
         )
     )  # fmt: skip
     await session.flush()
@@ -193,7 +201,7 @@ async def put_sim(
     model: str,
     document: Document,
 ) -> None:
-    """Keep a simulator answer; the first answer under a key stays."""
+    """Keep a simulator answer or a verdict; the first one under a key stays."""
     await session.execute(
         insert(EvalSimCache)
         .values(tenant_id=tenant_id, case_sha256=case_sha256, key=key, model=model,
@@ -208,7 +216,11 @@ async def list_sims(
     """A case revision's cached answers, to export with the case (`world.sim_cache`)."""
     rows = await session.scalars(
         select(EvalSimCache.document)
-        .where(EvalSimCache.tenant_id == tenant_id, EvalSimCache.case_sha256 == case_sha256)
+        .where(
+            EvalSimCache.tenant_id == tenant_id,
+            EvalSimCache.case_sha256 == case_sha256,
+            ~EvalSimCache.key.startswith(VERDICT_PREFIX),
+        )
         .order_by(EvalSimCache.created_at, EvalSimCache.key)
     )
     return list(rows)

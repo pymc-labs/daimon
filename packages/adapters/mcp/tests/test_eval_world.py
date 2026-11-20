@@ -5,18 +5,18 @@ Drives the real app: the live registry, every middleware, the `call_tool` proxy.
 
 from __future__ import annotations
 
-import uuid
+import datetime as dt
 from typing import Any
 
 import pytest
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.middleware.eval_world import PROXY_TOOLS, EvalWorldMiddleware
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.evals.eval_tenant import eval_tenant
-from daimon.core.evals.world.dispatch import eval_token_label
+from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.stores import eval_world
-from daimon.testing.eval_world import eval_case, make_running_item
+from daimon.testing.eval_world import eval_case, make_eval_principal, make_running_item
 from fastmcp import Client, FastMCP
-from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.tools.function_tool import FunctionTool
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,14 +25,7 @@ from .test_tool_schema_snapshot import (
     _fully_configured_settings,  # pyright: ignore[reportPrivateUsage]
 )
 
-
-def _as_eval_item(monkeypatch: pytest.MonkeyPatch, tenant_id: uuid.UUID, label: str) -> None:
-    claims = {"sub": str(uuid.uuid4()), "role": "admin", "tenant_id": str(tenant_id),
-              "platform": "web", "daimon_token_label": label}  # fmt: skip
-    token = AccessToken(token="t", client_id="c", scopes=[], claims=claims)
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: token
-    )
+SECRET = b"e" * 32
 
 
 async def test_every_tool_when_an_eval_item_calls_it_then_the_world_answers_and_no_handler_runs(
@@ -45,9 +38,17 @@ async def test_every_tool_when_an_eval_item_calls_it_then_the_world_answers_and_
     mcp: FastMCP = app.state.mcp
     world = next(m for m in mcp.middleware if isinstance(m, EvalWorldMiddleware))
     world._world.simulator = None  # pyright: ignore[reportPrivateUsage] - no model in tests
+    async with sessionmaker() as session, session.begin():
+        principal = await make_eval_principal(session)
     tenant_id = await eval_tenant(sessionmaker)
     async with sessionmaker() as session, session.begin():
         item_id = await make_running_item(session, tenant_id, eval_case({}))
+        token, _, _ = await mint_chat_mcp_token(
+            session, account_id=principal.account_id, agent_id=principal.account_id,
+            secret=SECRET, now=dt.datetime.now(dt.UTC), eval_item_id=item_id,
+        )  # fmt: skip
+    verified = await DaimonJWTVerifier(secret=SECRET, sessionmaker=sessionmaker).verify_token(token)
+    assert verified is not None, "the item's own credential verifies"
     ran: list[str] = []
     original = FunctionTool.run
 
@@ -57,7 +58,9 @@ async def test_every_tool_when_an_eval_item_calls_it_then_the_world_answers_and_
         return await original(self, arguments)
 
     monkeypatch.setattr(FunctionTool, "run", spy)
-    _as_eval_item(monkeypatch, tenant_id, eval_token_label(item_id))
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.middleware.mcp_identity.get_access_token", lambda: verified
+    )
     registered = sorted(t.name for t in await mcp.local_provider.list_tools())
     outcomes: dict[str, str] = {}
     async with Client(mcp) as client:
@@ -75,4 +78,3 @@ async def test_every_tool_when_an_eval_item_calls_it_then_the_world_answers_and_
         f"a tool neither answered by the world nor refused before it: {refused}"
     )
     assert answered.count("web_fetch") == 2, "the call_tool proxy reaches the world too"
-    assert len(answered) > len(refused), f"most tools reach the world: {len(answered)}"

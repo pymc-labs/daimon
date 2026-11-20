@@ -339,6 +339,11 @@ def internal_token_label(jti: uuid.UUID) -> str:
     return f"{INTERNAL_TOKEN_LABEL_PREFIX}{jti}"
 
 
+#: The eval item each internal credential minted in this context answers for. Set by the
+#: eval runner around an item; the row keeps it and the verifier signs nothing from tokens.
+current_eval_item: ContextVar[uuid.UUID | None] = ContextVar("eval_item", default=None)
+
+
 def chat_token_label(jti: uuid.UUID, *, held: bool = False) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
     prefix = HELD_CHAT_TOKEN_LABEL_PREFIX if held else CHAT_TOKEN_LABEL_PREFIX
@@ -360,6 +365,7 @@ async def mint_chat_mcp_token(
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
     seal_ids: Collection[str] = (),
+    eval_item_id: uuid.UUID | None = None,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -398,6 +404,7 @@ async def mint_chat_mcp_token(
         expires_at=expires_at,
         platform=None if hold is None else hold.platform,
         channel_id=None if hold is None else hold.channel_id,
+        eval_item_id=eval_item_id or current_eval_item.get(),
     )
     execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     token = mint_jwt(
@@ -440,6 +447,7 @@ async def mint_agent_mcp_token(
     slack_turn_context_id: uuid.UUID | None = None,
     seal_ids: Collection[str] = (),
     host_builtins: bool = False,
+    eval_item_id: uuid.UUID | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -478,6 +486,9 @@ async def mint_agent_mcp_token(
     ``jti`` lets a caller name the token in its label (`internal_token_label`).
 
     ``client`` names the coding tool a coding key is for (row only, for listings).
+
+    ``eval_item_id`` binds the row to an eval item (row only); an internal credential
+    takes `current_eval_item` when none is given.
 
     A provider-turn credential carries its turn's flags as MA's chat credential
     does (`mint_chat_mcp_token`): a ``hold`` binds the row to the held channel
@@ -530,6 +541,7 @@ async def mint_agent_mcp_token(
         surface=surface,
         purpose=purpose,
         client=client,
+        eval_item_id=eval_item_id or (current_eval_item.get() if internal else None),
     )
     claims: dict[str, str | int | bool | dict[str, str | bool] | list[str]] = {
         "sub": str(account_id),

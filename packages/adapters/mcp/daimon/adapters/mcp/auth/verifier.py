@@ -68,6 +68,7 @@ CHAT_EXECUTION_CLAIM = "daimon_chat_execution"
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
 TOKEN_LABEL_CLAIM = "daimon_token_label"
+EVAL_ITEM_CLAIM = "daimon_eval_item"
 SCOPES_CLAIM = "daimon_scopes"
 FOREIGN_HOME_CLAIM = "daimon_foreign_home"
 
@@ -352,6 +353,7 @@ class DaimonJWTVerifier(JWTVerifier):
             TOKEN_KIND_CLAIM,
             TOKEN_JTI_CLAIM,
             TOKEN_LABEL_CLAIM,
+            EVAL_ITEM_CLAIM,
             SCOPES_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
@@ -463,6 +465,8 @@ class DaimonJWTVerifier(JWTVerifier):
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_LABEL_CLAIM] = row.label
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)
+            if row.eval_item_id is not None:
+                access.claims[EVAL_ITEM_CLAIM] = str(row.eval_item_id)
             if row.kind == "operator":
                 access.claims[SCOPES_CLAIM] = list(row.scopes)
             if row.channel_id is not None:

@@ -1579,6 +1579,8 @@ class McpToken(Base):
     # 'token' for a key shown once on screen). Display only; NULL for older keys and
     # for every other kind of credential.
     client: Mapped[str | None]
+    # The eval item the credential answers for: server-set at mint, read by the verifier.
+    eval_item_id: Mapped[uuid.UUID | None]
 
 
 class CodingKeyClaim(Base):
@@ -5823,6 +5825,7 @@ class MonitoredEvent(Base):
 _EvalSuiteFK = Annotated[uuid.UUID, mapped_column(ForeignKey("eval_suites.id", ondelete="CASCADE"))]
 _EvalRunFK = Annotated[uuid.UUID, mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"))]
 _EvalScrub = "scrub_status IN ('scrubbed', 'partial', 'unscrubbed')"
+_EvalSignature = "signature IS NULL OR signature IN ('unsigned', 'unknown_key', 'valid')"
 
 
 class EvalSuite(Base):
@@ -5840,7 +5843,7 @@ class EvalSuite(Base):
     name: Mapped[str]
     owner_key: Mapped[str]
     current_version: Mapped[int]
-    scrub_status: Mapped[str] = mapped_column(server_default="scrubbed")
+    scrub_status: Mapped[str]
     source_instance: Mapped[str | None]
     archived_at: Mapped[datetime | None]
     created_at: Mapped[TsNow]
@@ -5848,9 +5851,14 @@ class EvalSuite(Base):
 
 
 class EvalSuiteVersion(Base):
-    """One immutable suite version: the Suite document."""
+    """One immutable suite version: the Suite document, how scrubbed its pinned cases are,
+    and the signature state of the bundle it was imported from (None: made here)."""
 
     __tablename__ = "eval_suite_versions"
+    __table_args__ = (
+        CheckConstraint(_EvalScrub, name="ck_eval_suite_versions_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_suite_versions_signature"),
+    )
 
     suite_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("eval_suites.id", ondelete="CASCADE"), primary_key=True
@@ -5858,6 +5866,8 @@ class EvalSuiteVersion(Base):
     version: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[TenantFK]
     document: Mapped[dict[str, Any]]
+    scrub_status: Mapped[str]
+    signature: Mapped[str | None]
     created_by: Mapped[str | None]
     created_at: Mapped[TsNow]
 
@@ -5919,7 +5929,8 @@ class EvalSuiteVersionCase(Base):
 
 
 class EvalBlob(Base):
-    """Raw bytes a document references, by sha256."""
+    """A blob a document references, by sha256. Its bytes live in the artifact store;
+    `content` holds them only where the deployment has none."""
 
     __tablename__ = "eval_blobs"
 
@@ -5929,7 +5940,7 @@ class EvalBlob(Base):
     media_type: Mapped[str]
     scrub: Mapped[str]
     needs_human_check: Mapped[FalseFlag]
-    content: Mapped[bytes]
+    content: Mapped[bytes | None]
     created_at: Mapped[TsNow]
 
 
@@ -5970,10 +5981,15 @@ class EvalArm(Base):
 
 
 class EvalRun(Base):
-    """A run of a suite version, live or recorded."""
+    """A run of a suite version, live, imported or recorded. `signature` is the state of the
+    bundle it was imported from (None: made here)."""
 
     __tablename__ = "eval_runs"
-    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_eval_runs_tenant_key"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="uq_eval_runs_tenant_key"),
+        CheckConstraint(_EvalScrub, name="ck_eval_runs_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_runs_signature"),
+    )
 
     id: Mapped[UuidPk]
     tenant_id: Mapped[TenantFK]
@@ -5982,6 +5998,8 @@ class EvalRun(Base):
     suite_version: Mapped[int]
     status: Mapped[str]
     origin: Mapped[str]
+    scrub_status: Mapped[str]
+    signature: Mapped[str | None]
     document: Mapped[dict[str, Any]]
     cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     spend_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
@@ -6075,7 +6093,8 @@ class EvalComment(Base):
 
     __tablename__ = "eval_comments"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "key", name="uq_eval_comments_tenant_key"),
+        UniqueConstraint("run_id", "key", name="uq_eval_comments_run_key"),
+        UniqueConstraint("suite_id", "key", name="uq_eval_comments_suite_key"),
         CheckConstraint(
             "run_id IS NOT NULL OR suite_id IS NOT NULL", name="ck_eval_comments_parent"
         ),
@@ -6099,6 +6118,7 @@ class EvalBundle(Base):
     __table_args__ = (
         CheckConstraint("direction IN ('export', 'import')", name="ck_eval_bundles_direction"),
         CheckConstraint(_EvalScrub, name="ck_eval_bundles_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_bundles_signature"),
     )
 
     id: Mapped[UuidPk]
@@ -6108,7 +6128,29 @@ class EvalBundle(Base):
     manifest: Mapped[dict[str, Any]]
     actor_key: Mapped[str]
     scrub_status: Mapped[str]
-    blob_sha256: Mapped[str | None]
+    signature: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalInstance(Base):
+    """The random name a workspace goes by as the source of the bundles it exports."""
+
+    __tablename__ = "eval_instances"
+
+    tenant_id: Mapped[TenantPk]
+    secret: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
+class EvalScrubEntity(Base):
+    """A real value's keyed hash and the fake it became. Never holds the real value."""
+
+    __tablename__ = "eval_scrub_entities"
+
+    tenant_id: Mapped[TenantPk]
+    kind: Mapped[str] = mapped_column(primary_key=True)
+    key_hash: Mapped[str] = mapped_column(primary_key=True)
+    fake: Mapped[str]
     created_at: Mapped[TsNow]
 
 
@@ -6131,6 +6173,7 @@ class EvalWorldCall(Base):
     reason: Mapped[str | None]
     exchange_id: Mapped[str | None]
     sim_key: Mapped[str | None]
+    model_calls: Mapped[int] = mapped_column(server_default=text("0"))
     document: Mapped[dict[str, Any]]
     created_at: Mapped[TsNow]
 

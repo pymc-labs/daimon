@@ -19,7 +19,8 @@ A suite has an id, a name and the cases it pins. Each change to a suite saves
 a new version, so results always name the version they ran.
 
 A case is one JSON document in the bundle format. Saving a case again adds a
-revision and a new suite version. Its hash covers every field, so any edit shows.
+revision; saving the suite pins it in a new version. Its hash covers every field, so
+any edit shows. Files a case uses come into the suite with a bundle import.
 
 Check a case before you save it:
 
@@ -27,6 +28,61 @@ Check a case before you save it:
 daimon evals cases validate case.json
 ```
 
+## Cases from threads
+
+Make cases from a conversation you can read. Each turn the agent answered becomes
+one case: the messages before it are history, and the world holds only what that
+turn used. Send a Discord, Slack or Teams link to the `eval_case_from_thread` tool,
+a web chat link to `POST /api/evals/suites/{id}/cases/from-thread`, or a web chat
+link or a saved thread file to the command line:
+
+```bash
+daimon evals cases from-thread support-basics https://example.com/chat/<id>
+daimon evals cases from-thread support-basics --record thread.json
+```
+
+Chat platforms keep messages, not tool calls, so these cases have `text` fidelity
+and the simulator fills the gaps. A case starts with the recorded answer as its
+reference and an `expectations_unreviewed` flag.
+
+Draft the pass criteria with a model, then review them. The command shows a cost
+estimate first and drafts only with `--yes`:
+
+```bash
+daimon evals cases draft support-basics <case-id> --yes
+```
+
+Repeated requests are marked as near-duplicates with `daimon evals cases dedupe`.
+Add `--keep 2` to keep the two oldest of each group.
+
+## Scrubbing
+
+Every case made from a thread is scrubbed before it is saved. Known names and those the
+name model finds get the same fake everywhere: in messages, tool data, file names and
+file contents. Known names are the workspace's people, channels and repos, plus the thread.
+Common secret and token formats are removed. Word, Excel, PowerPoint, PDF and text files
+are rebuilt with fakes and images are blanked where text is found. Other files are left out.
+
+Set [`DAIMON_EVALS__SCRUB_KEY`](configuration.md#daimon_evals__scrub_key) first.
+Install the scrub tools with `pip install "daimon-core[evals]"`, add the spaCy model
+named in [`DAIMON_EVALS__SCRUB_NER_MODEL`](configuration.md#daimon_evals__scrub_ner_model)
+and the `tesseract` program for images. Without the model only known names and patterns
+are found, and cases stay `partial`. Only a `scrubbed` case can be shared; a person
+should still read a case before it leaves the workspace.
+
+Scrub a bundle folder, zip or encrypted file offline, with a dictionary of the names
+your data holds (people, emails, companies, projects, hostnames, repos, channels, phrases):
+
+```bash
+export DAIMON_EVALS__SCRUB_KEY=<at least 16 characters>
+daimon evals bundle scrub bundle/ --entities names.yaml --salt my-workspace --map fakes.json --out clean/
+daimon evals bundle leftovers clean/ --entities names.yaml --salt my-workspace --map fakes.json
+```
+
+Both print counts and places, never the text they found, and exit 1 unless the bundle
+is fully scrubbed. Reuse the same key, `--salt` and `--map` for every bundle of a suite
+so fakes stay the same.
+The map holds only hashes and fakes, but keep it private.
 ## The world a case runs in
 
 A running case never reaches real services. Each call it makes, over HTTP, git
@@ -38,7 +94,7 @@ or an MCP tool, is answered by a fake world built from the case:
 
 When nothing can answer, or the case's call limits run out, the call is refused.
 Every call is logged with the effects it would have had, such as a created issue.
-Pushes go to a private copy of the repository for that run only. Set the
+Pushes go to a private copy of the repository for that item only. Set the
 simulator with [`DAIMON_EVALS__SIMULATOR_MODEL`](configuration.md#daimon_evals__simulator_model).
 
 ## Sandboxes
@@ -79,12 +135,14 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out eval-ca.pem
 Members create suites and own what they create. Owners share a suite with people
 or groups. Group membership is checked live. When the platform cannot say, access is denied.
 
-A suite that is not scrubbed cannot be shared.
+Shares reach only scrubbed suites, cases and runs. Content that is not scrubbed is
+for owners and admins, even on a shared suite.
 
 ## Bundles
 
 A bundle is a zip with a `bundle.json` manifest, suites, runs and blobs. The
-manifest lists every file with its sha256. Edits outside Daimon break validation.
+manifest lists every file with its sha256, so accidental damage shows. Only a
+signature from a trusted key proves who wrote a bundle.
 
 Validate a bundle folder, zip or encrypted file. This works offline, with no
 database:
@@ -103,19 +161,26 @@ daimon evals bundle export --suite support-basics --out support.zip
 daimon evals bundle import support.zip
 ```
 
-Export replaces people with neutral labels. Only an owner or an admin can keep
-identities or export content that is not scrubbed. Import refuses a bundle that is
-not scrubbed unless an owner or an admin accepts it with `--accept-unscrubbed`.
+Import also takes a bundle folder. Export replaces people with neutral labels.
+Only an admin can keep identities. Only an owner or an admin can export content
+that is not scrubbed. Import refuses a bundle that is not scrubbed unless an owner
+or an admin accepts it with `--accept-unscrubbed`.
+
+Imported runs are records: unfinished ones arrive cancelled and never run here.
+File contents live in the [artifact store](configuration.md#daimon_artifacts__backend)
+when one is set up, otherwise in the database.
 
 ### Signatures and encryption
 
 Set [`DAIMON_EVALS__SIGNING_KEY`](configuration.md#daimon_evals__signing_key) to sign
-exported bundles. Import checks signatures from the keys in
-[`DAIMON_EVALS__TRUSTED_KEYS`](configuration.md#daimon_evals__trusted_keys). A bad
-signature from a trusted key is refused.
+exported bundles. With
+[`DAIMON_EVALS__TRUSTED_KEYS`](configuration.md#daimon_evals__trusted_keys) set,
+import takes only bundles signed by those keys or this deployment's key. A bad
+signature from a trusted key is always refused.
 
 A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
-passphrase another way than the file.
+passphrase another way than the file. MCP tools never take a passphrase: export
+and import encrypted bundles from the command line or the web app.
 
 ## Where to use it
 

@@ -34,6 +34,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
     CHAT_EXECUTION_CLAIM,
+    EVAL_ITEM_CLAIM,
     FOREIGN_HOME_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
@@ -828,6 +829,7 @@ class _TokenFields(TypedDict):
     token_kind: McpTokenKind | None
     token_label: str | None
     token_jti: uuid.UUID | None
+    eval_item_id: uuid.UUID | None
     scopes: frozenset[str]
 
 
@@ -840,11 +842,13 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
     jti = claims.get(TOKEN_JTI_CLAIM)
     scopes = claims.get(SCOPES_CLAIM)
     label = claims.get(TOKEN_LABEL_CLAIM)
+    item = claims.get(EVAL_ITEM_CLAIM)
     return _TokenFields(
         is_chat_execution=claims.get(CHAT_EXECUTION_CLAIM) is True,
         token_kind=_TOKEN_KINDS.get(kind) if isinstance(kind, str) else None,
         token_label=label if isinstance(label, str) else None,
         token_jti=_uuid_or_none(jti) if isinstance(jti, str) else None,
+        eval_item_id=_uuid_or_none(item) if isinstance(item, str) else None,
         scopes=(
             frozenset(s for s in cast("list[object]", scopes) if isinstance(s, str))
             if isinstance(scopes, list)

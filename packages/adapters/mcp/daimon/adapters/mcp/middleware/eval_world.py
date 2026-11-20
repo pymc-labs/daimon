@@ -1,27 +1,21 @@
 """Eval callers never reach a tool handler: the fake world answers every call they make.
 
-A caller is an eval caller when its identity is the eval tenant's. Its item comes from the
-credential's registry label (`eval-item:<id>`, `eval_token_label`); without a running item the
+A caller is an eval caller when its identity is the eval tenant's. Its item is the one its
+credential's registry row is bound to (`AuthIdentity.eval_item_id`); without a running item the
 call is refused, never run. Innermost, so every gate before it still applies; the search
 proxies pass through because `call_tool` re-enters with the inner tool's name.
 """
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Sequence
 from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.eval_mcp import EVAL_WORLD_TAG
+from daimon.adapters.mcp.eval_mcp import EVAL_WORLD_TAG, tool_texts
 from daimon.core.evals.eval_tenant import is_eval_tenant
 from daimon.core.evals.format import ExchangeResponse, McpTool
-from daimon.core.evals.world.dispatch import (
-    DAIMON_SERVER,
-    FakeWorld,
-    ItemNotRunningError,
-    item_id_from_label,
-)
+from daimon.core.evals.world.dispatch import DAIMON_SERVER, FakeWorld, ItemNotRunningError
 from daimon.core.evals.world.services.web import SEARCH_TOOL
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from fastmcp.exceptions import ToolError
@@ -38,12 +32,8 @@ PROXY_TOOLS: Final = frozenset({"search_tools", "call_tool"})
 _NO_ITEM: Final = "This eval item isn't running, so nothing can answer. Nothing was done."
 
 
-def eval_item_id(auth: AuthIdentity) -> uuid.UUID | None:
-    return item_id_from_label(auth.token_label)
-
-
 def _result(response: ExchangeResponse) -> ToolResult:
-    texts = [b.text or b.uri or "" for b in response.content or ()]
+    texts = tool_texts(response)
     if response.is_error:
         raise ToolError("\n".join(texts) or "The tool failed.")
     structured = response.result if isinstance(response.result, dict) else None
@@ -84,15 +74,15 @@ class EvalWorldMiddleware(Middleware):
         if auth is None or name in PROXY_TOOLS:
             return await call_next(context)
         assert ctx is not None
-        item_id = eval_item_id(auth)
-        item = await self._world.item(item_id) if item_id else None
+        item = await self._world.item(auth.eval_item_id) if auth.eval_item_id else None
         if item is None:
             raise ToolError(_NO_ITEM)
         tool = await ctx.fastmcp.get_tool(name)
         if tool is None:
             raise ToolError(f"Unknown tool: {name}")
         args = dict(context.message.arguments or {})
-        info = McpTool(name=name, input_schema=tool.parameters, output_schema=tool.output_schema)
+        info = McpTool(name=name, description=tool.description, input_schema=tool.parameters,
+                       output_schema=tool.output_schema)  # fmt: skip
         try:
             if name == SEARCH_TOOL:
                 answer = await self._world.provider_tool(item, name, args)

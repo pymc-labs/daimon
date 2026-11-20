@@ -2937,8 +2937,8 @@ class EvalsSettings(BaseModel):
     trusted_keys: list[str] = Field(
         default_factory=list,
         description=(
-            "Base64 Ed25519 public keys whose bundle signatures import checks. A bundle signed "
-            "by one of them with a bad signature is refused."
+            "Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only "
+            "bundles signed by one of them or by this deployment's signing key."
         ),
     )
     source_label: str = Field(
@@ -2946,11 +2946,36 @@ class EvalsSettings(BaseModel):
         description="Label this deployment writes as the source of the bundles it exports.",
     )
     max_bundle_mb: int = Field(
-        default=512, gt=0, description="Largest eval bundle import accepts, unpacked, in MiB."
+        default=512, gt=0, description="Largest eval bundle import accepts, in MiB."
     )
-    simulator_model: str = Field(
-        default="claude-opus-5-5",
-        description="Anthropic model that answers eval world calls nobody recorded.",
+    scrub_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Secret that keys the scrub map (at least 16 characters). Required to scrub real "
+            "conversations into eval cases; changing it changes every fake made afterwards."
+        ),
+    )
+    scrub_ner_model: str = Field(
+        default="en_core_web_sm",
+        description=(
+            "spaCy model that finds names, places and organizations while scrubbing. Not "
+            "installed or empty: only known names and patterns are found and cases stay partial."
+        ),
+    )
+    scrub_entities_file: str | None = Field(
+        default=None,
+        description="JSON or YAML file of known private names added to every scrub.",
+    )
+    draft_model: str | None = Field(
+        default=None,
+        description="Model that drafts case expectations. Unset: the side-call model.",
+    )
+    simulator_model: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic model that answers eval world calls nobody recorded. Unset: the "
+            "side-call model."
+        ),
     )
     simulator_effort: Literal["none", "low", "medium", "high"] = Field(
         default="low", description="Effort the eval world simulator runs at."

@@ -27,6 +27,7 @@ from daimon.core.evals.format import (
     to_document,
 )
 from daimon.core.evals.world.model import WorldRequest
+from daimon.core.untrusted import render_untrusted
 from daimon.core.usage_recording import record_auxiliary_usage
 from mux.contracts.completions import CompletionEffort
 from pydantic import JsonValue
@@ -75,7 +76,9 @@ class SimAnswer:
 class Simulator(Protocol):
     async def answer(self, context: SimContext) -> SimAnswer: ...
 
-    async def same(self, service: str, recorded: JsonValue, live: JsonValue) -> bool:
+    async def same(
+        self, item_id: uuid.UUID, service: str, recorded: JsonValue, live: JsonValue
+    ) -> bool:
         """Whether two requests to `service` ask the same thing (the `semantic` match mode)."""
         ...
 
@@ -83,32 +86,56 @@ class Simulator(Protocol):
 Check = Callable[[ExchangeResponse], str | None]
 
 
-def wording_problem(response: ExchangeResponse) -> str | None:
-    text = json.dumps(to_document(response))
-    if _TELLS.search(text):
+def _strings(value: JsonValue) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [t for v in value.values() for t in _strings(v)]
+    if isinstance(value, list):
+        return [t for v in value for t in _strings(v)]
+    return []
+
+
+def wording_problem(response: ExchangeResponse, known: str = "") -> str | None:
+    """A tell in the answer's text that the request and case do not already hold."""
+    text = "\n".join(_strings(to_document(response)))
+    known = known.casefold()
+    if any(m[0].casefold() not in known for m in _TELLS.finditer(text)):
         return "The answer talks about itself as simulated or fake; a real service never does."
     return None
 
 
-async def simulate(simulator: Simulator, context: SimContext, check: Check) -> SimAnswer | str:
-    """A checked answer, retried once with the reason; the last reason when both fail."""
-    problem = ""
-    for _attempt in range(2):
+async def simulate(
+    simulator: Simulator, context: SimContext, check: Check, attempts: int = 2
+) -> tuple[SimAnswer | str, int]:
+    """A checked answer, retried once with the reason, and the model calls made; the last
+    reason when every attempt fails."""
+    problem, made = "", 0
+    known = json.dumps(
+        [to_document(context.request.request), to_document(context.case.world)], default=str
+    )
+    for _attempt in range(attempts):
+        made += 1
         try:
             answer = await simulator.answer(context)
         except ValueError as exc:  # unparseable output: retry like an invalid answer
             problem = f"The answer was not a JSON object of the asked shape: {exc}"
         else:
-            problem = check(answer.response) or wording_problem(answer.response) or ""
+            problem = check(answer.response) or wording_problem(answer.response, known) or ""
             if not problem:
-                return answer
+                return answer, made
         context = replace(context, problem=problem)
-    return problem
+    return problem, made
 
 
 def _cut(value: object, budget: int) -> str:
     text = json.dumps(value, ensure_ascii=False, default=str)
     return text if len(text) <= budget else text[:budget] + "…"
+
+
+def _data(source: str, value: object, budget: int) -> str:
+    """Recorded data and the live request, framed as data the model must not obey."""
+    return render_untrusted(_cut(value, budget), source=source)
 
 
 def build_prompt(context: SimContext) -> str:
@@ -125,22 +152,21 @@ def build_prompt(context: SimContext) -> str:
     resources = [to_document(r) for r in world.resources or () if r.service == request.service]
     identities = [to_document(i) for i in world.identities or ()]
     sections = [
-        ("Request", _cut({"surface": request.surface, "service": request.service,
+        ("Request", _data("request", {"surface": request.surface, "service": request.service,
                           "server": request.server, "tool": request.tool,
                           **to_document(request.request)}, 20_000)),
         ("Service", request.service + (f"\n{context.guidance}" if context.guidance else "")),
         ("Facts to keep", (world.simulator.instructions if world.simulator else None) or "None."),
         ("Clock", f"{case.clock.now.isoformat()} ({case.clock.timezone or 'UTC'})"),
         ("Accounts in use", _cut(identities, 4_000)),
-        ("Known resources", _cut(resources, 15_000)),
-        ("Recorded examples", _cut(relevant, 15_000)),
-        ("Changes made so far", _cut(context.overlay, 10_000)),
-        ("Your earlier answers", _cut(list(context.earlier), 10_000)),
+        ("Known resources", _data("resources", resources, 15_000)),
+        ("Recorded examples", _data("recorded", relevant, 15_000)),
+        ("Changes made so far", _data("changes", context.overlay, 10_000)),
+        ("Your earlier answers", _data("earlier", list(context.earlier), 10_000)),
     ]  # fmt: skip
-    if context.problem:
-        sections.append(("Your last answer was refused", context.problem))
     prompt = "\n\n".join(f"## {title}\n{body}" for title, body in sections)
-    return prompt[:_PROMPT_BUDGET]
+    refused = f"\n\n## Your last answer was refused\n{context.problem}" if context.problem else ""
+    return prompt[: _PROMPT_BUDGET - len(refused)] + refused
 
 
 def _strip_fence(text: str) -> str:
@@ -176,42 +202,53 @@ def parse_answer(request: WorldRequest, text: str) -> ExchangeResponse:
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModelSimulator:
-    """The simulator on the configured Anthropic model, every call metered to the eval tenant."""
+    """The simulator on the configured Anthropic model (None: the side-call model), every
+    call metered to the eval tenant under the item it answered for."""
 
     anthropic: AsyncAnthropic
     sessions: async_sessionmaker[AsyncSession]
-    model: str
+    model: str | None
     effort: CompletionEffort
+    _tenant: uuid.UUID | None = None
 
     async def _complete(
-        self, system: str, prompt: str, max_tokens: int, effort: CompletionEffort
-    ) -> str:
+        self, item_id: uuid.UUID, system: str, prompt: str, max_tokens: int,
+        effort: CompletionEffort,
+    ) -> tuple[str, str]:  # fmt: skip
         done = await auxiliary_complete(
             self.anthropic, provider=None, purpose="eval_simulator", system=system,
             prompt=prompt, max_tokens=max_tokens, effort=effort, anthropic_model=self.model,
         )  # fmt: skip
+        self._tenant = self._tenant or await eval_tenant(self.sessions)
         await record_auxiliary_usage(
             purpose="eval_simulator", provider=done.provider, sessionmaker=self.sessions,
-            tenant_id=await eval_tenant(self.sessions), platform_user_id=None,
+            tenant_id=self._tenant, platform_user_id=None,
             model_id=done.model_id, input_tokens=done.usage.input_tokens,
             output_tokens=done.usage.output_tokens,
             cache_read_input_tokens=done.usage.cache_read_input_tokens,
+            managed_session_id=f"eval-item:{item_id}",
         )  # fmt: skip
         if done.refused:
             raise ValueError("the model refused")
-        return done.text
+        return done.text, done.model_id
 
     async def answer(self, context: SimContext) -> SimAnswer:
-        text = await self._complete(SYSTEM_PROMPT, build_prompt(context), _MAX_TOKENS, self.effort)
-        return SimAnswer(parse_answer(context.request, text), self.model)
+        text, model = await self._complete(
+            context.item_id, SYSTEM_PROMPT, build_prompt(context), _MAX_TOKENS, self.effort
+        )
+        return SimAnswer(parse_answer(context.request, text), model)
 
-    async def same(self, service: str, recorded: JsonValue, live: JsonValue) -> bool:
+    async def same(
+        self, item_id: uuid.UUID, service: str, recorded: JsonValue, live: JsonValue
+    ) -> bool:
         prompt = (
             f"Two requests to {service}. Do they ask for the same thing, so one answer fits "
-            f"both? Reply yes or no.\n\nFirst: {_cut(recorded, 8_000)}\n\n"
-            f"Second: {_cut(live, 8_000)}"
+            f"both? Reply yes or no.\n\nFirst: {_data('recorded', recorded, 8_000)}\n\n"
+            f"Second: {_data('request', live, 8_000)}"
         )
-        text = await self._complete('Answer with one word: "yes" or "no".', prompt, 16, "none")
+        text, _model = await self._complete(
+            item_id, 'Answer with one word: "yes" or "no".', prompt, 16, "none"
+        )
         return text.strip().lower().startswith("yes")

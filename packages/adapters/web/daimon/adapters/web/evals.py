@@ -12,24 +12,47 @@ from typing import Annotated
 from daimon.adapters.web.caller import WebCaller, groups_of, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.dm_access import member_roles
-from daimon.core.evals.access import Share, Subject, platform_groups
+from daimon.core.evals.access import Share, Subject, WorkspaceRole, platform_groups
+from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.service import (
     CaseCheck,
     CaseRef,
     CaseSummary,
+    DedupeReport,
+    DraftResult,
     EvalForbidden,
     EvalNotFound,
     EvalRefused,
-    EvalService,
     ExportRequest,
     ImportReport,
     Page,
     RunItemSummary,
     SuiteDraft,
     SuiteSummary,
+    eval_service,
 )
+from daimon.core.evals.web_thread import WebChatSource
+from daimon.core.turn_hold import RequesterOrg
+from daimon.core.web_identity import WebPrincipal
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+
+class FromThread(BaseModel):
+    link: str
+
+
+class DraftCases(BaseModel):
+    case_ids: list[str]
+    confirm: bool = False
+
+
+class DedupeCases(BaseModel):
+    keep: int | None = Field(default=None, ge=1)
+    threshold: float = Field(default=0.8, gt=0, le=1)
+
 
 Caller = Annotated[WebCaller, Depends(requires("evals.use"))]
 
@@ -47,23 +70,29 @@ async def _call[T](work: Awaitable[T]) -> T:
         ) from None
 
 
+def eval_subject(caller: WebCaller, principal: WebPrincipal) -> Subject:
+    """The caller as the MCP tools see them: keyed by the platform id they act as, so a suite
+    made here is theirs there too. Another organisation's people are visitors."""
+    tenant_id = caller.person.tenant_id
+    held = member_roles(groups_of(caller) | principal.groups)
+    role: WorkspaceRole = "visitor" if principal.org is not RequesterOrg.HOST else caller.role
+    return Subject(
+        tenant_id=tenant_id,
+        platform=principal.platform,
+        key=principal.external_id,
+        role=role,
+        person_ids=frozenset({f"web:{caller.person.id}"}),
+        groups=platform_groups(held, principal.external_id, tenant_id=tenant_id),
+    )
+
+
 def evals_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/evals")
-    service = EvalService(runtime.sessionmaker, runtime.settings)
+    service = eval_service(runtime.sessionmaker, runtime.settings, runtime.anthropic)
 
     async def subject(caller: WebCaller) -> Subject:
         async with runtime.sessionmaker() as db:
-            principal = await caller.principal(db)
-        tenant_id = caller.person.tenant_id
-        held = member_roles(groups_of(caller) | principal.groups)
-        return Subject(
-            tenant_id=tenant_id,
-            platform=principal.platform,
-            key=f"web:{caller.person.id}",
-            role=caller.role,
-            person_ids=frozenset({principal.external_id}),
-            groups=platform_groups(held, principal.external_id, tenant_id=tenant_id),
-        )
+            return eval_subject(caller, await caller.principal(db))
 
     @router.get("/suites")
     async def list_suites(caller: Caller) -> list[SuiteSummary]:  # pyright: ignore[reportUnusedFunction]
@@ -113,6 +142,46 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=400, detail="The case id does not match the address.")
         return await _call(service.put_case(await subject(caller), suite_id, case))
 
+    @router.post("/suites/{suite_id}/cases/from-thread")
+    async def cases_from_thread(  # pyright: ignore[reportUnusedFunction]
+        caller: Caller, suite_id: str, body: FromThread
+    ) -> list[CaseRef]:
+        source = WebChatSource(
+            runtime.sessionmaker, tenant_id=caller.person.tenant_id, person_id=caller.person.id
+        )
+        return await _call(
+            service.cases_from_thread(await subject(caller), source, body.link, suite_id)
+        )
+
+    @router.post("/suites/{suite_id}/cases/draft")
+    async def draft_cases(caller: Caller, suite_id: str, body: DraftCases) -> DraftResult:  # pyright: ignore[reportUnusedFunction]
+        """Without `confirm`, only the cost estimate; with it, drafts and bills the workspace."""
+        actor = await subject(caller)
+        complete = None
+        if body.confirm and runtime.anthropic is not None:
+            complete = auxiliary_completer(
+                runtime.anthropic,
+                runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                platform=actor.platform,
+                user_id=next(iter(actor.person_ids), None),
+                model=runtime.settings.evals.draft_model,
+                markup=runtime.settings.billing.markup,
+            )
+        return await _call(
+            service.draft_expectations(
+                actor, suite_id, body.case_ids, complete=complete, confirm=body.confirm
+            )
+        )
+
+    @router.post("/suites/{suite_id}/dedupe")
+    async def dedupe_cases(caller: Caller, suite_id: str, body: DedupeCases) -> DedupeReport:  # pyright: ignore[reportUnusedFunction]
+        return await _call(
+            service.dedupe(
+                await subject(caller), suite_id, threshold=body.threshold, keep=body.keep
+            )
+        )
+
     @router.post("/cases/validate")
     async def validate_case(  # pyright: ignore[reportUnusedFunction]
         caller: Caller, case: Annotated[JsonObject, Body()]
@@ -133,24 +202,31 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/runs/{run_id}/items")
     async def list_items(  # pyright: ignore[reportUnusedFunction]
-        caller: Caller, run_id: str, offset: int = 0, limit: int = 50
+        caller: Caller, run_id: str, offset: int = 0, limit: int = 50, blind: bool = False
     ) -> list[RunItemSummary]:
         page = Page(offset=offset, limit=limit)
-        return await _call(service.items(await subject(caller), run_id, page))
+        return await _call(service.items(await subject(caller), run_id, page, blind=blind))
 
     @router.get("/items/{item_id}")
     async def get_item(  # pyright: ignore[reportUnusedFunction]
         caller: Caller, item_id: str, blind: bool = False
     ) -> JsonObject:
-        actor = await subject(caller)
-        found = service.item(actor, item_id, blind_for=actor.key if blind else None)
-        return to_document(await _call(found))
+        return to_document(await _call(service.item(await subject(caller), item_id, blind=blind)))
 
     @router.post("/bundles/export")
     async def export_bundle(  # pyright: ignore[reportUnusedFunction]
-        caller: Caller, request: ExportRequest
-    ) -> JsonObject:
-        return to_document(await _call(service.export_bundle(await subject(caller), request)))
+        caller: Caller,
+        request: ExportRequest,
+        passphrase: Annotated[str | None, Header(alias="X-Bundle-Passphrase")] = None,
+    ) -> StreamingResponse:
+        actor = await subject(caller)
+        bundle = await _call(service.export_bundle(actor, request, passphrase=passphrase))
+        headers = {
+            "Content-Disposition": f'attachment; filename="{bundle.name}"',
+            "Content-Length": str(bundle.size),
+            "X-Content-Type-Options": "nosniff",
+        }
+        return StreamingResponse(bundle.chunks(), media_type=bundle.media_type, headers=headers)
 
     @router.post("/bundles/import")
     async def import_bundle(  # pyright: ignore[reportUnusedFunction]

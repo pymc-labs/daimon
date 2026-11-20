@@ -5,7 +5,7 @@
   the world denied the call: the gateway closes the connection instead of answering.
 - `/world/{item}/git/{host}/{path}`: raw git smart HTTP for the repo at `https://{host}/{path}`.
 
-Both take the item's world token as a bearer token.
+Both take the item's world token as a bearer token; a body over `MAX_BODY` is refused (413).
 """
 
 from __future__ import annotations
@@ -29,6 +29,18 @@ from starlette.routing import Route
 #: Headers the gateway recomputes for the bytes it sends.
 _FRAMING: Final = frozenset({"content-length", "transfer-encoding", "content-encoding"})
 _MAX_LATENCY_MS: Final = 30_000
+MAX_BODY: Final = 64 << 20
+
+
+async def _body(request: Request) -> bytes | None:
+    """The request body, or None past `MAX_BODY`."""
+    chunks, size = list[bytes](), 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_BODY:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class GatewayRequest(BaseModel):
@@ -63,8 +75,10 @@ def create_world_app(world: FakeWorld) -> Starlette:
         item = await _item(world, request)
         if isinstance(item, Response):
             return item
+        if (raw := await _body(request)) is None:
+            return Response(status_code=413)
         try:
-            asked = GatewayRequest.model_validate_json(await request.body())
+            asked = GatewayRequest.model_validate_json(raw)
             body = base64.b64decode(asked.body_b64, validate=True)
         except (ValidationError, binascii.Error):
             return Response(status_code=400)
@@ -91,7 +105,9 @@ def create_world_app(world: FakeWorld) -> Starlette:
             return item
         query = f"?{request.url.query}" if request.url.query else ""
         url = f"https://{request.path_params['path']}{query}"
-        call = HttpCall(request.method, url, dict(request.headers), await request.body())
+        if (raw := await _body(request)) is None:
+            return Response(status_code=413)
+        call = HttpCall(request.method, url, dict(request.headers), raw)
         if find_repo(item, call) is None:
             return Response(status_code=404)
         try:

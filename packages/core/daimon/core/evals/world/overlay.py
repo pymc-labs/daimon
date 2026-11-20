@@ -38,6 +38,10 @@ class Overlay:
         current = self._current()
         return current[name] if name in current else self._seed.get(name)
 
+    def written(self, service: str, type_: str, key: str) -> bool:
+        """Whether the item's own writes changed this resource (the seed does not count)."""
+        return (service, resource_key(type_, key)) in self._current()
+
     def put(self, service: str, type_: str, key: str, data: JsonObject | None) -> None:
         """Stage a resource's new state; None deletes it."""
         self.writes[(service, resource_key(type_, key))] = data

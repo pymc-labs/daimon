@@ -232,8 +232,8 @@ exports are unsigned.
 
 `list[str]` · optional · default unset
 
-Base64 Ed25519 public keys whose bundle signatures import checks. A bundle signed by one
-of them with a bad signature is refused.
+Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only bundles
+signed by one of them or by this deployment's signing key.
 
 ### `DAIMON_EVALS__SOURCE_LABEL`
 
@@ -245,13 +245,40 @@ Label this deployment writes as the source of the bundles it exports.
 
 `int` · optional · default `512`
 
-Largest eval bundle import accepts, unpacked, in MiB.
+Largest eval bundle import accepts, in MiB.
+
+### `DAIMON_EVALS__SCRUB_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret that keys the scrub map (at least 16 characters). Required to scrub real
+conversations into eval cases; changing it changes every fake made afterwards.
+
+### `DAIMON_EVALS__SCRUB_NER_MODEL`
+
+`str` · optional · default `en_core_web_sm`
+
+spaCy model that finds names, places and organizations while scrubbing. Not installed or
+empty: only known names and patterns are found and cases stay partial.
+
+### `DAIMON_EVALS__SCRUB_ENTITIES_FILE`
+
+`str | None` · optional · default unset
+
+JSON or YAML file of known private names added to every scrub.
+
+### `DAIMON_EVALS__DRAFT_MODEL`
+
+`str | None` · optional · default unset
+
+Model that drafts case expectations. Unset: the side-call model.
 
 ### `DAIMON_EVALS__SIMULATOR_MODEL`
 
-`str` · optional · default `claude-opus-5-5`
+`str | None` · optional · default unset
 
-Anthropic model that answers eval world calls nobody recorded.
+Anthropic model that answers eval world calls nobody recorded. Unset: the side-call
+model.
 
 ### `DAIMON_EVALS__SIMULATOR_EFFORT`
 

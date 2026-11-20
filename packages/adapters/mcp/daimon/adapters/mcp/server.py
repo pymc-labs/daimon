@@ -23,7 +23,6 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted_from
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -138,6 +137,7 @@ from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_r
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.agent_editing import AgentEditDeps
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -557,7 +557,7 @@ def create_mcp_app(
         effective_sessionmaker,
         ModelSimulator(effective_anthropic, effective_sessionmaker, eval_settings.simulator_model,
                        eval_settings.simulator_effort),
-        git_root=Path(tempfile.gettempdir()) / "daimon-eval-git",
+        git_root=Path(tempfile.gettempdir()) / "daimon-eval-git", objects=artifact_store,
     )  # fmt: skip
     runtime = McpRuntime(
         session_factory=effective_sessionmaker,
@@ -764,6 +764,7 @@ def create_mcp_app(
                 anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
+                world=eval_world,
             ),
             methods=RELAY_METHODS,
         )

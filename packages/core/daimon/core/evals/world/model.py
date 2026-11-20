@@ -93,6 +93,10 @@ class Service(Protocol):
 
     def effects(self, request: WorldRequest) -> tuple[Effect, ...]: ...
 
+    def resource(self, request: WorldRequest) -> tuple[str, str] | None:
+        """The `(type, key)` of the overlay resource the request names, or None."""
+        ...
+
     def answer(
         self, item: ItemRef, request: WorldRequest, overlay: Overlay
     ) -> ExchangeResponse | None:
@@ -100,7 +104,7 @@ class Service(Protocol):
         ...
 
     def remember(self, request: WorldRequest, response: ExchangeResponse, overlay: Overlay) -> None:
-        """Keep what an answer from elsewhere (recorded, simulated) says about state."""
+        """Keep what an answer from elsewhere (recorded, simulated) to a write changed."""
         ...
 
     def check(self, request: WorldRequest, response: ExchangeResponse) -> str | None:

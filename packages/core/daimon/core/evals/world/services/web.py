@@ -16,7 +16,6 @@ from daimon.core.evals.format import (
     WebPage,
     to_document,
 )
-from daimon.core.evals.world.matching import SameJudge, normalized_text
 from daimon.core.evals.world.model import HttpCall, ItemRef, WorldRequest, body_bytes
 from daimon.core.evals.world.overlay import Overlay
 from daimon.core.host_web_fetch import page_text
@@ -63,20 +62,6 @@ def search_reply(found: SearchSet | None) -> ExchangeResponse:
     return _tool_reply({"results": results})
 
 
-async def search_set(item: ItemRef, query: str, same: SameJudge) -> SearchSet | None:
-    """The recorded result set for `query`: equal text first, then a `semantic` set the judge
-    says asks the same thing."""
-    sets = item.case.world.search or []
-    wanted = normalized_text(query)
-    exact = next((s for s in sets if normalized_text(s.query) == wanted), None)
-    if exact is not None:
-        return exact
-    for candidate in sets:
-        if candidate.match == "semantic" and await same("web", candidate.query, query):
-            return candidate
-    return None
-
-
 class WebService:
     name = "web"
 
@@ -88,6 +73,9 @@ class WebService:
             return (Effect(verb="web.search.query", args={"query": query}),)
         url = _url(request)
         return (Effect(verb="web.page.fetch", target=url),) if url else ()
+
+    def resource(self, request: WorldRequest) -> tuple[str, str] | None:
+        return None
 
     def answer(
         self, item: ItemRef, request: WorldRequest, overlay: Overlay
