@@ -3070,6 +3070,14 @@ class EvalsSettings(BaseModel):
             "run as the executor and reach these hosts."
         ),
     )
+    harness_config: dict[str, SecretStr] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            "Settings for the self-hosted harness in a harness arm's pod, as a JSON object of "
+            "its environment variables: its model endpoint and credentials. Add the endpoint's "
+            "host to DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none)."
+        ),
+    )
     sandbox_rate_usd_per_hour: Decimal = Field(
         default=Decimal("0"),
         ge=0,

@@ -378,6 +378,14 @@ control plane. Matched by TLS server name, not Host. Shells the executor starts 
 the agent and reach the fake world; commands it starts without a shell run as the
 executor and reach these hosts.
 
+### `DAIMON_EVALS__HARNESS_CONFIG`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Settings for the self-hosted harness in a harness arm's pod, as a JSON object of its
+environment variables: its model endpoint and credentials. Add the endpoint's host to
+DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none).
+
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 
 `Decimal` · optional · default `0`

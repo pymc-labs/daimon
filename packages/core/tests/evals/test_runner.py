@@ -8,14 +8,15 @@ import json
 import re
 import tarfile
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, ToolResultBlockParam
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, SelfhostedBillingSettings, SelfhostedModelPrice
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.evals.access import Subject
@@ -27,6 +28,7 @@ from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
 from daimon.core.evals.runner.gemini import GeminiArms
+from daimon.core.evals.runner.harness import HarnessArms
 from daimon.core.evals.runner.item import ItemDeps, TurnRequest
 from daimon.core.evals.runner.tools import McpService
 from daimon.core.evals.runner.turns import EvalTurns, PodSettings
@@ -212,14 +214,15 @@ class FakePods:
     """A sandbox runtime with no pods: every command works, and the outputs folder holds one
     report until it is removed."""
 
-    def __init__(self) -> None:
+    def __init__(self, address: str | None = None) -> None:
+        self.address = address
         self.started: list[PodSpec] = []
         self.stopped: list[str] = []
         self.outputs = {"report.txt": b"All done."}
 
     async def start(self, spec: PodSpec) -> PodHandle:
         self.started.append(spec)
-        return PodHandle(id="pod-1", runtime="docker")
+        return PodHandle(id="pod-1", runtime="docker", address=self.address)
 
     async def run(self, pod: PodHandle, command: str, *, timeout_s: float = 300) -> CommandResult:
         out = io.BytesIO()
@@ -520,5 +523,108 @@ async def test_production_port_when_gemini_item_runs_then_its_environment_pod_an
     assert pods.stopped == ["pod-1"] and gemini.deleted_environments == ["environment-1"], (
         "the pod stops and the environment goes when the item ends"
     )
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status == "done", run.status
+
+
+class FakeHarness:
+    """The harness in an item's pod, over its wire: the model calls the host tool
+    `issue_write`, waits for the host's result, then replies with it."""
+
+    def __init__(self) -> None:
+        self.turns: list[JsonObject] = []
+        self.actions: list[JsonObject] = []
+        self.cancels = 0
+        self.events: list[JsonObject] = []
+
+    def _emit(self, turn_id: str, session_id: str, *events: tuple[str, JsonObject]) -> None:
+        for kind, data in events:
+            self.events.append({"seq": len(self.events) + 1, "session_id": session_id,
+                                "turn_id": turn_id, "at": datetime.now(UTC).isoformat(),
+                                "type": kind, "data": data})  # fmt: skip
+
+    def _usage(self, n: int) -> tuple[str, JsonObject]:
+        return "usage", {"request_id": f"r{n}", "model": "harness-model", "input_tokens": 10,
+                         "cached_input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 0}  # fmt: skip
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "10.0.0.5" and request.url.port == 8088, request.url
+        assert request.headers["authorization"].startswith("Bearer "), "the item's token"
+        session = request.url.params["session_id"]
+        if request.method == "GET":
+            after = int(request.url.params.get("replay_after_seq",
+                                               request.url.params.get("after_seq", "0")))  # fmt: skip
+            events = [e for e in self.events if e["seq"] > after]
+            return httpx.Response(200, json={"events": events, "complete": True})
+        body = json.loads(request.content) if request.content else {}
+        path = request.url.path
+        if path == "/v0/turns":
+            self.turns.append(body)
+            call = {"call_id": "call-1", "name": "issue_write", "input": ISSUE}
+            self._emit(body["turn_id"], session, ("status_running", {}), self._usage(1),
+                       ("tool_use", {**call, "executor": "host"}),
+                       ("requires_action", {**call, "action_id": "act-1",
+                                            "kind": "function_result"}))  # fmt: skip
+            return httpx.Response(202, json={"accepted": True, "turn_id": body["turn_id"]})
+        turn_id = path.split("/")[3]
+        if path.endswith("/cancel"):
+            self.cancels += 1
+            return httpx.Response(200, json={"cancelled": False})
+        self.actions.append(body)
+        text = "".join(p["text"] for p in body["result"]["content"])
+        self._emit(turn_id, session,
+                   ("tool_result", {"call_id": "call-1", "output": text, "is_error": False}),
+                   self._usage(2),
+                   ("agent_message", {"message_id": "m1", "parts": [
+                       {"type": "text", "text": "Opened issue 42."}]}),
+                   ("turn_ended", {"outcome": "completed"}))  # fmt: skip
+        return httpx.Response(200, json={"accepted": True})
+
+
+async def test_production_port_when_harness_item_runs_then_its_pod_harness_and_tools_answer(
+    db_committing_engine: AsyncEngine, db_clean: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # fmt: skip
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    prices = SelfhostedBillingSettings(models={"harness-model": [SelfhostedModelPrice(
+        effective_from=date(2026, 1, 1), input="2", output="10", cache_read="1")]})  # fmt: skip
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED", prices.model_dump_json())
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        runs, alex, run_id, _ = await _start(
+            db_session, db_session_factory, repeats=1, commit=True,
+            live=LiveArm(backend="harness", model="harness-model"),
+        )  # fmt: skip
+    created: list[dict[str, Any]] = []
+    anthropic = build_fake_anthropic(_provider(alex.tenant_id, created).dispatch)
+    turn_deps = plain_turn_deps(anthropic, db_session_factory, defaults_root=tmp_path)
+    world, pods, harness = FakeWorld(db_session_factory, None, tmp_path), FakePods("10.0.0.5"), \
+        FakeHarness()  # fmt: skip
+    settings = PodSettings(runtime=pods, image="sandbox@sha256:0", ca=fixture_ca(),
+                           world_url="http://world", environment_id="env_eval",
+                           harness_config={"MODEL_ENDPOINT": "https://model.example.com"})  # fmt: skip
+    arms = HarnessArms(lambda: httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)))
+    turns = EvalTurns(turn_deps, world, settings, _mcp_service(world), harness=arms)
+    item = await run_next(ItemDeps(db_session_factory, turns, world))
+    assert item and not isinstance(item, bool), "the queued item runs"
+    assert item.status == "done", item.error
+    assert not any(c["kind"] in ("agents", "environments") for c in created), (
+        "a harness item makes nothing on Managed Agents"
+    )
+    (spec,) = pods.started
+    token = spec.executor_config["HARNESS_TOKEN"]
+    assert (spec.executor, spec.executor_config) == ("selfhosted", {
+        "MODEL_ENDPOINT": "https://model.example.com", "HARNESS_TOKEN": token,
+    }), "the pod runs the harness with its settings and the item's token"  # fmt: skip
+    (turn,) = harness.turns
+    assert turn["mcp_servers"] == [], "the pod dials no MCP server"
+    assert [t["name"] for t in turn["host_tools"]] == ["issue_write"], "the worker runs it"
+    (action,) = harness.actions
+    assert action["decision"] == "result" and "42" in json.dumps(action["result"]), (
+        "the world's answer is the host tool's result"
+    )
+    assert [(c.origin, c.tool) for c in item.world_calls or []] == [("recorded", "issue_write")]
+    assert "Opened issue 42." in json.dumps([e.model_dump(mode="json") for e in item.chat or []])
+    assert pods.stopped == ["pod-1"], "the pod stops when the item ends"
     run = await runs.status(alex, run_id)
     assert isinstance(run, Run) and run.status == "done", run.status

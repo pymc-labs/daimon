@@ -671,6 +671,7 @@ async def _work(reap_every_s: float) -> None:
             passthrough=frozenset(evals.passthrough_hosts),
             executor_config={"ANTHROPIC_ENVIRONMENT_KEY": evals.environment_key.get_secret_value()},
             registries=registries(features),
+            harness_config={k: v.get_secret_value() for k, v in evals.harness_config.items()},
         )  # fmt: skip
         deps = build_turn_deps(settings, rt.anthropic, rt.sessionmaker, billing_config=None,
                                deployment_default=rt.deployment_default,

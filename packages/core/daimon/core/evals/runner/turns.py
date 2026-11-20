@@ -9,12 +9,14 @@ id, so the world answers their calls.
 Anthropic environment keys come only from its console, so the worker has one Anthropic eval
 environment. Its executor takes whichever session the environment hands out, so items on it
 run one at a time: each holds the environment from its first turn to its close. A Gemini item
-makes an environment of its own (`runner.gemini`), so those run side by side."""
+makes an environment of its own (`runner.gemini`), and a harness item's harness runs in its pod
+(`runner.harness`), so those run side by side."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import secrets
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -43,6 +45,7 @@ from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Case, Usage
 from daimon.core.evals.runner.gemini import GeminiArms
+from daimon.core.evals.runner.harness import HarnessArms
 from daimon.core.evals.runner.item import TurnRequest
 from daimon.core.evals.runner.tools import (
     Caller,
@@ -58,6 +61,7 @@ from daimon.core.evals.sandbox.runtime import (
     PodHandle,
     PodLimits,
     PodSpec,
+    SandboxError,
     SandboxRuntime,
     read_files,
     wait_ready,
@@ -87,6 +91,7 @@ from daimon.core.turn.admission import admit, backend_facts
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.gemini import PROFILE as GEMINI_PROFILE
 from daimon.core.turn.host_tools import host_tools
+from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.outcomes import observe_turn
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -110,7 +115,9 @@ _ENVIRONMENT: Final = "eval-environment"
 _SHARED: Final = "anthropic"
 """The backend whose items share the worker's console-made environment (`PodSettings`)."""
 _GEMINI: Final = get_profile(GEMINI_PROFILE).provider
-_BACKENDS: Final = frozenset({_SHARED, _GEMINI})
+_HARNESS: Final = "harness"
+"""The arm backend of Daimon's own harness, whose provider is `selfhosted`."""
+_BACKENDS: Final = frozenset({_SHARED, _GEMINI, _HARNESS})
 """Backends whose live arms run here: their executors serve self-hosted sessions."""
 
 
@@ -126,6 +133,8 @@ class PodSettings:
     environment_id: str
     executor_config: Mapping[str, str] = field(default_factory=dict[str, str])
     passthrough: frozenset[str] = frozenset()
+    #: The harness's own settings in a harness item's pod: its model endpoint and credentials.
+    harness_config: Mapping[str, str] = field(default_factory=dict[str, str])
     registries: Literal["passthrough", "deny"] = "deny"
     limits: PodLimits = PodLimits()
 
@@ -196,11 +205,12 @@ class EvalTurns:
     """`TurnPort` on the production turn path. `deps` is the worker's own."""
 
     def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings,
-                 mcp: McpService | None = None,
-                 gemini: GeminiArms | None = None) -> None:  # fmt: skip
+                 mcp: McpService | None = None, gemini: GeminiArms | None = None,
+                 harness: HarnessArms | None = None) -> None:  # fmt: skip
         self.context = CaseContext()
         self.deps = replace(deps, context_providers=ContextProviders(provider=self.context))
         self.gemini = gemini or GeminiArms(deps.sessionmaker)
+        self.harness = harness or HarnessArms()
         self.world, self.pods = world, pods
         url, secret = deps.mcp.public_url, deps.mcp.jwt_secret
         self.mcp = mcp or (McpService(str(url), secret.get_secret_value().encode())
@@ -342,16 +352,19 @@ class EvalTurns:
     async def _own(self, request: TurnRequest, name: str, metadata: Mapping[str, str],
                    system: str | None, tools: list[JsonObject],
                    requester: uuid.UUID) -> _Item:  # fmt: skip
-        """A hosted arm's item: Daimon-owned fork and environment records (the provider
-        holds neither), the channel on the arm's backend, and a self-hosted environment of
-        the item's own for its pod."""
+        """A hosted or harness arm's item: Daimon-owned fork and environment records (the
+        provider holds neither), the channel on the arm's backend, and the item's pod: polling
+        a self-hosted environment of its own, or running the harness the worker drives."""
         deps, live = self.deps, request.arm.live
         assert live is not None
+        harness = live.backend == _HARNESS
+        provider, profile = (SELFHOSTED.provider, SELFHOSTED.profile) if harness else (
+            _GEMINI, GEMINI_PROFILE)  # fmt: skip
         tenant_id = await eval_tenant(deps.sessionmaker)
         # Owned records belong to an account: the requester's, whose turns run them.
         scope = resource_scope(tenant_id=str(tenant_id), account_id=str(requester))
         fork = await create_owned_agent(deps.anthropic, AgentSpec(
-            name=name, model=ModelRef(provider=_GEMINI, id=live.model), system=system,
+            name=name, model=ModelRef(provider=provider, id=live.model), system=system,
             metadata=metadata, purpose="eval",
         ), scope=scope, records=deps.sessionmaker)  # fmt: skip
         # The channel's name for the item's environment; the provider's is made below.
@@ -365,18 +378,27 @@ class EvalTurns:
         channel = channel_ref(tenant_id, request.case.surface.platform, name)
         async with deps.sessionmaker.begin() as session:
             policy = await access_policy.load_access_policy(session, tenant_id=tenant_id)
-            if _GEMINI not in policy.enabled_backends:
+            if provider not in policy.enabled_backends:
                 # The eval workspace runs whichever backends its arms name.
                 await access_policy.set_access_policy(session, tenant_id=tenant_id,
                     policy=policy.model_copy(update={"enabled_backends": (
-                        *policy.enabled_backends, _GEMINI)}))  # fmt: skip
+                        *policy.enabled_backends, provider)}))  # fmt: skip
             revision = await set_channel_backend(session, channel, BackendConfig(
-                backend=_GEMINI, profile=GEMINI_PROFILE, model=live.model,
+                backend=provider, profile=profile, model=live.model,
             ))  # fmt: skip
-        environment, key = await self.gemini.environment(scope, name)
-        item.cleanup.append(partial(self.gemini.delete, environment))
         specs = [ToolSpec(kind="custom", name=t["name"], description=t["description"],
                           input_schema=t["input_schema"]) for t in tools]  # fmt: skip
+        if harness:
+            token = secrets.token_urlsafe(32)
+            config = {**self.pods.harness_config, "HARNESS_TOKEN": token}
+            item.pod = await self._pod(request, provider, config)
+            if item.pod.address is None:
+                raise SandboxError(f"eval pod {item.pod.id} has no address for its harness")
+            item.runtime = self.harness.runtime(revision, name, system, specs,
+                                                address=item.pod.address, token=token)  # fmt: skip
+            return item
+        environment, key = await self.gemini.environment(scope, name)
+        item.cleanup.append(partial(self.gemini.delete, environment))
         item.runtime = self.gemini.runtime(revision, name, system, specs, environment)
         item.pod = await self._pod(request, _GEMINI, {
             "GEMINI_ENVIRONMENT_ID": self_hosted_id(environment), "GEMINI_ENVIRONMENT_KEY": key,
