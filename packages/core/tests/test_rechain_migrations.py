@@ -109,3 +109,17 @@ def test_check_reports_a_second_head_and_a_stale_head_file(forked_repo: Path) ->
     assert any("head.txt" in e and "0003_other" in e for e in errors), (
         "head.txt must name the single head"
     )
+
+
+def test_rechain_refuses_a_rename_onto_an_existing_file_before_writing(forked_repo: Path) -> None:
+    """Two branch migrations with one slug: 0003_x would become 0004_x while 0004_x exists."""
+    versions = forked_repo / rechain_migrations.VERSIONS
+    (versions / "0004_second.py").unlink()
+    _migration(forked_repo, "0004_first", "0003_first")
+    before = {p.name: p.read_text() for p in forked_repo.rglob("*.py") if ".git" not in p.parts}
+
+    with pytest.raises(SystemExit, match="0004_first.py: that file exists"):
+        rechain_migrations.rechain(forked_repo, "main")
+
+    after = {p.name: p.read_text() for p in forked_repo.rglob("*.py") if ".git" not in p.parts}
+    assert after == before, "nothing is rewritten when a rename would collide"

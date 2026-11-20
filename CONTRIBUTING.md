@@ -164,7 +164,8 @@ checks both lines against the code.
 The chain is linear and `packages/core/alembic/head.txt` names its head. After
 you merge or rebase `main`, run `uv run python scripts/rechain_migrations.py`:
 it renumbers your branch's new migrations onto `main`'s head, updates the files
-you changed that mention them, and rewrites `head.txt`. CI runs it with `--check`.
+you changed that mention them, and rewrites `head.txt`. From a fork, pass
+`--base upstream/main` (your fork's `main` may be stale). CI runs it with `--check`.
 Land a schema change in its own PR before the code that needs it; a `contract`
 migration lands alone, after the release that stopped using what it removes.
 

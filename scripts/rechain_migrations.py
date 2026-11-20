@@ -109,7 +109,13 @@ def _branch_chain(root: Path, base: str) -> tuple[str, list[Path]]:
     ]
     if not base_stems:
         raise SystemExit(f"{base} has no migrations under {VERSIONS}")
-    base_head = max(base_stems, key=lambda s: (_number(s), s))
+    # head.txt names the head exactly; a base from before it existed falls back to numbers.
+    done = subprocess.run(
+        ["git", "show", f"{base}:{HEAD_FILE}"], cwd=root, capture_output=True, text=True
+    )
+    base_head = done.stdout.strip() if done.returncode == 0 else ""
+    if base_head not in base_stems:
+        base_head = max(base_stems, key=lambda s: (_number(s), s))
     new = [p for p in sorted((root / VERSIONS).glob("*.py")) if p.stem not in base_stems]
     by_revision: dict[str, Path] = {}
     parent_of: dict[str, str] = {}
@@ -162,6 +168,9 @@ def rechain(root: Path, base: str) -> dict[str, str]:
         new = f"{number:04d}_{path.stem.split('_', 1)[1]}"
         if len(new) > MAX_ID:
             raise SystemExit(f"{new}: over {MAX_ID} characters; shorten the slug")
+        target = path.with_name(f"{new}.py")
+        if target != path and target.exists():  # checked before any file is written
+            raise SystemExit(f"{path.name} -> {target.name}: that file exists; rename one slug")
         mapping[old] = new
         renames.append((path, parents[0], parent, new))
         parent = new
