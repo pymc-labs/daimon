@@ -37,11 +37,13 @@ def ipv4_rules() -> str:
         "-I OUTPUT 1 -j EVAL_FILTER",
         f"-A EVAL_FILTER -m owner --uid-owner {_GW} -j ACCEPT",
         # The executor's port tunnels to control-plane hosts: nobody else may dial it.
-        f"-A EVAL_FILTER -o lo -p tcp --dport {EXEC_PORT} -m owner ! --uid-owner {_EXEC}"
+        f"-A EVAL_FILTER -p tcp --dport {EXEC_PORT} -m owner ! --uid-owner {_EXEC}"
         " -j REJECT --reject-with tcp-reset",
         # A runtime's own resolver (127.0.0.11 on Docker) would answer real names.
         "-A EVAL_FILTER -d 127.0.0.11 -j REJECT",
-        f"-A EVAL_FILTER -o lo -p udp ! --dport {DNS_PORT} -j REJECT",
+        f"-A EVAL_FILTER -p udp ! --dport {DNS_PORT} -j REJECT",
+        # A redirected packet keeps its first output interface, so match its new address.
+        "-A EVAL_FILTER -d 127.0.0.0/8 -j ACCEPT",
         "-A EVAL_FILTER -o lo -j ACCEPT",
         "-A EVAL_FILTER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
         "-A EVAL_FILTER -p tcp -j REJECT --reject-with tcp-reset",
