@@ -17,11 +17,12 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
-from daimon.core.stores import security_audit, workflow_runs, workflows
+from daimon.core.stores import security_audit, workflow_runs, workflow_triggers, workflows
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
 from daimon.core.workflows import delivery, engine
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
+from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.lanes import lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
@@ -29,6 +30,7 @@ from daimon.core.workflows.spec import (
     ActionNode,
     AgentNode,
     AnyNode,
+    FinishNode,
     Spec,
     parse_duration,
     parse_spec,
@@ -46,6 +48,10 @@ BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
+#: Runs a key may queue behind its active ones.
+QUEUE_LIMIT: Final = 100
+#: How many runs deep a chain of event or call starts may go.
+MAX_CHAIN_DEPTH: Final = 3
 
 
 def run_channel(tenant_id: uuid.UUID) -> str:
@@ -248,6 +254,8 @@ async def _apply(
         )
         await workflow_runs.close_waits(session, status="cancelled", now=now, run_id=run.id)
         events += await _queue_posts(session, loaded, end, [_view(r) for r in rows])
+        if run.mode == "live":
+            await _offer_finished(session, loaded, rows, end, now)
     else:
         projected = engine.project_status([_view(r) for r in rows])
         status, reason = projected or ("running", None)
@@ -313,6 +321,50 @@ async def _queue_posts(
     return [] if queued is None else [queued]
 
 
+def chain_depth(run: RunRow) -> int:
+    """How many event or call starts led to this run."""
+    depth = run.triggered_by.get("depth") if run.trigger_kind in ("event", "call") else 0
+    return depth if isinstance(depth, int) else 0
+
+
+async def _offer_finished(
+    session: AsyncSession, loaded: Loaded, rows: Sequence[StepRow], end: RunEnd, now: datetime
+) -> None:
+    """Event triggers listening to this workflow get the finished run as an event; the
+    starts loop filters and maps it. A chain stops at `MAX_CHAIN_DEPTH`."""
+    run = loaded.run
+    depth = chain_depth(run) + 1
+    listeners = await workflow_triggers.event_triggers_for(
+        session, tenant_id=run.tenant_id, source=f"workflow:{run.workflow_id}"
+    )
+    if not listeners or depth > MAX_CHAIN_DEPTH:
+        return
+    finish = [r for r in rows if isinstance(loaded.spec.nodes.get(r.node_id), FinishNode)]
+    output = max(finish, key=lambda r: r.visit).output if finish else None
+    event: dict[str, Any] = {
+        "workflow": {"id": str(run.workflow_id), "name": loaded.workflow.name},
+        "run": {
+            "id": str(run.id),
+            "number": run.number,
+            "status": end.status,
+            "outcome": end.outcome,
+            "output": output,
+        },
+        "depth": depth,
+    }
+    for trigger in listeners:
+        await workflow_triggers.record_event(
+            session,
+            trigger=trigger,
+            status="accepted",
+            received_at=now,
+            delivery_id=f"run:{run.id}",
+            verified=True,
+            payload=event,
+        )
+    await _notify(session, START_CHANNEL, str(run.id))
+
+
 async def _notify(session: AsyncSession, channel: str, payload: str) -> None:
     await session.execute(select(func.pg_notify(channel, payload)))
 
@@ -333,9 +385,34 @@ def _budget(spec: Spec, settings: Settings, start: Start, cleared: Cleared) -> D
     return min(asked, settings.workflows.max_run_budget_usd)
 
 
-def _active_limit(spec: Spec, settings: Settings) -> int:
+Conflict = Literal["queue", "skip", "replace", "debounce"]
+
+
+def _active_limit(spec: Spec, settings: Settings, trigger_kind: str = "manual") -> int:
+    """Active runs a key may hold: the spec's limit, else 1 when the spec sets concurrency
+    or for schedules (a slot never overlaps the last), else the deployment's ceiling."""
     asked = spec.concurrency.limit if spec.concurrency and spec.concurrency.limit else None
-    return min(asked or settings.workflows.max_active_runs, settings.workflows.max_active_runs)
+    one = spec.concurrency is not None or trigger_kind == "schedule"
+    default = 1 if one else settings.workflows.max_active_runs
+    return min(asked or default, settings.workflows.max_active_runs)
+
+
+def on_conflict(spec: Spec, trigger_kind: str) -> Conflict:
+    """What a start does over the limit; a schedule slot skips unless the spec says."""
+    asked = spec.concurrency.on_conflict if spec.concurrency else None
+    return asked or ("skip" if trigger_kind == "schedule" else "queue")
+
+
+def concurrency_key(spec: Spec, inputs: dict[str, Any], now: datetime) -> str | None:
+    """The spec's key on these inputs; None holds the whole workflow as one key."""
+    source = spec.concurrency.key if spec.concurrency else None
+    if not source:
+        return None
+    context: dict[str, JsonValue] = {"inputs": inputs}
+    value = (
+        render(source, context, now=now) if "${{" in source else evaluate(source, context, now=now)
+    )
+    return (value if isinstance(value, str) else str(value))[:200]
 
 
 async def start_run(
@@ -387,11 +464,32 @@ async def start_run(
         return Refusal("invalid_inputs", problems[0])
     if start.fork_of and start.fork_of[1] not in spec.nodes:
         return Refusal("not_found", "That step is not in this version.")
+    try:
+        key = concurrency_key(spec, inputs, now)
+    except ExpressionError as err:
+        return Refusal("invalid_inputs", f"The concurrency key failed: {err}")
+    limit = _active_limit(spec, settings, start.trigger_kind)
+    conflict = on_conflict(spec, start.trigger_kind)
     place = Place(tenant_id, workflow, spec, version, start.mode, start.run_as_account_id)
     cleared = await check(sm, settings, place, now=now)
     if isinstance(cleared, Refusal):
         return cleared
+    if conflict == "replace":
+        await _replace(sm, settings, workflow.id, key, limit, now)
     async with sm.begin() as session:
+        await workflows.get_workflow(
+            session, tenant_id=tenant_id, workflow_id=workflow.id, lock=True
+        )
+        active = await workflow_runs.count_active_runs(
+            session, workflow_id=workflow.id, concurrency_key=key
+        )
+        if active >= limit and conflict == "skip":
+            return Refusal("skipped", "A run is already going. This one was skipped.")
+        queued_count = await workflow_runs.count_active_runs(
+            session, workflow_id=workflow.id, concurrency_key=key, statuses=("queued",)
+        )
+        if active >= limit and queued_count >= QUEUE_LIMIT:
+            return Refusal("queue_full", f"{QUEUE_LIMIT} runs are already waiting. Try later.")
         run = await workflow_runs.create_run(
             session,
             tenant_id=tenant_id,
@@ -405,6 +503,7 @@ async def start_run(
             inputs=inputs,
             untrusted_inputs=start.untrusted_inputs or bool(source and source.untrusted_inputs),
             label=start.label,
+            concurrency_key=key,
             budget_usd=_budget(spec, settings, start, cleared),
             deadline_at=_deadline(spec, settings, now),
             parent_run_id=start.parent_run_id,
@@ -440,14 +539,31 @@ async def start_run(
             actor=ENGINE,
             at=now,
         )
-        active = await workflow_runs.count_active_runs(session, workflow_id=workflow.id)
-        if active < _active_limit(spec, settings):
+        if active < limit:
             await _begin(session, settings, run, now)
         else:
             await _notify(session, START_CHANNEL, str(run.id))
         result = await workflow_runs.get_run(session, run.id)
     assert result is not None
     return result
+
+
+async def _replace(
+    sm: Sessions,
+    settings: Settings,
+    workflow_id: uuid.UUID,
+    key: str | None,
+    limit: int,
+    now: datetime,
+) -> None:
+    """`replace`: cancel the oldest active runs of the key until a new one fits."""
+    async with sm() as session:
+        active = await workflow_runs.active_run_ids(
+            session, workflow_id=workflow_id, concurrency_key=key
+        )
+    end = RunEnd("cancelled", reason="replaced", message="A newer run replaced this one")
+    for run_id in active[: max(len(active) - limit + 1, 0)]:
+        await stop_run(sm, settings, run_id=run_id, end=end, now=now)
 
 
 def _fork_copies(
@@ -498,8 +614,10 @@ async def promote_queued(
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, lock=True
         )
         spec = await spec_of(session, run)
-        active = await workflow_runs.count_active_runs(session, workflow_id=run.workflow_id)
-        if active >= _active_limit(spec, settings):
+        active = await workflow_runs.count_active_runs(
+            session, workflow_id=run.workflow_id, concurrency_key=run.concurrency_key
+        )
+        if active >= _active_limit(spec, settings, run.trigger_kind):
             return False
         await _begin(session, settings, run, now)
         return True
@@ -969,60 +1087,7 @@ async def decide_unknown(
         return True
 
 
-# --- the starts and sweep loops ---
-
-
-async def start_from_trigger_events(
-    sm: Sessions, settings: Settings, *, now: datetime, limit: int = 20
-) -> int:
-    """Turn accepted trigger events into runs, as the live version's publisher."""
-    started = 0
-    async with sm.begin() as session:
-        for event, workflow_id, kind, key in await workflow_runs.claim_trigger_events(
-            session, limit=limit
-        ):
-            workflow = await workflows.get_workflow(
-                session, tenant_id=event.tenant_id, workflow_id=workflow_id
-            )
-            live = None
-            if workflow is not None and workflow.live_version is not None:
-                live = await workflows.get_version(
-                    session,
-                    tenant_id=event.tenant_id,
-                    workflow_id=workflow_id,
-                    number=workflow.live_version,
-                )
-            result: RunRow | Refusal = Refusal("not_published", "No live version")
-            if live is not None:
-                result = await start_run(
-                    sm,
-                    settings,
-                    tenant_id=event.tenant_id,
-                    start=Start(
-                        workflow_id=workflow_id,
-                        run_as_account_id=live.published_by_account_id,
-                        triggered_by={
-                            "kind": kind,
-                            "trigger_id": str(event.trigger_id),
-                            "event_id": str(event.id),
-                        },
-                        trigger_kind=kind,
-                        trigger_key=key,
-                        inputs=event.inputs or {},
-                        untrusted_inputs=kind in ("webhook", "event"),
-                    ),
-                    now=now,
-                )
-            if isinstance(result, Refusal):
-                await workflow_runs.mark_trigger_event(
-                    session, event.id, status="rejected", reason=result.reason
-                )
-            else:
-                started += 1
-                await workflow_runs.mark_trigger_event(
-                    session, event.id, status="started", run_id=result.id
-                )
-    return started
+# --- the sweep loop ---
 
 
 async def sweep(
@@ -1032,13 +1097,14 @@ async def sweep(
     now: datetime,
     retention_days: Callable[[uuid.UUID], Awaitable[int]],
 ) -> None:
-    """Clear old payloads and delete finished runs past their workspace's retention.
+    """Delete trigger events past the payload retention and finished runs past their
+    workspace's retention.
 
     `retention_days(tenant_id)` awaits to the workspace's retention in days.
     """
     async with sm.begin() as session:
         before = now - timedelta(days=settings.workflows.payload_retention_days)
-        await workflow_runs.clear_payloads(session, before=before)
+        await workflow_triggers.delete_events_before(session, before=before)
         tenant_ids = await workflow_runs.tenants_with_finished_runs(session)
     for tenant_id in tenant_ids:
         days = await retention_days(tenant_id)

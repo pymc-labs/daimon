@@ -23,8 +23,6 @@ from daimon.core._models import (
     WorkflowRun,
     WorkflowStep,
     WorkflowStepActivity,
-    WorkflowTrigger,
-    WorkflowTriggerEvent,
     WorkflowWait,
 )
 from daimon.core.workflows.engine import ErrorClass, StepStatus
@@ -62,6 +60,7 @@ class RunRow(_Row):
     inputs: dict[str, Any]
     untrusted_inputs: bool
     label: str | None
+    concurrency_key: str | None
     parent_run_id: uuid.UUID | None
     forked_from_run_id: uuid.UUID | None
     forked_from_step: str | None
@@ -178,6 +177,7 @@ async def create_run(
     deadline_at: datetime | None,
     untrusted_inputs: bool = False,
     label: str | None = None,
+    concurrency_key: str | None = None,
     parent_run_id: uuid.UUID | None = None,
     forked_from_run_id: uuid.UUID | None = None,
     forked_from_step: str | None = None,
@@ -205,6 +205,7 @@ async def create_run(
         inputs=inputs,
         untrusted_inputs=untrusted_inputs,
         label=label,
+        concurrency_key=concurrency_key,
         parent_run_id=parent_run_id,
         forked_from_run_id=forked_from_run_id,
         forked_from_step=forked_from_step,
@@ -719,16 +720,31 @@ async def close_waits(
 # --- runs the loops pick up ---
 
 
-async def count_active_runs(session: AsyncSession, *, workflow_id: uuid.UUID) -> int:
-    return (
-        await session.scalar(
-            select(func.count()).where(
-                WorkflowRun.workflow_id == workflow_id,
-                WorkflowRun.status.in_(("running", "waiting")),
-            )
-        )
-        or 0
+async def count_active_runs(
+    session: AsyncSession,
+    *,
+    workflow_id: uuid.UUID,
+    concurrency_key: str | None = None,
+    statuses: Sequence[str] = ("running", "waiting"),
+) -> int:
+    """Runs of the workflow in `statuses`; with a key, only the runs holding that key."""
+    stmt = select(func.count()).where(
+        WorkflowRun.workflow_id == workflow_id, WorkflowRun.status.in_(statuses)
     )
+    if concurrency_key is not None:
+        stmt = stmt.where(WorkflowRun.concurrency_key == concurrency_key)
+    return await session.scalar(stmt) or 0
+
+
+async def active_run_ids(
+    session: AsyncSession, *, workflow_id: uuid.UUID, concurrency_key: str | None
+) -> list[uuid.UUID]:
+    stmt = select(WorkflowRun.id).where(
+        WorkflowRun.workflow_id == workflow_id, WorkflowRun.status.in_(("running", "waiting"))
+    )
+    if concurrency_key is not None:
+        stmt = stmt.where(WorkflowRun.concurrency_key == concurrency_key)
+    return list(await session.scalars(stmt.order_by(WorkflowRun.created_at)))
 
 
 async def previous_end(
@@ -808,61 +824,7 @@ async def delete_runs(session: AsyncSession, run_ids: Sequence[uuid.UUID]) -> No
         await session.execute(delete(WorkflowRun).where(WorkflowRun.id.in_(run_ids)))
 
 
-# --- trigger events and grants ---
-
-
-class TriggerEventRow(_Row):
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    trigger_id: uuid.UUID
-    test: bool
-    inputs: dict[str, Any] | None
-    received_at: datetime
-
-
-async def claim_trigger_events(
-    session: AsyncSession, *, limit: int
-) -> list[tuple[TriggerEventRow, uuid.UUID, str, str]]:
-    """Accepted events, locked SKIP LOCKED: `(event, workflow id, trigger kind, trigger key)`."""
-    rows = await session.execute(
-        select(
-            WorkflowTriggerEvent,
-            WorkflowTrigger.workflow_id,
-            WorkflowTrigger.kind,
-            WorkflowTrigger.trigger_key,
-        )
-        .join(WorkflowTrigger, WorkflowTrigger.id == WorkflowTriggerEvent.trigger_id)
-        .where(WorkflowTriggerEvent.status == "accepted")
-        .order_by(WorkflowTriggerEvent.received_at)
-        .limit(limit)
-        .with_for_update(of=WorkflowTriggerEvent, skip_locked=True)
-    )
-    return [(TriggerEventRow.model_validate(e), w, k, key) for e, w, k, key in rows.tuples()]
-
-
-async def mark_trigger_event(
-    session: AsyncSession,
-    event_id: uuid.UUID,
-    *,
-    status: Literal["started", "skipped", "rejected"],
-    run_id: uuid.UUID | None = None,
-    reason: str | None = None,
-) -> None:
-    await session.execute(
-        update(WorkflowTriggerEvent)
-        .where(WorkflowTriggerEvent.id == event_id)
-        .values(status=status, run_id=run_id, reason=reason)
-    )
-
-
-async def clear_payloads(session: AsyncSession, *, before: datetime) -> int:
-    rows = await session.scalars(
-        update(WorkflowTriggerEvent)
-        .where(WorkflowTriggerEvent.received_at < before, WorkflowTriggerEvent.payload.is_not(None))
-        .values(payload=None, headers=None)
-        .returning(WorkflowTriggerEvent.id)
-    )
-    return len(rows.all())
+# --- grants ---
 
 
 class GrantRow(_Row):

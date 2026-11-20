@@ -468,6 +468,7 @@ async def publish(
             source=source,
             published_by=env.who.account_id,
             note=note.strip()[:500],
+            now=env.now,
         )
         changes = _sync(spec)
         if workflow.status == "needs_owner":

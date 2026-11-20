@@ -13,9 +13,9 @@ keeps account ids only, so the chain still verifies.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, TypedDict, Unpack
+from typing import Any, Literal, TypedDict, Unpack, cast
 
 from daimon.core._models import (
     Workflow,
@@ -25,6 +25,7 @@ from daimon.core._models import (
     WorkflowWait,
     WorkflowWaitAnswer,
 )
+from daimon.core.stores import workflow_triggers
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -215,8 +216,9 @@ async def publish_version(
     published_by: uuid.UUID,
     note: str = "",
     approved_by: uuid.UUID | None = None,
+    now: datetime | None = None,
 ) -> WorkflowVersionRow:
-    """Add the next version and make it live; the draft now begins from it."""
+    """Add the next version and make it live with its triggers; the draft now begins from it."""
     workflow = await get_workflow(session, tenant_id=tenant_id, workflow_id=workflow_id, lock=True)
     if workflow is None:
         raise LookupError(f"No workflow {workflow_id}")
@@ -240,6 +242,15 @@ async def publish_version(
         update(Workflow)
         .where(Workflow.id == workflow_id)
         .values(live_version=orm.number, draft_base_version=orm.number)
+    )
+    found: object = spec.get("triggers")
+    triggers = cast("list[object]", found) if isinstance(found, list) else []
+    await workflow_triggers.sync_live(
+        session,
+        tenant_id=tenant_id,
+        workflow_id=workflow_id,
+        triggers=[cast("dict[str, Any]", t) for t in triggers if isinstance(t, dict)],
+        now=now or datetime.now(UTC),
     )
     await session.refresh(orm)
     return WorkflowVersionRow.model_validate(orm)
