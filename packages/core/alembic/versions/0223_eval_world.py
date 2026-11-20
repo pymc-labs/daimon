@@ -7,6 +7,7 @@ downgrade: destructive
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -19,7 +20,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-def _created() -> sa.Column[sa.DateTime]:
+def _created() -> sa.Column[datetime]:
     return sa.Column(
         "created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False
     )
