@@ -1039,6 +1039,7 @@ async def create_session(
                 session_factory=session_factory,
                 slack_turn_context_id=slack_turn_context_id,
                 chat_session_id=chat_session_id,
+                hold=hold,
                 scope=scope,
             )
 

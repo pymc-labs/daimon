@@ -299,8 +299,9 @@ async def _refresh_chat_credential_locked(
             slack_turn_context_id = uuid.UUID(metadata["daimon_chat_context"])
         if preserve_context and metadata.get(HOLD_METADATA_KEY) is not None:
             # A mounted vault keeps the hold it was minted with; a refresh never
-            # widens or drops it.
-            hold = hold_from_metadata(metadata[HOLD_METADATA_KEY])
+            # widens or drops it. A turn that names its hold (`hold`) wins: a
+            # credential minted without it is re-minted with it, never kept.
+            hold = hold or hold_from_metadata(metadata[HOLD_METADATA_KEY])
         raw_jti = metadata.get("daimon_chat_jti")
         try:
             jti = uuid.UUID(raw_jti) if isinstance(raw_jti, str) else None
@@ -407,6 +408,7 @@ async def refresh_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
+    hold: TurnHold | None = None,
 ) -> None:
     """Refresh the vault already mounted by a reused ordinary chat session."""
     async with session_factory() as session:
@@ -421,6 +423,7 @@ async def refresh_agent_mcp_vault(
             public_url=public_url,
             now=now,
             scope=scope,
+            hold=hold,
             preserve_context=True,
             create_missing=False,
         )
@@ -440,6 +443,7 @@ async def refresh_mounted_mcp_vaults(
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
     relay_urls: Sequence[str] = (),
+    hold: TurnHold | None = None,
 ) -> None:
     """Renew every actually mounted Daimon slot, without creating missing slots.
 
@@ -457,6 +461,7 @@ async def refresh_mounted_mcp_vaults(
             now=now,
             session_factory=session_factory,
             scope=scope,
+            hold=hold,
         )
         if relay_urls:
             await refresh_relay_vault(
