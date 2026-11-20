@@ -242,6 +242,7 @@ from daimon.adapters.slack.vision import (
     download_as_image_blocks,
     is_vision_image,
 )
+from daimon.adapters.slack.workflow_delivery import make_slack_workflow_poster
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -962,6 +963,7 @@ class SlackApp:
                 self.runtime.sessionmaker,
                 platform="slack",
                 post=make_slack_routine_poster(self.runtime),
+                workflow=make_slack_workflow_poster(self.runtime),
                 should_stop=lambda: self.draining,
             )
         )
