@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import AfterValidator, Field, JsonValue, StringConstraints
+from pydantic import AfterValidator, Field, JsonValue, StringConstraints, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.actions import RequiredAction
@@ -138,8 +138,19 @@ class AgentSpec(Contract):
     purpose: Purpose = _purpose()
     """`eval`: the agent runs eval items, so drivers leave provider web tools out."""
 
+    @model_validator(mode="after")
+    def _enclosed(self) -> Self:
+        return _eval_agent_checked(self)
 
-def eval_tools(spec: AgentSpec) -> tuple[ToolSpec, ...] | None:
+
+def _eval_agent_checked[T: AgentSpec | AgentPatch](spec: T) -> T:
+    # The provider dials an agent's MCP servers from its own side, outside the eval world.
+    if spec.purpose == "eval" and spec.mcp_servers:
+        raise ValueError("an eval agent cannot connect MCP servers")
+    return spec
+
+
+def eval_tools(spec: AgentSpec | AgentPatch) -> tuple[ToolSpec, ...] | None:
     """The agent's tools as a driver compiles them: an eval agent has no provider web tools."""
     if spec.purpose != "eval" or spec.tools is None:
         return spec.tools
@@ -166,6 +177,14 @@ class AgentPatch(Contract):
     declared_drops: _DeclaredDrops | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    purpose: Purpose | None = Field(
+        default=None, exclude_if=lambda value: value is None, json_schema_extra={ADDITIVE: True}
+    )
+    """`eval` for a patch to an eval agent: its tools are compiled as an eval agent's."""
+
+    @model_validator(mode="after")
+    def _enclosed(self) -> Self:
+        return _eval_agent_checked(self)
 
 
 class Agent(Contract):

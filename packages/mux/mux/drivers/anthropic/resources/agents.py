@@ -80,7 +80,7 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             else None
         )
     if "tools" in fields and (spec.tools is not None or isinstance(spec, AgentPatch)):
-        tools = eval_tools(spec) if isinstance(spec, AgentSpec) else spec.tools
+        tools = eval_tools(spec)
         compiled = [tool_payload(tool) for tool in tools] if tools is not None else None
         if compiled is not None:
             builtin: dict[str, object] | None = None
@@ -136,7 +136,7 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
             payload.update({name: None for name in nulls.fields})
         else:
             raise ValueError(f"unsupported agent extension {extension.namespace!r}")
-    if isinstance(spec, AgentSpec) and spec.purpose == "eval" and payload.get("tools"):
+    if spec.purpose == "eval" and payload.get("tools"):
         payload["tools"] = [
             _without_web_tools(t) for t in cast(list[dict[str, object]], payload["tools"])
         ]
@@ -145,8 +145,10 @@ def agent_payload(spec: AgentSpec | AgentPatch) -> dict[str, object]:
 
 def _without_web_tools(tool: dict[str, object]) -> dict[str, object]:
     """An eval agent's toolset: web tools run on the provider's side, so they are off."""
-    if tool.get("type") != "agent_toolset_20260401":
+    if tool.get("type") in ("custom", "mcp_toolset"):
         return tool
+    if tool.get("type") != "agent_toolset_20260401":
+        raise ValueError(f"an eval agent cannot use the {tool.get('type')!r} tools")
     configs = [
         c for c in cast(list[dict[str, object]], tool.get("configs") or [])
         if c.get("name") not in PROVIDER_WEB_TOOLS

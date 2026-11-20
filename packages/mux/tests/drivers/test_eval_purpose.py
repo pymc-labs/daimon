@@ -1,4 +1,5 @@
-"""Every hosted driver self-hosts only eval environments and gives eval agents no web tools."""
+"""Every hosted driver self-hosts only eval environments and gives eval agents no web tools
+or MCP servers (the provider would reach both from its own side)."""
 
 from __future__ import annotations
 
@@ -6,7 +7,15 @@ import json
 
 import pytest
 from mux.contracts.ids import ModelRef, Provider, Revision
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, Purpose, SessionSpec, ToolSpec
+from mux.contracts.resources import (
+    AgentPatch,
+    AgentSpec,
+    EnvironmentSpec,
+    MCPConnection,
+    Purpose,
+    SessionSpec,
+    ToolSpec,
+)
 from mux.drivers.anthropic.resources.agents import agent_payload
 from mux.drivers.anthropic.resources.environments import environment_payload
 from mux.drivers.gemini import GeminiManagedAgents
@@ -46,6 +55,18 @@ def test_anthropic() -> None:
     tools = json.dumps(agent_payload(_agent("anthropic", "eval"))["tools"])
     assert '"name": "web_search", "enabled": false' in tools, "web search off"
     assert '"name": "web_fetch", "enabled": false' in tools, "web fetch off"
+    patch = AgentPatch(tools=_agent("anthropic", "eval").tools, purpose="eval")
+    assert '"name": "web_search", "enabled": false' in json.dumps(agent_payload(patch)["tools"])
+
+
+def test_eval_agents_have_no_mcp_servers() -> None:
+    server = (MCPConnection(name="m", url="https://mcp.example.com"),)
+    with pytest.raises(ValueError, match="MCP"):
+        AgentSpec(
+            name="a", model=ModelRef(provider="openai", id="x"), mcp_servers=server, purpose="eval"
+        )
+    with pytest.raises(ValueError, match="MCP"):
+        AgentPatch(mcp_servers=server, purpose="eval")
 
 
 async def test_gemini() -> None:
@@ -86,10 +107,14 @@ async def test_openai() -> None:
     agent = await driver.agents.create(SCOPE, _agent("openai", "eval"), key="agent")
     sent = json.dumps(transport.calls[-1][2])
     assert not any(name in sent for name in WEB), "no provider web tools"
+    assert '"mux_purpose": "eval"' in sent, "the provider record marks an eval agent"
     transport.responses["POST", "/agents/sessions"] = native_session()
     spec = SessionSpec(
         agent=agent.ref, agent_revision=Revision(local=0), environment=env.ref, config_revision=1
     )
+    with pytest.raises(UnsupportedCapability):
+        await driver.sessions.create(SCOPE, spec, key="plain")
+    native["metadata"] = {"mux_tenant": "t", "mux_purpose": "eval"}
     await driver.sessions.create(SCOPE, spec, key="s")
     body = transport.calls[-1][2]
     assert body is not None and body["environment"] == {
