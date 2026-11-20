@@ -68,6 +68,7 @@ from daimon.core.turn.approvals import (
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended_capabilities import (
+    StepTools,
     UnattendedEntryPoint,
     apply_capabilities,
     capability_policy,
@@ -264,6 +265,7 @@ async def gate_session_snapshot(
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
     principal_check: PrincipalCheck | None = None,
+    step_tools: StepTools | None = None,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
@@ -312,6 +314,7 @@ async def gate_session_snapshot(
         allow_builtins=allowed.allow_builtins,
         allow_skills=allowed.allow_skills,
         tool_allowlist=frozenset() if entry_point == "long_job" else None,
+        step_tools=step_tools,
     )
     await apply_capabilities(
         client, session, constrained, scope=scope, session_factory=session_factory
@@ -362,6 +365,7 @@ def unattended_posture(
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
     relays: RelayCatalogues | None = None,
+    step_tools: StepTools | None = None,
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -411,6 +415,7 @@ def unattended_posture(
             entry_point, routine_sandbox_tools=routine_sandbox_tools
         ).allow_builtins,
         tool_allowlist=frozenset() if entry_point == "long_job" else None,
+        step_tools=step_tools,
     )
 
 
@@ -427,6 +432,7 @@ def session_gate(
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
     principal_check: PrincipalCheck | None = None,
+    step_tools: StepTools | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
@@ -453,6 +459,7 @@ def session_gate(
             entry_point=entry_point,
             routine_sandbox_tools=routine_sandbox_tools,
             principal_check=principal_check,
+            step_tools=step_tools,
         )
 
     return gate
