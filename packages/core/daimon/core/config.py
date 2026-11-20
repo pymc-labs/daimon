@@ -2937,8 +2937,8 @@ class EvalsSettings(BaseModel):
     trusted_keys: list[str] = Field(
         default_factory=list,
         description=(
-            "Base64 Ed25519 public keys whose bundle signatures import checks. A bundle signed "
-            "by one of them with a bad signature is refused."
+            "Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only "
+            "bundles signed by one of them or by this deployment's signing key."
         ),
     )
     source_label: str = Field(
@@ -2946,7 +2946,7 @@ class EvalsSettings(BaseModel):
         description="Label this deployment writes as the source of the bundles it exports.",
     )
     max_bundle_mb: int = Field(
-        default=512, gt=0, description="Largest eval bundle import accepts, unpacked, in MiB."
+        default=512, gt=0, description="Largest eval bundle import accepts, in MiB."
     )
 
 
