@@ -345,10 +345,22 @@ class EvalService:
         warnings = [] if problems else case_warnings(_case_model(document), "case")
         return CaseCheck(problems=problems, warnings=warnings)
 
-    async def save_suite(self, actor: Subject, draft: SuiteDraft) -> Suite:
+    async def check_case(self, actor: Subject, document: JsonObject) -> CaseCheck:
+        """`validate_case` for someone who may use evals here."""
+        await self._check_on(actor)
+        return self.validate_case(document)
+
+    async def save_suite(
+        self, actor: Subject, draft: SuiteDraft, *, new: bool | None = None
+    ) -> Suite:
+        """Create the suite or add its next version; `new` True or False insists on one."""
         await self._check_on(actor)
         async with self._sessions() as session, session.begin():
             existing = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=draft.id)
+            if new and existing is not None:
+                raise EvalRefused(f"A suite {draft.id} already exists. Pick another id.")
+            if new is False and existing is None:
+                raise EvalNotFound(f"No suite {draft.id} here.")
             if existing is None:
                 if draft.cases:
                     raise EvalRefused("A new suite starts with no cases. Add them one by one.")

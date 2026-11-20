@@ -71,7 +71,10 @@ class ZipSource:
     """A zipped bundle, held in memory. Refuses unsafe names and oversized content."""
 
     def __init__(self, data: bytes, *, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
-        self._zip = zipfile.ZipFile(io.BytesIO(data))
+        try:
+            self._zip = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            raise InvalidDocument(["not a bundle zip or encrypted bundle"]) from None
         infos = self._zip.infolist()
         if sum(i.file_size for i in infos) > max_bytes:
             raise InvalidDocument([f"bundle unpacks to more than {max_bytes} bytes"])
@@ -120,17 +123,20 @@ def encrypt(data: bytes, passphrase: str) -> bytes:
 
 
 def decrypt(data: bytes, passphrase: str) -> bytes:
-    magic, header_line, sealed = data.split(b"\n", 2)
-    header = json.loads(header_line)
+    try:
+        magic, header_line, sealed = data.split(b"\n", 2)
+        header = json.loads(header_line)
+        n, r, p = int(header["n"]), int(header["r"]), int(header["p"])
+        salt, nonce = base64.b64decode(header["salt"]), base64.b64decode(header["nonce"])
+    except (ValueError, KeyError, TypeError):
+        raise InvalidDocument(["not a Daimon encrypted bundle"]) from None
     if magic != ENC_MAGIC or header.get("kdf") != "scrypt":
         raise InvalidDocument(["not a Daimon encrypted bundle"])
-    n, r, p = int(header["n"]), int(header["r"]), int(header["p"])
     if n > 2**20 or r > 16 or p > 4:
         raise InvalidDocument(["encryption parameters are out of range"])
-    key = _key(passphrase, base64.b64decode(header["salt"]), n, r, p)
     try:
-        return AESGCM(key).decrypt(base64.b64decode(header["nonce"]), sealed, None)
-    except InvalidTag:
+        return AESGCM(_key(passphrase, salt, n, r, p)).decrypt(nonce, sealed, None)
+    except (InvalidTag, ValueError):
         raise InvalidDocument(["wrong passphrase or damaged bundle"]) from None
 
 

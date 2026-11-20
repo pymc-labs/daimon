@@ -291,7 +291,7 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    expected = (unset if server_setup else set()) | {"long_jobs"}
+    expected = (unset if server_setup else set()) | {"long_jobs", "evals"}
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"

@@ -933,10 +933,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "evals",
         "Evals",
-        "People can build eval suites, run agents on them in an enclosed sandbox and review "
-        "the results. Off hides evals and their tools.",
+        "People build and share eval suites. Off hides evals and their tools.",
         tiers=("deployment", "workspace"),
-        binds="turn",
         default="off",
         authority=_ADMIN,
     ),
