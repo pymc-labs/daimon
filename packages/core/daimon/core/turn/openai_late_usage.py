@@ -238,8 +238,9 @@ class DurableRereads:
         self._delays, self._give_up_after, self._reads = tuple(delays_s), give_up_after, reads
         self._take_after, self._budget_s = take_after, budget_s
         self._due: dict[tuple[str, str], tuple[int, datetime]] = {}
-        #: Turns given up on, or whose thread moved: listed still, never read again.
-        self._ended: set[tuple[str, str]] = set()
+        #: Turns given up on, or whose thread moved, by when their usage was seen: listed
+        #: still, never read again.
+        self._ended: dict[tuple[str, str], datetime] = {}
         self._cursor: tuple[str, str, int] | None = None
 
     async def run(
@@ -249,13 +250,17 @@ class DurableRereads:
         from daimon.core.stores import mux_state
         from daimon.core.turn.hosted_codec import OPENAI
 
+        # As long again past giving up, so a give-up during downtime is still logged.
+        seen_since = now - 2 * self._give_up_after
+        # Usage seen before then is skipped, so its keys go (a due time follows its sighting).
+        self._ended = {key: at for key, at in self._ended.items() if at >= seen_since}
+        self._due = {key: due for key, due in self._due.items() if due[1] >= seen_since}
         async with sessionmaker() as db:
             rows = await mux_state.not_final_outbox_for_profiles(
                 db,
                 OPENAI.provider,
                 OPENAI.profiles,
-                # As long again past giving up, so a give-up during downtime is still logged.
-                seen_since=now - 2 * self._give_up_after,
+                seen_since=seen_since,
                 limit=PASS_ROWS,
                 after=self._cursor,
             )
@@ -270,10 +275,12 @@ class DurableRereads:
             key = (row.binding_id, row.observation_id)
             if observation.turn_id is None or key in self._ended:
                 continue
+            if observation.observed_at < seen_since:
+                continue  # a pending row long given up on
             if now - observation.observed_at < self._take_after:
                 continue  # the in-process re-reads come first
             if now - observation.observed_at > self._give_up_after:
-                self._ended.add(key)
+                self._ended[key] = observation.observed_at
                 self._due.pop(key, None)
                 log.warning("openai_late_usage.gave_up", key=":".join(key), durable=True)
                 continue
@@ -297,7 +304,7 @@ class DurableRereads:
                 done = False
             if done:
                 self._due.pop(key, None)
-                self._ended.add(key)
+                self._ended[key] = observation.observed_at
             else:
                 delay = self._delays[min(attempt, len(self._delays) - 1)]
                 self._due[key] = (attempt + 1, now + timedelta(seconds=delay))
