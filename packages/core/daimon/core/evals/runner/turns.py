@@ -1,9 +1,14 @@
 """The production turn port: each item runs as a real turn in the eval tenant.
 
-An item gets its own fork of the arm's agent, a self-hosted eval environment served by its
-own sandbox pod, a channel naming both, the case's people as principals, its recorded memory
-and context, and then turns through the same admit, bind and run path as a chat. Tokens minted
-in its turns carry its id, so the world answers their calls."""
+An item gets its own fork of the arm's agent, its own sandbox pod serving the worker's eval
+environment, a channel naming both, the case's people as principals, its recorded memory and
+context, and then turns through the same admit, bind and run path as a chat. The fork's MCP
+tools are custom tools the worker runs (`runner.tools`); tokens minted in its turns carry its
+id, so the world answers their calls.
+
+Environment keys come only from the provider's console, so a worker has one eval environment
+per backend. Its executor takes whichever session the environment hands out, so items on it
+run one at a time: each holds the environment from its first turn to its close."""
 
 from __future__ import annotations
 
@@ -35,6 +40,14 @@ from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Case, Usage
 from daimon.core.evals.runner.item import TurnRequest
+from daimon.core.evals.runner.tools import (
+    Caller,
+    JsonObject,
+    McpService,
+    custom_tools,
+    daimon_catalogue,
+    item_tools,
+)
 from daimon.core.evals.sandbox.ca import EvalCA
 from daimon.core.evals.sandbox.runtime import (
     PodFile,
@@ -52,11 +65,10 @@ from daimon.core.memory_resource import ensure_memory_store_and_mount
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import (
     archive_agent,
-    archive_environment,
     create_agent,
-    create_environment,
     create_memory,
     retrieve_agent,
+    update_environment,
 )
 from daimon.core.output_delivery import DeliverableFile, sweep_outputs
 from daimon.core.output_runtime import SessionOutput
@@ -64,8 +76,10 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import context_providers, identity, scoped_config_write
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, session_tools_for_policy
 from daimon.core.turn.admission import admit, backend_facts
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.host_tools import host_tools
 from daimon.core.turn.outcomes import observe_turn
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -79,6 +93,8 @@ OUTPUTS_DIR: Final = "/mnt/session/outputs"
 """Where the agent saves files for its reply (the platform prompt names it)."""
 _FORK_FIELDS: Final = ("description", "system", "tools", "skills")
 _EVAL_CONTEXT: Final = "eval://case-context"
+_ENVIRONMENT: Final = "eval-environment"
+"""The Daimon name the worker gives its eval environment in the eval tenant."""
 _BACKEND: Final = "anthropic"
 """The one backend whose live arms run here: its executor serves self-hosted sessions."""
 
@@ -91,6 +107,8 @@ class PodSettings:
     image: str
     ca: EvalCA
     world_url: str
+    #: The worker's self-hosted eval environment; its key is in `executor_config`.
+    environment_id: str
     executor_config: Mapping[str, str] = field(default_factory=dict[str, str])
     passthrough: frozenset[str] = frozenset()
     registries: Literal["passthrough", "deny"] = "deny"
@@ -104,7 +122,8 @@ class _Item:
     surface: EvalSurfaceLifecycle
     name: str
     agent_id: str
-    environment_id: str
+    world_token: str
+    tools: list[JsonObject] = field(default_factory=list[JsonObject])
     pod: PodHandle | None = None
 
 
@@ -153,12 +172,17 @@ def _role(case: Case, person: str) -> Role:
 class EvalTurns:
     """`TurnPort` on the production turn path. `deps` is the worker's own."""
 
-    def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings) -> None:
+    def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings,
+                 mcp: McpService | None = None) -> None:  # fmt: skip
         self.context = CaseContext()
         self.deps = replace(deps, context_providers=ContextProviders(provider=self.context))
         self.world, self.pods = world, pods
+        url, secret = deps.mcp.public_url, deps.mcp.jwt_secret
+        self.mcp = mcp or (McpService(str(url), secret.get_secret_value().encode())
+                           if url is not None and secret is not None else None)  # fmt: skip
         self._items: dict[uuid.UUID, _Item] = {}
-        self._opening: dict[uuid.UUID, asyncio.Lock] = {}
+        self._environment = asyncio.Lock()
+        self._tagged = False
 
     async def raise_card(self, notice: EvalCardNotice) -> None:
         """A card a tool posted in an item's conversation: the script presses it."""
@@ -181,57 +205,89 @@ class EvalTurns:
             return
         self.context.by_channel.pop(item.name, None)
         scope = resource_scope(tenant_id=str(item.tenant_id))
-        client, records = self.deps.anthropic, self.deps.sessionmaker
         steps: list[Awaitable[None]] = [
-            archive_agent(client, item.agent_id, scope=scope, records=records),
-            archive_environment(client, item.environment_id, scope=scope, records=records),
-        ]
+            archive_agent(self.deps.anthropic, item.agent_id, scope=scope,
+                          records=self.deps.sessionmaker),
+        ]  # fmt: skip
         if item.pod is not None:
             steps.insert(0, self.pods.runtime.stop(item.pod))
-        for step in steps:
-            try:
-                await step
-            # Clean-up is best effort: `reap` removes pods left behind, archives can wait.
-            except Exception:
-                log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
+        try:
+            for step in steps:
+                try:
+                    await step
+                # Clean-up is best effort: `reap` removes pods left behind, archives can wait.
+                except Exception:
+                    log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
+        finally:
+            self._environment.release()
 
     async def _open(self, request: TurnRequest) -> _Item:
-        deps, case, arm = self.deps, request.case, request.arm
+        arm = request.arm
         if arm.live is None or arm.live.backend != _BACKEND:
             raise NotImplementedError("the eval runner runs live arms on the anthropic backend")
+        await self._environment.acquire()
+        try:
+            return await self._opened(request)
+        except BaseException:
+            self._items.pop(request.item_id, None)
+            self._environment.release()
+            raise
+
+    async def _opened(self, request: TurnRequest) -> _Item:
+        deps, case, arm = self.deps, request.case, request.arm
+        assert arm.live is not None
         tenant_id = await eval_tenant(deps.sessionmaker)
         scope = resource_scope(tenant_id=str(tenant_id))
         name = f"eval-{request.item_id.hex[:20]}"
-        metadata = build_metadata(tenant_id=tenant_id, name=name,
-                                  account_id=derive_guild_account_uuid(tenant_id))  # fmt: skip
-        environment = await create_environment(deps.anthropic, {
-            "name": name, "config": {"type": "self_hosted"}, "metadata": metadata,
-            "purpose": "eval",
-        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
-        source = await self._source(request)
-        params: dict[str, Any] = source.model_dump(mode="json", include=set(_FORK_FIELDS))
-        tools: list[dict[str, Any]] = params.get("tools") or []
-        agent = await create_agent(deps.anthropic, {
-            **params, "name": name, "metadata": metadata, "purpose": "eval",
-            "model": arm.live.model, "mcp_servers": [],
-            # Provider-dialed MCP servers reach past the enclosure, so the fork has none.
-            "tools": [t for t in tools if t.get("type") != "mcp_toolset"],
-        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
-        item = _Item(tenant_id, case, request.surface, name, agent.id, environment.id)
-        self._items[request.item_id] = item
-        item.pod = await self._pod(request, environment.id)
+        account = derive_guild_account_uuid(tenant_id)
+        metadata = build_metadata(tenant_id=tenant_id, name=name, account_id=account)
         async with deps.sessionmaker.begin() as session:
             # The operator pays for eval turns; each run's cap bounds them.
             await set_funding_mode(session, tenant_id=tenant_id, funding_mode="operator_funded")
-            await scoped_config_write.set_fields(
-                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=name),
-                tenant_id=tenant_id, agent_name=name, environment_name=name,
-            )  # fmt: skip
-            for person in case.surface.participants:
-                await identity.get_or_create_platform_principal(
+            accounts = {
+                person.id: (await identity.get_or_create_platform_principal(
                     session, tenant_id=tenant_id, platform=case.surface.platform,
                     external_id=person.id,
-                )  # fmt: skip
+                )).account_id
+                for person in case.surface.participants
+            }  # fmt: skip
+        if not self._tagged:
+            # Console-made, so untagged: the channel names it like any environment.
+            tag = build_metadata(tenant_id=tenant_id, name=_ENVIRONMENT, account_id=account)
+            await update_environment(deps.anthropic, self.pods.environment_id,
+                                     {"metadata": tag}, scope=scope,
+                                     records=deps.sessionmaker)  # fmt: skip
+            self._tagged = True
+        source = await self._source(request)
+        params: dict[str, Any] = source.model_dump(mode="json", include=set(_FORK_FIELDS))
+        source_tools: list[dict[str, Any]] = params.get("tools") or []
+        requester = accounts.get(request.surface.script.requester)
+        daimon: tuple[JsonObject, ...] = ()
+        if (
+            self.mcp is not None
+            and requester is not None
+            and any(t.get("mcp_server_name") == DAIMON_SERVER_NAME for t in source_tools)
+        ):
+            daimon = await daimon_catalogue(deps.sessionmaker, self.mcp,
+                                            Caller(tenant_id, requester, name))  # fmt: skip
+        trusted = frozenset({DAIMON_SERVER_NAME})
+        gated = session_tools_for_policy(deps.tool_safety, source_tools, trusted_servers=trusted)
+        tools = custom_tools(gated or source_tools, daimon, case)
+        agent = await create_agent(deps.anthropic, {
+            **params, "name": name, "metadata": metadata, "purpose": "eval",
+            "model": arm.live.model, "mcp_servers": [],
+            # Provider-dialed MCP servers reach past the enclosure: the worker runs their tools.
+            "tools": [t for t in source_tools if t.get("type") != "mcp_toolset"] + [
+                {k: v for k, v in t.items() if not k.startswith("_")} for t in tools],
+        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
+        item = _Item(tenant_id, case, request.surface, name, agent.id, request.world_token, tools)
+        self._items[request.item_id] = item
+        item.pod = await self._pod(request)
+        async with deps.sessionmaker.begin() as session:
+            await scoped_config_write.set_fields(
+                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=name),
+                tenant_id=tenant_id, agent_name=name, environment_name=_ENVIRONMENT,
+            )  # fmt: skip
             context = "\n\n".join(c.text for c in (case.agent_context and
                                                     case.agent_context.context) or [])  # fmt: skip
             if context:
@@ -255,7 +311,7 @@ class EvalTurns:
         return await retrieve_agent(self.deps.anthropic, found, scope=scope,
                                     records=self.deps.sessionmaker)  # fmt: skip
 
-    async def _pod(self, request: TurnRequest, environment_id: str) -> PodHandle:
+    async def _pod(self, request: TurnRequest) -> PodHandle:
         pods, case = self.pods, request.case
         world_item = await self.world.item(request.item_id)
         assert world_item is not None, "the item is running"
@@ -264,7 +320,7 @@ class EvalTurns:
                     int(f.mode, 8) if f.mode else 0o644)
             for f in case.world.files or [] if f.path.startswith("/workspace/")
         ]  # fmt: skip
-        executor = {**pods.executor_config, "ANTHROPIC_ENVIRONMENT_ID": environment_id}
+        executor = {**pods.executor_config, "ANTHROPIC_ENVIRONMENT_ID": pods.environment_id}
         spec = PodSpec(
             item=world_item, image=pods.image, executor=_BACKEND, world_url=pods.world_url,
             world_token=request.world_token, ca=pods.ca, executor_config=executor, files=files,
@@ -323,13 +379,22 @@ class EvalTurns:
                 async def reseed() -> str:
                     return message
 
-                await run_prepared_turn(
-                    deps, prepared, tenant_id=item.tenant_id, platform=platform,
-                    thread_id=item.name, external_user_id=requester, user_message=message,
-                    request_text=request.text, lifecycle=request.surface, cancel=request.cancel,
-                    reseed_user_message=reseed, recovery_lifecycle=lambda _: request.surface,
-                    confirm_write=request.surface.confirm,
-                )  # fmt: skip
+                caller = Caller(item.tenant_id, admission.account_id, str(admission.agent.id))
+                tools = item_tools(
+                    deps.sessionmaker, self.mcp, caller, item_id=request.item_id,
+                    world_token=item.world_token, tools=item.tools,
+                ) if self.mcp and item.tools else None  # fmt: skip
+                reset = host_tools.set(tools)
+                try:
+                    await run_prepared_turn(
+                        deps, prepared, tenant_id=item.tenant_id, platform=platform,
+                        thread_id=item.name, external_user_id=requester, user_message=message,
+                        request_text=request.text, lifecycle=request.surface, cancel=request.cancel,
+                        reseed_user_message=reseed, recovery_lifecycle=lambda _: request.surface,
+                        confirm_write=request.surface.confirm,
+                    )  # fmt: skip
+                finally:
+                    host_tools.reset(reset)
         if item.pod is not None:
             await sweep_outputs(PodOutputs(self.pods.runtime, item.pod),
                                 post=lambda f: self._keep(item, f))  # fmt: skip

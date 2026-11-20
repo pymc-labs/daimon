@@ -299,12 +299,19 @@ http://eval-worker:8090. Unset: no sandbox can be enclosed.
 
 Port the eval worker serves its fake world on, on every interface.
 
+### `DAIMON_EVALS__ENVIRONMENT_ID`
+
+`str | None` · optional · default unset
+
+Self-hosted environment eval items run in, made in the provider's console. Items on it
+run one at a time. Unset: live arms cannot run.
+
 ### `DAIMON_EVALS__ENVIRONMENT_KEY`
 
 `SecretStr | None` · optional · default unset · secret
 
-Environment key the eval sandbox's executor polls its self-hosted environment with.
-Unset: live arms cannot run.
+Environment key the eval sandbox's executor polls that environment with. Unset: live
+arms cannot run.
 
 ### `DAIMON_EVALS__SANDBOX_RUNTIME`
 

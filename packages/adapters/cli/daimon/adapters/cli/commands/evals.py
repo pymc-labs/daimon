@@ -651,8 +651,10 @@ def worker(reap_every_s: Annotated[float, typer.Option(min=1)] = 600) -> None:
 async def _work(reap_every_s: float) -> None:
     async with build_runtime(load_settings()) as rt:
         settings, evals = rt.settings, rt.settings.evals
-        if evals.sandbox_image is None or evals.world_url is None or evals.environment_key is None:
-            raise _Failed("set DAIMON_EVALS__SANDBOX_IMAGE, __WORLD_URL and __ENVIRONMENT_KEY")
+        if evals.sandbox_image is None or evals.world_url is None or evals.environment_id is None \
+                or evals.environment_key is None:  # fmt: skip
+            raise _Failed("set DAIMON_EVALS__SANDBOX_IMAGE, __WORLD_URL, __ENVIRONMENT_ID and "
+                          "__ENVIRONMENT_KEY")  # fmt: skip
         artifacts = settings.artifacts and build_artifact_store(settings.artifacts)
         simulator = ModelSimulator(rt.anthropic, rt.sessionmaker, evals.simulator_model,
                                    evals.simulator_effort)  # fmt: skip
@@ -664,7 +666,8 @@ async def _work(reap_every_s: float) -> None:
                                           keys=("eval_package_registries",))  # fmt: skip
         pods = PodSettings(
             runtime=runtime, image=evals.sandbox_image, ca=configured_ca(evals),
-            world_url=evals.world_url, passthrough=frozenset(evals.passthrough_hosts),
+            world_url=evals.world_url, environment_id=evals.environment_id,
+            passthrough=frozenset(evals.passthrough_hosts),
             executor_config={"ANTHROPIC_ENVIRONMENT_KEY": evals.environment_key.get_secret_value()},
             registries=registries(features),
         )  # fmt: skip

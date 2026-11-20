@@ -15,19 +15,27 @@ from typing import Any
 import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, ToolResultBlockParam
+from daimon.core.config import McpSettings
 from daimon.core.confirmation import ConfirmationPrompt
 from daimon.core.evals.access import Subject
+from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
+from daimon.core.evals.chat.events import ChatLog
+from daimon.core.evals.chat.script import ScriptPlayer
+from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
 from daimon.core.evals.runner.item import ItemDeps, TurnRequest
+from daimon.core.evals.runner.tools import McpService
 from daimon.core.evals.runner.turns import EvalTurns, PodSettings
 from daimon.core.evals.runner.worker import run_next
 from daimon.core.evals.runs import RunDraft, RunService
 from daimon.core.evals.sandbox.runtime import CommandResult, PodHandle, PodSpec
 from daimon.core.evals.service import EvalService, SuiteCasePick, SuiteDraft
 from daimon.core.evals.world.dispatch import FakeWorld
+from daimon.core.host_calls import WAKE_SEED, requested_call_card
 from daimon.core.output_delivery import DeliverableFile
 from daimon.core.stores import evals as store
+from daimon.core.stores import host_call_cards, identity
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock, TurnState
 from daimon.testing.builders import plain_turn_deps
 from daimon.testing.eval_world import eval_case
@@ -56,7 +64,8 @@ WORLD = {"exchanges": [{
     "request": {"args": ISSUE}, "response": {"result": {"number": 42}},
     "match": {"mode": "keys", "keys": ["/owner", "/repo"]},
     "effects": [{"verb": "github.issue.create", "target": "github:example/app"}], "kind": "write",
-}]}  # fmt: skip
+}], "mcp_servers": [{"name": "github", "kind": "third_party", "tools": [
+    {"name": "issue_write", "input_schema": {"type": "object"}}]}]}  # fmt: skip
 
 
 class ModelTurns:
@@ -224,14 +233,25 @@ class FakePods:
 
 
 def _provider(source_tenant: uuid.UUID, created: list[dict[str, Any]]) -> MARouter:
-    """Managed agents with the run workspace's default agent: forks and environments are
-    made on request, and each session replies once."""
-    pool = {"ag_src": ma_agent(id="ag_src", name="default", tenant_id=source_tenant).model_dump(
-        mode="json")}  # fmt: skip
+    """Managed agents with the run workspace's default agent, which uses the case's github
+    server, and the worker's untagged eval environment: forks are made on request, and the
+    session calls the fork's issue_write once, then replies."""
+    pool = {
+        "ag_src": ma_agent(id="ag_src", name="default", tenant_id=source_tenant, tools=[
+            {"type": "mcp_toolset", "mcp_server_name": "github", "configs": [],
+             "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}}},
+        ]).model_dump(mode="json"),
+        "env_eval": ma_environment(id="env_eval", name="console").model_dump(mode="json")
+        | {"metadata": {}},
+    }  # fmt: skip
     reply = [
-        {"id": "evt_msg", "type": "agent.message", "processed_at": "2026-01-05T09:15:01Z",
+        {"id": "evt_tool", "type": "agent.custom_tool_use", "processed_at": "2026-01-05T09:15:01Z",
+         "name": "issue_write", "input": ISSUE},
+        {"id": "evt_wait", "type": "session.status_idle", "processed_at": "2026-01-05T09:15:01Z",
+         "stop_reason": {"type": "requires_action", "event_ids": ["evt_tool"]}},
+        {"id": "evt_msg", "type": "agent.message", "processed_at": "2026-01-05T09:15:02Z",
          "content": [{"type": "text", "text": "Opened issue 42. The report is attached."}]},
-        {"id": "evt_idle", "type": "session.status_idle", "processed_at": "2026-01-05T09:15:02Z",
+        {"id": "evt_idle", "type": "session.status_idle", "processed_at": "2026-01-05T09:15:03Z",
          "stop_reason": {"type": "end_turn"}},
     ]  # fmt: skip
     memory = make_fake_memory_store_handler()
@@ -242,14 +262,16 @@ def _provider(source_tenant: uuid.UUID, created: list[dict[str, Any]]) -> MARout
             if rest:
                 return httpx.Response(200, json=pool[rest.strip("/")])
             return list_response([v for k, v in pool.items() if k.startswith(kind[:2])])
-        if rest:
+        if rest and rest.endswith("/archive"):
             created.append({"kind": "archive", "id": rest.split("/")[1]})
             return httpx.Response(200, json=pool[rest.split("/")[1]])
         body = json.loads(request.content)
+        if rest:
+            created.append({"kind": "update", "id": rest.strip("/"), **body})
+            pool[rest.strip("/")] |= body
+            return httpx.Response(200, json=pool[rest.strip("/")])
         created.append({"kind": kind, **body})
-        fields = {"name": body["name"], "metadata": body["metadata"]}
-        made = (ma_agent(id="ag_fork", **fields) if kind == "agents"
-                else ma_environment(id="env_fork", **fields))  # fmt: skip
+        made = ma_agent(id="ag_fork", name=body["name"], metadata=body["metadata"])
         pool[made.id] = made.model_dump(mode="json")
         return httpx.Response(200, json=pool[made.id])
 
@@ -260,15 +282,44 @@ def _provider(source_tenant: uuid.UUID, created: list[dict[str, Any]]) -> MARout
             environment_id=body["environment_id"],
         ).model_dump(mode="json"))  # fmt: skip
 
+    def sent(request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        created.extend({"kind": "event", **e} for e in json.loads(request.content)["events"])
+        return send_events_response()
+
     router = MARouter()
     router.add("GET", r"/v1/(?P<kind>agents|environments)(?P<rest>/[^/]+)?$", handle)
-    router.add("POST", r"/v1/(?P<kind>agents|environments)(?P<rest>/[^/]+/archive)?$", handle)
+    router.add("POST", r"/v1/(?P<kind>agents|environments)(?P<rest>/[^/]+(/archive)?)?$", handle)
     router.add("POST", r"/v1/memory_stores", lambda r, _m: memory(r))
     router.add("POST", r"/v1/sessions$", session)
-    router.add("POST", r"/v1/sessions/[^/]+/events$", lambda _r, _m: send_events_response())
+    router.add("POST", r"/v1/sessions/[^/]+/events$", sent)
     router.add("GET", r"/v1/sessions/[^/]+/events/stream$", lambda _r, _m: sse_response(reply))
     router.add("GET", r"/v1/sessions/[^/]+/events$", lambda _r, _m: list_response(reply))
     return router
+
+
+def _mcp_service(world: FakeWorld) -> McpService:
+    """The deployment's MCP service as the eval route answers: the world, to the world token."""
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        message = json.loads(request.content)
+        if "id" not in message:
+            return httpx.Response(202)
+        result: JsonObject = {}
+        if message["method"] == "tools/call":
+            token = request.headers["authorization"].removeprefix("Bearer ")
+            item = await world.item_for_token(token)
+            assert item is not None and request.url.path == f"/eval-mcp/{item.id}/github"
+            params = message["params"]
+            answer = await world.mcp(item, "github", params["name"], params["arguments"])
+            result = {"content": [{"type": "text", "text": json.dumps(
+                to_document(answer.response))}]}  # fmt: skip
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    async def resolve(_host: str, _port: int) -> str:
+        return "203.0.113.7"
+
+    return McpService("https://mcp.example.com/mcp", b"secret", transport=httpx.MockTransport(
+        handle), resolve=resolve)  # fmt: skip
 
 
 async def test_production_port_when_item_runs_then_fork_pod_turn_and_files_reach_the_chat(
@@ -280,22 +331,31 @@ async def test_production_port_when_item_runs_then_fork_pod_turn_and_files_reach
     turn_deps = plain_turn_deps(anthropic, db_session_factory, defaults_root=tmp_path)
     world, pods = FakeWorld(db_session_factory, None, tmp_path), FakePods()
     settings = PodSettings(runtime=pods, image="sandbox@sha256:0", ca=fixture_ca(),
-                           world_url="http://world", executor_config={"KEY": "k"})  # fmt: skip
-    deps = ItemDeps(db_session_factory, EvalTurns(turn_deps, world, settings), world)
+                           world_url="http://world", environment_id="env_eval",
+                           executor_config={"KEY": "k"})  # fmt: skip
+    turns = EvalTurns(turn_deps, world, settings, _mcp_service(world))
+    deps = ItemDeps(db_session_factory, turns, world)
     item = await run_next(deps)
     assert item and not isinstance(item, bool), "the queued item runs"
     assert item.status == "done", item.error
-    fork, environment = (
-        next(c for c in created if c["kind"] == k) for k in ("agents", "environments")
-    )
     eval_id = str(await eval_tenant(db_session_factory))
+    fork, tag = (next(c for c in created if c["kind"] == k) for k in ("agents", "update"))
     assert fork["metadata"]["daimon_tenant"] == eval_id, "the fork lives in the eval tenant"
     assert fork.get("mcp_servers") in (None, []), "the fork dials no MCP servers"
-    assert environment["config"] == {"type": "self_hosted"}, "its environment is the pod"
+    assert [(t["type"], t["name"]) for t in fork["tools"]] == [("custom", "issue_write")], (
+        "the github toolset is a custom tool the worker runs"
+    )
+    assert (tag["id"], tag["metadata"]["daimon_tenant"]) == ("env_eval", eval_id), (
+        "the worker's environment is named in the eval tenant, not made per item"
+    )
+    assert not any(c["kind"] == "environments" for c in created)
     (spec,) = pods.started
-    assert spec.executor_config == {"KEY": "k", "ANTHROPIC_ENVIRONMENT_ID": "env_fork"}
+    assert spec.executor_config == {"KEY": "k", "ANTHROPIC_ENVIRONMENT_ID": "env_eval"}
     assert pods.stopped == ["pod-1"], "the pod stops when the item ends"
-    assert sum(c["kind"] == "archive" for c in created) == 2, "fork and environment are archived"
+    assert [c["id"] for c in created if c["kind"] == "archive"] == ["ag_fork"]
+    (result,) = (c for c in created if c.get("type") == "user.custom_tool_result")
+    assert result["custom_tool_use_id"] == "evt_tool" and "42" in json.dumps(result["content"])
+    assert [(c.origin, c.tool) for c in item.world_calls or []] == [("recorded", "issue_write")]
     kinds = [e.kind for e in item.chat or []]
     assert kinds == ["message", "reaction_add", "reaction_remove", "message", "file"], kinds
     (output,) = item.outputs or []
@@ -303,3 +363,67 @@ async def test_production_port_when_item_runs_then_fork_pod_turn_and_files_reach
     assert not pods.outputs, "a delivered file leaves the pod's outputs folder"
     run = await runs.status(alex, run_id)
     assert isinstance(run, Run) and run.status == "done", run.status
+
+
+async def test_card_when_script_approves_then_call_is_approved_and_its_wake_queued(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="web", workspace_id="team-c")
+    alex = await identity.get_or_create_platform_principal(db_session, tenant_id=tenant.id,
+                                                           platform="web", external_id="u1")  # fmt: skip
+    created = await host_call_cards.create_card(
+        db_session, tenant_id=tenant.id, origin_id=uuid.uuid4(), requester_account_id=alex.account_id,
+        requester_platform_user_id="u1", platform="web", channel_id="eval-1", thread_id="eval-1",
+        executing_agent_id=uuid.uuid4(), executing_ma_agent_id="ag_fork", agent_name="eval-1",
+        tool_name="issue_write", args_digest="d", reference={"args": ISSUE},
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )  # fmt: skip
+    assert created is not None
+    card_id = f"hcc:{created.row.id}"
+    await host_call_cards.mark_posted(db_session, card_id=created.row.id, message_id=card_id)
+    await db_session.flush()
+    mcp = McpSettings.model_validate(
+        {"public_url": "https://mcp.example.com/mcp", "jwt_secret": "s" * 32}
+    )
+    deps = plain_turn_deps(None, db_session_factory, settings=bare_settings(), mcp=mcp)
+    chat = ChatLog()
+    surface = EvalSurfaceLifecycle(chat, ScriptPlayer(eval_case({}), chat))
+    notice = EvalCardNotice(item_id=uuid.uuid4(), card_id=card_id,
+                            card=requested_call_card(created.row))  # fmt: skip
+    await press_eval_card(deps, tenant.id, surface, notice, is_admin=False)
+    assert [e.kind for e in chat.events] == ["card", "card_update"], "the script pressed it"
+    async with db_session_factory() as session:
+        row = await host_call_cards.get_card(session, tenant_id=tenant.id, card_id=created.row.id)
+    assert row is not None and row.status == "approved"
+    assert len(surface.wakes) == 1, "the approved call waits for the next turn"
+
+
+class WakingTurns:
+    """A turn port whose first turn leaves one approved call's wake."""
+
+    def __init__(self) -> None:
+        self.turns: list[tuple[str, bool]] = []
+
+    async def turn(self, request: TurnRequest) -> Usage:
+        self.turns.append((request.text, request.follow_up))
+        if len(self.turns) == 1:
+
+            async def ran() -> str:
+                return "Ran issue_write."
+
+            request.surface.wakes.append(ran)
+        await request.surface.on_terminal_success(TurnState(content=[TextBlock("text", "Ok.")]))
+        return Usage(cost_usd=0.01)
+
+    async def close(self, item_id: uuid.UUID) -> None:
+        return None
+
+
+async def test_wake_when_a_call_was_approved_then_it_runs_as_the_next_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    await _start(db_session, db_session_factory, repeats=1)
+    turns, world = WakingTurns(), FakeWorld(db_session_factory, None, tmp_path)
+    item = await run_next(ItemDeps(db_session_factory, turns, world))
+    assert item and not isinstance(item, bool) and item.status == "done", item
+    assert turns.turns[1:] == [(f"Ran issue_write.\n\n{WAKE_SEED}", True)], turns.turns
