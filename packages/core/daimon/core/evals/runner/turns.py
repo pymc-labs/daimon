@@ -96,7 +96,7 @@ from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
-from mux.drivers.gemini.core import self_hosted_id
+from mux.drivers.gemini import self_hosted_id
 from mux.profiles import CONTROL_PLANE_HOSTS, get_profile
 
 log = structlog.get_logger()

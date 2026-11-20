@@ -27,9 +27,14 @@ from daimon.core.turn.runtimes import RuntimeFactory
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, Environment, EnvironmentSpec, ToolSpec
-from mux.drivers.gemini import GeminiManagedAgents, configured_transport
-from mux.drivers.gemini.core import self_hosted_id
-from mux.drivers.gemini.transport import EnvironmentTransport, SelfHostedTransport, Transport
+from mux.drivers.gemini import (
+    EnvironmentTransport,
+    GeminiManagedAgents,
+    SelfHostedTransport,
+    Transport,
+    configured_transport,
+    self_hosted_id,
+)
 from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
