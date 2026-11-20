@@ -370,7 +370,11 @@ class _Walk:
                 case TransformNode():
                     outcome = Succeeded(output=render(dict(node.set), context, now=now))
                 case FinishNode():
-                    outcome = Succeeded(output=render(node.output, context, now=now))
+                    output = render(node.output, context, now=now)
+                    if node.deliver is not None:
+                        # A delivery whose templates fail fails the Finish, before any post.
+                        render(node.deliver.model_dump(), context, now=now)
+                    outcome = Succeeded(output=output)
         except ExpressionError as err:
             outcome = Failed("fatal", str(err))
         self.complete(step, outcome)

@@ -20,7 +20,7 @@ from daimon.core.config import Settings
 from daimon.core.stores import security_audit, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
-from daimon.core.workflows import engine
+from daimon.core.workflows import delivery, engine
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.lanes import lane_key
@@ -245,6 +245,7 @@ async def _apply(
             ended_at=now,
         )
         await workflow_runs.close_waits(session, status="cancelled", now=now, run_id=run.id)
+        events += await _queue_posts(session, loaded, end, [_view(r) for r in rows])
     else:
         projected = engine.project_status([_view(r) for r in rows])
         status, reason = projected or ("running", None)
@@ -281,6 +282,33 @@ async def _apply(
     if any(r.status == "ready" for r in rows):
         await _notify(session, READY_CHANNEL, str(run.id))
     await _notify(session, run_channel(run.tenant_id), str(run.id))
+
+
+async def _queue_posts(
+    session: AsyncSession, loaded: Loaded, end: RunEnd, views: list[StepView]
+) -> list[Event]:
+    """The Finish's post on success, the owner's notice on a failure."""
+    run, wf, spec = loaded.run, loaded.workflow, loaded.spec
+    if end.status == "succeeded":
+        node_id = next((v.node_id for v in views if v.key == end.step), None)
+        queued = (
+            None
+            if node_id is None
+            else await delivery.queue_finish(
+                session,
+                run=run,
+                workflow=wf,
+                spec=spec,
+                steps=views,
+                facts=loaded.facts,
+                node_id=node_id,
+            )
+        )
+    else:
+        queued = await delivery.queue_failure_notice(
+            session, run=run, workflow=wf, spec=spec, end=end
+        )
+    return [] if queued is None else [queued]
 
 
 async def _notify(session: AsyncSession, channel: str, payload: str) -> None:

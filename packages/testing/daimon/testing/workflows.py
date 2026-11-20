@@ -10,6 +10,7 @@ from typing import Any
 from daimon.core._models import Tenant
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import workflow_runs, workflows
+from daimon.core.stores.domain import Platform
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.workflows import engine, runs
 from daimon.core.workflows.ledger import verify
@@ -100,16 +101,25 @@ async def make_world(
     db_session: AsyncSession,
     nodes: dict[str, Any],
     start: str,
+    *,
+    platform: Platform = "discord",
+    home: str | None = None,
     **settings: Any,  # noqa: ANN401 - WorkflowSettings fields
 ) -> World:
-    tenant = await make_tenant(db_session)
+    tenant = await make_tenant(db_session, platform=platform)
     owner = await make_account(db_session, tenant=tenant)
     await db_session.execute(
         update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
     )
-    spec = {"schema": "daimon.workflow/v1", "name": "T", "start": start, "nodes": nodes}
+    spec: dict[str, Any] = {"schema": "daimon.workflow/v1", "name": "T", "start": start}
+    spec |= {"nodes": nodes} | ({"home": {"channel": home}} if home else {})
     flow = await workflows.create_workflow(
-        db_session, tenant_id=tenant.id, owner_account_id=owner.id, name="T", spec=spec
+        db_session,
+        tenant_id=tenant.id,
+        owner_account_id=owner.id,
+        name="T",
+        spec=spec,
+        home_channel_id=home,
     )
     await workflows.publish_version(
         db_session,

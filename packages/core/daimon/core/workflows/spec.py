@@ -201,6 +201,8 @@ class WorkflowNode(_Flow):
 class Deliver(_Model):
     to: str
     message: str | None = None
+    #: File refs to attach, such as `${{ steps.report.files }}` (at most 10).
+    files: Template = None
 
 
 class FinishNode(_Base):

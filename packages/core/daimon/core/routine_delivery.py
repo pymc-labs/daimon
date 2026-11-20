@@ -26,13 +26,12 @@ Platform SDKs may retry a single send after a server error or connection reset.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Final, Literal
 
 import structlog
@@ -58,6 +57,16 @@ from daimon.core.channel_audience import requester_standing
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.delivery import (
+    DELIVERY_LEASE,
+    DELIVERY_POLL_INTERVAL_S,
+    DeliveryOutcome,
+    JobPoster,
+    RoutinePoster,
+    WorkflowPoster,
+    poll_once,
+    run_poller,
+)
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import attribution_line, render_post
@@ -72,11 +81,9 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
-    claim_routine_deliveries,
     queue_failure_notice,
     record_result,
     routine_platform,
-    settle_routine_delivery,
 )
 from daimon.core.stores.routines import (
     OWNER_LACKS_ROLE_ERROR as OWNER_LACKS_ROLE_ERROR,
@@ -120,9 +127,6 @@ __all__ = [
 ]
 
 log = structlog.get_logger(__name__)
-
-DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
-DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 
 #: daimon's own posting tool: a call to it naming the destination is the
 #: agent delivering the result itself.
@@ -899,20 +903,6 @@ async def tenant_dm_still_open(
         )
 
 
-@dataclass(frozen=True)
-class DeliveryOutcome:
-    status: Literal["delivered", "skipped"]
-    #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
-    #: creator by direct message instead of the destination.
-    note: str | None = None
-
-
-#: The adapter hook: post `row`'s result (or refuse) and say what happened.
-#: It is responsible for resolving the destination on its platform and for
-#: calling `delivery_refusal` with what it resolved.
-RoutinePoster = Callable[[RoutineRow], Awaitable[DeliveryOutcome]]
-
-
 async def poll_deliveries_once(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -922,51 +912,10 @@ async def poll_deliveries_once(
     owner: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> int:
-    """Claim due posts for `platform`, post each, settle. Returns how many."""
-    lease_owner = owner or f"{platform}:{uuid.uuid4()}"
-    async with sessionmaker() as session, session.begin():
-        claimed = await claim_routine_deliveries(
-            session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
-        )
-    for row in claimed:
-        payload = decode_payload(payload_for(row))
-        if not (payload.text.strip() or payload.files):
-            outcome = DeliveryOutcome(status="skipped", note="no_result")
-        else:
-            try:
-                outcome = await post(row)
-            except Exception as err:
-                # Named boundary: the poster is adapter code talking to a chat
-                # API. Settling `skipped` (not back to pending) keeps delivery
-                # at most once — a failure may have landed after the post.
-                log.warning(
-                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
-                )
-                outcome = DeliveryOutcome(
-                    status="skipped",
-                    note=(
-                        "File delivery failed or was interrupted; it will not be retried."
-                        if payload.files
-                        else "post_failed"
-                    ),
-                )
-        async with sessionmaker() as session, session.begin():
-            settled = await settle_routine_delivery(
-                session,
-                row.id,
-                owner=lease_owner,
-                status=outcome.status,
-                note=outcome.note,
-                now=datetime.now(UTC) if clock is None else clock(),
-            )
-        log.info(
-            "routine.delivery_settled",
-            routine_id=str(row.id),
-            status=outcome.status,
-            note=outcome.note,
-            settled=settled,
-        )
-    return len(claimed)
+    """Claim due routine posts for `platform`, post each, settle. Returns how many."""
+    return await poll_once(
+        sessionmaker, platform=platform, post=JobPoster(post), now=now, owner=owner, clock=clock
+    )
 
 
 async def run_delivery_poller(
@@ -976,14 +925,13 @@ async def run_delivery_poller(
     post: RoutinePoster,
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
+    workflow: WorkflowPoster | None = None,
 ) -> None:
-    """Poll until `should_stop`, one `poll_deliveries_once` per interval."""
-    owner = f"{platform}:{uuid.uuid4()}"
-    while not should_stop():
-        try:
-            await poll_deliveries_once(
-                sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
-            )
-        except Exception:
-            log.exception("routine.delivery_poll_failed", platform=platform)
-        await asyncio.sleep(interval_s)
+    """Poll routine posts, and workflow posts with `workflow`, until `should_stop`."""
+    await run_poller(
+        sessionmaker,
+        platform=platform,
+        post=JobPoster(post, workflow),
+        should_stop=should_stop,
+        interval_s=interval_s,
+    )

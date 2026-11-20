@@ -731,6 +731,23 @@ async def count_active_runs(session: AsyncSession, *, workflow_id: uuid.UUID) ->
     )
 
 
+async def previous_end(
+    session: AsyncSession, *, workflow_id: uuid.UUID, before: uuid.UUID
+) -> str | None:
+    """How the workflow's last other ended live run ended (cancelled runs left out)."""
+    return await session.scalar(
+        select(WorkflowRun.status)
+        .where(
+            WorkflowRun.workflow_id == workflow_id,
+            WorkflowRun.id != before,
+            WorkflowRun.mode == "live",
+            WorkflowRun.status.in_(("succeeded", "failed", "timed_out")),
+        )
+        .order_by(WorkflowRun.ended_at.desc().nulls_last(), WorkflowRun.number.desc())
+        .limit(1)
+    )
+
+
 async def queued_runs(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
     rows = await session.scalars(
         select(WorkflowRun.id)
