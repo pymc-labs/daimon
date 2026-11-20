@@ -151,14 +151,27 @@ async def test_ask_reviewer_in_a_thread_refuses_strangers(db_session: AsyncSessi
     thread = f"{HOME};messageid={post.message_id}"
     assert (post.thread_id, post.addressee_account_id) == (thread, None), post
 
-    runtime, tenant = _runtime(world), world.tenant_id
-    elsewhere = _reply("aad-2", f"{HOME};messageid=1", "lunch?")
-    assert await workflow_asks.claim_inbound(runtime, elsewhere, tenant) is None
-    refused = await workflow_asks.claim_inbound(runtime, _reply("aad-9", thread, "ok"), tenant)
-    assert refused is not None and refused.status == "refused", refused
-    answered = await workflow_asks.claim_inbound(
-        runtime, _reply("aad-2", thread, "Ship it"), tenant
+    sender = OfflineTeamsSender(
+        SurfaceRecorder(
+            evidence_id="wf",
+            destination_id=thread,
+            thread_id=None,
+            clock=time.monotonic,
+            decode=decode,
+        ),
+        service_url=SERVICE_URL,
     )
-    assert answered is not None and answered.status == "answered", answered
+
+    async def claims(user: str, where: str, text: str) -> bool:
+        reply = _reply(user, where, text)
+        return await workflow_asks.claim_inbound(
+            _runtime(world), reply, world.tenant_id, cast(TeamsSender, sender)
+        )
+
+    assert not await claims("aad-2", f"{HOME};messageid=1", "lunch?"), "other threads are chat"
+    assert await claims("aad-9", thread, "ship it")
+    [refusal] = sender.recorder.surviving_messages()
+    assert "Ask " in str(refusal), refusal
+    assert await claims("aad-2", thread, "Ship it")
     output = (await world.steps(run.id))["f"].output
     assert isinstance(output, dict) and output["text"] == "Ship it", output

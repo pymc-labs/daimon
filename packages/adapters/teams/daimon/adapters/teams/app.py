@@ -1117,18 +1117,8 @@ class TeamsApp:
         self.spawn(self._answer_or_admit(parsed), name="teams.turn")
 
     async def _answer_or_admit(self, parsed: TeamsInbound) -> None:
-        claimed = await workflow_asks.claim_inbound(self.runtime, parsed, self._tenant_id)
-        if claimed is not None:
-            if claimed.text is not None:
-                card = notice_card(claimed.text, error=claimed.status == "refused")
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await asyncio.wait_for(
-                        self._sender.send(
-                            parsed.conversation_id, card, service_url=parsed.service_url
-                        ),
-                        SEND_TIMEOUT_S,
-                    )
-            return
+        if await workflow_asks.claim_inbound(self.runtime, parsed, self._tenant_id, self._sender):
+            return  # a workflow ask's answer, not a turn
         if not self._ignored_unprompted(parsed):
             await self._admit(parsed)
 

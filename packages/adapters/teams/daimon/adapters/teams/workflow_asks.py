@@ -9,12 +9,16 @@ checks the person against the ask.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
+from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import card_actor, submitted_fields, toast
 from daimon.adapters.teams.identity import TeamsInbound
+from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S, TEAMS_SEND_ERRORS, TeamsSender
 from daimon.core.workflows import answers, waits
 from microsoft_teams.cards import (
     ActionSet,
@@ -110,14 +114,14 @@ class AskActions:
 
 
 async def claim_inbound(
-    runtime: TeamsRuntime, parsed: TeamsInbound, tenant_id: uuid.UUID
-) -> answers.Claimed | None:
-    """The ask a channel-thread reply answers, decided; None for ordinary chat.
+    runtime: TeamsRuntime, parsed: TeamsInbound, tenant_id: uuid.UUID, sender: TeamsSender
+) -> bool:
+    """Answer an ask with a reply in a channel thread it opened. True when no turn follows.
 
     Personal chats have no threads, so an ask sent by DM is answered on its card."""
     if parsed.kind != "channel" or ";messageid=" not in parsed.conversation_id:
-        return None
-    return await answers.claim_reply(
+        return False
+    claimed = await answers.claim_reply(
         runtime.sessionmaker,
         runtime.settings,
         answers.Reply(
@@ -129,3 +133,13 @@ async def claim_inbound(
             thread_id=parsed.conversation_id,
         ),
     )
+    if claimed is None:
+        return False
+    if claimed.text is not None:
+        card = notice_card(claimed.text, error=claimed.status == "refused")
+        with contextlib.suppress(*TEAMS_SEND_ERRORS):
+            await asyncio.wait_for(
+                sender.send(parsed.conversation_id, card, service_url=parsed.service_url),
+                SEND_TIMEOUT_S,
+            )
+    return True
