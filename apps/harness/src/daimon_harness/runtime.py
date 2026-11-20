@@ -245,7 +245,9 @@ class TurnContext:
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
                 # Model and harness credentials must not be visible in child processes.
+                # An eval pod passes the agent's own environment (case vars, CA, clock).
                 env={
+                    **json.loads(os.environ.get("HARNESS_TOOL_ENV", "{}")),
                     "HOME": str(self.work),
                     "TMPDIR": str(self.home / "tmp"),
                     "PYTHONUSERBASE": str(self.work / ".local"),

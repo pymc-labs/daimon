@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final, cast
 
@@ -120,7 +120,8 @@ def _strings(value: object) -> dict[str, str]:
     )
 
 
-def _agent_profile(pod: dict[str, object]) -> str:
+def agent_env(pod: dict[str, object], now: float) -> dict[str, str]:
+    """The agent's environment: the case's variables, the eval CA and the case clock."""
     env = {
         "PATH": SYSTEM_PATH,
         "LANG": "C.UTF-8",
@@ -128,14 +129,20 @@ def _agent_profile(pod: dict[str, object]) -> str:
         "HOME": "/home/agent",
         "USER": "agent",
         **CA_VARS,
+        **_strings(pod.get("agent_env")),  # names checked by the host's `main_config`
     }
-    env.update(_strings(pod.get("agent_env")))
     clock = pod.get("clock")
-    libs = glob.glob("/usr/lib/*/faketime/libfaketime.so.1")
     if clock:
+        libs = glob.glob("/usr/lib/*/faketime/libfaketime.so.1")
         if not libs:
             raise SystemExit("a case clock needs libfaketime")
-        env |= {"LD_PRELOAD": libs[0], "FAKETIME": f"@{clock}", "FAKETIME_DONT_RESET": "1"}
+        start = datetime.strptime(str(clock), "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+        # An offset, so the case clock runs on from the pod's start in every process.
+        env |= {"LD_PRELOAD": libs[0], "FAKETIME": f"{int(start.timestamp() - now):+d}"}
+    return env
+
+
+def _profile(env: dict[str, str]) -> str:
     exports = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in env.items())
     return f"umask 002\n{exports}"
 
@@ -172,14 +179,17 @@ def _main() -> None:
     Path("/usr/local/share/ca-certificates/daimon-eval.crt").write_bytes(ca.read_bytes())
     subprocess.run(["update-ca-certificates"], check=True, capture_output=True)
     pod = json.loads((MAIN_DIR / "pod.json").read_text())
+    agent = agent_env(pod, time.time())
     profile = STATE_DIR / "agent.sh"
-    profile.write_text(_agent_profile(pod))
+    profile.write_text(_profile(agent))
     profile.chmod(0o644)
     executor = str(pod["executor"])
     env = {**EXEC_ENV, **_strings(pod.get("exec_env"))}
     argv = executor_argv(executor, env)
-    if executor == "selfhosted":  # the harness runs as root and drops each tool to its own uid
-        env |= {"HOME": "/root"}
+    if executor == "selfhosted":
+        # The harness runs as root and drops each tool to its own uid; its tools get the
+        # agent's environment, and no agent wrapper, which only the executor uid may run.
+        env |= {"HOME": "/root", "PATH": SYSTEM_PATH, "HARNESS_TOOL_ENV": json.dumps(agent)}
         command = argv
     else:
         env |= {"HOME": "/home/exec", "USER": "exec"}
@@ -209,14 +219,14 @@ def manifest() -> dict[str, list[str]]:
 def main() -> None:
     role = sys.argv[1] if len(sys.argv) > 1 else ""
     if role == "net":
-        netinit.apply()
+        netinit.apply(GATEWAY_DIR / "config.json")
         gateway = [sys.executable, "-m", "daimon_eval_sandbox", "gateway"]
         os.execvp(
             "setpriv",
             [*_drop(GATEWAY_UID, groups="", bounding="-all", no_new_privs=True), *gateway],
         )
     elif role == "init":
-        netinit.apply()
+        netinit.apply(GATEWAY_DIR / "config.json")
     elif role == "gateway":
         _gateway()
     elif role == "main":

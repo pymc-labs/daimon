@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import os
+import shlex
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -31,6 +36,50 @@ def _bridge_gateway() -> str:
         capture_output=True, text=True, check=True,
     )  # fmt: skip
     return found.stdout.strip()
+
+
+#: The executor's environment in a pod (`daimon_eval_sandbox.__main__.EXEC_ENV`).
+_EXEC_ENV = {
+    "PATH": "/opt/eval/agent-bin:/opt/venv/bin:/usr/local/bin:/usr/bin:/bin",
+    "SHELL": "/opt/eval/agent-bin/bash",
+    "HOME": "/home/exec",
+}
+_LISTENER = (
+    "import socket\ns = socket.create_server(('0.0.0.0', 443))\n"
+    "while True:\n    c, _ = s.accept(); c.sendall(b'REAL-WORLD'); c.close()\n"
+)
+_RAW_TCP = (
+    "import socket, sys\nc = socket.create_connection((sys.argv[1], 443), timeout=10)\n"
+    "c.sendall(b'\\x00\\x01not-http')\nprint(c.recv(64))\n"
+)
+
+
+@contextmanager
+def _real_host() -> Iterator[str]:
+    """A host on the Docker bridge that answers raw TCP on 443, as the real world would."""
+    started = subprocess.run(
+        ["docker", "run", "-d", "--rm", "--entrypoint", "/usr/local/bin/python3", IMAGE,
+         "-c", _LISTENER],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    container = started.stdout.strip()
+    try:
+        found = subprocess.run(
+            ["docker", "inspect", container, "-f", "{{.NetworkSettings.IPAddress}}"],
+            capture_output=True, text=True, check=True,
+        )  # fmt: skip
+        yield found.stdout.strip()
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
+
+
+def _as_executor(pod: str, *argv: str) -> str:
+    env = [arg for name, value in _EXEC_ENV.items() for arg in ("-e", f"{name}={value}")]
+    done = subprocess.run(
+        ["docker", "exec", "-u", "exec", "-w", "/workspace", *env, f"{pod}-main", *argv],
+        capture_output=True, text=True, timeout=300,
+    )  # fmt: skip
+    return done.stdout + done.stderr
 
 
 async def test_pod_reaches_only_the_world(
@@ -73,7 +122,19 @@ async def test_pod_reaches_only_the_world(
             assert cloned == (0, "hello\n"), f"the case repository clones: {cloned}"
             raw = await run("timeout 10 bash -c 'echo > /dev/tcp/192.0.2.1/22'")
             assert raw[0] != 0, "a raw TCP connection is refused"
+            with _real_host() as host:
+                relayed = await run(f"python3 -c {shlex.quote(_RAW_TCP)} {host}")
+            assert "REAL-WORLD" not in relayed[1], f"raw TCP on 443 never leaves: {relayed}"
             assert (await run("id -u"))[1].strip() == "10001", "commands run as the agent"
+            await run("ln -s /run/eval/main /workspace/out")
+            leaked = await runtime.files(pod, "/workspace/out")
+            assert not leaked, f"files are read with the agent's rights: {leaked}"
+            verdicts = await asyncio.to_thread(
+                _as_executor, pod.id, "/opt/venv/bin/python", "-m", "daimon_eval_sandbox",
+                "probe", "isolation",
+            )  # fmt: skip
+            failed = {k: v for k, v in json.loads(verdicts).items() if v != "pass"}
+            assert not failed, f"every executor command path runs as the agent: {verdicts}"
         except AssertionError as exc:
             raise AssertionError(f"{exc}\n{await runtime.logs(pod.id)}") from exc
         finally:
