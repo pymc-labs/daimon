@@ -31,7 +31,7 @@ from daimon.testing.eval_world import eval_case
 
 
 @cache
-def _ca() -> EvalCA:
+def fixture_ca() -> EvalCA:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
@@ -43,7 +43,7 @@ def _spec(**extra: object) -> PodSpec:
     item = ItemRef(uuid.uuid4(), uuid.uuid4(), eval_case({}), "0" * 64)
     fields: dict[str, object] = {
         "item": item, "image": "img@sha256:1", "executor": "anthropic", "world_url": "http://w",
-        "world_token": "wt", "ca": _ca(), **extra,
+        "world_token": "wt", "ca": fixture_ca(), **extra,
     }  # fmt: skip
     return PodSpec(**fields)  # type: ignore[arg-type]
 
@@ -93,7 +93,7 @@ def test_workspace_files_land_as_the_agent_and_end_with_the_ready_marker() -> No
 
 
 def test_eval_ca_is_stable_and_covers_past_clocks() -> None:
-    cert = x509.load_pem_x509_certificate(_ca().cert_pem)
+    cert = x509.load_pem_x509_certificate(fixture_ca().cert_pem)
     assert cert.not_valid_before_utc <= datetime(2001, 1, 1, tzinfo=UTC), "valid for past clocks"
     constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
     assert constraints.ca, "it is a CA"

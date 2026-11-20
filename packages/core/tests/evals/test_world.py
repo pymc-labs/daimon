@@ -106,7 +106,7 @@ async def test_simulated_github_answer_when_invalid_twice_then_denied(
     assert "number" in problem, f"the retry is told what was wrong: {problem}"
 
 
-def _bundle(tmp_path: Path) -> bytes:
+def repo_bundle(tmp_path: Path) -> bytes:
     repo = tmp_path / "source"
     git = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com"]
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -119,9 +119,9 @@ def _bundle(tmp_path: Path) -> bytes:
 
 
 @asynccontextmanager
-async def _serve(world: FakeWorld) -> AsyncIterator[str]:
+async def serve_world(world: FakeWorld, host: str = "127.0.0.1") -> AsyncIterator[str]:
     config = uvicorn.Config(
-        create_world_app(world), host="127.0.0.1", port=0, log_level="error", ws="none"
+        create_world_app(world), host=host, port=0, log_level="error", ws="none"
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
@@ -148,7 +148,7 @@ async def _git(*args: str, cwd: Path | None = None) -> str:
 async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    content = _bundle(tmp_path)
+    content = repo_bundle(tmp_path)
     world = FakeWorld(db_session_factory, None, tmp_path / "world")
     tenant = await make_tenant(db_session, platform="web")
     sha = hashlib.sha256(content).hexdigest()
@@ -160,7 +160,7 @@ async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     case = eval_case({"repos": [repo]})
     ids = [await make_running_item(db_session, tenant.id, case) for _ in range(2)]
     tokens = [await issue_world_token(db_session, i) for i in ids]
-    async with _serve(world) as base:
+    async with serve_world(world) as base:
 
         def url(n: int) -> list[str]:
             header = f"http.extraHeader=Authorization: Bearer {tokens[n]}"
