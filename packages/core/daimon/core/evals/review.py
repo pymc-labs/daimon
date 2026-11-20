@@ -10,36 +10,40 @@ same way. There is no skip: a task left alone is offered again once its reservat
 
 from __future__ import annotations
 
-import random
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from hashlib import sha256
 from typing import Final, Literal
 
 from daimon.core.evals.access import Subject
 from daimon.core.evals.blind import (
+    CaseView,
     arm_labels,
     arm_names,
     blind_item_view,
+    blind_pool,
+    blind_ref,
+    case_view,
     handle,
     is_blind,
     mask_document,
+    mask_text,
+    opaque_id,
+    real_ref,
+    roll,
 )
 from daimon.core.evals.format import (
     Anchor,
     Arm,
     Case,
-    ChatMessage,
     Comment,
     Grader,
     ItemPair,
     JsonObject,
     PrincipalRef,
-    Reference,
     ReviewQueue,
     RubricScale,
     Run,
@@ -103,17 +107,6 @@ class Criterion(_Out):
     question: str
     kind: Literal["binary", "scale", "overall", "preference"]
     scale: RubricScale | None = None
-
-
-class CaseView(_Out):
-    """The part of a case a reviewer needs; never its world, provenance or expectations."""
-
-    id: str
-    title: str
-    platform: str
-    history: list[ChatMessage]
-    turn: list[ChatMessage]
-    reference: Reference | None
 
 
 class TaskColumn(_Out):
@@ -186,37 +179,38 @@ class _Unit:
 
 
 def _units(
-    queue: ReviewQueue, salt: str, run_arms: Sequence[str], index: Sequence[store.ItemIndexRow]
+    queue: ReviewQueue,
+    secret: str,
+    run_arms: Sequence[str],
+    index: Sequence[store.ItemIndexRow],
+    *,
+    blind: bool,
 ) -> list[_Unit]:
-    """The queue's tasks. A blind queue takes only repeats every arm it covers finished, so
-    which repeats exist never tells live arms from recorded ones."""
+    """The queue's tasks. A blind reader takes only repeats every arm the queue covers
+    finished, so which repeats exist never tells live arms from recorded ones."""
     arms = set(queue.arms or run_arms)
-    live = [i for i in index if i.status == "done" and i.arm_key in arms]
+    live = blind_pool(index, arms) if blind else [
+        i for i in index if i.status == "done" and i.arm_key in arms
+    ]  # fmt: skip
     groups: dict[tuple[str, int], list[store.ItemIndexRow]] = defaultdict(list)
     for i in live:
         groups[(i.case_key, i.repeat)].append(i)
-    if queue.blind:
-        groups = {k: g for k, g in groups.items() if {i.arm_key for i in g} == arms}
     if queue.layout == "single":
         return [
-            _Unit(handle(salt, i.key), i.case_key, i.repeat, (i.key,))
+            _Unit(handle(secret, "unit", i.key), i.case_key, i.repeat, (i.key,))
             for g in groups.values()
             for i in g
         ]
     return [
-        _Unit(handle(salt, f"{case}{_SEP}{repeat}"), case, repeat, tuple(i.key for i in g))
+        _Unit(handle(secret, "unit", case, str(repeat)), case, repeat, tuple(i.key for i in g))
         for (case, repeat), g in groups.items()
         if len(g) >= 2
     ]
 
 
-def _comment_prefix(queue_ref: str) -> str:
+def _comment_prefix(secret: str, queue_ref: str) -> str:
     """Comments made in a queue carry this in their id, so a blind task shows only those."""
-    return f"c-{handle(queue_ref, 'comments')[2:14]}-"
-
-
-def _roll(*parts: str) -> random.Random:
-    return random.Random(int(sha256("|".join(parts).encode()).hexdigest(), 16))
+    return f"c-{handle(secret, 'comments', queue_ref)[2:14]}-"
 
 
 def _criteria(queue: ReviewQueue, case: Case, columns: int) -> list[Criterion]:
@@ -273,7 +267,7 @@ class _Column:
     item: RunItem
     arm: Arm
     opaque_id: str
-    """The item's row id: what the blind item view and blind anchors use."""
+    """The item's id in this queue's tasks: what the blind item view and blind anchors use."""
 
 
 def _reviewer(actor: Subject, by: By) -> str:
@@ -300,10 +294,14 @@ class ReviewService:
         await self._evals.check_on(actor)
         async with self._sessions() as session, session.begin():
             run, _ = await self._evals.run_access(session, actor, run_id, "edit")
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             shown = Run.model_validate(run.document)
             unknown = [a for a in draft.arms or [] if a not in {x.id for x in shown.arms}]
             if unknown:
                 raise EvalRefused(f"The run has no arm {', '.join(unknown)}.")
+            names = arm_names(shown)
+            if mask_text(f"{draft.id}\n{draft.name}", names) != f"{draft.id}\n{draft.name}":
+                raise EvalRefused("A queue's id and name can't name an arm, an agent or a model.")
             queue = ReviewQueue(
                 id=draft.id, name=draft.name, layout=draft.layout, blind=draft.blind,
                 arms=draft.arms, criteria=draft.criteria,
@@ -313,25 +311,27 @@ class ReviewService:
             row = await store.put_queue(
                 session, tenant_id=actor.tenant_id, run_id=run.id, document=to_document(queue)
             )
-            return await self._view(session, run, row, blind=False)
+            return await self._view(session, run, row, secret, blind=False)
 
     async def queues(self, actor: Subject, run_id: str) -> list[QueueView]:
         """The run's queues the actor may work or manage; a reviewer sees arms as labels."""
         await self._evals.check_on(actor)
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
             run, role = await self._evals.run_access(session, actor, run_id, "review")
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             views: list[QueueView] = []
             for row in await store.queues_of_run(session, run_id=run.id):
                 queue = ReviewQueue.model_validate(row.document)
                 if role in ("editor", "owner") or await self._may_review(actor, queue):
-                    views.append(await self._view(session, run, row, blind=is_blind(role)))
+                    views.append(await self._view(session, run, row, secret, blind=is_blind(role)))
             return views
 
     async def my_queues(self, actor: Subject) -> list[QueueView]:
         """Open queues across the workspace that the actor may review, as a reviewer sees them:
         every run they review, and queues that name them or a group they are in."""
         await self._evals.check_on(actor)
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             views: list[QueueView] = []
             roles: dict[str, str | None] = {}
             for run, row in await store.queues_of_tenant(session, tenant_id=actor.tenant_id):
@@ -347,7 +347,7 @@ class ReviewService:
                         roles[run.key] = None
                 role = roles[run.key]
                 if role is not None:
-                    views.append(await self._view(session, run, row, blind=is_blind(role)))
+                    views.append(await self._view(session, run, row, secret, blind=is_blind(role)))
             return views
 
     async def _may_review(self, actor: Subject, queue: ReviewQueue) -> bool:
@@ -359,19 +359,20 @@ class ReviewService:
         return bool(wanted and await actor.groups(wanted))
 
     async def _view(
-        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow, *, blind: bool
-    ) -> QueueView:
+        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow, secret: str,
+        *, blind: bool,
+    ) -> QueueView:  # fmt: skip
         queue = ReviewQueue.model_validate(row.document)
         shown = Run.model_validate(run.document)
         ref = _ref(run.key, row.key)
         index = await store.item_index(session, run_id=run.id)
-        units = _units(queue, ref, [a.id for a in shown.arms], index)
+        units = _units(queue, secret, [a.id for a in shown.arms], index, blind=blind or queue.blind)
         need = queue.reviewers_per_item or 1
         done: dict[str, int] = defaultdict(int)
         for a in await store.assignments_of(session, queue_id=row.id):
             done[a.item_key] += a.done_at is not None
         if blind and queue.arms:
-            labels = arm_labels(shown)
+            labels = arm_labels(shown, secret)
             queue = queue.model_copy(update={"arms": [labels.get(a, "Arm") for a in queue.arms]})
         return QueueView(
             ref=ref, run_id=run.key, queue=queue, total=len(units),
@@ -387,14 +388,16 @@ class ReviewService:
         reviewer = _reviewer(actor, by)
         now = self._clock()
         async with self._sessions() as session, session.begin():
-            run, _ = await self._evals.run_access(session, actor, run_key, "review")
+            run, role = await self._evals.run_access(session, actor, run_key, "review")
             row = await store.queue_by_key(session, run_id=run.id, key=queue_key, lock=True)
             if row is None:
                 raise EvalNotFound("No such queue or task here.")
             queue = ReviewQueue.model_validate(row.document)
             if queue.status == "closed" or not await self._may_review(actor, queue):
                 raise EvalForbidden("This queue is closed or not yours to review.")
-            units = await self._all_units(session, run, row, queue)
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            blind = queue.blind or is_blind(role)
+            units = await self._all_units(session, run, queue, secret, blind=blind)
             assigned = await store.assignments_of(session, queue_id=row.id)
             need = queue.reviewers_per_item or 1
             mine = {a.item_key: a for a in assigned if a.reviewer_key == reviewer}
@@ -414,67 +417,71 @@ class ReviewService:
                 reviewer_key=reviewer, until=until,
             )  # fmt: skip
             done_by_me = sum(1 for a in mine.values() if a.done_at is not None)
-            columns = await self._columns(session, actor, run, row, queue, chosen, reviewer)
+            columns = await self._columns(
+                session, actor, run, row, chosen, reviewer, secret, blind=blind
+            )
             case = await self._case(session, run, chosen.case_key)
-            comments = await self._task_comments(session, run, row, queue, columns)
+            comments = await self._task_comments(session, run, row, columns, secret, blind=blind)
         return self._task(
             run, row, queue, chosen, columns, case, comments, until=until,
-            progress=(done_by_me, len(units)),
+            progress=(done_by_me, len(units)), blind=blind,
         )  # fmt: skip
 
     async def _all_units(
-        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow, queue: ReviewQueue
-    ) -> list[_Unit]:
+        self, session: AsyncSession, run: store.RunRow, queue: ReviewQueue, secret: str,
+        *, blind: bool,
+    ) -> list[_Unit]:  # fmt: skip
         arms = [a.id for a in Run.model_validate(run.document).arms]
         index = await store.item_index(session, run_id=run.id)
-        return _units(queue, _ref(run.key, row.key), arms, index)
+        return _units(queue, secret, arms, index, blind=blind)
 
     async def _unit(
-        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow, queue: ReviewQueue,
-        key: str,
+        self, session: AsyncSession, run: store.RunRow, queue: ReviewQueue, secret: str,
+        key: str, *, blind: bool,
     ) -> _Unit:  # fmt: skip
-        for unit in await self._all_units(session, run, row, queue):
+        for unit in await self._all_units(session, run, queue, secret, blind=blind):
             if unit.key == key:
                 return unit
         raise EvalNotFound("No such queue or task here.")
 
     async def _columns(
         self, session: AsyncSession, actor: Subject, run: store.RunRow, row: store.QueueRow,
-        queue: ReviewQueue, unit: _Unit, reviewer: str,
+        unit: _Unit, reviewer: str, secret: str, *, blind: bool,
     ) -> list[_Column]:  # fmt: skip
-        """The unit's items as displayed, named A, B... by place; a blind queue shuffles them
-        per reviewer and shows each through the blind item view."""
+        """The unit's items as displayed, named A, B... by place; blind, they are shuffled
+        per reviewer and shown through the blind item view."""
         shown = Run.model_validate(run.document)
         rows = await store.items_by_key(session, run_id=run.id, keys=unit.items)
         found = sorted((rows[k] for k in unit.items if k in rows), key=lambda r: r.arm_key)
-        if queue.blind:
-            _roll(_ref(run.key, row.key), unit.key, reviewer).shuffle(found)
+        if blind:
+            roll(secret, "columns", _ref(run.key, row.key), unit.key, reviewer).shuffle(found)
         arms = {a.id: a for a in shown.arms}
         columns: list[_Column] = []
         for n, r in enumerate(found):
             item = RunItem.model_validate(r.document)
-            if queue.blind:
+            if blind:
                 item = await with_transcript(item, partial(self._evals.blob_bytes, actor.tenant_id))
-            columns.append(_Column(chr(65 + n), item, arms[item.arm_id], str(r.id)))
+            opaque = opaque_id(secret, run.key, f"t.{row.key}", r.key)
+            columns.append(_Column(chr(65 + n), item, arms[item.arm_id], opaque))
         return columns
 
     def _task(
         self, run: store.RunRow, row: store.QueueRow, queue: ReviewQueue, unit: _Unit,
         columns: Sequence[_Column], case: Case, comments: list[Comment], *,
-        until: datetime | None, progress: tuple[int, int],
+        until: datetime | None, progress: tuple[int, int], blind: bool,
     ) -> ReviewTask:  # fmt: skip
         names = arm_names(Run.model_validate(run.document))
         out: list[TaskColumn] = []
         for c in columns:
-            if queue.blind:
+            if blind:
                 view = blind_item_view(c.item, item_id=c.opaque_id, label=c.label, names=names)
                 out.append(TaskColumn(label=c.label, arm=None, item=RunItem.model_validate(view)))
             else:
                 out.append(TaskColumn(label=c.label, arm=c.arm, item=c.item))
         ref = _ref(run.key, row.key)
         return ReviewTask(
-            id=f"{ref}{_SEP}{unit.key}", queue=ref, layout=queue.layout, blind=queue.blind,
-            case=_case_view(case, names if queue.blind else None),
+            id=f"{ref}{_SEP}{unit.key}", queue=ref, layout=queue.layout, blind=blind,
+            case=case_view(case, names if blind else None),
             criteria=_criteria(queue, case, len(columns)), columns=out, comments=comments,
             reserved_until=until, done=progress[0], total=progress[1],
         )  # fmt: skip
@@ -487,14 +494,14 @@ class ReviewService:
         raise EvalNotFound("The case of this task is gone.")
 
     async def _task_comments(
-        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow, queue: ReviewQueue,
-        columns: Sequence[_Column],
+        self, session: AsyncSession, run: store.RunRow, row: store.QueueRow,
+        columns: Sequence[_Column], secret: str, *, blind: bool,
     ) -> list[Comment]:  # fmt: skip
-        """Comments on the task's items or case; a blind queue shows only its own, by
-        opaque item ids and with model names masked."""
-        ids = {c.item.id: c.opaque_id for c in columns}
+        """Comments on the task's items or case; a blind reader gets only those made in this
+        queue, by opaque item ids and with model names masked."""
+        ids = {c.item.id: c for c in columns}
         case_id = columns[0].item.case.id if columns else None
-        prefix = _comment_prefix(_ref(run.key, row.key))
+        prefix = _comment_prefix(secret, _ref(run.key, row.key))
         names = arm_names(Run.model_validate(run.document))
         found: list[Comment] = []
         for r in await store.comments_of_run(session, run_id=run.id):
@@ -503,7 +510,7 @@ class ReviewService:
                 comment.item_id is None and comment.case_id == case_id
             ):
                 continue
-            if not queue.blind:
+            if not blind:
                 found.append(comment)
             elif comment.id.startswith(prefix):
                 found.append(_hide(comment, ids, names))
@@ -515,14 +522,16 @@ class ReviewService:
         """The comments of a review task, as the task shows them."""
         await self._evals.check_on(actor)
         run_key, queue_key, unit_key = _split(task_id, 3)
-        async with self._sessions() as session:
-            run, _ = await self._evals.run_access(session, actor, run_key, "review")
+        async with self._sessions() as session, session.begin():
+            run, role = await self._evals.run_access(session, actor, run_key, "review")
             row, queue = await self._queue(session, run, queue_key)
-            unit = await self._unit(session, run, row, queue, unit_key)
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            blind = queue.blind or is_blind(role)
+            unit = await self._unit(session, run, queue, secret, unit_key, blind=blind)
             columns = await self._columns(
-                session, actor, run, row, queue, unit, _reviewer(actor, by)
+                session, actor, run, row, unit, _reviewer(actor, by), secret, blind=blind
             )
-            return await self._task_comments(session, run, row, queue, columns)
+            return await self._task_comments(session, run, row, columns, secret, blind=blind)
 
     async def _queue(
         self, session: AsyncSession, run: store.RunRow, key: str, *, lock: bool = False
@@ -552,9 +561,11 @@ class ReviewService:
             run, role = await self._evals.run_access(session, actor, run_key, "review")
             row, queue = await self._queue(session, run, queue_key, lock=True)
             if all(d.supersedes for d in scores):
-                await self._adjudicate(session, actor, role, run, scores, now)
+                await self._adjudicate(session, actor, role, run, scores, now, by)
                 return
-            unit = await self._unit(session, run, row, queue, unit_key)
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            blind = queue.blind or is_blind(role)
+            unit = await self._unit(session, run, queue, secret, unit_key, blind=blind)
             held = [
                 a
                 for a in await store.assignments_of(session, queue_id=row.id)
@@ -564,17 +575,21 @@ class ReviewService:
                 raise EvalForbidden(
                     "This task is not reserved for you now. Get it again from the queue."
                 )
-            columns = await self._columns(session, actor, run, row, queue, unit, reviewer)
+            columns = await self._columns(
+                session, actor, run, row, unit, reviewer, secret, blind=blind
+            )
             case = await self._case(session, run, unit.case_key)
             specs = {c.id: c for c in _criteria(queue, case, len(columns))}
-            made = [self._score(actor, by, queue, d, specs, columns, now) for d in scores]
+            made = [self._score(actor, by, blind, d, specs, columns, now) for d in scores]
+            if missing := _unanswered(specs, columns, scores):
+                raise EvalRefused(f"Answer every question for every answer: {', '.join(missing)}.")
             await store.put_scores(session, tenant_id=actor.tenant_id, run_id=run.id, scores=made)
             await store.finish_item(
                 session, queue_id=row.id, item_key=unit_key, reviewer_key=reviewer, at=now
             )
 
     def _score(
-        self, actor: Subject, by: By, queue: ReviewQueue, draft: ScoreDraft,
+        self, actor: Subject, by: By, blind: bool, draft: ScoreDraft,
         specs: Mapping[str, Criterion], columns: Sequence[_Column], now: datetime,
     ) -> JsonObject:  # fmt: skip
         spec = specs.get(draft.criterion)
@@ -592,18 +607,18 @@ class ReviewService:
             if target not in by_label:
                 raise EvalRefused(f"{draft.criterion}: name the column (A, B...) it is about.")
             item_id = by_label[target].item.id
-        anchors = [_anchor(a, columns) for a in draft.anchors or []]
+        anchors = [_anchor(a, columns, blind=blind) for a in draft.anchors or []]
         score = Score(
             id=f"h-{uuid.uuid4().hex}", item_id=item_id, criterion=draft.criterion,
             pair=pair, grader=Grader(kind=by, who=PrincipalRef(kind=_WHO[by], id=actor.key)),
             value=draft.value, rationale=draft.rationale, anchors=anchors or None,
-            blind=queue.blind, at=now,
+            blind=blind, at=now,
         )  # fmt: skip
         return to_document(score)
 
     async def _adjudicate(
         self, session: AsyncSession, actor: Subject, role: str, run: store.RunRow,
-        drafts: Sequence[ScoreDraft], now: datetime,
+        drafts: Sequence[ScoreDraft], now: datetime, by: By,
     ) -> None:  # fmt: skip
         if role not in ("editor", "owner") and not actor.is_admin:
             raise EvalForbidden("Only editors and owners can adjudicate.")
@@ -615,7 +630,7 @@ class ReviewService:
                 raise EvalRefused("A decision can only replace a human score of this run.")
             prior = Score.model_validate(old)
             grader = prior.grader.model_copy(
-                update={"who": PrincipalRef(kind="person", id=actor.key)}
+                update={"who": PrincipalRef(kind=_WHO[by], id=actor.key)}
             )
             score = prior.model_copy(
                 update={
@@ -632,10 +647,11 @@ class ReviewService:
         Preferences given in either display order are compared as one pair."""
         await self._evals.check_on(actor)
         run_key, queue_key = _split(queue_ref, 2)
-        async with self._sessions() as session:
+        async with self._sessions() as session, session.begin():
             run, _ = await self._evals.run_access(session, actor, run_key, "edit")
             row, queue = await self._queue(session, run, queue_key)
-            units = await self._all_units(session, run, row, queue)
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
+            units = await self._all_units(session, run, queue, secret, blind=queue.blind)
             raw = await store.scores_of_run(session, run_id=run.id)
         replaced = {str(d["supersedes"]) for d in raw if d.get("supersedes")}
         humans = [
@@ -682,19 +698,21 @@ class ReviewService:
             run, role = await self._evals.run_access(session, actor, run_key, "review")
             item_id, case_id, anchors = draft.item_id, draft.case_id, draft.anchors
             key = f"c-{uuid.uuid4().hex}"
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             if draft.task_id:
                 row, queue = await self._queue(session, run, queue_key)
-                unit = await self._unit(session, run, row, queue, unit_key)
+                blind = queue.blind or is_blind(role)
+                unit = await self._unit(session, run, queue, secret, unit_key, blind=blind)
                 columns = await self._columns(
-                    session, actor, run, row, queue, unit, _reviewer(actor, by)
+                    session, actor, run, row, unit, _reviewer(actor, by), secret, blind=blind
                 )
                 by_label = {c.label: c for c in columns}
                 if draft.target is not None and draft.target not in by_label:
                     raise EvalRefused("Name a column of this task.")
                 item_id = by_label[draft.target].item.id if draft.target else None
                 case_id = None if item_id else unit.case_key
-                anchors = [_anchor(a, columns) for a in draft.anchors or []] or None
-                key = f"{_comment_prefix(_ref(run.key, row.key))}{uuid.uuid4().hex}"
+                anchors = [_anchor(a, columns, blind=blind) for a in draft.anchors or []] or None
+                key = f"{_comment_prefix(secret, _ref(run.key, row.key))}{uuid.uuid4().hex}"
             elif is_blind(role):
                 raise EvalForbidden("Reviewers comment from inside a review task.")
             if item_id is None and case_id is None:
@@ -730,34 +748,51 @@ def _lapsed(held: store.AssignmentRow | None, now: datetime) -> bool:
     return bool(held and held.done_at is None and not _open_lease(held, now))
 
 
-def _anchor(anchor: Anchor, columns: Sequence[_Column]) -> Anchor:
-    """An anchor naming a column by label or opaque id, with the item's real id."""
+def _anchor(anchor: Anchor, columns: Sequence[_Column], *, blind: bool) -> Anchor:
+    """An anchor naming a column by label or opaque id, with the item's real id and, for a
+    blind reader, the real message, call or output id behind the neutral one."""
     for c in columns:
         if anchor.item_id in (c.label, c.opaque_id):
-            return anchor.model_copy(update={"item_id": c.item.id})
+            real = anchor.model_copy(update={"item_id": c.item.id})
+            return real_ref(c.item, real) if blind else real
     raise EvalRefused("An anchor names a column that is not in this task.")
 
 
-def _case_view(case: Case, names: frozenset[str] | None) -> CaseView:
-    view = CaseView(
-        id=case.id, title=case.title, platform=case.surface.platform, history=case.history,
-        turn=case.turn.messages, reference=case.expect.reference,
-    )  # fmt: skip
-    if names is None:
-        return view
-    masked = mask_document(view.model_dump(mode="json", by_alias=True), names)
-    return CaseView.model_validate(masked)
+def _unanswered(
+    specs: Mapping[str, Criterion], columns: Sequence[_Column], drafts: Sequence[ScoreDraft]
+) -> list[str]:
+    """The questions a submission leaves out: each criterion for each column (a preference
+    once)."""
+    one = columns[0].label if len(columns) == 1 else None
+    given = {
+        (d.criterion, None if specs[d.criterion].kind == "preference" else d.target or one)
+        for d in drafts
+        if d.criterion in specs
+    }
+    missing: list[str] = []
+    for c in specs.values():
+        for target in (None,) if c.kind == "preference" else [col.label for col in columns]:
+            if (c.id, target) not in given:
+                missing.append(f"{c.id} {target}" if target else c.id)
+    return missing
 
 
-def _hide(comment: Comment, ids: Mapping[str, str], names: frozenset[str]) -> Comment:
-    """A comment for a blind reader: item ids as the items' opaque ids, no model names."""
+def _hide(comment: Comment, by_id: Mapping[str, _Column], names: frozenset[str]) -> Comment:
+    """A comment for a blind reader: item ids as the items' opaque ids, anchors by neutral
+    ids, no model names."""
+
+    def opaque(item_id: str) -> str:
+        return by_id[item_id].opaque_id if item_id in by_id else ""
+
     update: dict[str, object] = {}
     if comment.item_id:
-        update["item_id"] = ids.get(comment.item_id, "")
+        update["item_id"] = opaque(comment.item_id)
     if comment.anchors:
         update["anchors"] = [
-            a.model_copy(update={"item_id": ids.get(a.item_id, "")}) for a in comment.anchors
-        ]
+            blind_ref(by_id[a.item_id].item, a).model_copy(update={"item_id": opaque(a.item_id)})
+            if a.item_id in by_id else a.model_copy(update={"item_id": ""})
+            for a in comment.anchors
+        ]  # fmt: skip
     masked = mask_document(to_document(comment.model_copy(update=update)), names)
     return Comment.model_validate(masked)
 

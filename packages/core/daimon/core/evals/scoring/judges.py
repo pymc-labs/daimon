@@ -115,12 +115,13 @@ class JudgeMeter:
         self.holds += 1
 
     def settle(self, call: PlannedCall, held: float, cost: float | None) -> None:
-        """Release a hold; `cost` None: the call failed and cost nothing known."""
+        """Release a hold; `cost` None: the call failed, and may have been billed before it
+        did, so it counts at its worst case."""
         self.held_usd -= held
         self.holds -= 1
         if cost is None:
             self.failed += 1
-            return
+            cost = held
         self.spent_usd += cost
         self.by_model[call.model.model] = self.by_model.get(call.model.model, 0.0) + cost
 
