@@ -21,8 +21,13 @@ from daimon.core.access_policy import (
 from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.authz import AgentRef, Subject
 from daimon.core.channel_audience import AudienceMode
+from daimon.core.channel_changes import ChannelActor, Expected, set_access
 from daimon.core.channel_directory import _tags  # pyright: ignore[reportPrivateUsage]
-from daimon.core.channel_rules import set_category_rule, set_channel_rule
+from daimon.core.channel_environments import (
+    _sealed_moves,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.core.channel_rules import ChannelRuleRefused, set_category_rule, set_channel_rule
+from daimon.core.direct_messages import sealed_among
 from daimon.core.mcp_auth import coding_token_channel
 from daimon.core.permissions import (
     agent_permissions,
@@ -30,23 +35,27 @@ from daimon.core.permissions import (
     channel_permissions,
     channel_rule,
     effective_channel_rule,
+    limited_among,
     limited_ids,
     limiting_ids_at,
     memory_writable,
     readable_from,
+    sealed_outside,
     session_readable_from,
     with_channel_rule,
 )
-from daimon.core.scope import DeploymentDefault
+from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import access_policy as store
 from daimon.core.stores.audience_facts import StoredRoom, mark_unknown, publish_facts
+from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.turn.deps import TurnDeps
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     build_fake_anthropic,
     make_fake_ma_handler,
 )
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OPEN = "1" * 17
@@ -56,6 +65,9 @@ OTHER_OPEN = "5" * 17
 UNLISTED = "9" * 17
 ADMIN = Subject(is_admin=True, platform_user_id="7" * 17)
 INSIDE = ChannelRule(readers="inside")
+IN_NARROW = Subject(
+    is_admin=True, platform_user_id="7" * 17, origin_channel_ids=frozenset({NARROW})
+)
 DEFAULT = DeploymentDefault(agent_name="daimon")
 
 
@@ -201,7 +213,14 @@ def _mode(monkeypatch: pytest.MonkeyPatch, mode: AudienceMode) -> None:
     monkeypatch.setattr(store, "audience_mode", read)
 
 
-async def _publish(session: AsyncSession, tenant_id: uuid.UUID, *, usable: bool = True) -> None:
+async def _publish(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    *,
+    usable: bool = True,
+    fresh_for: timedelta = timedelta(minutes=10),
+    open_rooms: tuple[str, ...] = (),
+) -> None:
     now = datetime.now(UTC)
     await publish_facts(
         session,
@@ -210,9 +229,10 @@ async def _publish(session: AsyncSession, tenant_id: uuid.UUID, *, usable: bool 
             OPEN: StoredRoom(RoomFacts(contained=False, narrow=False)),
             NARROW: StoredRoom(RoomFacts(contained=False, narrow=True)),
             "8" * 17: StoredRoom(UNKNOWN_FACTS),
+            **{room: StoredRoom(RoomFacts(contained=False, narrow=False)) for room in open_rooms},
         },
         now=now,
-        fresh_until=now + timedelta(minutes=10),
+        fresh_until=now + fresh_for,
     )
     if not usable:
         await mark_unknown(session, tenant_id=tenant_id, now=now)
@@ -315,7 +335,7 @@ async def test_editing_a_policy_in_each_setup_screen_saves_no_automatic_rule_and
         tenant_id=tenant.id,
         policy=TenantAccessPolicy(channel_rules={OTHER_OPEN: HAND}),
     )
-    await _publish(db_session, tenant.id)
+    await _publish(db_session, tenant.id, open_rooms=(HAND_OWN, OTHER_OPEN))
     original = await _stored(db_session, tenant.id)
 
     async def check(label: str) -> None:
@@ -355,7 +375,7 @@ async def test_editing_a_policy_in_each_setup_screen_saves_no_automatic_rule_and
         writers="none",
         default=DEFAULT,
         actor_account_id=None,
-        subject=ADMIN,
+        subject=IN_NARROW,
     )
     await check("writers on the narrow room")
     async with db_session_factory() as session:
@@ -389,7 +409,7 @@ async def test_editing_a_policy_in_each_setup_screen_saves_no_automatic_rule_and
         platform="discord",
         target=NARROW,
         value="on",
-        subject=ADMIN,
+        subject=IN_NARROW,
     )
     await check("approvals")
 
@@ -426,3 +446,205 @@ async def test_saving_the_loaded_policy_unchanged_stores_exactly_what_was_stored
     assert await _stored(db_session, tenant.id) == {**before, "internal_role_ids": ["6" * 17]}
     await store.set_access_policy(db_session, tenant_id=tenant.id, policy=cli)
     assert await _stored(db_session, tenant.id) == before
+
+
+# --- review fixes -------------------------------------------------------------------------
+
+
+def test_equal_policies_hash_alike_whatever_the_mapping_order() -> None:
+    first = {OPEN: ChannelRule(writers="none"), NARROW: ChannelRule(readers="inside")}
+    one = TenantAccessPolicy(channel_rules=first)
+    two = TenantAccessPolicy(channel_rules=dict(reversed(first.items())))
+    assert one == two and hash(one) == hash(two) and len({one, two}) == 1
+    assert hash(_policy()) == hash(TenantAccessPolicy()), "automatic rules are not content"
+
+
+def test_a_settings_change_from_outside_a_narrow_room_is_refused_and_writes_stay_stored() -> None:
+    policy = _policy()
+    assert sealed_outside(policy, {OPEN}, channel_ids=(NARROW,)) == NARROW
+    assert sealed_outside(policy, {NARROW}, channel_ids=(NARROW,)) is None
+    assert sealed_outside(policy, {OPEN}, channel_ids=(OPEN,)) is None
+    assert sealed_outside(policy, set(), channel_ids=(NARROW,), operator=True) is None
+    unknown = attach_automatic_rules(TenantAccessPolicy(), {}, unknown_narrow=True)
+    assert sealed_outside(unknown, {OPEN}, channel_ids=(UNLISTED,)) == UNLISTED
+    assert with_channel_rule(policy, OPEN, ChannelRule(writers="none")).channel_rules.keys() == {
+        OPEN
+    }, "a write rebuilds from stored rules"
+
+
+def test_limited_among_counts_a_room_with_no_fact_and_limited_ids_lists_known_ones() -> None:
+    policy = attach_automatic_rules(
+        TenantAccessPolicy(), {OPEN: OPEN_RULE, NARROW: INSIDE}, unknown_narrow=True
+    )
+    assert limited_among(policy, [OPEN, NARROW, UNLISTED, "dm:x"]) == {NARROW, UNLISTED}
+    assert limited_ids(policy) == {NARROW}
+
+
+class _Deps:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self.sessionmaker = factory
+
+
+@pytest.mark.parametrize("facts", ["missing", "expired", "fresh"])
+async def test_a_forward_from_a_room_with_no_usable_fact_counts_as_sealed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    facts: str,
+) -> None:
+    """The Discord forward filter asks about each source: `sealed_among`."""
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=f"41{facts[:2]}")
+    if facts == "expired":
+        await _publish(db_session, tenant.id, fresh_for=timedelta(seconds=-5))
+    elif facts == "fresh":
+        await _publish(db_session, tenant.id)
+    await db_session.commit()
+    sealed = await sealed_among(
+        cast("TurnDeps", _Deps(db_session_factory)),
+        tenant_id=tenant.id,
+        ids={OPEN, NARROW, UNLISTED},
+    )
+    expected = {OPEN, NARROW, UNLISTED} if facts != "fresh" else {NARROW, UNLISTED}
+    assert sealed == expected, "a known open room is open; a room with no fact is narrow"
+
+
+@pytest.mark.parametrize("facts", ["missing", "expired", "fresh"])
+async def test_a_channel_with_an_environment_pick_and_no_fact_counts_as_sealed(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    facts: str,
+) -> None:
+    """`_sealed_moves` (the environment checks) tests each picked channel."""
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=f"42{facts[:2]}")
+    if facts == "expired":
+        await _publish(db_session, tenant.id, fresh_for=timedelta(seconds=-5))
+    elif facts == "fresh":
+        await _publish(db_session, tenant.id)
+    await set_fields(
+        db_session,
+        scope=ChannelScopeRef(tenant_id=tenant.id, channel_id=OPEN),
+        tenant_id=tenant.id,
+        environment_name="open",
+    )
+    await db_session.commit()
+    policy = await store.load_access_policy(db_session, tenant_id=tenant.id)
+    moves = await _sealed_moves(
+        db_session,
+        policy,
+        tenant_id=tenant.id,
+        default=DEFAULT,
+        change=lambda picks: picks.without("open"),
+    )
+    assert moves == (frozenset() if facts == "fresh" else frozenset({"default"}))
+
+
+async def test_the_web_access_write_saves_no_automatic_rule_and_loses_none(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web channel form calls `set_access`; it sends the stored rule as `expected`."""
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4301")
+    await _publish(db_session, tenant.id)
+    client = build_fake_anthropic(make_fake_ma_handler(FakeMAState()))
+    actor = ChannelActor(tenant_id=tenant.id, subject=IN_NARROW, account_id=None, surface="web")
+    await set_access(
+        client,
+        db_session_factory,
+        actor,
+        platform="discord",
+        channel_id=NARROW,
+        readers=None,
+        writers="none",
+        default=DEFAULT,
+        expected=Expected(ChannelRule(readers="any", writers="any")),
+    )
+    async with db_session_factory() as session:
+        stored = await _stored(session, tenant.id)
+        policy = await store.load_access_policy(session, tenant_id=tenant.id)
+    assert "automatic" not in str(stored)
+    assert stored["channel_rules"] == {NARROW: {"readers": "any", "writers": "none"}}
+    assert effective_channel_rule(policy, NARROW) == ChannelRule(readers="inside", writers="none")
+
+
+class _Counter:
+    def __init__(self, session: AsyncSession) -> None:
+        self.statements: list[str] = []
+        self._bind = session.sync_session.get_bind()
+        event.listen(self._bind, "before_cursor_execute", self._record)
+
+    def _record(self, _c: object, _cur: object, statement: str, *_: object) -> None:
+        self.statements.append(statement)
+
+    def close(self) -> None:
+        event.remove(self._bind, "before_cursor_execute", self._record)
+
+
+async def _queries(session: AsyncSession, tenant_id: uuid.UUID, *, whole: bool) -> list[str]:
+    counter = _Counter(session)
+    try:
+        if whole:
+            await store.load_access_policy(session, tenant_id=tenant_id)
+        else:
+            await store._load_stored_policy(session, tenant_id=tenant_id)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        counter.close()
+    return counter.statements
+
+
+async def test_off_adds_one_query_and_a_second_load_in_the_session_adds_none(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4401")
+    await db_session.commit()
+    async with db_session_factory() as session:
+        base = await _queries(session, tenant.id, whole=False)
+    async with db_session_factory() as session:
+        first = await _queries(session, tenant.id, whole=True)
+        second = await _queries(session, tenant.id, whole=True)
+    assert len(first) - len(base) <= 1, "the mode read is the one extra query"
+    assert len(second) == len(base), "the same session does not read the mode again"
+
+
+async def test_shadow_reads_the_room_rows_at_most_once_a_minute(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mode(monkeypatch, "shadow")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4402")
+    await _publish(db_session, tenant.id)
+    seen: list[list[str]] = []
+    for _ in range(2):
+        async with db_session_factory() as session:
+            seen.append(await _queries(session, tenant.id, whole=True))
+    rows = [sum("discord_channel_audience" in q for q in statements) for statements in seen]
+    assert rows == [1, 0], "the second load, in a new session, reads no room rows"
+
+
+async def test_an_admin_outside_a_narrow_room_cannot_change_its_rule(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mode(monkeypatch, "on")
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4501")
+    await _publish(db_session, tenant.id)
+    client = build_fake_anthropic(make_fake_ma_handler(FakeMAState()))
+    with pytest.raises(ChannelRuleRefused, match="inside the channel"):
+        await set_channel_rule(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id=NARROW,
+            writers="none",
+            default=DEFAULT,
+            subject=ADMIN,
+        )
+    async with db_session_factory() as session:
+        policy = await store.load_access_policy(session, tenant_id=tenant.id)
+    assert policy.channel_rules == {}

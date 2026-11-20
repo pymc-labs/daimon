@@ -36,7 +36,13 @@ from daimon.core.defaults.ma_index import (
     list_environments_by_tenant,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.permissions import SEALED_REFUSAL, home_of, limited_ids, sealed_outside
+from daimon.core.permissions import (
+    SEALED_REFUSAL,
+    home_of,
+    limited_among,
+    limited_ids,
+    sealed_outside,
+)
 from daimon.core.platform_words import NEUTRAL_ADMIN, NEUTRAL_SPACE
 from daimon.core.rule_views import RuleViewer, load_rule_viewer
 from daimon.core.scope import (
@@ -595,11 +601,12 @@ async def _sealed_moves(
     change: Callable[[_Picks], _Picks],
 ) -> frozenset[str]:
     """The environments `change` moves sealed channels or threads onto."""
-    seals = limited_ids(policy)
-    if not seals:
-        return frozenset()
     before = await _load_picks(session, tenant_id=tenant_id)
     after = change(before)
+    # A picked channel with unknown room facts is narrow: it is sealed too.
+    seals = limited_ids(policy) | limited_among(policy, {*before.channels, *after.channels})
+    if not seals:
+        return frozenset()
     places = await _seal_parents(
         session, tenant_id=tenant_id, seals=seals, channels={*before.channels, *after.channels}
     )
@@ -655,8 +662,9 @@ async def update_needs_confirm(
     name = environment.metadata.get(MA_METADATA_KEY_NAME)
     if config is None or name is None or not opens_network(environment, config):
         return False
-    seals = limited_ids(await load_access_policy(session, tenant_id=tenant_id))
+    policy = await load_access_policy(session, tenant_id=tenant_id)
     picks = await _load_picks(session, tenant_id=tenant_id)
+    seals = limited_ids(policy) | limited_among(policy, picks.channels)
     places = await _seal_parents(session, tenant_id=tenant_id, seals=seals, channels=picks.channels)
     return any(
         picks.runs(seal, parent, default) == name

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import (
     AbstractAsyncContextManager,
     AsyncExitStack,
@@ -37,7 +37,7 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.mux_backend import resource_scope
 from daimon.core.output_runtime import OutputRuntime
-from daimon.core.permissions import dm_source_limited, limited_ids
+from daimon.core.permissions import dm_source_limited, limited_among, limited_ids
 from daimon.core.platform_words import words_for
 from daimon.core.routine_sandbox import RoutineSandbox
 from daimon.core.scope import ChannelScopeRef
@@ -404,10 +404,20 @@ SEALED_SINCE_MESSAGE = (
 
 
 async def sealed_channel_ids(deps: TurnDeps, *, tenant_id: uuid.UUID) -> frozenset[str]:
-    """The tenant's current seal list, for filtering history a /dm-me move copies."""
+    """The tenant's current seal list, for filtering history a /dm-me move copies. It lists
+    known rooms only (Slack keys and Discord rooms with facts); see `sealed_among`."""
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
     return limited_ids(policy)
+
+
+async def sealed_among(
+    deps: TurnDeps, *, tenant_id: uuid.UUID, ids: Iterable[str]
+) -> frozenset[str]:
+    """The channels among `ids` that are sealed now, a room with no fact counting as narrow."""
+    async with deps.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    return limited_among(policy, ids)
 
 
 def is_sealed_slack_message(

@@ -304,6 +304,13 @@ def ruled_agents(policy: TenantAccessPolicy) -> frozenset[str]:
     return frozenset(policy.agent_rules)
 
 
+def limited_among(policy: TenantAccessPolicy, ids: Iterable[str]) -> frozenset[str]:
+    """The ids of `ids` whose readers are limited, counting a Discord room with no fact
+    as narrow when the policy says so. Use it where `limited_ids` would miss unknown rooms."""
+    limited = _limited(policy)
+    return frozenset(i for i in ids if i in limited)
+
+
 def limited_ids(policy: TenantAccessPolicy) -> frozenset[str]:
     """Every id whose readers are inside or own: channels, Discord threads and
     Slack ``channel:ts`` keys. Lists known rooms only: a Discord room with no fact
@@ -570,7 +577,11 @@ def sealed_outside(
     """
     if operator:
         return None
-    sealed = [c for c in channel_ids if c is not None and channel_rule(policy, c).readers != "any"]
+    sealed = [
+        c
+        for c in channel_ids
+        if c is not None and effective_channel_rule(policy, c).readers != "any"
+    ]
     home = agent_permissions(policy, agent_names).home
     if home is not None:
         sealed.append(home)
@@ -742,6 +753,7 @@ __all__ = [
     "effective_channel_rule",
     "held_to",
     "home_of",
+    "limited_among",
     "limited_ids",
     "limited_under",
     "limiting_ids_at",

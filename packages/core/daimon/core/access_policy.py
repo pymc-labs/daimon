@@ -10,6 +10,7 @@ object and conversation ids) for the tenant's own platform. Channels are named b
 
 from __future__ import annotations
 
+import json
 from typing import Any, Final, Literal, cast
 
 from mux.contracts.ids import Provider
@@ -171,7 +172,7 @@ class TenantAccessPolicy(BaseModel):
         return self.model_dump() == other.model_dump()
 
     def __hash__(self) -> int:
-        return hash(self.model_dump_json())
+        return hash(json.dumps(self.model_dump(mode="json"), sort_keys=True))
 
     @model_validator(mode="before")
     @classmethod

@@ -136,7 +136,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
-from daimon.core.direct_messages import sealed_channel_ids
+from daimon.core.direct_messages import sealed_among
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
@@ -6121,8 +6121,20 @@ class DaimonBot(commands.Bot):
         sealed_sources: frozenset[str] = frozenset()
         if any(getattr(m, "message_snapshots", None) for m in forward_messages):
             here = {str(message.channel.id), str(getattr(message.channel, "parent_id", None))}
+            # Ask about each source and its parent: a room with no fact is narrow too.
+            sources = {
+                str(source)
+                for m in forward_messages
+                if (source := getattr(getattr(m, "reference", None), "channel_id", None))
+                is not None
+            }
+            sources |= {
+                str(parent)
+                for source in sources
+                if (parent := getattr(self.get_channel(int(source)), "parent_id", None)) is not None
+            }
             sealed_sources = (
-                await sealed_channel_ids(self.runtime.turn_deps, tenant_id=tenant_id) - here
+                await sealed_among(self.runtime.turn_deps, tenant_id=tenant_id, ids=sources) - here
             )
 
         def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
