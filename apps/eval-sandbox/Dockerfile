@@ -40,7 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && groupadd --gid 10001 agent && useradd --uid 10001 --gid agent --create-home agent \
     && useradd --uid 61000 --user-group --no-create-home --shell /usr/sbin/nologin gateway \
     && usermod -aG agent exec \
-    && install -d -o agent -g agent -m 2775 /workspace && install -d -m 755 /run/eval/state
+    && install -d -o agent -g agent -m 2775 /workspace && install -d -m 755 /run/eval/state \
+    && install -d -o agent -g agent -m 2775 /mnt/session/outputs
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=tools /usr/local/bin/codex /usr/local/bin/gemini-api /usr/local/bin/
 COPY --from=tools /licenses/ /usr/local/share/licenses/

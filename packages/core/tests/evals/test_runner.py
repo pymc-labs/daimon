@@ -10,7 +10,7 @@ import tarfile
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -24,6 +24,7 @@ from daimon.core.evals.chat.script import ScriptPlayer
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
+from daimon.core.evals.runner.gemini import GeminiArms
 from daimon.core.evals.runner.item import ItemDeps, TurnRequest
 from daimon.core.evals.runner.tools import McpService
 from daimon.core.evals.runner.turns import EvalTurns, PodSettings
@@ -42,6 +43,7 @@ from daimon.testing.eval_world import eval_case
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import bare_settings
+from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
@@ -51,10 +53,11 @@ from mux.testing.drivers.anthropic.ma import (
     sse_response,
 )
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
+from mux.testing.drivers.gemini.fake import FakeTransport as GeminiFake
 from mux.testing.fake_model_server import FakeModelServer
 from mux.testing.fake_model_server.script import call_tool, say
 from pydantic_core import to_jsonable_python
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .test_sandbox import fixture_ca
 
@@ -123,11 +126,15 @@ async def _start(
     *,
     repeats: int,
     cap_items: float = 10,
+    live: LiveArm | None = None,
+    commit: bool = False,
 ) -> tuple[RunService, Subject, str, float]:
     """A one-case suite with a live arm, and a run of it capped at `cap_items` items' cost:
     service, actor, run id and one item's cost."""
     settings = bare_settings().model_copy(update={"features": {"evals": "on"}})
     tenant = await make_tenant(db_session, platform="web", workspace_id="team-a")
+    if commit:
+        await db_session.commit()
     alex = Subject(tenant_id=tenant.id, platform="web", key="alex", role="admin")
     evals = EvalService(factory, settings)
     case = eval_case(WORLD, expect={
@@ -139,8 +146,8 @@ async def _start(
     suite = await evals.save_suite(alex, SuiteDraft(
         id="runner", name="Runner", cases=[SuiteCasePick(id=ref.id)],
     ))  # fmt: skip
-    arm = await evals.save_arm(alex, Arm(id="arm-a", label="A", kind="live",
-                                         live=LiveArm(backend="anthropic", model="test-model")))  # fmt: skip
+    live = live or LiveArm(backend="anthropic", model="test-model")
+    arm = await evals.save_arm(alex, Arm(id="arm-a", label="A", kind="live", live=live))
     runs = RunService(factory, settings, evals)
     draft = RunDraft(suite=SuitePin(id="runner", version=suite.version), arm_ids=[arm.id],
                      repeats=repeats)  # fmt: skip
@@ -427,3 +434,57 @@ async def test_wake_when_a_call_was_approved_then_it_runs_as_the_next_turn(
     item = await run_next(ItemDeps(db_session_factory, turns, world))
     assert item and not isinstance(item, bool) and item.status == "done", item
     assert turns.turns[1:] == [(f"Ran issue_write.\n\n{WAKE_SEED}", True)], turns.turns
+
+
+def _interaction(id_: str, status: str, step: dict[str, Any]) -> JsonObject:
+    stamp = datetime.now(UTC).isoformat()
+    return {"id": id_, "status": status, "created": stamp, "updated": stamp,
+            "environment_id": "environment-1", "steps": [step],
+            "usage": {"total_input_tokens": 10, "total_output_tokens": 5}}  # fmt: skip
+
+
+async def test_production_port_when_gemini_item_runs_then_its_environment_pod_and_tools_answer(
+    db_committing_engine: AsyncEngine, db_clean: None, tmp_path: Path
+) -> None:
+    # Committing sessions: Gemini's records read in read-only transactions of their own.
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        runs, alex, run_id, _ = await _start(
+            db_session, db_session_factory, repeats=1, commit=True,
+            live=LiveArm(backend="gemini", model=FLASH_PRIMARY),
+        )  # fmt: skip
+    created: list[dict[str, Any]] = []
+    anthropic = build_fake_anthropic(_provider(alex.tenant_id, created).dispatch)
+    turn_deps = plain_turn_deps(anthropic, db_session_factory, defaults_root=tmp_path)
+    world, pods, gemini = FakeWorld(db_session_factory, None, tmp_path), FakePods(), GeminiFake()
+    gemini.responses += [
+        _interaction("i1", "requires_action", {"type": "function_call", "id": "call",
+                                               "name": "issue_write", "arguments": ISSUE}),
+        _interaction("i2", "completed", {"type": "model_output", "content": [
+            {"type": "text", "text": "Opened issue 42."}]}),
+    ]  # fmt: skip
+    settings = PodSettings(runtime=pods, image="sandbox@sha256:0", ca=fixture_ca(),
+                           world_url="http://world", environment_id="env_eval")  # fmt: skip
+    turns = EvalTurns(turn_deps, world, settings, _mcp_service(world),
+                      GeminiArms(db_session_factory, gemini))  # fmt: skip
+    item = await run_next(ItemDeps(db_session_factory, turns, world))
+    assert item and not isinstance(item, bool), "the queued item runs"
+    assert item.status == "done", item.error
+    assert not any(c["kind"] in ("agents", "environments") for c in created), (
+        "a Gemini item makes nothing on Managed Agents"
+    )
+    (spec,) = pods.started
+    assert (spec.executor, spec.executor_config) == ("gemini", {
+        "GEMINI_ENVIRONMENT_ID": "environment-1", "GEMINI_ENVIRONMENT_KEY": "key-environment-1",
+    }), "the pod polls the item's own environment with its key"  # fmt: skip
+    first, second = gemini.requests
+    assert first["environment"] == "environment-1", "the session runs in that environment"
+    assert [t["name"] for t in cast(list[JsonObject], first["tools"])] == ["issue_write"]
+    assert "42" in json.dumps(second["input"]), "the world's answer is the tool's result"
+    assert [(c.origin, c.tool) for c in item.world_calls or []] == [("recorded", "issue_write")]
+    assert "Opened issue 42." in json.dumps([e.model_dump(mode="json") for e in item.chat or []])
+    assert pods.stopped == ["pod-1"] and gemini.deleted_environments == ["environment-1"], (
+        "the pod stops and the environment goes when the item ends"
+    )
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status == "done", run.status

@@ -6,9 +6,10 @@ context, and then turns through the same admit, bind and run path as a chat. The
 tools are custom tools the worker runs (`runner.tools`); tokens minted in its turns carry its
 id, so the world answers their calls.
 
-Environment keys come only from the provider's console, so a worker has one eval environment
-per backend. Its executor takes whichever session the environment hands out, so items on it
-run one at a time: each holds the environment from its first turn to its close."""
+Anthropic environment keys come only from its console, so the worker has one Anthropic eval
+environment. Its executor takes whichever session the environment hands out, so items on it
+run one at a time: each holds the environment from its first turn to its close. A Gemini item
+makes an environment of its own (`runner.gemini`), so those run side by side."""
 
 from __future__ import annotations
 
@@ -16,15 +17,17 @@ import asyncio
 import hashlib
 import shlex
 import uuid
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any, Final, Literal
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.context_provider import (
     ContextProviders,
     ContextRequest,
@@ -39,6 +42,7 @@ from daimon.core.evals.chat.cards import EvalCardNotice, press_eval_card
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
 from daimon.core.evals.format import Case, Usage
+from daimon.core.evals.runner.gemini import GeminiArms
 from daimon.core.evals.runner.item import TurnRequest
 from daimon.core.evals.runner.tools import (
     Caller,
@@ -67,24 +71,32 @@ from daimon.core.mux_compat import (
     archive_agent,
     create_agent,
     create_memory,
+    create_owned_agent,
+    create_owned_environment,
     retrieve_agent,
     update_environment,
 )
 from daimon.core.output_delivery import DeliverableFile, sweep_outputs
 from daimon.core.output_runtime import SessionOutput
 from daimon.core.scope import ChannelScopeRef
-from daimon.core.stores import context_providers, identity, scoped_config_write
+from daimon.core.stores import access_policy, context_providers, identity, scoped_config_write
 from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, session_tools_for_policy
 from daimon.core.turn.admission import admit, backend_facts
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.gemini import PROFILE as GEMINI_PROFILE
 from daimon.core.turn.host_tools import host_tools
 from daimon.core.turn.outcomes import observe_turn
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.runtimes import RuntimeFactory
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
+from mux.contracts.config import BackendConfig
+from mux.contracts.ids import ModelRef, Provider
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
+from mux.drivers.gemini.core import self_hosted_id
 from mux.profiles import CONTROL_PLANE_HOSTS
 
 log = structlog.get_logger()
@@ -95,8 +107,10 @@ _FORK_FIELDS: Final = ("description", "system", "tools", "skills")
 _EVAL_CONTEXT: Final = "eval://case-context"
 _ENVIRONMENT: Final = "eval-environment"
 """The Daimon name the worker gives its eval environment in the eval tenant."""
-_BACKEND: Final = "anthropic"
-"""The one backend whose live arms run here: its executor serves self-hosted sessions."""
+_SHARED: Final = "anthropic"
+"""The backend whose items share the worker's console-made environment (`PodSettings`)."""
+_BACKENDS: Final = frozenset({_SHARED, "gemini"})
+"""Backends whose live arms run here: their executors serve self-hosted sessions."""
 
 
 @dataclass(frozen=True)
@@ -123,8 +137,16 @@ class _Item:
     name: str
     agent_id: str
     world_token: str
+    #: Whether it holds the worker's shared environment until it closes.
+    shared: bool
     tools: list[JsonObject] = field(default_factory=list[JsonObject])
     pod: PodHandle | None = None
+    #: Clean-up after the pod stops: the fork, a per-item environment.
+    cleanup: list[Callable[[], Awaitable[None]]] = field(
+        default_factory=list[Callable[[], Awaitable[None]]]
+    )
+    #: The item's own turn runtime (`runtimes.RuntimeFactory`); None: the deployment's.
+    runtime: RuntimeFactory | None = None
 
 
 class PodOutputs:
@@ -173,9 +195,11 @@ class EvalTurns:
     """`TurnPort` on the production turn path. `deps` is the worker's own."""
 
     def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings,
-                 mcp: McpService | None = None) -> None:  # fmt: skip
+                 mcp: McpService | None = None,
+                 gemini: GeminiArms | None = None) -> None:  # fmt: skip
         self.context = CaseContext()
         self.deps = replace(deps, context_providers=ContextProviders(provider=self.context))
+        self.gemini = gemini or GeminiArms(deps.sessionmaker)
         self.world, self.pods = world, pods
         url, secret = deps.mcp.public_url, deps.mcp.jwt_secret
         self.mcp = mcp or (McpService(str(url), secret.get_secret_value().encode())
@@ -204,36 +228,38 @@ class EvalTurns:
         if item is None:
             return
         self.context.by_channel.pop(item.name, None)
-        scope = resource_scope(tenant_id=str(item.tenant_id))
-        steps: list[Awaitable[None]] = [
-            archive_agent(self.deps.anthropic, item.agent_id, scope=scope,
-                          records=self.deps.sessionmaker),
-        ]  # fmt: skip
-        if item.pod is not None:
-            steps.insert(0, self.pods.runtime.stop(item.pod))
+        pod = item.pod
+        steps = ([lambda: self.pods.runtime.stop(pod)] if pod is not None else []) + item.cleanup
         try:
             for step in steps:
                 try:
-                    await step
+                    await step()
                 # Clean-up is best effort: `reap` removes pods left behind, archives can wait.
                 except Exception:
                     log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
         finally:
-            self._environment.release()
+            if item.shared:
+                self._environment.release()
 
     async def _open(self, request: TurnRequest) -> _Item:
         arm = request.arm
-        if arm.live is None or arm.live.backend != _BACKEND:
-            raise NotImplementedError("the eval runner runs live arms on the anthropic backend")
-        await self._environment.acquire()
+        if arm.live is None or arm.live.backend not in _BACKENDS:
+            raise NotImplementedError(
+                f"the eval runner runs live arms on {', '.join(sorted(_BACKENDS))}"
+            )
+        shared = arm.live.backend == _SHARED
+        if shared:
+            await self._environment.acquire()
         try:
-            return await self._opened(request)
+            return await self._opened(request, shared)
         except BaseException:
-            self._items.pop(request.item_id, None)
-            self._environment.release()
+            if request.item_id in self._items:
+                await self.close(request.item_id)
+            elif shared:
+                self._environment.release()
             raise
 
-    async def _opened(self, request: TurnRequest) -> _Item:
+    async def _opened(self, request: TurnRequest, shared: bool) -> _Item:
         deps, case, arm = self.deps, request.case, request.arm
         assert arm.live is not None
         tenant_id = await eval_tenant(deps.sessionmaker)
@@ -251,7 +277,7 @@ class EvalTurns:
                 )).account_id
                 for person in case.surface.participants
             }  # fmt: skip
-        if not self._tagged:
+        if shared and not self._tagged:
             # Console-made, so untagged: the channel names it like any environment.
             tag = build_metadata(tenant_id=tenant_id, name=_ENVIRONMENT, account_id=account)
             await update_environment(deps.anthropic, self.pods.environment_id,
@@ -273,20 +299,31 @@ class EvalTurns:
         trusted = frozenset({DAIMON_SERVER_NAME})
         gated = session_tools_for_policy(deps.tool_safety, source_tools, trusted_servers=trusted)
         tools = custom_tools(gated or source_tools, daimon, case)
-        agent = await create_agent(deps.anthropic, {
-            **params, "name": name, "metadata": metadata, "purpose": "eval",
-            "model": arm.live.model, "mcp_servers": [],
-            # Provider-dialed MCP servers reach past the enclosure: the worker runs their tools.
-            "tools": [t for t in source_tools if t.get("type") != "mcp_toolset"] + [
-                {k: v for k, v in t.items() if not k.startswith("_")} for t in tools],
-        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
-        item = _Item(tenant_id, case, request.surface, name, agent.id, request.world_token, tools)
-        self._items[request.item_id] = item
-        item.pod = await self._pod(request)
+        if not shared:
+            assert requester is not None, "the case's requester is a participant"
+            item = await self._own(request, name, metadata, params.get("system"), tools,
+                                   requester)  # fmt: skip
+        else:
+            agent = await create_agent(deps.anthropic, {
+                **params, "name": name, "metadata": metadata, "purpose": "eval",
+                "model": arm.live.model, "mcp_servers": [],
+                # Provider-dialed MCP servers reach past the enclosure: the worker runs them.
+                "tools": [t for t in source_tools if t.get("type") != "mcp_toolset"] + [
+                    {k: v for k, v in t.items() if not k.startswith("_")} for t in tools],
+            }, scope=scope, records=deps.sessionmaker)  # fmt: skip
+            item = _Item(tenant_id, case, request.surface, name, agent.id, request.world_token,
+                         True, tools)  # fmt: skip
+            item.cleanup.append(partial(archive_agent, deps.anthropic, agent.id, scope=scope,
+                                        records=deps.sessionmaker))  # fmt: skip
+            self._items[request.item_id] = item
+            executor = {**self.pods.executor_config,
+                        "ANTHROPIC_ENVIRONMENT_ID": self.pods.environment_id}  # fmt: skip
+            item.pod = await self._pod(request, _SHARED, executor)
         async with deps.sessionmaker.begin() as session:
             await scoped_config_write.set_fields(
                 session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=name),
-                tenant_id=tenant_id, agent_name=name, environment_name=_ENVIRONMENT,
+                tenant_id=tenant_id, agent_name=name,
+                environment_name=_ENVIRONMENT if shared else name,
             )  # fmt: skip
             context = "\n\n".join(c.text for c in (case.agent_context and
                                                     case.agent_context.context) or [])  # fmt: skip
@@ -297,7 +334,52 @@ class EvalTurns:
                     config=ProviderConfig(endpoint=_EVAL_CONTEXT, enabled=True),
                     actor=Subject(is_admin=True),
                 )  # fmt: skip
-        await self._seed_memory(item)
+        if shared:
+            await self._seed_memory(item)
+        return item
+
+    async def _own(self, request: TurnRequest, name: str, metadata: Mapping[str, str],
+                   system: str | None, tools: list[JsonObject],
+                   requester: uuid.UUID) -> _Item:  # fmt: skip
+        """A hosted arm's item: Daimon-owned fork and environment records (the provider
+        holds neither), the channel on the arm's backend, and a self-hosted environment of
+        the item's own for its pod."""
+        deps, live = self.deps, request.arm.live
+        assert live is not None
+        tenant_id = await eval_tenant(deps.sessionmaker)
+        # Owned records belong to an account: the requester's, whose turns run them.
+        scope = resource_scope(tenant_id=str(tenant_id), account_id=str(requester))
+        fork = await create_owned_agent(deps.anthropic, AgentSpec(
+            name=name, model=ModelRef(provider="gemini", id=live.model), system=system,
+            metadata=metadata, purpose="eval",
+        ), scope=scope, records=deps.sessionmaker)  # fmt: skip
+        # The channel's name for the item's environment; the provider's is made below.
+        await create_owned_environment(deps.anthropic, EnvironmentSpec(
+            name=name, metadata=metadata), scope=scope, records=deps.sessionmaker)  # fmt: skip
+        item = _Item(tenant_id, request.case, request.surface, name, fork.id,
+                     request.world_token, False, tools)  # fmt: skip
+        item.cleanup.append(partial(archive_agent, deps.anthropic, fork.id, scope=scope,
+                                    records=deps.sessionmaker))  # fmt: skip
+        self._items[request.item_id] = item
+        channel = channel_ref(tenant_id, request.case.surface.platform, name)
+        async with deps.sessionmaker.begin() as session:
+            policy = await access_policy.load_access_policy(session, tenant_id=tenant_id)
+            if "gemini" not in policy.enabled_backends:
+                # The eval workspace runs whichever backends its arms name.
+                await access_policy.set_access_policy(session, tenant_id=tenant_id,
+                    policy=policy.model_copy(update={"enabled_backends": (
+                        *policy.enabled_backends, "gemini")}))  # fmt: skip
+            revision = await set_channel_backend(session, channel, BackendConfig(
+                backend="gemini", profile=GEMINI_PROFILE, model=live.model,
+            ))  # fmt: skip
+        environment, key = await self.gemini.environment(scope, name)
+        item.cleanup.append(partial(self.gemini.delete, environment))
+        specs = [ToolSpec(kind="custom", name=t["name"], description=t["description"],
+                          input_schema=t["input_schema"]) for t in tools]  # fmt: skip
+        item.runtime = self.gemini.runtime(revision, name, system, specs, environment)
+        item.pod = await self._pod(request, "gemini", {
+            "GEMINI_ENVIRONMENT_ID": self_hosted_id(environment), "GEMINI_ENVIRONMENT_KEY": key,
+        })  # fmt: skip
         return item
 
     async def _source(self, request: TurnRequest) -> BetaManagedAgentsAgent:
@@ -311,7 +393,8 @@ class EvalTurns:
         return await retrieve_agent(self.deps.anthropic, found, scope=scope,
                                     records=self.deps.sessionmaker)  # fmt: skip
 
-    async def _pod(self, request: TurnRequest) -> PodHandle:
+    async def _pod(self, request: TurnRequest, executor: Provider,
+                   config: Mapping[str, str]) -> PodHandle:  # fmt: skip
         pods, case = self.pods, request.case
         world_item = await self.world.item(request.item_id)
         assert world_item is not None, "the item is running"
@@ -320,12 +403,11 @@ class EvalTurns:
                     int(f.mode, 8) if f.mode else 0o644)
             for f in case.world.files or [] if f.path.startswith("/workspace/")
         ]  # fmt: skip
-        executor = {**pods.executor_config, "ANTHROPIC_ENVIRONMENT_ID": pods.environment_id}
         spec = PodSpec(
-            item=world_item, image=pods.image, executor=_BACKEND, world_url=pods.world_url,
-            world_token=request.world_token, ca=pods.ca, executor_config=executor, files=files,
+            item=world_item, image=pods.image, executor=executor, world_url=pods.world_url,
+            world_token=request.world_token, ca=pods.ca, executor_config=config, files=files,
             env=(case.world.env and case.world.env.vars) or {},
-            control_plane=CONTROL_PLANE_HOSTS[_BACKEND], passthrough=pods.passthrough,
+            control_plane=CONTROL_PLANE_HOSTS[executor], passthrough=pods.passthrough,
             registries=pods.registries,
             clock=case.clock.now, limits=pods.limits,
         )  # fmt: skip
@@ -349,6 +431,9 @@ class EvalTurns:
 
     async def _turn(self, item: _Item, request: TurnRequest) -> Usage:
         deps, case = self.deps, item.case
+        if item.runtime is not None:
+            # The channel names the arm's backend; the item's runtime serves its fork.
+            deps = replace(deps, channel_backends=True, turn_runtime_factory=item.runtime)
         platform = case.surface.platform
         requester = request.surface.script.requester
         role = _role(case, requester)
