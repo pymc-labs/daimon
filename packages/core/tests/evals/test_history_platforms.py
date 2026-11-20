@@ -17,7 +17,7 @@ _BOT = {"id": "b1", "display_name": "Daimon", "is_bot": True}
 _AT = "2026-01-05T09:15:00Z"
 
 
-def _case(platform: str, conversation: str, **surface: Any) -> Case:  # noqa: ANN401
+def _case(platform: str, conversation: str, **surface: Any) -> Case:
     return eval_case(
         {},
         surface={"platform": platform, "conversation": conversation, "participants": _PEOPLE,

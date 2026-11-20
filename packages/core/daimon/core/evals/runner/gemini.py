@@ -30,10 +30,12 @@ from mux.contracts.resources import AgentSpec, Environment, EnvironmentSpec, Too
 from mux.drivers.gemini import GeminiManagedAgents, configured_transport
 from mux.drivers.gemini.core import self_hosted_id
 from mux.drivers.gemini.transport import EnvironmentTransport, SelfHostedTransport, Transport
+from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: The provider project eval records are kept under.
 _PROJECT: Final = "evals"
+_PROVIDER: Final = get_profile(PROFILE).provider
 #: Held per model attempt, and the most an item's attempts may hold at once; each run's
 #: cap bounds what items spend.
 _HOLD_USD, _CAP_USD = Decimal("0.05"), Decimal("1")
@@ -54,7 +56,7 @@ class GeminiArms:
     @property
     def transport(self) -> EvalTransport:
         if self._transport is None:
-            key = os.environ.get(DEFAULT_KEY_ENV["gemini"], "")
+            key = os.environ.get(DEFAULT_KEY_ENV[_PROVIDER], "")
             self._transport = cast(EvalTransport, configured_transport(api_key=key))
         return self._transport
 
@@ -85,7 +87,7 @@ class GeminiArms:
         assert revision.model is not None
         deployment = GeminiDeployment(
             revision.digest, revision.local, _PROJECT,
-            AgentSpec(name=name, model=ModelRef(provider="gemini", id=revision.model),
+            AgentSpec(name=name, model=ModelRef(provider=_PROVIDER, id=revision.model),
                       system=system, tools=tuple(tools), purpose="eval"),
             environment.spec, self_hosted=environment,
         )  # fmt: skip

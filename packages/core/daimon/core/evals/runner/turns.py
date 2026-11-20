@@ -97,7 +97,7 @@ from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini.core import self_hosted_id
-from mux.profiles import CONTROL_PLANE_HOSTS
+from mux.profiles import CONTROL_PLANE_HOSTS, get_profile
 
 log = structlog.get_logger()
 
@@ -109,7 +109,8 @@ _ENVIRONMENT: Final = "eval-environment"
 """The Daimon name the worker gives its eval environment in the eval tenant."""
 _SHARED: Final = "anthropic"
 """The backend whose items share the worker's console-made environment (`PodSettings`)."""
-_BACKENDS: Final = frozenset({_SHARED, "gemini"})
+_GEMINI: Final = get_profile(GEMINI_PROFILE).provider
+_BACKENDS: Final = frozenset({_SHARED, _GEMINI})
 """Backends whose live arms run here: their executors serve self-hosted sessions."""
 
 
@@ -350,7 +351,7 @@ class EvalTurns:
         # Owned records belong to an account: the requester's, whose turns run them.
         scope = resource_scope(tenant_id=str(tenant_id), account_id=str(requester))
         fork = await create_owned_agent(deps.anthropic, AgentSpec(
-            name=name, model=ModelRef(provider="gemini", id=live.model), system=system,
+            name=name, model=ModelRef(provider=_GEMINI, id=live.model), system=system,
             metadata=metadata, purpose="eval",
         ), scope=scope, records=deps.sessionmaker)  # fmt: skip
         # The channel's name for the item's environment; the provider's is made below.
@@ -364,20 +365,20 @@ class EvalTurns:
         channel = channel_ref(tenant_id, request.case.surface.platform, name)
         async with deps.sessionmaker.begin() as session:
             policy = await access_policy.load_access_policy(session, tenant_id=tenant_id)
-            if "gemini" not in policy.enabled_backends:
+            if _GEMINI not in policy.enabled_backends:
                 # The eval workspace runs whichever backends its arms name.
                 await access_policy.set_access_policy(session, tenant_id=tenant_id,
                     policy=policy.model_copy(update={"enabled_backends": (
-                        *policy.enabled_backends, "gemini")}))  # fmt: skip
+                        *policy.enabled_backends, _GEMINI)}))  # fmt: skip
             revision = await set_channel_backend(session, channel, BackendConfig(
-                backend="gemini", profile=GEMINI_PROFILE, model=live.model,
+                backend=_GEMINI, profile=GEMINI_PROFILE, model=live.model,
             ))  # fmt: skip
         environment, key = await self.gemini.environment(scope, name)
         item.cleanup.append(partial(self.gemini.delete, environment))
         specs = [ToolSpec(kind="custom", name=t["name"], description=t["description"],
                           input_schema=t["input_schema"]) for t in tools]  # fmt: skip
         item.runtime = self.gemini.runtime(revision, name, system, specs, environment)
-        item.pod = await self._pod(request, "gemini", {
+        item.pod = await self._pod(request, _GEMINI, {
             "GEMINI_ENVIRONMENT_ID": self_hosted_id(environment), "GEMINI_ENVIRONMENT_KEY": key,
         })  # fmt: skip
         return item

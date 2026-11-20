@@ -397,6 +397,7 @@ source_modules = [
     "daimon.core.slack_event_dedup_sweep",
     "daimon.core.slack_file_token",
     "daimon.core.slack_files",
+    "daimon.core.slack_mrkdwn",
     "daimon.core.slack_oauth",
     "daimon.core.slack_customize_scope",
     "daimon.core.slack_user_groups",
