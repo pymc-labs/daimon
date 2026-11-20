@@ -1,67 +1,119 @@
-"""Conservative visibility checks without the privileged members intent."""
+"""The room check on Discord's gateway cache: who can see a room, one person at a time.
 
-from aiohttp import ClientError
+A thin converter. The rule lives in `daimon.core.audience_facts`; this module only turns
+a discord.py guild into its inputs. The cache is complete only when every member is
+cached (`guild.chunked`); until then every room is unknown.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from daimon.core.audience_facts import (
+    AudienceChannel,
+    AudienceMember,
+    RoomFacts,
+    compute_room_facts,
+)
+from daimon.core.channel_visibility import DiscordOverwrite
 from daimon.core.outsiders import INTERNAL_ROLES_HINT, OutsiderVisibility
+from daimon.core.stores.audience_facts import StoredRoom
 
 import discord
 
-MEMBER_OVERWRITE_CAP = 100
+_ROLE, _MEMBER = 0, 1
 
 
-async def channel_outsiders(
-    channel: discord.abc.GuildChannel, internal_role_ids: tuple[str, ...]
+def _overwrites(channel: discord.abc.GuildChannel) -> tuple[DiscordOverwrite, ...]:
+    found: list[DiscordOverwrite] = []
+    for target, overwrite in channel.overwrites.items():
+        allow, deny = overwrite.pair()
+        is_role = isinstance(target, discord.Role) or (
+            isinstance(target, discord.Object) and target.type is discord.Role
+        )
+        found.append(
+            DiscordOverwrite(str(target.id), _ROLE if is_role else _MEMBER, allow.value, deny.value)
+        )
+    return tuple(found)
+
+
+def audience_channel(channel: discord.abc.GuildChannel | discord.Thread) -> AudienceChannel:
+    if isinstance(channel, discord.Thread):
+        return AudienceChannel(
+            str(channel.id),
+            channel.type.value,
+            channel.name,
+            parent_id=str(channel.parent_id),
+        )
+    return AudienceChannel(
+        str(channel.id), channel.type.value, channel.name, overwrites=_overwrites(channel)
+    )
+
+
+def audience_member(guild: discord.Guild, member: discord.Member) -> AudienceMember:
+    return AudienceMember(
+        user_id=str(member.id),
+        role_ids=frozenset(str(role.id) for role in member.roles if not role.is_default()),
+        is_bot=member.bot,
+        is_owner=member.id == guild.owner_id,
+        timed_out=member.is_timed_out(),
+    )
+
+
+def guild_rooms(
+    guild: discord.Guild,
+    *,
+    internal_role_ids: tuple[str, ...],
+    team_role_ids: tuple[str, ...],
+    extra: Iterable[discord.abc.GuildChannel | discord.Thread] = (),
+) -> dict[str, StoredRoom] | None:
+    """Each room's facts with its parent, from the cache; None while the cache is partial.
+
+    `extra` names channels the cache may lack, such as an archived thread.
+    """
+    if not guild.chunked:
+        return None
+    seen = {c.id for c in (*guild.channels, *guild.threads)}
+    channels = [
+        audience_channel(c)
+        for c in (*guild.channels, *guild.threads, *(e for e in extra if e.id not in seen))
+    ]
+    facts = compute_room_facts(
+        guild_id=str(guild.id),
+        members=[audience_member(guild, member) for member in guild.members],
+        role_permissions={str(role.id): role.permissions.value for role in guild.roles},
+        channels=channels,
+        internal_role_ids=internal_role_ids,
+        team_role_ids=team_role_ids,
+    )
+    parents = {c.id: c.parent_id for c in channels}
+    return {
+        channel_id: StoredRoom(room, parents.get(channel_id)) for channel_id, room in facts.items()
+    }
+
+
+def channel_outsiders(
+    channel: discord.abc.GuildChannel | discord.Thread,
+    internal_role_ids: tuple[str, ...],
+    team_role_ids: tuple[str, ...] = (),
 ) -> OutsiderVisibility:
+    """Whether anyone who is not internal can view the channel, from the cache.
+
+    True when the cache cannot say, so a partial cache never certifies a room as closed.
+    """
     if not internal_role_ids:
         return OutsiderVisibility(note=INTERNAL_ROLES_HINT)
-    internal = set(internal_role_ids)
-    # Fetch current roles and channel overwrites, including category-synced ones.
-    # A stale cache must never certify that a channel excludes outsiders.
-    try:
-        roles = await channel.guild.fetch_roles()
-        fresh_channel = await channel.guild.fetch_channel(channel.id)
-        if not isinstance(fresh_channel, discord.abc.GuildChannel):
-            return OutsiderVisibility(outsiders_can_view=True)
-        channel = fresh_channel
-        default = next((role for role in roles if role.id == channel.guild.id), None)
-        if default is None or str(channel.guild.id) in internal:
-            return OutsiderVisibility(outsiders_can_view=True)
-        overwrites = channel.overwrites
-        everyone = next((ow for target, ow in overwrites.items() if target.id == default.id), None)
-        for role in roles:
-            if str(role.id) in internal:
-                continue
-            base = discord.Permissions(default.permissions.value | role.permissions.value)
-            if base.administrator:
-                return OutsiderVisibility(outsiders_can_view=True)
-            if everyone is not None:
-                allow, deny = everyone.pair()
-                base.handle_overwrite(allow.value, deny.value)
-            if role.id != default.id:
-                overwrite = next(
-                    (ow for target, ow in overwrites.items() if target.id == role.id), None
-                )
-                if overwrite is not None:
-                    allow, deny = overwrite.pair()
-                    base.handle_overwrite(allow.value, deny.value)
-            if base.view_channel:
-                return OutsiderVisibility(outsiders_can_view=True)
-        # Uncached member overwrites are typed Objects; do not discard them.
-        members = [
-            target.id
-            for target, overwrite in channel.overwrites.items()
-            if overwrite.view_channel is True
-            and (
-                isinstance(target, discord.Member)
-                or isinstance(target, discord.Object)
-                and target.type is discord.User
-            )
-        ]
-        if len(members) > MEMBER_OVERWRITE_CAP:
-            return OutsiderVisibility(outsiders_can_view=True)
-        for member_id in members:
-            member = await channel.guild.fetch_member(member_id)
-            if not internal.intersection(str(role.id) for role in member.roles):
-                return OutsiderVisibility(outsiders_can_view=True)
-    except (discord.HTTPException, ClientError, TimeoutError):
-        return OutsiderVisibility(outsiders_can_view=True)
-    return OutsiderVisibility(outsiders_can_view=False)
+    rooms = guild_rooms(
+        channel.guild,
+        internal_role_ids=internal_role_ids,
+        team_role_ids=team_role_ids,
+        extra=(channel,),
+    )
+    room = None if rooms is None else rooms.get(str(channel.id))
+    return OutsiderVisibility(outsiders_can_view=_has_outsiders(room.facts if room else None))
+
+
+def _has_outsiders(facts: RoomFacts | None) -> bool:
+    if facts is None or facts.outsiders_count is None:
+        return True
+    return facts.outsiders_count > 0

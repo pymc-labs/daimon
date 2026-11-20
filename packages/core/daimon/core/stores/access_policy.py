@@ -146,6 +146,7 @@ async def _roles_supported(
     role_ids = (
         *policy.invoker_role_ids,
         *policy.internal_role_ids,
+        *policy.team_role_ids,
         *(role for rule in policy.agent_rules.values() for role in rule.invoker_role_ids),
     )
     if not role_ids:
@@ -230,6 +231,7 @@ async def set_access_policy(
         "agent_rules",
         "invoker_role_ids",
         "internal_role_ids",
+        "team_role_ids",
     ):
         if not payload.get(key):
             payload.pop(key, None)

@@ -125,7 +125,9 @@ class HereCog(commands.Cog):
                     external_id=str(interaction.user.id),
                 )
                 policy = await load_access_policy(session, tenant_id=tenant_id)
-                visibility = await channel_outsiders(channel, policy.internal_role_ids)
+                visibility = channel_outsiders(
+                    channel, policy.internal_role_ids, policy.team_role_ids
+                )
                 routing_admin = await is_guild_admin(interaction, action=DelegatedAction.ROUTING)
                 card = await load_here_card(
                     session,
