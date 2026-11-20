@@ -50,12 +50,14 @@ Where each feature can be set, and its default.
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Completion pings in direct messages | `dm_completion_pings` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  |  | Only Discord |
 | Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |  |
+| /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
@@ -96,6 +98,7 @@ Where each feature can be set, and its default.
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
+| Approvals in direct messages | `dm_approvals` | Guardrail | Off | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
@@ -110,7 +113,7 @@ Where each feature can be set, and its default.
 
 ## Approvals
 
-Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it, or the operator at the command line, who gives a reason that is audited.
+Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only, not routines or watches. Only a chat app admin, or the operator with an audited reason, can change it.
 
 | | |
 | --- | --- |
@@ -533,6 +536,18 @@ The person who asked is pinged when a long answer is finished.
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_COMPLETION_PINGS` |
 
+## Completion pings in direct messages
+
+Direct messages follow Completion pings.
+
+| | |
+| --- | --- |
+| Key | `dm_completion_pings` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Most specific wins |
+
 ## Model reactions
 
 The first message in a thread, and the first after the model or effort changes, gets an emoji for the model and one for the effort it runs on.
@@ -643,6 +658,30 @@ A reply in a direct message can read the agent's memory but not change it.
 | Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Stricter wins |
+
+## Approvals in direct messages
+
+Direct messages follow Approvals.
+
+| | |
+| --- | --- |
+| Key | `dm_approvals` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## /new in threads
+
+/new works in threads Daimon started.
+
+| | |
+| --- | --- |
+| Key | `thread_new` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
 
 ## Rooms with outside people
 
