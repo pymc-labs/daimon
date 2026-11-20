@@ -1,0 +1,51 @@
+"""Contracts found by AST: `start_run` is the only way a run is created, and preflight
+runs before a run is created or a step spends.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+PACKAGES = Path(__file__).resolve().parents[3]
+RUNS = PACKAGES / "core/daimon/core/workflows/runs.py"
+
+
+def _functions(tree: ast.Module) -> dict[str, ast.AsyncFunctionDef | ast.FunctionDef]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _called(node: ast.AST, name: str) -> list[int]:
+    return [
+        call.lineno
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and (
+            (isinstance(call.func, ast.Name) and call.func.id == name)
+            or (isinstance(call.func, ast.Attribute) and call.func.attr == name)
+        )
+    ]
+
+
+def test_start_run_is_the_only_run_creator() -> None:
+    creators: set[str] = set()
+    for path in PACKAGES.glob("**/daimon/**/*.py"):
+        tree = ast.parse(path.read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if _called(fn, "create_run"):
+                creators.add(f"{path.name}:{fn.name}:create_run")
+            if _called(fn, "WorkflowRun"):
+                creators.add(f"{path.name}:{fn.name}:WorkflowRun")
+    assert creators == {
+        "runs.py:start_run:create_run",
+        "workflow_runs.py:create_run:WorkflowRun",
+    }, f"runs are created only through start_run: {sorted(creators)}"
+
+
+def test_preflight_runs_before_a_run_is_created_or_a_step_spends() -> None:
+    fns = _functions(ast.parse(RUNS.read_text()))
+    for name, spend in (("start_run", "create_run"), ("execute", "executor")):
+        checks, spends = _called(fns[name], "check"), _called(fns[name], spend)
+        assert checks and spends and max(checks) < min(spends), f"{name} checks before {spend}"
