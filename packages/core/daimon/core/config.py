@@ -1067,12 +1067,15 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "workflows", "credits", "integrations", "admin"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
     "channels",
     "routines",
+    "workflows",
     "credits",
     "integrations",
     "admin",
@@ -1170,7 +1173,7 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, workflows, credits, integrations, admin."
         ),
     )
     nodes: WebNodesSettings = Field(
@@ -2952,6 +2955,46 @@ class LongJobsSettings(BaseModel):
     )
 
 
+class WorkflowsSettings(BaseModel):
+    """Operator ceilings for workflows; a workflow's spec and the workspace only lower them."""
+
+    max_concurrent_steps: int = Field(
+        default=20, gt=0, description="Most workflow steps running at once on this deployment."
+    )
+    per_tenant_agent_steps: int = Field(
+        default=5, gt=0, description="Most agent steps running at once in one workspace."
+    )
+    per_owner_agent_steps: int = Field(
+        default=3, gt=0, description="Most agent steps running at once for one run-as person."
+    )
+    max_active_runs: int = Field(
+        default=10, gt=0, description="Most runs of one workflow active at once; others queue."
+    )
+    max_deadline_days: int = Field(
+        default=90, gt=0, description="Longest deadline a workflow run may set, in days."
+    )
+    max_steps: int = Field(default=500, gt=0, description="Most steps one workflow run may take.")
+    max_items: int = Field(default=200, gt=0, description="Most items one For each step may take.")
+    max_run_budget_usd: Decimal = Field(
+        default=Decimal("50"),
+        gt=0,
+        allow_inf_nan=False,
+        description="Most one workflow run may spend in USD, even with an admin's approval.",
+    )
+    webhook_per_minute: int = Field(
+        default=60, gt=0, description="Webhook calls one workflow trigger accepts a minute."
+    )
+    webhook_tenant_per_minute: int = Field(
+        default=600, gt=0, description="Webhook calls one workspace's workflows accept a minute."
+    )
+    webhook_max_body_bytes: int = Field(
+        default=1 << 20, gt=0, description="Largest webhook body a workflow trigger accepts."
+    )
+    payload_retention_days: int = Field(
+        default=7, ge=1, description="Days a workflow trigger's received payloads are kept."
+    )
+
+
 class MonitoringSettings(BaseModel):
     retention_days: int = Field(
         default=90,
@@ -3028,6 +3071,10 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    workflows: WorkflowsSettings = Field(
+        default_factory=WorkflowsSettings,
+        description="Workflow ceilings and webhook limits. See WorkflowsSettings.",
+    )
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     security_audit_retention_days: int = Field(
         default=90,

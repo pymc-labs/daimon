@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readOnlyHint` runs without a card. The chat worker needs that server's key in
   `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
 
+- **Workflow settings, off by default.** The feature list has Workflows, Workflow
+  webhooks, Workflow code steps, a run budget and run history, and the web app has a
+  Workflows section. They change nothing yet.
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.

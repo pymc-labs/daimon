@@ -18,6 +18,7 @@ typo is silent — check the spelling here.
 - [Core](#core)
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
+- [Workflows](#workflows)
 - [Monitoring](#monitoring)
 - [Database](#database)
 - [Anthropic](#anthropic)
@@ -244,6 +245,86 @@ Maximum launching and running long jobs per tenant.
 `int` · optional · default `2`
 
 Maximum launching and running long jobs per owner within a tenant.
+
+## Workflows
+
+Read from `daimon.core.config.WorkflowsSettings`. Prefix `DAIMON_WORKFLOWS__`.
+
+Operator ceilings for workflows; a workflow's spec and the workspace only lower them.
+
+Workflow ceilings and webhook limits. See WorkflowsSettings.
+
+### `DAIMON_WORKFLOWS__MAX_CONCURRENT_STEPS`
+
+`int` · optional · default `20`
+
+Most workflow steps running at once on this deployment.
+
+### `DAIMON_WORKFLOWS__PER_TENANT_AGENT_STEPS`
+
+`int` · optional · default `5`
+
+Most agent steps running at once in one workspace.
+
+### `DAIMON_WORKFLOWS__PER_OWNER_AGENT_STEPS`
+
+`int` · optional · default `3`
+
+Most agent steps running at once for one run-as person.
+
+### `DAIMON_WORKFLOWS__MAX_ACTIVE_RUNS`
+
+`int` · optional · default `10`
+
+Most runs of one workflow active at once; others queue.
+
+### `DAIMON_WORKFLOWS__MAX_DEADLINE_DAYS`
+
+`int` · optional · default `90`
+
+Longest deadline a workflow run may set, in days.
+
+### `DAIMON_WORKFLOWS__MAX_STEPS`
+
+`int` · optional · default `500`
+
+Most steps one workflow run may take.
+
+### `DAIMON_WORKFLOWS__MAX_ITEMS`
+
+`int` · optional · default `200`
+
+Most items one For each step may take.
+
+### `DAIMON_WORKFLOWS__MAX_RUN_BUDGET_USD`
+
+`Decimal` · optional · default `50`
+
+Most one workflow run may spend in USD, even with an admin's approval.
+
+### `DAIMON_WORKFLOWS__WEBHOOK_PER_MINUTE`
+
+`int` · optional · default `60`
+
+Webhook calls one workflow trigger accepts a minute.
+
+### `DAIMON_WORKFLOWS__WEBHOOK_TENANT_PER_MINUTE`
+
+`int` · optional · default `600`
+
+Webhook calls one workspace's workflows accept a minute.
+
+### `DAIMON_WORKFLOWS__WEBHOOK_MAX_BODY_BYTES`
+
+`int` · optional · default `1048576`
+
+Largest webhook body a workflow trigger accepts.
+
+### `DAIMON_WORKFLOWS__PAYLOAD_RETENTION_DAYS`
+
+`int` · optional · default `7`
+
+Days a workflow trigger's received payloads are kept.
 
 ## Monitoring
 
@@ -1144,10 +1225,10 @@ package, where the image build puts it.
 
 ### `DAIMON_WEB__MODULES`
 
-`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
+`tuple['chat' | 'agents' | 'channels' | 'routines' | 'workflows' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,workflows,credits,integrations,admin`
 
 Sections of the web app that are on, comma-separated: chat, agents, channels, routines,
-credits, integrations, admin.
+workflows, credits, integrations, admin.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 
