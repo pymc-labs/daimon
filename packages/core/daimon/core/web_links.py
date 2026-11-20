@@ -35,6 +35,7 @@ LinkKey = Literal[
     "agents",
     "channel",
     "routine",
+    "workflow",
     "skill",
     "environment",
     "person",
@@ -66,6 +67,7 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "agents": DeepLink("/agents", None, "agents", "agents.view"),
     "channel": DeepLink("/channels", "channel", "channels", "channels.view"),
     "routine": DeepLink("/routines", "routine", "routines", "routines.view"),
+    "workflow": DeepLink("/workflows/{id}", None, "workflows", "workflows.view"),
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
     "environment": DeepLink("/agents/environments", "env", "agents", "workspace.manage"),
     "person": DeepLink("/admin", "person", "admin", "people.manage"),
@@ -89,6 +91,7 @@ MEMBER_CAPS: Final[frozenset[str]] = frozenset(
         "agents.view",
         "channels.view",
         "routines.view",
+        "workflows.view",
         "credits.view_own",
     }
 )
@@ -144,6 +147,9 @@ class TenantLinks:
 
     def routine(self, routine_id: uuid.UUID | str | None = None) -> str | None:
         return self._url("routine", None, None if routine_id is None else str(routine_id))
+
+    def workflow(self, workflow_id: uuid.UUID | str) -> str | None:
+        return self._url("workflow", str(workflow_id))
 
     def skill(self, skill_id: str) -> str | None:
         return self._url("skill", skill_id)
