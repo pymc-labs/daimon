@@ -32,7 +32,7 @@ from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.channel_directory import list_shared_channel_ids
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.web_identity import place_of, thread_key
-from daimon.core.workflows import catalog, run_views, service, templates, views
+from daimon.core.workflows import catalog, run_views, service, templates, views, webhooks
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
@@ -519,39 +519,59 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     ) -> run_views.RunDetail:
         return await service.get_run_by_number(await env_of(caller), workflow_id, number)
 
-    # ----- triggers and webhooks (not built) -----
+    # ----- triggers and webhooks -----
+
+    def base_url() -> str:
+        return str(runtime.web.public_url)
 
     @router.get("/{workflow_id}/deliveries/last")
-    async def last_delivery(workflow_id: uuid.UUID, caller: Viewer) -> None:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        raise HTTPException(status_code=404, detail="Nothing has arrived yet.")
+    @speaks
+    async def last_delivery(workflow_id: uuid.UUID, caller: Viewer) -> webhooks.Delivery:  # pyright: ignore[reportUnusedFunction]
+        return await webhooks.last_delivery(await env_of(caller), workflow_id)
 
-    @router.get("/{workflow_id}/triggers/{trigger_id}/deliveries")
-    async def deliveries(workflow_id: uuid.UUID, trigger_id: str, caller: Viewer) -> list[None]:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        return []
+    @router.get("/{workflow_id}/triggers/{key}/webhook")
+    @speaks
+    async def webhook(workflow_id: uuid.UUID, key: str, caller: Viewer) -> webhooks.WebhookInfo:  # pyright: ignore[reportUnusedFunction]
+        return await webhooks.info(await env_of(caller), workflow_id, key, base_url=base_url())
 
-    @router.post("/{workflow_id}/triggers/{trigger_id}/preview")
-    async def preview(workflow_id: uuid.UUID, trigger_id: str, caller: Viewer) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-        await env_of(caller)
-        return {"ok": False, "error": "Webhook triggers are not available yet."}
+    @router.get("/{workflow_id}/triggers/{key}/deliveries")
+    @speaks
+    async def deliveries(  # pyright: ignore[reportUnusedFunction]
+        workflow_id: uuid.UUID, key: str, caller: Viewer
+    ) -> list[webhooks.DeliveryRow]:
+        return await webhooks.deliveries(await env_of(caller), workflow_id, key)
 
-    for method, suffix in (
-        ("GET", "webhook"),
-        ("POST", "listen"),
-        ("DELETE", "listen"),
-        ("POST", "rotate"),
-        ("POST", "deliveries/{delivery_id}/replay"),
-    ):
+    @router.post("/{workflow_id}/triggers/{key}/preview")
+    @speaks
+    async def preview(  # pyright: ignore[reportUnusedFunction]
+        workflow_id: uuid.UUID, key: str, body: webhooks.Preview, caller: Viewer
+    ) -> dict[str, Any]:
+        return await webhooks.preview(await env_of(caller), workflow_id, key, body)
 
-        async def not_built(  # pyright: ignore[reportUnusedFunction]
-            workflow_id: uuid.UUID, trigger_id: str, caller: Member
-        ) -> None:
-            await env_of(caller)
-            raise HTTPException(status_code=404, detail="Webhook triggers are not available yet.")
+    @router.post("/{workflow_id}/triggers/{key}/listen")
+    @speaks
+    async def listen(workflow_id: uuid.UUID, key: str, caller: Viewer) -> webhooks.WebhookInfo:  # pyright: ignore[reportUnusedFunction]
+        env = await env_of(caller)
+        return await webhooks.listen(env, workflow_id, key, on=True, base_url=base_url())
 
-        router.add_api_route(
-            f"/{{workflow_id}}/triggers/{{trigger_id}}/{suffix}", not_built, methods=[method]
-        )
+    @router.delete("/{workflow_id}/triggers/{key}/listen")
+    @speaks
+    async def unlisten(workflow_id: uuid.UUID, key: str, caller: Viewer) -> webhooks.WebhookInfo:  # pyright: ignore[reportUnusedFunction]
+        env = await env_of(caller)
+        return await webhooks.listen(env, workflow_id, key, on=False, base_url=base_url())
+
+    @router.post("/{workflow_id}/triggers/{key}/rotate")
+    @speaks
+    async def rotate(  # pyright: ignore[reportUnusedFunction]
+        workflow_id: uuid.UUID, key: str, body: webhooks.Rotate, caller: Member
+    ) -> webhooks.Secret:
+        return await webhooks.rotate(await env_of(caller), workflow_id, key, body)
+
+    @router.post("/{workflow_id}/triggers/{key}/deliveries/{delivery}/replay", status_code=201)
+    @speaks
+    async def replay(  # pyright: ignore[reportUnusedFunction]
+        workflow_id: uuid.UUID, key: str, delivery: str, caller: Member
+    ) -> webhooks.DeliveryRow:
+        return await webhooks.replay(await env_of(caller), workflow_id, key, delivery)
 
     return router

@@ -15,6 +15,7 @@ import pytest
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.turns import WebTurns
 from daimon.adapters.web.workflows import workflows_router
+from daimon.core.config import Settings
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores.domain import WebPersonRow
@@ -37,6 +38,7 @@ _ANY_BODY: dict[str, object] = {
     "decision": "fail",
     "note": "",
     "inputs": {},
+    "delivery": "x",
 }
 
 
@@ -54,6 +56,7 @@ class Rig:
         self.member: WebPersonRow
         self.client: httpx.AsyncClient
         self.turns: WebTurns
+        self.settings: Settings
         self.sent: list[dict[str, Any]] = []
 
     async def sign_in(self, who: str) -> None:
@@ -62,7 +65,9 @@ class Rig:
         self.client.cookies.set("__Host-daimon_web", token, domain="web.example.com")
 
     @asynccontextmanager
-    async def open(self, *, engine: bool = True, page: bool = True) -> AsyncIterator[Rig]:
+    async def open(
+        self, *, engine: bool = True, page: bool = True, **settings: Any
+    ) -> AsyncIterator[Rig]:
         self.ws = await funded_workspace(self.factory)
         self.member = await _member(self.factory, self.ws.tenant_id, "Mia", discord_id="m-1")
         async with self.factory.begin() as db:
@@ -85,13 +90,13 @@ class Rig:
             )
         router = build_turn_router(str(self.ws.tenant_id), sent_event_bodies=self.sent)
         built = build_turns(self.factory, router, self.tmp_path)
-        settings = discord_settings(
-            features={"workflows": "on" if engine else "off"}, defaults_root=_DEFAULTS
-        )
-        turns = WebTurns(settings, built.web, replace(built.deps, settings=settings))
+        features = {"workflows": "on" if engine else "off", **settings.pop("features", {})}
+        config = discord_settings(features=features, defaults_root=_DEFAULTS, **settings)
+        self.settings = config
+        turns = WebTurns(config, built.web, replace(built.deps, settings=config))
         self.turns = turns
         async with self.web_client(
-            web_settings(), sessionmaker=self.factory, turns=turns, settings=settings
+            web_settings(), sessionmaker=self.factory, turns=turns, settings=config
         ) as client:
             self.client = client
             client.headers.update(_OWN)

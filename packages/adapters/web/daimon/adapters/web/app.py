@@ -32,6 +32,7 @@ from daimon.adapters.web.server_skills import server_skills_router
 from daimon.adapters.web.static import spa_router
 from daimon.adapters.web.support import support_router
 from daimon.adapters.web.upload_limit import UploadLimitMiddleware
+from daimon.adapters.web.workflow_hooks import workflow_hooks_router
 from daimon.adapters.web.workflows import workflows_router
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -127,6 +128,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(chat_router(runtime))
     app.include_router(routines_router(runtime))
     app.include_router(workflows_router(runtime))
+    app.include_router(workflow_hooks_router(runtime))
     app.include_router(credits_router(runtime))
     app.include_router(integrations_router(runtime))
     app.include_router(invites_router(runtime))
