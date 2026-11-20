@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Direct messages can match channel behaviour.** Three new settings, all off
+  by default. "Approvals in direct messages" lets a DM follow the team's
+  Approvals setting, so Allow writes reaches DMs too; only a server admin sets
+  it. "Completion pings in direct messages" lets a Discord DM answer follow
+  Completion pings. "/new in threads" lets `/new` start a fresh conversation in
+  a Discord thread Daimon started. `/new` is now listed in servers, where it
+  refuses outside such a thread as before.
+
+- **Trusted tool hints reach identity relay servers.** A server attached through
+  the identity relay and named in `DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS` had
+  its tool list read at the relay, which refused it, so the tool name decided.
+  Daimon now reads the server's own URL with its bearer key, so a tool it marks
+  `readOnlyHint` runs without a card. The chat worker needs that server's key in
+  `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.
