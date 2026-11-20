@@ -1387,10 +1387,12 @@ class DirectMessageCog(commands.Cog):
                 # A pinged answer is posted below its card, which then goes.
                 await sent.delete()
 
+            pings = admission.shown("dm_completion_pings") and admission.shown("completion_pings")
             card = DiscordTurnLifecycle(
                 send=channel.send,
                 edit=edit,
-                delete=delete,
+                # With no delete a late replacement edits the card, as before the toggle.
+                delete=delete if pings else None,
                 agent_name=admission.agent.name,
                 model_id=admission.agent.model.id,
                 markup=runtime.turn_deps.markup,
@@ -1398,8 +1400,7 @@ class DirectMessageCog(commands.Cog):
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
-                notify_on_completion=admission.shown("dm_completion_pings")
-                and admission.shown("completion_pings"),
+                notify_on_completion=pings,
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,

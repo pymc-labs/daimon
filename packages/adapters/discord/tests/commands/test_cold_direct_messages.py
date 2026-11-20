@@ -912,12 +912,26 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     [(False, True, False), (True, False, False), (True, True, True)],
     ids=["dm-off", "pings-off", "both-on"],
 )
-async def test_dm_turn_card_pings_only_where_dm_completion_pings_and_completion_pings_are_on(
+async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pings_are_on(
     db_session_factory, monkeypatch, dm_pings, pings, expected
 ):
-    """`dm_completion_pings` makes a DM answer follow Completion pings; off, it never pings."""
+    """On, the answer is a new message that pings the asker and the card is deleted; off,
+    the answer edits the card in place and nobody is pinged."""
+    from daimon.core.turn.state import TextBlock, TurnState
+
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    posted: list[SimpleNamespace] = []
+
+    async def send(*_args, **kwargs):
+        sent = SimpleNamespace(
+            id=900 + len(posted), kwargs=kwargs, edit=AsyncMock(), delete=AsyncMock()
+        )
+        posted.append(sent)
+        return sent
+
     await cog.on_message(message())
+    asked = message(102)
+    asked.channel.send = send
     shown = {"dm_completion_pings": dm_pings, "completion_pings": pings}
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
@@ -927,8 +941,15 @@ async def test_dm_turn_card_pings_only_where_dm_completion_pings_and_completion_
         is_admin=False,
         budget_channel_id=None,
     )
-    card = await _card_from_turn(cog, message(102), reply, admission)
-    assert card._notify_on_completion is expected, "the DM card pings only with both on"
+    card = await _card_from_turn(cog, asked, reply, admission)
+    await card.post_initial()
+    card_message = posted[-1]
+    await card.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="The answer")]))
+    pinged = [m for m in posted if "<@999>" in str(m.kwargs.get("content", ""))]
+    assert bool(pinged) is expected, "a ping is a new message naming the asker, only when on"
+    assert (card_message.delete.await_count == 1) is expected, (
+        "the card is deleted behind a pinged answer and kept otherwise"
+    )
 
 
 async def _new_in_thread(db_session_factory, monkeypatch, *, enabled: bool, owner_id: int):
