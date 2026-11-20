@@ -32,9 +32,9 @@ export function EstimateView({ estimate, arms = [] }: { estimate: Estimate; arms
   )
 }
 
-/** Approve with a spend cap. Nothing runs until a cap is set. A cap above `limit` needs `above` to approve: for anyone else the button asks for approval instead. */
-export function ApproveBar({ estimate, label = "Approve and run", pending, limit, admin = true, above = "an admin", initial, onApprove }: {
-  estimate: Estimate; label?: string; pending?: boolean; limit?: number; admin?: boolean; above?: string; initial?: number; onApprove: (cap: number) => void
+/** Approve with a spend cap. Nothing runs until a cap is set. A cap above `limit` needs approval from someone else: for anyone else the button asks for approval instead. */
+export function ApproveBar({ estimate, label = "Approve and run", pending, limit, admin = true, initial, onApprove }: {
+  estimate: Estimate; label?: string; pending?: boolean; limit?: number; admin?: boolean; initial?: number; onApprove: (cap: number) => void
 }) {
   const [text, setText] = useState(initial ? String(initial) : "")
   const cap = Number(text)
@@ -51,7 +51,6 @@ export function ApproveBar({ estimate, label = "Approve and run", pending, limit
         <Button variant="ghost" size="sm" onClick={() => setText(String(suggestedCap(estimate)))}>Use {usd(suggestedCap(estimate))}</Button>
         <Button size="sm" disabled={!ok || pending} onClick={() => onApprove(cap)}>{asks ? "Ask for approval" : label}</Button>
       </div>
-      {asks && <p className="text-right text-xs text-muted-foreground">Caps above {usd(limit)} need {above} to approve.</p>}
     </div>
   )
 }

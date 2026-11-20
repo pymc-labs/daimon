@@ -80,7 +80,6 @@ describe("spend approval", () => {
     renderAt("/evals/suites/s/run", "/evals/suites/:suite/run", <NewRun />)
     await userEvent.click(await screen.findByRole("checkbox", { name: /Arm X/ }))
     await userEvent.type(await screen.findByLabelText(/cap/i), "40")
-    expect(screen.getByText(/need the person who runs Daimon to approve/)).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "Ask for approval" }))
     expect(await screen.findByRole("alert")).toHaveTextContent("has no known price")
   })
@@ -89,8 +88,8 @@ describe("spend approval", () => {
     const waiting = { ...run, status: "estimated", estimate, ext: { "daimon.requested_cap_usd": 40 } }
     vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? { ...me(["evals"]), role } : path.endsWith("/suites") ? [] : path.endsWith("/items?limit=500") ? [] : waiting) as never)
     renderAt("/evals/runs/r", "/evals/runs/:run", <TooltipProvider><Run /></TooltipProvider>)
-    expect(await screen.findByText(/of up to \$40.00\. Ask the person who runs Daimon to approve this cap\./)).toBeInTheDocument()
-    expect(screen.getByText("Awaiting operator approval", { selector: "span, div" })).toBeInTheDocument()
+    expect(await screen.findByText("Awaiting operator approval")).toBeInTheDocument()
+    expect(screen.getByText("Cap").nextElementSibling).toHaveTextContent("$40.00")
     await waitFor(() => expect(!!screen.queryByLabelText(/cap/i)).toBe(cap))
   })
 })

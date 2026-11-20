@@ -158,6 +158,7 @@ export function Run() {
               { label: "Status", value: <RunPill status={r.status} /> },
               { label: "Items", value: list.length ? `${done} of ${list.length}` : "–" },
               { label: "Spend", value: cap ? `${usd(spend)} of ${usd(cap)}` : usd(spend) },
+              ...(asked && !cap ? [{ label: "Cap", value: usd(asked) }] : []),
               { label: "Repeats", value: r.repeats },
             ]} />
             {cap && <div className="-mt-5 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-label="Spend against cap" aria-valuenow={spend} aria-valuemax={cap}><div className={cn("h-full", spend / cap > 0.9 ? "bg-warning" : "bg-teal")} style={{ width: `${Math.min(100, (spend / cap) * 100)}%` }} /></div>}
@@ -165,7 +166,6 @@ export function Run() {
               <section className="space-y-3">
                 <h2 className="text-sm font-medium">Estimate</h2>
                 <EstimateView estimate={r.estimate} arms={r.arms} />
-                <p role="status" className="text-right text-sm text-muted-foreground">Awaiting operator approval{asked ? ` of up to ${usd(asked)}` : ""}. Ask the person who runs Daimon to approve this cap.</p>
                 {admin && (
                   <>
                     {approve.error && <p role="alert" className="text-right text-sm text-destructive">{approve.error.message}</p>}

@@ -92,7 +92,7 @@ export function NewRun() {
           )}
         </Section>
         {start.error && <p role="alert" className="text-sm text-destructive">{start.error.message}</p>}
-        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} limit={estimate.data.admin_approval_usd} admin={false} above="the person who runs Daimon" pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
+        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} limit={estimate.data.admin_approval_usd} admin={false} pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
       </div>
     </Page>
   )
