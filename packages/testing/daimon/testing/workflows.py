@@ -9,6 +9,7 @@ from typing import Any
 
 from daimon.core._models import Tenant
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
+from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_runs, workflows
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.workflow_run_events import list_events
@@ -16,6 +17,8 @@ from daimon.core.workflows import engine, runs
 from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Start, StepWork
+from daimon.core.workflows.spec import node_hash, parse_spec
+from daimon.core.workflows.validate import validate_spec
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import update
@@ -103,6 +106,41 @@ class World:
         spec = _spec(nodes, start) | {"triggers": [{"id": "call", "kind": "call"}]}
         async with self.sm.begin() as s:
             return await _publish(s, self.tenant_id, self.owner, spec, None)
+
+    async def grant_all(self) -> list[str]:
+        """Record, as the owner, every grant the live version needs; their kinds."""
+        async with self.sm.begin() as s:
+            workflow = await workflows.get_workflow(
+                s, tenant_id=self.tenant_id, workflow_id=self.workflow_id
+            )
+            assert workflow is not None and workflow.live_version is not None
+            live = await workflows.get_version(
+                s,
+                tenant_id=self.tenant_id,
+                workflow_id=self.workflow_id,
+                number=workflow.live_version,
+            )
+            assert live is not None
+            spec = parse_spec(live.spec)
+            needed = validate_spec(spec).grants
+            rows = [
+                {
+                    "kind": g.kind,
+                    "node_id": g.node,
+                    "pins": {"node_hash": node_hash(spec.nodes[g.node])} if g.node else {},
+                }
+                for g in needed
+            ]
+            await publish_requests.add_grants(
+                s,
+                tenant_id=self.tenant_id,
+                workflow_id=self.workflow_id,
+                version=live.number,
+                grants=rows,
+                approved_by=self.owner,
+                now=NOW,
+            )
+        return [g.kind for g in needed]
 
     async def verified(self, run_id: uuid.UUID) -> list[str]:
         async with self.sm() as s:

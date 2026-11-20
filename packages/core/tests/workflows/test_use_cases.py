@@ -1,8 +1,8 @@
 """Design use cases 5 to 8 and 10, end to end on the database with fake agents and tools.
 
 Code runs for real through its fixed wrapper; agents, actions and approvals answer from a
-script per node. Use case 10 stops at its event wait, which the waits milestone runs.
-Built-in tool grants are left out: no grant is recorded here, so preflight would refuse.
+script per node. Use case 10 stops at its event wait, which the waits milestone runs. Built-in tools
+run under grants recorded for the live version, as an admin's approval leaves them.
 """
 
 from __future__ import annotations
@@ -114,6 +114,7 @@ async def test_6_issue_triage_routes_untrusted_input_and_ends_quiet_on_spam(
         "reproduce": {
             "kind": "agent",
             "instructions": "Reproduce",
+            "builtins": "all",
             "session": "fresh",
             "next": "respond",
         },
@@ -122,6 +123,7 @@ async def test_6_issue_triage_routes_untrusted_input_and_ends_quiet_on_spam(
         "quiet": {"kind": "finish"},
     }
     world = await make_world(db_session, nodes, "classify")
+    assert await world.grant_all() == ["builtins"], "the sandbox step runs under its grant"
     bug = await world.run(inputs={"title": "Crash"}, untrusted_inputs=True)
     answers: Answers = {
         "classify": [engine.Succeeded(route="bug"), engine.Succeeded(route="spam")],
@@ -143,7 +145,7 @@ async def test_7_competitor_research_fans_out_and_tolerates_one_failure(
         "each": {
             "kind": "for_each",
             "items": "${{ inputs.competitors }}",
-            "do": {"kind": "agent", "instructions": "Research"},
+            "do": {"kind": "agent", "instructions": "Research", "builtins": "read"},
             "concurrency": 5,
             "tolerate_failures": 1,
             "next": "synthesise",
@@ -158,6 +160,7 @@ async def test_7_competitor_research_fans_out_and_tolerates_one_failure(
         "done": {"kind": "finish", "output": "${{ steps.each.output }}"},
     }
     world = await make_world(db_session, nodes, "each")
+    await world.grant_all()
     run = await world.run(inputs={"competitors": ["Acme", "Globex", "Initech"]})
     answers: Answers = {
         "each": [
@@ -214,6 +217,7 @@ async def test_10_alert_triage_pages_high_and_waits_on_low(db_session: AsyncSess
         "investigate": {
             "kind": "agent",
             "instructions": "Investigate",
+            "builtins": "read",
             "output": {"severity": {"type": "string"}},
             "next": "severity",
         },
@@ -232,6 +236,7 @@ async def test_10_alert_triage_pages_high_and_waits_on_low(db_session: AsyncSess
         "quiet": {"kind": "finish", "outcome": "succeeded"},
     }
     world = await make_world(db_session, nodes, "investigate")
+    await world.grant_all()
     answers: Answers = {
         "investigate": [
             engine.Succeeded({"severity": "high"}),
