@@ -1,0 +1,1 @@
+{"schema": "daimon.eval.score/1", "id": "s1", "item_id": "baseline-a-2026-01.export-bug-issue.0", "criterion": "effects/0", "grader": {"kind": "code", "version": "1"}, "value": {"pass": true}, "at": "2026-01-05T09:15:00Z"}
