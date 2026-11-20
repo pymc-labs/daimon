@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 from daimon.core.stores.domain import RoutineRow
 
 PANEL_CAP = 25
+#: A moved routine's line on every panel; the panel links the workflow and offers no changes.
+MOVED_TO_WORKFLOWS: Final = "Moved to Workflows. Change it there."
 
 Glyph = Literal["⏸", "⏳", "❌", "✅"]
 
