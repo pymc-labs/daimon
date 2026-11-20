@@ -153,6 +153,7 @@ def executor_argv(executor: str, env: dict[str, str]) -> list[str]:
         case "anthropic":
             return [*python, "daimon_eval_sandbox", "anthropic-worker"]
         case "openai":
+            # argv is world-readable in /proc; `--remote` takes a base URL, not a credential.
             remote, env_id = env["CODEX_REMOTE_URL"], env["CODEX_ENVIRONMENT_ID"]
             return ["codex", "exec-server", "--remote", remote, "--environment-id", env_id]
         case "gemini":

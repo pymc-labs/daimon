@@ -17,6 +17,7 @@ import os
 import ssl
 import time
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Final, cast
 from urllib.parse import urlencode
@@ -28,6 +29,7 @@ from daimon.core.evals.sandbox.runtime import (
     MAX_OUTPUT_BYTES,
     CommandResult,
     PodHandle,
+    PodLimits,
     PodSpec,
     SandboxError,
     agent_command,
@@ -180,6 +182,22 @@ def exit_code(status: JsonObject) -> int:
     raise SandboxError(f"exec failed: {status.get('message')}")
 
 
+def overdue_pods(pods: list[JsonObject], now: float) -> list[str]:
+    """Names of pods that finished or outlived the deadline, Pending ones included.
+
+    A pod that never schedules has no start time, so the cluster's own deadline never
+    applies to it; its creation time does.
+    """
+    names: list[str] = []
+    for pod in pods:
+        meta = cast(JsonObject, pod["metadata"])
+        created = datetime.fromisoformat(str(meta["creationTimestamp"])).timestamp()
+        phase = cast(JsonObject, pod.get("status") or {}).get("phase")
+        if phase in ("Failed", "Succeeded") or now - created > PodLimits().deadline_s:
+            names.append(str(meta["name"]))
+    return names
+
+
 class KubernetesRuntime:
     def __init__(self, namespace: str, *, api: str | None = None, account: Path = _ACCOUNT) -> None:
         host, port = (
@@ -305,14 +323,10 @@ class KubernetesRuntime:
                 raise SandboxError(f"kubernetes delete {kind}/{pod.id}: {reply.status_code}")
 
     async def reap(self) -> list[str]:
-        """Delete finished eval pods (past their deadline, or a crashed worker's) and Secrets."""
+        """Delete finished or overdue eval pods (a crashed worker's) and their Secrets."""
         query = urlencode({"labelSelector": _ITEM_LABEL})
         listed = await self._call("GET", f"{self._path('pods')}?{query}")
-        names = [
-            str(cast(JsonObject, pod["metadata"])["name"])
-            for pod in cast(list[JsonObject], listed.get("items") or [])
-            if cast(JsonObject, pod.get("status") or {}).get("phase") in ("Failed", "Succeeded")
-        ]
+        names = overdue_pods(cast(list[JsonObject], listed.get("items") or []), time.time())
         for name in names:
             await self.stop(PodHandle(name, "kubernetes"))
         return names
