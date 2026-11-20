@@ -1,8 +1,8 @@
 # Features
 
 A feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
-Thread. Each is On, Off, Default or one of the feature's values. Default inherits from
-above, down to the built-in default. Settings show which level decided.
+Thread. Each is On, Off, Default or one of the feature's values. Default inherits
+from above. Settings show which level decided.
 
 An admin can lock a value at any level but Thread, and levels below cannot change it.
 A locked Off turns the feature off below.
@@ -1075,7 +1075,7 @@ A change through a connected tool waits for the person to press Approve. In a ro
 
 ## Package registries in eval sandboxes
 
-Package installs in an eval sandbox download from the real registries, read only. Block sends them to the simulated world like any other request.
+Block answers package installs from the fake world.
 
 | | |
 | --- | --- |

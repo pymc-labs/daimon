@@ -40,8 +40,8 @@ _COMBINE = {
 _INTRO = """# Features
 
 A feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
-Thread. Each is On, Off, Default or one of the feature's values. Default inherits from
-above, down to the built-in default. Settings show which level decided.
+Thread. Each is On, Off, Default or one of the feature's values. Default inherits
+from above. Settings show which level decided.
 
 An admin can lock a value at any level but Thread, and levels below cannot change it.
 A locked Off turns the feature off below.

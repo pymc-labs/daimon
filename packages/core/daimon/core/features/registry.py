@@ -705,10 +705,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         default="passthrough",
         tiers=("deployment",),
         binds="turn",
-        doc=(
-            "Package installs in an eval sandbox download from the real registries, read only. "
-            "Block sends them to the simulated world like any other request."
-        ),
+        doc="Block answers package installs from the fake world.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
