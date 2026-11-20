@@ -23,8 +23,16 @@ from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
 from daimon.core.workflows import engine
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.graph import ancestors
+from daimon.core.workflows.lanes import lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
-from daimon.core.workflows.spec import ActionNode, AnyNode, Spec, parse_duration, parse_spec
+from daimon.core.workflows.spec import (
+    ActionNode,
+    AgentNode,
+    AnyNode,
+    Spec,
+    parse_duration,
+    parse_spec,
+)
 from pydantic import JsonValue
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -80,6 +88,8 @@ class StepWork:
     spec: Spec
     attempt: int
     context: dict[str, JsonValue]
+    #: Where the run spends, for an executor that checks preflight again before a nudge.
+    place: Place | None = None
 
 
 class StepExecutor(Protocol):
@@ -203,6 +213,9 @@ async def _apply(
     """Write a transition: steps, the run's projected status, ledger events, audit, NOTIFY."""
     run = loaded.run
     changed = {(v.node_id, v.visit): _write(v, now) for v in transition.steps}
+    for (node_id, visit), write in changed.items():
+        if isinstance(node := loaded.spec.nodes.get(node_id), AgentNode):
+            write["lane"] = lane_key(loaded.spec, node_id, node, visit)
     changed |= writes or {}
     stale = {k: w for k, w in changed.items() if w.get("status") == "cancelled"}
     for batch, bump in (
@@ -213,6 +226,10 @@ async def _apply(
             session, tenant_id=run.tenant_id, run_id=run.id, steps=batch, bump_generation=bump
         )
     rows = await workflow_runs.list_steps(session, run.id)
+    for r in rows:
+        if (r.node_id, r.visit) in stale:
+            # A cancelled attempt is over: a later claim never reattaches to it.
+            await workflow_runs.finish_attempt(session, step_id=r.id, status="abandoned", now=now)
     events = list(before) + list(transition.events)
     end = transition.end
     if end is not None:
@@ -529,6 +546,7 @@ async def execute(
             engine.expression_context(
                 loaded.spec, loaded.views(), node_id=claimed.step.node_id, facts=loaded.facts
             ),
+            loaded.place(),
         )
         try:
             outcome = await executor(work)
@@ -752,19 +770,25 @@ async def recheck_blocked(
 
 
 async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: datetime) -> None:
-    """A lease ran out with its worker gone. Nothing sent yet, or an idempotent node: run it
-    again. Otherwise a write may have happened, and the step is `unknown` for its owner."""
+    """A lease ran out with its worker gone. An agent step whose session was saved keeps its
+    attempt and is reattached to that session. Nothing sent yet, or an idempotent node: run
+    it again. Otherwise a write may have happened, and the step is `unknown` for its owner."""
     async with sm.begin() as session:
         held = await _locked_step(session, step_id, None, "running")
         if held is None or (held[1].lease_expires_at and held[1].lease_expires_at > now):
             return
         run, step = held
         attempts = await workflow_runs.list_attempts(session, step_id)
+        loaded = await _load(session, settings, run, now)
+        node = loaded.spec.nodes[step.node_id]
+        if isinstance(node, AgentNode) and attempts and attempts[-1].session_id is not None:
+            await _retry_later(
+                session, loaded, step, now=now, delay=timedelta(0), message="Reattaching"
+            )
+            return
         await workflow_runs.finish_attempt(
             session, step_id=step_id, status="abandoned", now=now, error_class="unknown"
         )
-        loaded = await _load(session, settings, run, now)
-        node = loaded.spec.nodes[step.node_id]
         sent = bool(attempts) and attempts[-1].send_intent_at is not None
         if not sent or (isinstance(node, ActionNode) and node.idempotent):
             await _retry_later(

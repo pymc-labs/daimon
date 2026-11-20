@@ -116,6 +116,8 @@ class Succeeded:
     output: JsonValue = None
     route: str | None = None
     summary: str | None = None
+    #: `finish_early`: the run ends here as succeeded with outcome `nothing_to_do`.
+    early: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,6 +428,9 @@ class _Walk:
                 slot=taken[0].slot if taken else None,
             )
         self.emit("step.succeeded", done, **({"reused": reused} if reused else {}))
+        if outcome.early:
+            self.end_run(RunEnd("succeeded", outcome="nothing_to_do", step=done.key))
+            return
         if isinstance(node, FinishNode):
             if node.outcome == "failed":
                 source = step.via[0].split(":", 1)[0] if step.via else None
@@ -435,7 +440,11 @@ class _Walk:
                 reason = "approval_rejected" if rejected else "step_failed"
                 self.fail_run(reason, f"Ended at {_title(step.node_id, node)}", done.key)
             else:
-                self.end_run(RunEnd("succeeded", outcome="completed", step=done.key))
+                # A Finish with nothing to deliver or return is a quiet end, as a week with
+                # nothing to report.
+                quiet = node.output is None and node.deliver is None
+                outcome_of = "nothing_to_do" if quiet else "completed"
+                self.end_run(RunEnd("succeeded", outcome=outcome_of, step=done.key))
             return
         self.leave(done, taken)
 

@@ -19,8 +19,10 @@ from daimon.core._models import (
     Workflow,
     WorkflowAttempt,
     WorkflowGrant,
+    WorkflowLane,
     WorkflowRun,
     WorkflowStep,
+    WorkflowStepActivity,
     WorkflowTrigger,
     WorkflowTriggerEvent,
     WorkflowWait,
@@ -32,6 +34,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 ACTIVE_RUN_STATES = ("queued", "running", "waiting")
+ACTIVITY_LIMIT = 200
 AttemptStatus = Literal["running", "succeeded", "failed", "abandoned"]
 
 
@@ -89,6 +92,7 @@ class StepRow(_Row):
     error_message: str | None
     via: list[str]
     reused: Literal["fork", "pinned"] | None
+    lane: str | None
     lease_owner: str | None
     lease_expires_at: datetime | None
     generation: int
@@ -104,6 +108,7 @@ class AttemptRow(_Row):
     number: int
     status: AttemptStatus
     error_class: str | None
+    session_id: str | None
     send_intent_at: datetime | None
     started_at: datetime
     ended_at: datetime | None
@@ -134,6 +139,8 @@ class StepWrite(TypedDict, total=False):
     error_message: str | None
     via: list[str]
     reused: str | None
+    #: Only set when the step is first written; `set_lane` refines it.
+    lane: str | None
     lease_owner: str | None
     lease_expires_at: datetime | None
     ready_at: datetime | None
@@ -238,18 +245,55 @@ async def update_run(
 
 
 async def add_cost(
-    session: AsyncSession, *, run_id: uuid.UUID, step_id: uuid.UUID, cost_usd: Decimal
+    session: AsyncSession,
+    *,
+    run_id: uuid.UUID,
+    step_id: uuid.UUID | None,
+    cost_usd: Decimal,
+    attempt_id: uuid.UUID | None = None,
 ) -> None:
+    """Roll a debit up to the run, and to its step and attempt when known."""
     await session.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id == run_id)
         .values(cost_usd=WorkflowRun.cost_usd + cost_usd)
     )
-    await session.execute(
-        update(WorkflowStep)
-        .where(WorkflowStep.id == step_id)
-        .values(cost_usd=WorkflowStep.cost_usd + cost_usd)
-    )
+    if step_id is not None:
+        await session.execute(
+            update(WorkflowStep)
+            .where(WorkflowStep.id == step_id)
+            .values(cost_usd=WorkflowStep.cost_usd + cost_usd)
+        )
+    if attempt_id is not None:
+        await session.execute(
+            update(WorkflowAttempt)
+            .where(WorkflowAttempt.id == attempt_id)
+            .values(cost_usd=WorkflowAttempt.cost_usd + cost_usd)
+        )
+
+
+async def attempt_of_session(
+    session: AsyncSession, *, run_id: uuid.UUID, session_id: str, at: datetime
+) -> tuple[uuid.UUID, uuid.UUID] | None:
+    """`(step id, attempt id)` that `session_id` was working on at `at`, in `run_id`.
+
+    A lane's session serves several steps in turn; the latest attempt that started on it
+    by then is the one a model call belongs to.
+    """
+    row = (
+        await session.execute(
+            select(WorkflowAttempt.step_id, WorkflowAttempt.id)
+            .join(WorkflowStep, WorkflowStep.id == WorkflowAttempt.step_id)
+            .where(
+                WorkflowStep.run_id == run_id,
+                WorkflowAttempt.session_id == session_id,
+                WorkflowAttempt.started_at <= at,
+            )
+            .order_by(WorkflowAttempt.started_at.desc())
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else (row[0], row[1])
 
 
 async def list_steps(session: AsyncSession, run_id: uuid.UUID) -> list[StepRow]:
@@ -287,6 +331,8 @@ async def save_steps(
             tenant_id=tenant_id, run_id=run_id, node_id=node_id, visit=visit, **write
         )
         changes: dict[str, Any] = dict(write)
+        if "lane" in changes:
+            changes["lane"] = func.coalesce(WorkflowStep.lane, stmt.excluded.lane)
         if bump_generation:
             changes["generation"] = WorkflowStep.generation + 1
         await session.execute(
@@ -298,10 +344,15 @@ async def save_steps(
 
 async def ready_steps(
     session: AsyncSession, *, now: datetime, limit: int
-) -> list[tuple[uuid.UUID, uuid.UUID, uuid.UUID | None]]:
-    """Due ready steps, oldest first: `(step id, tenant, run-as account)`."""
+) -> list[tuple[uuid.UUID, uuid.UUID, uuid.UUID | None, bool]]:
+    """Due ready steps, oldest first: `(step id, tenant, run-as account, is an agent step)`."""
     rows = await session.execute(
-        select(WorkflowStep.id, WorkflowStep.tenant_id, WorkflowRun.run_as_account_id)
+        select(
+            WorkflowStep.id,
+            WorkflowStep.tenant_id,
+            WorkflowRun.run_as_account_id,
+            WorkflowStep.lane.is_not(None),
+        )
         .join(WorkflowRun, WorkflowRun.id == WorkflowStep.run_id)
         .where(
             WorkflowStep.status == "ready",
@@ -311,25 +362,31 @@ async def ready_steps(
         .order_by(WorkflowStep.ready_at)
         .limit(limit)
     )
-    return [(a, b, c) for a, b, c in rows.tuples()]
+    return [(a, b, c, d) for a, b, c, d in rows.tuples()]
 
 
 async def running_counts(
     session: AsyncSession,
 ) -> tuple[int, dict[uuid.UUID, int], dict[uuid.UUID, int]]:
-    """Running steps: in all, per tenant and per run-as account (the steps loop's caps)."""
+    """Running steps: in all, then agent steps (those with a lane) per tenant and per run-as
+    account (the steps loop's caps)."""
     rows = await session.execute(
-        select(WorkflowStep.tenant_id, WorkflowRun.run_as_account_id, func.count())
+        select(
+            WorkflowStep.tenant_id,
+            WorkflowRun.run_as_account_id,
+            func.count(),
+            func.count().filter(WorkflowStep.lane.is_not(None)),
+        )
         .join(WorkflowRun, WorkflowRun.id == WorkflowStep.run_id)
         .where(WorkflowStep.status == "running")
         .group_by(WorkflowStep.tenant_id, WorkflowRun.run_as_account_id)
     )
     total, tenants, owners = 0, dict[uuid.UUID, int](), dict[uuid.UUID, int]()
-    for tenant_id, owner, count in rows.tuples():
+    for tenant_id, owner, count, agents in rows.tuples():
         total += count
-        tenants[tenant_id] = tenants.get(tenant_id, 0) + count
+        tenants[tenant_id] = tenants.get(tenant_id, 0) + agents
         if owner is not None:
-            owners[owner] = owners.get(owner, 0) + count
+            owners[owner] = owners.get(owner, 0) + agents
     return total, tenants, owners
 
 
@@ -338,7 +395,8 @@ async def claim_step(
 ) -> tuple[RunRow, StepRow, int] | None:
     """Lease a ready step: run row then step row, both SKIP LOCKED; None when taken.
 
-    Returns the run, the leased step and the new attempt's number.
+    Returns the run, the leased step and the attempt's number: a new attempt, or the one
+    still running when a reclaimed agent step is reattached to its session.
     """
     run_id = await session.scalar(select(WorkflowStep.run_id).where(WorkflowStep.id == step_id))
     if run_id is None:
@@ -356,14 +414,23 @@ async def claim_step(
     ).scalar_one_or_none()
     if step is None:
         return None
-    number = (
-        await session.scalar(
-            select(func.coalesce(func.max(WorkflowAttempt.number), 0)).where(
-                WorkflowAttempt.step_id == step_id
-            )
+    kept = await session.scalar(
+        select(WorkflowAttempt.number).where(
+            WorkflowAttempt.step_id == step_id, WorkflowAttempt.status == "running"
         )
-        or 0
-    ) + 1
+    )
+    number = (
+        kept
+        or (
+            await session.scalar(
+                select(func.coalesce(func.max(WorkflowAttempt.number), 0)).where(
+                    WorkflowAttempt.step_id == step_id
+                )
+            )
+            or 0
+        )
+        + 1
+    )
     await session.execute(
         update(WorkflowStep)
         .where(WorkflowStep.id == step_id)
@@ -375,9 +442,10 @@ async def claim_step(
             started_at=func.coalesce(WorkflowStep.started_at, now),
         )
     )
-    session.add(
-        WorkflowAttempt(tenant_id=run.tenant_id, step_id=step_id, number=number, started_at=now)
-    )
+    if kept is None:
+        session.add(
+            WorkflowAttempt(tenant_id=run.tenant_id, step_id=step_id, number=number, started_at=now)
+        )
     await session.flush()
     claimed = await get_step(session, step_id)
     assert claimed is not None
@@ -407,6 +475,118 @@ async def mark_send_intent(session: AsyncSession, *, step_id: uuid.UUID, now: da
         .where(WorkflowAttempt.step_id == step_id, WorkflowAttempt.status == "running")
         .values(send_intent_at=now)
     )
+
+
+async def running_attempt(session: AsyncSession, step_id: uuid.UUID) -> AttemptRow | None:
+    orm = await session.scalar(
+        select(WorkflowAttempt).where(
+            WorkflowAttempt.step_id == step_id, WorkflowAttempt.status == "running"
+        )
+    )
+    return None if orm is None else AttemptRow.model_validate(orm)
+
+
+async def get_attempt(session: AsyncSession, attempt_id: uuid.UUID) -> AttemptRow | None:
+    orm = await session.get(WorkflowAttempt, attempt_id)
+    return None if orm is None else AttemptRow.model_validate(orm)
+
+
+async def set_attempt_session(
+    session: AsyncSession, *, attempt_id: uuid.UUID, session_id: str, now: datetime
+) -> None:
+    """Saved before the first send, so a lost worker's successor can reattach."""
+    await session.execute(
+        update(WorkflowAttempt)
+        .where(WorkflowAttempt.id == attempt_id)
+        .values(session_id=session_id, send_intent_at=now)
+    )
+
+
+async def set_lane(session: AsyncSession, *, step_id: uuid.UUID, lane: str) -> None:
+    await session.execute(update(WorkflowStep).where(WorkflowStep.id == step_id).values(lane=lane))
+
+
+async def lane_busy(
+    session: AsyncSession, *, run_id: uuid.UUID, lane: str, step_id: uuid.UUID
+) -> bool:
+    """Whether another step of the run is running on `lane` (one turn at a time a session)."""
+    other = await session.scalar(
+        select(WorkflowStep.id).where(
+            WorkflowStep.run_id == run_id,
+            WorkflowStep.lane == lane,
+            WorkflowStep.status == "running",
+            WorkflowStep.id != step_id,
+        )
+    )
+    return other is not None
+
+
+async def get_lane(session: AsyncSession, *, run_id: uuid.UUID, lane: str) -> str | None:
+    """The open session of a lane, if one was created."""
+    return await session.scalar(
+        select(WorkflowLane.session_id).where(
+            WorkflowLane.run_id == run_id,
+            WorkflowLane.lane_key == lane,
+            WorkflowLane.status == "open",
+        )
+    )
+
+
+async def put_lane(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    lane: str,
+    agent_id: str,
+    session_id: str | None,
+) -> None:
+    """Open (or replace) a lane's session; None archives it, so the next step starts fresh."""
+    stmt = insert(WorkflowLane).values(
+        tenant_id=tenant_id, run_id=run_id, lane_key=lane, agent_id=agent_id, session_id=session_id
+    )
+    await session.execute(
+        stmt.on_conflict_do_update(
+            constraint="uq_workflow_lanes_key",
+            set_={
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "status": "open" if session_id else "archived",
+            },
+        )
+    )
+
+
+async def add_activity(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    step_id: uuid.UUID,
+    kind: Literal["message", "tool", "note"],
+    text: str,
+    tool: str | None = None,
+    now: datetime,
+) -> None:
+    """One line on the step's activity, bounded per step (`ACTIVITY_LIMIT`)."""
+    count = await session.scalar(
+        select(func.count()).where(WorkflowStepActivity.step_id == step_id)
+    )
+    if (count or 0) >= ACTIVITY_LIMIT:
+        return
+    session.add(
+        WorkflowStepActivity(
+            tenant_id=tenant_id, step_id=step_id, kind=kind, text=text[:500], tool=tool, at=now
+        )
+    )
+
+
+async def list_activity(session: AsyncSession, step_id: uuid.UUID) -> list[tuple[str, str]]:
+    rows = await session.execute(
+        select(WorkflowStepActivity.kind, WorkflowStepActivity.text)
+        .where(WorkflowStepActivity.step_id == step_id)
+        .order_by(WorkflowStepActivity.id)
+    )
+    return [(k, t) for k, t in rows.tuples()]
 
 
 async def list_attempts(session: AsyncSession, step_id: uuid.UUID) -> list[AttemptRow]:
