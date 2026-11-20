@@ -1576,6 +1576,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "tenacity" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -1605,6 +1606,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tenacity", specifier = ">=9.0" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [[package]]
