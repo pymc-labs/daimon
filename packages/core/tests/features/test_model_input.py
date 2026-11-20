@@ -43,7 +43,9 @@ def test_guidance_never_applies_to_isolated_agents() -> None:
 def test_toolset_defaults_change_nothing() -> None:
     """With nothing set the session keeps the agent's own tools, minus default-Off capabilities."""
     toolset = SessionToolset.of(_snapshot(), {})
-    assert toolset.off_capabilities == {"long_jobs"}, "only the default-Off capability is hidden"
+    assert toolset.off_capabilities == {"long_jobs", "workflows"}, (
+        "only the default-Off capabilities are hidden"
+    )
     assert (toolset.daimon_tools, toolset.builtins, toolset.repo_memory, toolset.env_file) == (
         True,
         {},

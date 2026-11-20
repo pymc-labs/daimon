@@ -59,9 +59,9 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
     assert groups and root.back is None
     seen: set[str] = set()
     for op in groups:
-        screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), op)
-        assert screen is not None and screen.back is not None
-        seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
+        for screen in await _walk(db_session_factory, actor, op, None):
+            assert screen.back is not None
+            seen |= {o.value.split(":")[2].split("~")[0] for o in screen.selects[0].options}
     place = _place(actor)
     views = await read_features(db_session_factory, _settings(), place)
     discord = {
@@ -207,17 +207,15 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
             )
         }
         for category in {spec.category for spec in FEATURES.values()}:
-            screen = await panel.show(
-                db_session_factory, _settings(), actor, place, panel.open_op(category)
-            )
-            assert screen is not None
-            offered = len(screen.selects[0].options)
+            pages = await _walk(db_session_factory, actor, panel.open_op(category), None, place)
+            assert all(len(p.selects[0].options) <= panel.SELECT_LIMIT for p in pages), "paged"
+            offered = sum(len(p.selects[0].options) for p in pages)
             wanted = sum(
                 1
                 for s in FEATURES.values()
                 if s.category == category and s.on_platform(platform) and s.key in shown
             )
-            assert offered == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+            assert offered == wanted, f"{platform} {category} is cut"
     op = panel.open_op("chat", "progress_plans")
     screen = await panel.show(
         db_session_factory, _settings(), actor, _place(actor), op, agents=agents
@@ -227,13 +225,17 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
 
 
 async def _walk(
-    db_session_factory: Sessions, actor: FeatureActor, op: str, agents: panel.AgentLoader | None
+    db_session_factory: Sessions,
+    actor: FeatureActor,
+    op: str,
+    agents: panel.AgentLoader | None,
+    place: FeaturePlace | None = None,
 ) -> list[panel.PanelScreen]:
     """The screens reached from `op` by pressing Next until there is none."""
     screens: list[panel.PanelScreen] = []
     while True:
         screen = await panel.show(
-            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+            db_session_factory, _settings(), actor, place or _place(actor), op, agents=agents
         )
         assert screen is not None, op
         screens.append(screen)
