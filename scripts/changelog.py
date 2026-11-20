@@ -60,9 +60,9 @@ def ordered(root: Path, until: str | None) -> list[Path]:
     skipped, like fragments added after ``until``.
     """
     present = {p.relative_to(root).as_posix(): p for p in fragments(root)}
-    log = _git(
-        root, "log", until or "HEAD", "--diff-filter=A", "--name-only", "--format=", "--", "changes"
-    )
+    # No rename detection: a fragment renamed after it was added still counts as added.
+    log = _git(root, "log", until or "HEAD", "--no-renames", "--diff-filter=A",
+               "--name-only", "--format=", "--", "changes")  # fmt: skip
     seen = [name for name in dict.fromkeys(log.split("\n")) if name in present]
     if until is None:
         seen = [name for name in present if name not in seen] + seen

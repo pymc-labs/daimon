@@ -64,3 +64,15 @@ def test_fold_moves_only_fragments_reachable_from_until_newest_first(tmp_path: P
     assert [p.name for p in changelog.fragments(tmp_path)] == ["third.md"], (
         "folded files are removed"
     )
+
+
+def test_fold_until_counts_a_fragment_renamed_after_it_was_added(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "changes").mkdir()
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
+    _add(tmp_path, "draft")
+    _git(tmp_path, "mv", "changes/draft.md", "changes/final.md")
+    _git(tmp_path, "commit", "-qm", "rename")
+
+    assert changelog.fold(tmp_path, _git(tmp_path, "rev-parse", "HEAD")) == 0
+    assert "**draft.**" in (tmp_path / "CHANGELOG.md").read_text(), "the renamed fragment folds"
