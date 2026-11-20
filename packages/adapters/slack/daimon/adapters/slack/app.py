@@ -25,6 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
+from daimon.adapters.slack import workflow_asks
 from daimon.adapters.slack.admin import WorkspaceWebClient, resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
@@ -358,7 +359,7 @@ from daimon.core.turn_origin import (
     turn_origin,
 )
 from daimon.core.turn_queue import TurnQueue
-from daimon.core.workflows import chat_cards
+from daimon.core.workflows import answers, chat_cards
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
@@ -475,6 +476,13 @@ def _envelope_event_time(payload: dict[str, Any]) -> datetime | None:
     return datetime.fromtimestamp(raw, tz=UTC)
 
 
+def _mentions_app(payload: dict[str, Any], event: dict[str, Any]) -> bool:
+    """The message tags the app, so it also arrives as `app_mention`."""
+    text = str(event.get("text") or "")
+    found = cast("list[dict[str, Any]]", payload.get("authorizations") or [])
+    return any(f"<@{a.get('user_id')}>" in text for a in found)
+
+
 def _revokes_bot_token(event: dict[str, Any]) -> bool:
     """Return True if a ``tokens_revoked`` event revoked the workspace bot token.
 
@@ -573,11 +581,18 @@ class SlackApp:
             MENU_CALLBACK_ID: self._submit_menu,
             SETTLE_CALLBACK_ID: self._submit_settle,
             FORM_CALLBACK_ID: self._submit_workflow_form,
+            workflow_asks.ASK_FORM: self._submit_ask_form,
         }
 
     async def _submit_workflow_form(self, payload: dict[str, Any]) -> _Submitted:
         # The ack closes the form; the run card, or what to tell the person, follows.
         return None, submit_job(self.runtime, payload)
+
+    async def _claim_thread_reply(self, event: dict[str, Any], *, team_id: str) -> None:
+        await workflow_asks.claim_event(self.runtime, event, team_id=team_id)
+
+    async def _submit_ask_form(self, payload: dict[str, Any]) -> _Submitted:
+        return None, lambda: workflow_asks.submit_ask_form(self.runtime, payload)
 
     def _with_web_client(
         self, team_id: str, run: Callable[[AsyncWebClient], Awaitable[None]]
@@ -1273,6 +1288,15 @@ class SlackApp:
                 )
                 self._mention_tasks.add(task)
                 task.add_done_callback(self._mention_tasks.discard)
+            elif (
+                etype == "message"
+                and event.get("thread_ts")
+                and event.get("subtype") is None
+                and event.get("channel_type") in ("channel", "group")
+                and not _mentions_app(payload, event)
+            ):
+                # A thread reply that names no one may answer a workflow's ask there.
+                self._spawn(self._claim_thread_reply(event, team_id=team_id))
             elif etype in {"channel_shared", "channel_unshared"}:
                 self._spawn(
                     handle_shared_channel_event(
@@ -1511,6 +1535,8 @@ class SlackApp:
             self._spawn(handler(self.runtime, payload))
         elif action_id == DM_PICK_ACTION_ID:
             self._spawn(handle_dm_agent_pick(self.runtime, payload))
+        elif answers.parse_action(action_id) is not None:
+            self._spawn(workflow_asks.handle_ask_action(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1792,6 +1818,8 @@ class SlackApp:
             # Slack considers them delivered; they will not be redelivered to the
             # replacement instance — this is inherent to ack-first + drain.
             return
+        if await workflow_asks.claim_event(self.runtime, event, team_id=team_id):
+            return  # a workflow ask's answer, not a turn
 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         # Most named messages meet a switch that is off: one read, then nothing.
