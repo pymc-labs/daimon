@@ -57,11 +57,11 @@ Add `--keep 2` to keep the two oldest of each group.
 
 ## Scrubbing
 
-Every case made from a thread is scrubbed before it is saved. People, emails,
-companies, projects, channels, hosts and ids get the same fake everywhere: in
-messages, tool data, file names and file contents. Secrets and signed-URL tokens
-are removed. Word, Excel, PowerPoint and PDF files are rebuilt with fakes, and images
-are blanked where text is found and flagged for a person to check.
+Every case made from a thread is scrubbed before it is saved. Known names and those the
+name model finds get the same fake everywhere: in messages, tool data, file names and
+file contents. Known names are the workspace's people, channels and repos, plus the thread.
+Common secret and token formats are removed. Word, Excel, PowerPoint, PDF and text files
+are rebuilt with fakes and images are blanked where text is found. Other files are left out.
 
 Set [`DAIMON_EVALS__SCRUB_KEY`](configuration.md#daimon_evals__scrub_key) first.
 Install the scrub tools with `pip install "daimon-core[evals]"`, add the spaCy model
@@ -75,12 +75,13 @@ your data holds (people, emails, companies, projects, hostnames, repos, channels
 
 ```bash
 export DAIMON_EVALS__SCRUB_KEY=<at least 16 characters>
-daimon evals bundle scrub bundle/ --entities names.yaml --map fakes.json --out clean/
-daimon evals bundle leftovers clean/ --entities names.yaml --map fakes.json
+daimon evals bundle scrub bundle/ --entities names.yaml --salt my-workspace --map fakes.json --out clean/
+daimon evals bundle leftovers clean/ --entities names.yaml --salt my-workspace --map fakes.json
 ```
 
-Both print counts and places, never the text they found, and exit 1 when something is
-left. Reuse the same key and `--map` for every bundle of a suite so fakes stay the same.
+Both print counts and places, never the text they found, and exit 1 unless the bundle
+is fully scrubbed. Reuse the same key, `--salt` and `--map` for every bundle of a suite
+so fakes stay the same.
 The map holds only hashes and fakes, but keep it private.
 
 ## Who can do what
