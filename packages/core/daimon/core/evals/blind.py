@@ -160,6 +160,8 @@ class CaseView(FormatModel):
     history: list[ChatMessage]
     turn: list[ChatMessage]
     reference: Reference | None
+    participants: dict[str, str]
+    """Author id to display name, as the case's surface names them (the bot included)."""
 
 
 def case_view(case: Case, names: Iterable[str] | None = None) -> CaseView:
@@ -167,6 +169,7 @@ def case_view(case: Case, names: Iterable[str] | None = None) -> CaseView:
     view = CaseView(
         id=case.id, title=case.title, platform=case.surface.platform, history=case.history,
         turn=case.turn.messages, reference=case.expect.reference,
+        participants={p.id: p.display_name for p in [*case.surface.participants, case.surface.bot]},
     )  # fmt: skip
     if names is None:
         return view

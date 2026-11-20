@@ -169,7 +169,8 @@ async def test_arms_and_cases_when_a_reviewer_asks_then_arms_are_refused_and_cas
     assert isinstance(await evals.arms(owner), list), "admins list the arms"
     [case_ref, *_] = await evals.cases(owner, "support-basics")
     seen = await evals.case(reader, "support-basics", case_ref.id)
-    assert set(seen) <= {"id", "title", "platform", "history", "turn", "reference"}
+    assert set(seen) <= {"id", "title", "platform", "history", "turn", "reference", "participants"}
+    assert seen["participants"], "authors come with their display names"
     assert "world" in await evals.case(owner, "support-basics", case_ref.id)
 
 
