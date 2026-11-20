@@ -7,11 +7,13 @@ Both runtimes deliver the same files, built here.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import mimetypes
 import posixpath
 import tarfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -93,6 +95,19 @@ class SandboxRuntime(Protocol):
     ) -> CommandResult: ...
     async def files(self, pod: PodHandle, root: str) -> list[DeliverableFile]: ...
     async def stop(self, pod: PodHandle) -> None: ...
+
+
+async def wait_ready(runtime: SandboxRuntime, pod: PodHandle, timeout_s: float = 300) -> None:
+    """Until the agent shell works: files in, gateway up, eval CA trusted."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            if (await runtime.run(pod, "true", timeout_s=30)).exit_code == 0:
+                return
+        except SandboxError:
+            pass
+        await asyncio.sleep(1)
+    raise SandboxError(f"eval pod {pod.id} was not ready in {timeout_s:.0f}s")
 
 
 def registries(features: FeatureSnapshot) -> Literal["passthrough", "deny"]:

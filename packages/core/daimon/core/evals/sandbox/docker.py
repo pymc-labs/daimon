@@ -25,6 +25,7 @@ from daimon.core.evals.sandbox.runtime import (
     main_tar,
     pod_name,
     untar_files,
+    wait_ready,
 )
 from daimon.core.output_delivery import DeliverableFile
 
@@ -125,11 +126,14 @@ class DockerRuntime:
                 main_tar(spec, configs=True),
             )
             inspected = (await self._call("GET", f"/containers/{net}/json")).json()
+            networks = dict(inspected.get("NetworkSettings", {}).get("Networks") or {})
+            address = next(
+                (str(n["IPAddress"]) for n in networks.values() if n.get("IPAddress")), None
+            )
+            await wait_ready(self, PodHandle(name, "docker"))
         except (SandboxError, httpx.HTTPError):
             await self.stop(PodHandle(name, "docker"))
             raise
-        networks = dict(inspected.get("NetworkSettings", {}).get("Networks") or {})
-        address = next((str(n["IPAddress"]) for n in networks.values() if n.get("IPAddress")), None)
         return PodHandle(name, "docker", address)
 
     async def run(self, pod: PodHandle, command: str, *, timeout_s: float = 300) -> CommandResult:

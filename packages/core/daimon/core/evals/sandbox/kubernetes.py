@@ -33,6 +33,7 @@ from daimon.core.evals.sandbox.runtime import (
     main_tar,
     pod_name,
     untar_files,
+    wait_ready,
 )
 from daimon.core.output_delivery import DeliverableFile
 from pydantic import JsonValue
@@ -253,6 +254,7 @@ class KubernetesRuntime:
             )
             if loaded.exit_code != 0:
                 raise SandboxError(f"pod files did not load: {loaded.stderr[:300]!r}")
+            await wait_ready(self, handle)
         except (SandboxError, httpx.HTTPError, OSError, TimeoutError):
             await self.stop(handle)
             raise
