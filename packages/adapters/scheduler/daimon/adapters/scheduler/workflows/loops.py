@@ -96,9 +96,11 @@ async def starts_step(engine: WorkflowEngine) -> None:
 
 @scheduler_step
 async def steps_step(engine: WorkflowEngine) -> None:
-    """Claim due ready steps within the deployment, workspace and run-as caps."""
+    """Settle Workflow steps from their ended child runs, then claim due ready steps within
+    the deployment, workspace and run-as caps."""
     caps = engine.settings.workflows
     now = engine.clock()
+    await runs.sync_children(engine.sm, engine.settings, now=now)
     async with engine.sm() as session:
         total, per_tenant, per_owner = await workflow_runs.running_counts(session)
         free = caps.max_concurrent_steps - total

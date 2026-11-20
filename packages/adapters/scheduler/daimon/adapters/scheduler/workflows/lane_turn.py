@@ -27,7 +27,7 @@ from daimon.core.workflows.agent_step import Writes, step_policy
 from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.preflight import spend_user_id
 from daimon.core.workflows.runs import StepWork
-from daimon.core.workflows.spec import AgentNode
+from daimon.core.workflows.spec import AgentNode, CodeNode
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -51,48 +51,14 @@ class HeadlessLaneTurn:
         node, run, settings = work.node, work.run, self.settings
         assert isinstance(node, AgentNode), "a lane runs agent steps"
         channel = work.place.workflow.home_channel_id if work.place else None
-        public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
-
-        def heal() -> Awaitable[object]:
-            return reconcile_tenant_defaults(
-                self.client,
-                self.sm,
-                settings.defaults_root,
-                tenant_id=run.tenant_id,
-                public_url=public_url,
-            )
-
-        agent_id = await resolve_agent(
-            self.client,
-            tenant_id=run.tenant_id,
-            daimon_tag=agent_of(work.spec, node)
-            or self.deployment_default.agent_name
-            or BUILTIN_AGENT_NAME,
-            cached_id=None,
-            apply_callable=heal,
-            cache=self.resolver_cache,
-        )
-        async with self.sm() as s:
-            scoped = await resolve(
-                s,
-                context=ScopeContext(tenant_id=run.tenant_id, channel_id=channel),
-                default=self.deployment_default,
-            )
-            account_id = run.run_as_account_id
-            spender = None
-            if account_id is not None:
+        agent_id, environment_id = await self.targets(work)
+        spender = None
+        if (account_id := run.run_as_account_id) is not None:
+            async with self.sm() as s:
                 person = await spend_person_of_account(
                     s, tenant_id=run.tenant_id, account_id=account_id
                 )
-                spender = spend_user_id(person, account_id)
-        environment_id = await resolve_environment(
-            self.client,
-            tenant_id=run.tenant_id,
-            daimon_tag=scoped.environment_name or "default",
-            cached_id=None,
-            apply_callable=heal,
-            cache=self.resolver_cache,
-        )
+            spender = spend_user_id(person, account_id)
 
         def usage(session: str, model_id: str) -> Callable[..., Awaitable[object]]:
             return functools.partial(
@@ -135,3 +101,44 @@ class HeadlessLaneTurn:
             session_id=session_id,
             step=step,
         )
+
+    async def targets(self, work: StepWork) -> tuple[str, str]:
+        """The step's agent and environment ids: the node's own, else the workspace's."""
+        node, run, settings = work.node, work.run, self.settings
+        channel = work.place.workflow.home_channel_id if work.place else None
+        public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
+
+        def heal() -> Awaitable[object]:
+            return reconcile_tenant_defaults(
+                self.client,
+                self.sm,
+                settings.defaults_root,
+                tenant_id=run.tenant_id,
+                public_url=public_url,
+            )
+
+        agent = agent_of(work.spec, node) if isinstance(node, AgentNode) else None
+        agent_id = await resolve_agent(
+            self.client,
+            tenant_id=run.tenant_id,
+            daimon_tag=agent or self.deployment_default.agent_name or BUILTIN_AGENT_NAME,
+            cached_id=None,
+            apply_callable=heal,
+            cache=self.resolver_cache,
+        )
+        async with self.sm() as s:
+            scoped = await resolve(
+                s,
+                context=ScopeContext(tenant_id=run.tenant_id, channel_id=channel),
+                default=self.deployment_default,
+            )
+        environment = node.environment if isinstance(node, CodeNode) else None
+        environment_id = await resolve_environment(
+            self.client,
+            tenant_id=run.tenant_id,
+            daimon_tag=environment or scoped.environment_name or "default",
+            cached_id=None,
+            apply_callable=heal,
+            cache=self.resolver_cache,
+        )
+        return agent_id, environment_id

@@ -22,7 +22,7 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import accounts, tenants, workflow_runs
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows.features import KEYS, workflow_features
-from daimon.core.workflows.spec import Spec, node_hash
+from daimon.core.workflows.spec import CodeNode, ForEachNode, Spec, node_hash
 from daimon.core.workflows.validate import validate_spec
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -67,6 +67,14 @@ class Place:
     run_as_account_id: uuid.UUID | None
 
 
+def has_code(spec: Spec) -> bool:
+    """Any Code step, a For each's included."""
+    return any(
+        isinstance(n, CodeNode) or (isinstance(n, ForEachNode) and isinstance(n.do, CodeNode))
+        for n in spec.nodes.values()
+    )
+
+
 def spend_user_id(person: SpendPerson, account_id: uuid.UUID) -> str:
     """The id the run-as person's step spend is gated and recorded under. An allowance
     counts what they spent under any of their ids, so any one of them serves."""
@@ -95,6 +103,8 @@ async def check(
         )
         if not features.enabled:
             return Refusal("workflows_off", "Workflows are off here. Ask an admin to turn them on.")
+        if not features.code and has_code(place.spec):
+            return Refusal("code_off", "Code steps are off here. Ask an admin to turn them on.")
         if channel is not None:
             provider = await channel_provider(
                 session, tenant_id=tenant.id, platform=tenant.platform, channel_id=channel

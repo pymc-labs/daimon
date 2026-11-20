@@ -37,6 +37,7 @@ from daimon.core.workflows.spec import (
     ActionNode,
     AgentNode,
     AnyNode,
+    CodeNode,
     FinishNode,
     ForEachNode,
     Spec,
@@ -1333,9 +1334,10 @@ async def recheck_blocked(
 
 
 async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: datetime) -> None:
-    """A lease ran out with its worker gone. An agent step whose session was saved keeps its
-    attempt and is reattached to that session. Nothing sent yet, or an idempotent node: run
-    it again. Otherwise a write may have happened, and the step is `unknown` for its owner."""
+    """A lease ran out with its worker gone. An agent or code step whose session was saved
+    keeps its attempt and is reattached to that session. Nothing sent yet, or an idempotent
+    node: run it again. Otherwise a write may have happened, and the step is `unknown` for
+    its owner."""
     async with sm.begin() as session:
         held = await _locked_step(session, step_id, None, "running")
         if held is None or (held[1].lease_expires_at and held[1].lease_expires_at > now):
@@ -1344,7 +1346,7 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
         attempts = await workflow_runs.list_attempts(session, step_id)
         loaded = await _load(session, settings, run, now)
         node = node_of(loaded.spec, step)
-        if isinstance(node, AgentNode) and attempts and attempts[-1].session_id is not None:
+        if isinstance(node, AgentNode | CodeNode) and attempts and attempts[-1].session_id:
             await _retry_later(
                 session, loaded, step, now=now, delay=timedelta(0), message="Reattaching"
             )

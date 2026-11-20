@@ -210,7 +210,12 @@ class ManagedLongJobPort:
                 **job.source_metadata,
                 MA_METADATA_KEY_TENANT: str(job.tenant_id),
                 MA_METADATA_KEY_ACCOUNT: str(job.owner_account_id),
-                MA_METADATA_KEY_BUDGET_CHANNEL: job.parent_channel_id,
+                # A workflow without a home channel spends on no channel budget.
+                **(
+                    {MA_METADATA_KEY_BUDGET_CHANNEL: job.parent_channel_id}
+                    if job.parent_channel_id
+                    else {}
+                ),
                 "daimon_long_job": str(job.id),
             },
             budget={
