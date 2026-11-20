@@ -472,7 +472,7 @@ _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
-    "chat", "agents", "channels", "routines", "credits", "integrations",
+    "chat", "agents", "channels", "routines", "credits", "integrations", "evals",
 )  # fmt: skip
 
 
@@ -930,6 +930,16 @@ def _limit(
 
 
 _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
+    _capability(
+        "evals",
+        "Evals",
+        "People can build eval suites, run agents on them in an enclosed sandbox and review "
+        "the results. Off hides evals and their tools.",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_ADMIN,
+    ),
     _capability(
         "watches",
         "Watches",

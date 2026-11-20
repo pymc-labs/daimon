@@ -87,12 +87,13 @@ def _dicts(tools: Any) -> list[Any]:
 
 
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
-    `plain` leaves long jobs at its default (Off)."""
+    """A web place with nothing set but long jobs and evals turned On, so the baseline hides
+    nothing; `plain` leaves both at their default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
         features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+        features["evals"] = ResolvedFeature("evals", "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -222,7 +223,8 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
+    off_by_default = CAPABILITY_TOOLS["long_jobs"] | CAPABILITY_TOOLS["evals"]
+    assert plain.hidden_daimon_tools == off_by_default, "long jobs and evals are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)

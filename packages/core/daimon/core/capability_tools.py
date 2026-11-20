@@ -5,6 +5,25 @@ from __future__ import annotations
 from typing import Final
 
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
+    "evals": frozenset(
+        {
+            "eval_suites_list",
+            "eval_suite_get",
+            "eval_suite_create",
+            "eval_suite_update",
+            "eval_suite_share",
+            "eval_cases_list",
+            "eval_case_get",
+            "eval_case_put",
+            "eval_case_validate",
+            "eval_arms_list",
+            "eval_arm_create",
+            "eval_items_list",
+            "eval_item_get",
+            "eval_bundle_export",
+            "eval_bundle_import",
+        }
+    ),
     "watches": frozenset(
         {
             "create_watch",
