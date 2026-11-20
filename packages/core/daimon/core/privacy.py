@@ -101,6 +101,7 @@ class PurgePreview(BaseModel):
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     monitored_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    workflows: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
     # one row per PurgeReport mux field.
     mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -155,6 +156,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.mux_journal_events, "saved conversation message"),
         (preview.host_call_cards, "approval request"),
         (preview.monitored_events, "record admins can read"),
+        (preview.workflows, "workflow record"),
     )
     parts = [
         "saved settings"

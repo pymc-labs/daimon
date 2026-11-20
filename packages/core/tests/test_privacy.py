@@ -51,6 +51,7 @@ from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import (
     link_principals,
@@ -585,6 +586,28 @@ async def test_preview_and_purge_agree_on_connector_tokens(
     assert left == 0, "no connector token may survive the purge"
 
 
+async def test_preview_and_purge_agree_on_workflows(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    spec = {"schema": "daimon.workflow/v1", "name": "Mine", "start": "a", "nodes": {}}
+    await workflows_store.create_workflow(
+        db_session, tenant_id=tenant.id, owner_account_id=account.id, name="Mine", spec=spec
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.workflows.count == 1, "the person's private workflow is counted"
+    assert "1 workflow record" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.workflows == 1, "purge must erase the workflow it previewed"
+    async with db_session_factory() as session:
+        left = await workflows_store.count_for_account(session, account_id=account.id)
+    assert left == 0, "nothing of the person may survive in workflows"
+
+
 async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -1049,6 +1072,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
         "monitored_events": "monitored_events",
+        "workflows": "workflows",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -1122,6 +1146,25 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # the admin grants of the account.
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
+        # workflows.erase_for_account: private workflows (with runs) deleted, shared ones
+        # needs_owner, access and answers deleted, answer text cleared, runs' triggered_by
+        # tombstoned. Other person columns are attribution only, ON DELETE SET NULL.
+        **dict.fromkeys(
+            (
+                "workflows",
+                "workflow_versions",
+                "workflow_access",
+                "workflow_grants",
+                "workflow_publish_requests",
+                "workflow_trigger_secrets",
+                "workflow_runs",
+                "workflow_waits",
+                "workflow_wait_answers",
+                "workflow_proposals",
+                "workflow_wait_posts",
+            ),
+            "accounts.id FKs; workflows.erase_for_account",
+        ),
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",

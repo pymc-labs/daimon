@@ -41,6 +41,7 @@ from daimon.core.stores import (
     web_people,
     web_roles,
     wizard_session,
+    workflows,
 )
 from daimon.core.stores import coding_key_claims as key_claims
 from daimon.core.stores import connector_tokens as connectors
@@ -500,6 +501,8 @@ ERASABLE: tuple[Erasable, ...] = (
     by_account("dm_picks", (dm_access.count_picks_for_account, dm_access.delete_picks_for_account)),
     by_dm_user("dm_rules", dm_access.count_user_rules, dm_access.delete_user_rules),
     by_dm_user("dm_grant_users", dm_access.count_grants_listing, dm_access.scrub_user_from_grants),
+    # Private workflows go; shared ones the person held wait for a new owner.
+    by_account("workflows", (workflows.count_for_account, workflows.erase_for_account)),
     # Their identities, tokens and browser sessions cascade from the person.
     by_account("web_people", (web_people.count_for_account, web_people.delete_for_account)),
     by_account(
