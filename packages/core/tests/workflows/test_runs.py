@@ -8,21 +8,28 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+    BetaManagedAgentsSpanModelRequestEndEvent,
+)
+from daimon.core import usage_recording
 from daimon.core._models import (
     SecurityAuditEvent,
     Tenant,
+    UsageEvent,
     WorkflowRun,
     WorkflowRunEvent,
     WorkflowStep,
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
-from daimon.core.stores import workflow_runs, workflows
+from daimon.core.pricing import MODEL_PRICING
+from daimon.core.stores import tenant_ledger, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.workflows import engine, preflight, runs
 from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Start, StepWork
 from daimon.testing.factories import make_account, make_tenant
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError
@@ -400,3 +407,46 @@ async def test_the_ledger_is_append_only(db_session: AsyncSession) -> None:
         await workflow_runs.delete_runs(s, [run.id])
     assert await db_session.scalar(select(WorkflowRunEvent.seq)) is None, "a run delete cascades"
     assert await db_session.scalar(select(WorkflowStep.id)) is None, "with its steps"
+
+
+async def test_lane_usage_is_tagged_and_rolled_up_to_step_and_run(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, AGENT, "a")
+    run = await world.run()
+    claimed = await world.claim(run.id, "a")
+    async with world.sm.begin() as s:
+        attempt = await workflow_runs.running_attempt(s, claimed.step.id)
+        assert attempt is not None, "the claim opened an attempt"
+        await workflow_runs.set_attempt_session(
+            s, attempt_id=attempt.id, session_id="ses_l", now=NOW
+        )
+    for event_id in ("evt_1", "evt_1", "evt_2"):  # a replay rolls up once
+        await usage_recording.record_turn_usage(
+            sessionmaker=world.sm,
+            tenant_id=world.tenant_id,
+            platform_user_id=None,
+            managed_session_id="ses_l",
+            model_id="claude-opus-4-7",
+            event=BetaManagedAgentsSpanModelRequestEndEvent(
+                id=event_id,
+                is_error=False,
+                model_request_start_id="start_1",
+                model_usage=ma_model_usage(input_tokens=1000, output_tokens=500),
+                processed_at=NOW + timedelta(minutes=1),
+                type="span.model_request_end",
+            ),
+            pricing=MODEL_PRICING["claude-opus-4-7"],
+            workflow_run_id=run.id,
+        )
+    async with world.sm() as s:
+        tags = (
+            await s.execute(
+                select(UsageEvent.workflow_run_id, UsageEvent.workflow_step_id).distinct()
+            )
+        ).all()
+        debits = await tenant_ledger.get_balance(s, tenant_id=world.tenant_id)
+    assert tags == [(run.id, claimed.step.id)], f"usage rows name the run and step: {tags}"
+    step = (await world.steps(run.id))["a"]
+    total = (await world.get(run.id)).cost_usd
+    assert step.cost_usd == total == -debits > 0, f"step and run carry the debits: {step}"
