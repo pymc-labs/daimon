@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
 from daimon.core.stores import web_identities as identities_store
-from daimon.core.web_identity import VerifiedIdentity, resolve_web_people
+from daimon.core.stores.domain import Role
+from daimon.core.turn_hold import RequesterOrg
+from daimon.core.web_identity import VerifiedIdentity, WebPrincipal, resolve_web_people
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -51,3 +54,19 @@ async def test_sign_in_stores_the_email_it_carries_and_keeps_it_when_a_later_one
 
     assert first.email == "ada@acme.test", "the sign-in's email lands on the person"
     assert again.email == "ada@acme.test", "a sign-in without one keeps the stored email"
+
+
+@pytest.mark.parametrize(
+    ("org", "client"),
+    [
+        (RequesterOrg.HOST, False),
+        (RequesterOrg.OTHER, True),
+        (RequesterOrg.OUTSIDER, True),
+        (RequesterOrg.UNKNOWN, True),
+    ],
+)
+def test_only_a_host_member_is_not_a_client_on_the_web(org: RequesterOrg, client: bool) -> None:
+    principal = WebPrincipal(
+        platform="discord", external_id="u-1", role=Role.USER, org=org, home_id=None
+    )
+    assert principal.subject.client is client

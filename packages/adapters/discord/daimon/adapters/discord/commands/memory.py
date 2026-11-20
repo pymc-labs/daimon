@@ -83,6 +83,7 @@ async def _resolve_agent(
         policy = await load_access_policy(session, tenant_id=tenant_id)
         channel = interaction.channel
         parent = channel.parent_id if isinstance(channel, discord.Thread) else None
+        standing = RequesterOrg.HOST  # until `audience_hold` can be on
         hold = await held_place(
             session,
             tenant_id=tenant_id,
@@ -92,7 +93,7 @@ async def _resolve_agent(
             foreign_home_id=principal.foreign_home_id,
             # Discord has no other-organisation members and no live shared-channel
             # signal: a member of the guild, and the recorded registry decides.
-            requester_org=RequesterOrg.HOST,
+            requester_org=standing,
             channel_shared=None,
         )
     if config.agent_name is None:

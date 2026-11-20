@@ -86,7 +86,7 @@ _REFUSALS = {
     "writers_none": "the person may not use it here",
     "runs_elsewhere": "it is kept to other channels",
     "own_agents_only": "this channel only uses its own agents",
-    "client_requester": "it can't run for someone from another organisation here",
+    "client_requester": "it can't run for someone outside the team here",
     "provider_setup_pending": "its model provider is still being set up, so ask again shortly",
 }
 SELF_BUDGET_SPENT = "Your copies used up their spending limit for this message. Answer now."

@@ -4414,10 +4414,11 @@ class DaimonBot(commands.Bot):
             if not post_state.may_post:
                 raise AdmissionDenied(reason="writers_none")
             category_id, category_unresolved = await _resolve_category(thread, fetch=False)
+        standing = RequesterOrg.HOST  # until `audience_hold` can be on
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
-            requester_org=RequesterOrg.HOST,
+            requester_org=standing,
             platform="discord",
             external_user_id=row.requester_external_user_id,
             channel_id=row.parent_channel_id,
@@ -5277,12 +5278,13 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
+        standing = RequesterOrg.HOST  # until `audience_hold` can be on
         try:
             admission = await admit(
                 self.runtime.turn_deps,
                 origin="chat",
                 tenant_id=tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=standing,
                 platform="discord",
                 external_user_id=str(message.author.id),
                 channel_id=parent_channel_id,

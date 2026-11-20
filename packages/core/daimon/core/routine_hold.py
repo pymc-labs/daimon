@@ -12,9 +12,9 @@ refuses it before any hold is decided (`routine_destination_parent_unknown`).
 
 from __future__ import annotations
 
+from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.shared_channels import is_channel_shared
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,9 +24,10 @@ async def routine_hold(session: AsyncSession, row: RoutineRow, *, platform: str)
     channel_id = routine_destination_channel(row)
     if channel_id is None:
         return None
-    if await is_channel_shared(
+    audience = await channel_has_outsiders(
         session, tenant_id=row.tenant_id, platform=platform, channel_id=channel_id
-    ):
+    )
+    if audience.contained:
         return TurnHold(platform, channel_id, client=False)
     return None
 
@@ -50,6 +51,9 @@ async def result_is_held(
     async with sessionmaker() as session:
         if await routine_hold(session, row, platform=platform) is not None:
             return True
-        return parent_channel_id is not None and await is_channel_shared(
+        if parent_channel_id is None:
+            return False
+        parent = await channel_has_outsiders(
             session, tenant_id=row.tenant_id, platform=platform, channel_id=parent_channel_id
         )
+        return parent.contained

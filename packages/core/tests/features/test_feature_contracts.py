@@ -91,6 +91,7 @@ _NARROWED: dict[str, str] = {
     "private_channel_messages": "operator-only: read once at startup",
     "direct_messages": "a workspace or agent policy for DMs, which have no channel or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
+    "audience_hold": "a server admin's choice, read at admission once for the whole server",
     "dm_history_depth": "DMs have no channel or thread; an agent and its workspace set the memory",
     "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",
     "tool_safety": "operator-only security switch",

@@ -96,6 +96,7 @@ Where each feature can be set, and its default.
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
+| Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
@@ -639,6 +640,18 @@ A reply in a direct message can read the agent's memory but not change it.
 | --- | --- |
 | Key | `dm_memory_read_only` |
 | Values | `off` (Writable), `on` (Read-only) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Stricter wins |
+
+## Rooms with outside people
+
+Report only changes nothing.
+
+| | |
+| --- | --- |
+| Key | `audience_hold` |
+| Values | `off` (Off), `shadow` (Report only) |
 | Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Stricter wins |

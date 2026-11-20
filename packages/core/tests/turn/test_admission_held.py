@@ -124,15 +124,18 @@ async def test_an_other_organisation_requires_its_home_id(
         await _admit(db_session_factory, tmp_path, tenant, org=RequesterOrg.OTHER)
 
 
+@pytest.mark.parametrize("org", [RequesterOrg.UNKNOWN, RequesterOrg.OUTSIDER])
 async def test_an_unknown_requester_is_held_but_changes_nothing_stored(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    org: RequesterOrg,
 ) -> None:
+    """An outsider (a member with no internal role) is a client too, and records nothing."""
     tenant = await _seed_admittable_tenant(db_session, policy=None)
     await _store_role(db_session, tenant, Role.ADMIN)
 
-    admission = await _admit(
-        db_session_factory, tmp_path, tenant, org=RequesterOrg.UNKNOWN, role=Role.USER
-    )
+    admission = await _admit(db_session_factory, tmp_path, tenant, org=org, role=Role.USER)
 
     assert await _role_and_marker(db_session, tenant) == (Role.ADMIN, None)
     assert admission.hold == TurnHold(PLATFORM, CHANNEL, client=True)
@@ -161,7 +164,7 @@ async def test_a_principal_already_marked_foreign_is_a_client_even_when_the_adap
     assert (await _role_and_marker(db_session, tenant))[1] == HOME, "the marker is sticky"
 
 
-@pytest.mark.parametrize("org", [RequesterOrg.OTHER, RequesterOrg.UNKNOWN])
+@pytest.mark.parametrize("org", [RequesterOrg.OTHER, RequesterOrg.UNKNOWN, RequesterOrg.OUTSIDER])
 async def test_a_client_is_refused_a_direct_message(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

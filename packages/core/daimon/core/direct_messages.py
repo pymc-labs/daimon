@@ -584,6 +584,7 @@ async def admit_cold_dm(
     verified_membership: bool | None,
     agent_name: str | None = None,
     platform: str = "discord",
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> Admission:
     """Check a cold agent without creating one or changing channel routing.
 
@@ -599,7 +600,7 @@ async def admit_cold_dm(
         deps,
         origin="chat",
         tenant_id=tenant_id,
-        requester_org=RequesterOrg.HOST,
+        requester_org=requester_org,
         platform=platform,
         external_user_id=external_user_id,
         channel_id=channel_id,
@@ -925,10 +926,12 @@ async def reply_to_dm(
     platform_channel_id: str | None = None,
     tell: TellMonitored | None = None,
     groups: frozenset[str] | None = None,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> str | None:
     """Compatibility text API for adapters that do not consume a delivery grant."""
     reply = await reply_to_dm_result(
         deps,
+        requester_org=requester_org,
         platform=platform,
         route_key=route_key,
         external_user_id=external_user_id,
@@ -970,6 +973,7 @@ async def reply_to_dm_result(
     platform_channel_id: str | None = None,
     tell: TellMonitored | None = None,
     groups: frozenset[str] | None = None,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
@@ -1033,7 +1037,7 @@ async def reply_to_dm_result(
             admission = await admit(
                 deps,
                 tenant_id=conversation.tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=requester_org,
                 platform=platform,
                 external_user_id=external_user_id,
                 origin="chat",
@@ -1227,6 +1231,7 @@ async def run_dm_routine(
     source: DmSource | None,
     budget_channel_id: str | None,
     sandbox: RoutineSandbox | None = None,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
@@ -1241,6 +1246,7 @@ async def run_dm_routine(
     try:
         return await _run_dm_fire(
             deps,
+            requester_org=requester_org,
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
             agent_name=agent_name,
@@ -1260,6 +1266,7 @@ async def run_dm_watch(
     prompt: str,
     source: DmSource,
     budget_channel_id: str,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a DM watch's fire as a fresh private DM turn of its owner, under watch posture.
 
@@ -1276,6 +1283,7 @@ async def run_dm_watch(
     try:
         return await _run_dm_fire(
             deps,
+            requester_org=requester_org,
             tenant_id=row.tenant_id,
             owner_user_id=owner_user_id,
             agent_name=row.target_name,
@@ -1297,6 +1305,7 @@ async def run_dm_timer(
     row: TaskContinuationRow,
     *,
     prompt: str,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a due DM timer as a fresh private DM turn of its owner.
 
@@ -1309,6 +1318,7 @@ async def run_dm_timer(
     try:
         return await _run_dm_fire(
             deps,
+            requester_org=requester_org,
             tenant_id=row.tenant_id,
             owner_user_id=row.requester_external_user_id,
             agent_name=row.target_name,
@@ -1332,6 +1342,7 @@ async def run_channel_timer(
     role_ids: tuple[str, ...] = (),
     category_id: str | None = None,
     category_unresolved: bool = False,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a due channel timer as a fresh, unattended turn of its owner in that channel.
 
@@ -1356,7 +1367,7 @@ async def run_channel_timer(
         admission = await admit(
             deps,
             tenant_id=row.tenant_id,
-            requester_org=RequesterOrg.HOST,
+            requester_org=requester_org,
             platform="discord",
             external_user_id=owner,
             channel_id=channel_id,
@@ -1418,6 +1429,7 @@ async def _run_dm_fire(
     budget_channel_id: str | None,
     watch_row: TaskContinuationRow | None = None,
     timer_row: TaskContinuationRow | None = None,
+    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False) as fence:
         now = datetime.now(UTC)
@@ -1435,7 +1447,7 @@ async def _run_dm_fire(
             admission = await admit(
                 deps,
                 tenant_id=tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=requester_org,
                 platform="discord",
                 external_user_id=owner_user_id,
                 origin="routine" if watch_row is None else watch_row.reason,

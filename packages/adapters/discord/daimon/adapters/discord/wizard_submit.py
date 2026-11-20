@@ -484,12 +484,13 @@ async def run_wizard_submit_turn_observed(
         )
         # The protection check above cached any parent it had to fetch.
         category_id, category_unresolved = await _resolve_category(channel, fetch=False)
+        standing = RequesterOrg.HOST  # until `audience_hold` can be on
         try:
             admission = await admit(
                 bot.runtime.turn_deps,
                 origin="chat",
                 tenant_id=row.tenant_id,
-                requester_org=RequesterOrg.HOST,
+                requester_org=standing,
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,

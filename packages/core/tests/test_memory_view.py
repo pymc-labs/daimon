@@ -199,10 +199,11 @@ async def test_personal_memory_is_not_used_in_a_held_place(
     [
         (RequesterOrg.UNKNOWN, False),
         (RequesterOrg.UNKNOWN, None),
+        (RequesterOrg.OUTSIDER, False),
         (RequesterOrg.OTHER, False),
         (RequesterOrg.HOST, True),
     ],
-    ids=["unknown", "unknown-no-signal", "other", "host-in-live-shared-channel"],
+    ids=["unknown", "unknown-no-signal", "outsider", "other", "host-in-live-shared-channel"],
 )
 async def test_an_asker_not_proven_a_member_of_an_unshared_channel_never_reads_agent_wide_memory(
     requester_org: RequesterOrg,
