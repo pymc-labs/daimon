@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { NotFound } from "@/pages/Status"
-import { useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
+import { exportWorkflow, useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
 import { Design } from "./Design"
 import { MigrationStrip, PublishStrip } from "./PublishStrip"
 import { RunDialog } from "./RunDialog"
@@ -40,13 +40,7 @@ export function WorkflowPage() {
   if (!wf) return <Page crumbs={crumbs}>{query.isError && <ErrorState error={error} onRetry={() => void query.refetch()} />}</Page>
   const b = `/workflows/${id}`
   const design = rest === "" || /^versions\/\d+$/.test(rest)
-  const exportYaml = () => {
-    const a = document.createElement("a")
-    a.href = URL.createObjectURL(new Blob([toYaml(wf.spec)], { type: "text/yaml" }))
-    a.download = `${wf.name.toLowerCase().replace(/\W+/g, "-")}.yaml`
-    a.click()
-    URL.revokeObjectURL(a.href)
-  }
+  const exportYaml = () => void exportWorkflow(id, wf.name, "yaml", wf.live_version ?? undefined).catch((e: Error) => toast.error(e.message))
   const remove = async () => {
     if (!(await confirm({ title: `Delete ${wf.name}?`, action: "Delete", destructive: true }))) return
     del.mutate(id, { onSuccess: () => { toast(`Deleted ${wf.name}`); navigate("/workflows") } })

@@ -1,6 +1,6 @@
 // Run state from the ledger: the projection the run page renders, edge states for the graph and the timeline bars.
 import { allEdges, edgeKey } from "./spec"
-import type { AttemptStatus, ErrorClass, Person, RunEvent, RunState, RunStatus, Spec, StepRun, StepStatus, WaitingReason, WaitKind } from "./types"
+import type { Answer, AttemptStatus, ErrorClass, FileRef, Person, RunEvent, RunState, RunStatus, Spec, StepRun, StepStatus, Sent, WaitingReason, WaitKind } from "./types"
 
 const ms = (iso: string) => new Date(iso).getTime()
 export const ENDED_STEP: StepStatus[] = ["succeeded", "failed", "skipped", "cancelled"]
@@ -95,12 +95,16 @@ export function project(events: RunEvent[]): RunState {
         if (!st) break
         st.status = "waiting"
         st.wait = {
-          kind: (str(d.kind) ?? "approval") as WaitKind, status: "waiting", addressees: (d.addressees as Person[] | undefined) ?? [],
+          id: str(d.id) ?? "", kind: (str(d.kind) ?? "approval") as WaitKind, status: "waiting", addressees: (d.addressees as Person[] | undefined) ?? [],
           opened_at: e.at, expires_at: str(d.expires_at), closed_at: null, decision: null, decider: null,
+          sent: [], attachments: (d.attachments as FileRef[] | undefined) ?? [], answer: null,
         }
         break
+      case "wait.posted":
+        if (st?.wait) st.wait.sent = [...st.wait.sent, d.sent as Sent]
+        break
       case "wait.decided":
-        if (st?.wait) Object.assign(st.wait, { status: "completed", closed_at: e.at, decision: str(d.decision), decider: (d.by as Person | undefined) ?? null })
+        if (st?.wait) Object.assign(st.wait, { status: "completed", closed_at: e.at, decision: str(d.decision), decider: (d.by as Person | undefined) ?? null, answer: (d.answer as Answer | undefined) ?? null })
         break
       case "wait.timed_out":
         if (st?.wait) Object.assign(st.wait, { status: "timed_out", closed_at: e.at, decision: str(d.route) })

@@ -1,6 +1,6 @@
 // Scripted runs: a walk over the spec writes each run's ledger. Live runs hold rows in the future that the stream releases on time.
 import { project } from "@/modules/workflows/runs"
-import { allEdges, ancestors, edgeKey, edgesOf, outputFields, titleOf, toolWrites, type FlowEdge } from "@/modules/workflows/spec"
+import { allEdges, ancestors, edgeKey, edgesOf, finishDeliver, outputFields, titleOf, toolWrites, type FlowEdge } from "@/modules/workflows/spec"
 import type {
   ActivityLine, EventType, Field, Node, Person, Proposal, RunDetail, RunEvent, RunSummary, RunTest, Spec, StepDetail, TriggerKind, WaitKind,
 } from "@/modules/workflows/types"
@@ -211,7 +211,12 @@ function pause(c: Ctx, id: string, key: string, n: Node, v: number, t: number, e
   const after = durMs(typeof n.timeout === "string" ? n.timeout : n.timeout?.after) ?? durMs(n.for)
   const what = approval ? `Approval from ${to.map((p) => p.name).join(", ")}` : kind === "event" ? `Waiting for ${n.event!.source}` : "Waiting for a time"
   emit(c, t, "step.started", key, "Engine", "Started", { attempt: 1 })
-  emit(c, t, "wait.opened", key, "Engine", what, { kind, addressees: to, expires_at: after ? iso(t + after) : null })
+  const attachments = approval && n.attach ? [{ name: "comparison.md", size: 4812, url: fileUrl(c.run, "comparison.md") }] : []
+  emit(c, t, "wait.opened", key, "Engine", what, { id: waitId(c.run, key), kind, addressees: to, expires_at: after ? iso(t + after) : null, attachments })
+  if (approval && (n.deliver === "dm" || n.deliver === "thread")) {
+    const where = n.deliver === "dm" ? `Direct message to ${to[0]?.name ?? "the owner"}` : `Thread in #${n.channel ?? "sales"}`
+    emit(c, t, "wait.posted", key, "Engine", `Posted in ${where}`, { sent: { platform: "discord", where, link: "https://discord.com/channels/745261709622771773/1/2", at: iso(t) } })
+  }
   emit(c, t, "run.waiting", null, "Engine", approval ? "Waiting for approval" : what, { reason: kind })
   if (end === "wait") return void (c.stop = t)
   if (end === "timeout") {
@@ -225,11 +230,15 @@ function pause(c: Ctx, id: string, key: string, n: Node, v: number, t: number, e
   decide(c, id, key, n, v, t + wait * (script.pace ?? 1), approval ? c.run.owner : null)
 }
 
-function decide(c: Ctx, id: string, key: string, n: Node, v: number, at: number, by: Person | null, route?: string) {
+export const waitId = (run: Run, key: string) => `wt_${run.id}_${key}`
+export const fileUrl = (run: Run, name: string) => `/api/workflows/runs/${run.id}/files/${encodeURIComponent(name)}`
+
+function decide(c: Ctx, id: string, key: string, n: Node, v: number, at: number, by: Person | null, route?: string, text?: string) {
   const edges = choose(c, id, n, v, route)
   const name = edges[0]?.kind === "next" ? null : edges[0]?.label ?? null
   const detail = by ? `${name === "approve" ? "Approved" : name === "reject" ? "Rejected" : cap(name ?? "Done")} by ${by.name}` : n.event ? "Event arrived" : "Time reached"
-  emit(c, at, "wait.decided", key, by?.name ?? "Engine", detail, { decision: name, by })
+  const answer = by && text != null ? { by, via: "web", text, values: { text }, files: [], at: iso(at) } : null
+  emit(c, at, "wait.decided", key, by?.name ?? "Engine", answer ? `Answered by ${by?.name}` : detail, { decision: name, by, answer })
   emit(c, at, "run.resumed", null, "Engine", "Resumed")
   if (name) emit(c, at, "step.route_chosen", key, by?.name ?? "Engine", `Chose ${name}`, { route: name, slot: edges[0]!.slot })
   emit(c, at, "step.succeeded", key, "Engine", "Succeeded")
@@ -263,8 +272,9 @@ function each(c: Ctx, id: string, key: string, n: Node, v: number, t: number) {
 }
 
 function finish(c: Ctx, id: string, n: Node, at: number) {
-  if (n.deliver) {
-    const to = c.run.test ? (c.run.by ?? c.run.owner).name : n.deliver.to === "home" ? "home channel" : n.deliver.to
+  const dl = finishDeliver(n)
+  if (dl) {
+    const to = c.run.test ? (c.run.by ?? c.run.owner).name : dl.to === "home" ? "home channel" : dl.to
     emit(c, at + 200, "delivery.queued", id, "Engine", `To ${to}`)
     emit(c, at + 900, "delivery.sent", id, "Engine", `Posted to ${to}`)
   }
@@ -364,12 +374,12 @@ export function decideUnknown(run: Run, d: Decision, by: Person, now = Date.now(
 }
 
 /** Decides an open approval with one of its routes. */
-export function decideWait(run: Run, key: string, route: string, by: Person, now = Date.now()) {
+export function decideWait(run: Run, key: string, route: string, by: Person, now = Date.now(), text?: string) {
   cut(run, now)
   const s = project(run.events).steps.find((x) => x.key === key && x.status === "waiting")
   if (!s) return false
   const c = ctx(run)
-  decide(c, s.node, key, run.spec.nodes[s.node]!, s.visit, now, by, route)
+  decide(c, s.node, key, run.spec.nodes[s.node]!, s.visit, now, by, route, text)
   drive(c)
   return true
 }
@@ -485,7 +495,7 @@ export function stepDetail(run: Run, key: string, attempt: number | null, now = 
   return {
     key, attempt: a?.n ?? 0, agent: agent ? agentName(agent) : null, model: agent ? n.model ?? AGENTS.find((a) => a.id === CATALOG.agents.find((x) => x.key === agent)?.id)?.model ?? null : null,
     summary: agent && done ? summaryText(st.node, output) : null, route: st.route ? { name: st.route, reason } : null,
-    files: st.node === "synthesise" && done ? [{ name: "comparison.md", size: 4812 }] : [],
+    files: st.node === "synthesise" && done ? [{ name: "comparison.md", size: 4812, url: fileUrl(run, "comparison.md") }] : [],
     input, output, untrusted,
     rejections: mine.filter((e) => e.type === "step.contract_rejected").map((e) => ({ attempt: st.attempts.findLastIndex((x) => ms(x.started_at) <= ms(e.at)) + 1, errors: e.data.errors as string[] })),
     proposals, activity, plan,

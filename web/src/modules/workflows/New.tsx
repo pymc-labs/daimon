@@ -12,10 +12,10 @@ import { useCan } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 import { NotFound } from "@/pages/Status"
 import { useCreate, useTemplates } from "./api"
-import type { AskMessage, NewWorkflow as Body } from "./types"
+import type { NewWorkflow as Body } from "./types"
 import { KIND, TRIGGER } from "./kinds"
 
-type From = Body["from"]
+type From = Body["from"] | "describe"
 const FROM: { id: From; icon: LucideIcon; label: string; fact: string }[] = [
   { id: "describe", icon: MessageSquareText, label: "Describe it", fact: "Daimon drafts the steps" },
   { id: "template", icon: LayoutTemplate, label: "Template", fact: "6 starting points" },
@@ -38,13 +38,11 @@ export function NewWorkflow() {
   const [name, setName] = useState("")
   const [yaml, setYaml] = useState("")
   if (!can("workflows.run")) return <NotFound />
-  const body: Body | null = from === "describe" ? (text.trim() ? { from, text: text.trim() } : null)
+  // Describe it starts blank: the text is the first message of the workflow's chat thread.
+  const body: Body | null = from === "describe" ? (text.trim() ? { from: "blank", name: "Untitled workflow" } : null)
     : from === "template" ? { from, template: tpl } : from === "blank" ? (name.trim() ? { from, name: name.trim() } : null) : (yaml.trim() ? { from, yaml } : null)
   const submit = () => body && create.mutate(body, {
-    onSuccess: (w) => {
-      const ask: AskMessage[] | undefined = w.reply && body.from === "describe" ? [{ role: "user", text: body.text }, { role: "assistant", text: w.reply }] : undefined
-      navigate(`/workflows/${w.id}${ask ? "?ask=1" : ""}`, { state: ask ? { ask } : undefined })
-    },
+    onSuccess: (w) => navigate(from === "describe" ? `/workflows/${w.id}?ask=1` : `/workflows/${w.id}`, { state: from === "describe" ? { first: text.trim() } : undefined }),
   })
   return (
     <Page crumbs={[{ label: "Workflows", to: "/workflows" }, { label: "New workflow" }]}>

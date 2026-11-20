@@ -50,7 +50,7 @@ export function TestRunSheet({ wf, draft, open, onOpenChange }: { wf: Workflow; 
     setDelivery(d)
     setVals(Object.fromEntries(Object.entries(d.inputs).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)])))
   }
-  const go = () => start.mutate({ inputs: vals, test: { live_writes: live, pinned } }, {
+  const go = () => start.mutate({ inputs: vals, test: { live_writes: live, pinned, pinned_from: pinned.length ? prevRun?.id ?? null : null } }, {
     onSuccess: (r) => { onOpenChange(false); setParams((p) => { p.set("run", String(r.number)); p.delete("node"); return p }, { replace: true }) },
   })
   return (

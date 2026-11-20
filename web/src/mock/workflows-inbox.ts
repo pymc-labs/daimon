@@ -8,7 +8,7 @@ import type {
 } from "@/modules/workflows/types"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { me } from "./world"
-import { ago, detail, draftOf, find, findRun, mkDraft, P, versionsOf, W, type Stored } from "./workflows"
+import { ago, allRuns, detail, draftOf, find, findRun, mkDraft, P, versionsOf, W, type Stored } from "./workflows"
 import { decideWait } from "./workflows-runs"
 import { publicRequest, requests } from "./workflows-store"
 
@@ -31,7 +31,7 @@ const unknown = (id: unknown) => HttpResponse.json({ detail: `No such ${String(i
 
 type Rec = Omit<InboxItem, "decision"> & {
   to: string[]; show?: string; bound?: InboxDetail["bound"]; proposals?: InboxDetail["proposals"]; question?: string
-  form?: InboxDetail["form"]; values?: Record<string, unknown>; routes: InboxRoute[]; decision: Decision | null; request?: string
+  form?: InboxDetail["form"]; values?: Record<string, unknown>; sent?: InboxDetail["sent"]; attachments?: InboxDetail["attachments"]; answer?: InboxDetail["answer"]; routes: InboxRoute[]; decision: Decision | null; request?: string
 }
 const approve: InboxRoute[] = [{ name: "reject", label: "Reject", primary: false, comment: true }, { name: "approve", label: "Approve", primary: true, comment: false }]
 const run = (wf: string, n: number) => ({ id: `${wf}_run${n}`, number: n })
@@ -61,7 +61,9 @@ const RECS: Rec[] = [
     since: ago(1.4), expires_at: null, to: ["p_maya", "p_jonas"], decision: null,
     routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }], question: "Where should the Larkspur Retail kickoff notes go?",
     form: { type: "object", required: ["channel"], properties: { channel: { type: "string", title: "Channel", enum: ["#delivery", "#clients", "#leads"] }, note: { type: "string", title: "Note" } } },
-    values: { channel: "#delivery" } },
+    values: { channel: "#delivery" },
+    sent: [{ platform: "discord", where: "Direct message to Maya Lindqvist", link: "https://discord.com/channels/745261709622771773/1/2", at: ago(1.4) }],
+    attachments: [{ name: "kickoff-notes.md", size: 2140, url: "/api/workflows/runs/wf_onboard_run124/files/kickoff-notes.md" }] },
   { id: "ib_alert", kind: "approval", title: "Page the on-call", workflow: { id: "wf_alert", name: "Alert triage" }, run: run("wf_alert", 128), step: "page", asked_by: "Daimon",
     since: ago(0.4), expires_at: ago(-0.2), to: ["p_jonas"], decision: null, routes: approve,
     show: "**api-latency-p99** above 900 ms for 12 minutes.\nLikely cause: the new rate limiter on `/v1/score`. Paging the on-call with the graph and the deploy link.",
@@ -91,12 +93,12 @@ function recsFor(): Rec[] {
 }
 const recOf = (id: string): Rec | undefined => recsFor().find((r) => r.id === id)
 
-const item = ({ to: _to, show: _s, bound: _b, proposals: _p, question: _q, form: _f, values: _v, routes: _r, request: _x, ...i }: Rec): InboxItem => i
+const item = ({ to: _to, show: _s, bound: _b, proposals: _p, question: _q, form: _f, values: _v, sent: _sn, attachments: _at, answer: _an, routes: _r, request: _x, ...i }: Rec): InboxItem => i
 
 function detailOf(r: Rec): InboxDetail {
   const req = r.request ? requests.find(r.request) : undefined
   return {
-    ...item(r), show: r.show ?? null, bound: r.bound ?? [], proposals: r.proposals ?? [], question: r.question ?? null, form: r.form ?? null, values: r.values ?? {},
+    ...item(r), show: r.show ?? null, bound: r.bound ?? [], proposals: r.proposals ?? [], question: r.question ?? null, form: r.form ?? null, values: r.values ?? {}, sent: r.sent ?? [], attachments: r.attachments ?? [], answer: r.answer ?? null,
     routes: r.routes, publish: req ? publicRequest(req) : null,
   }
 }
@@ -154,6 +156,15 @@ export const workflowsInboxHandlers: HttpHandler[] = [
   }),
   http.post("/api/workflows/inbox/:id/decide", async ({ params, request }) => {
     await wait(400)
+    const b0 = (await request.clone().json()) as InboxDecide
+    const wr = allRuns().find((x) => String(params.id).startsWith(`wt_${x.id}_`))
+    if (wr) {
+      const key = String(params.id).slice(`wt_${wr.id}_`.length)
+      const text = typeof b0.values?.text === "string" ? b0.values.text : undefined
+      const by = who()
+      if (!decideWait(wr, key, b0.route, by, Date.now(), text)) return HttpResponse.json({ detail: "This step is no longer waiting." }, { status: 409 })
+      return HttpResponse.json({ id: String(params.id), decision: { route: b0.route, label: VERB[b0.route] ?? "Decided", by, at: new Date().toISOString(), comment: null, selected: null } })
+    }
     const r = recOf(String(params.id))
     if (!r) return notFound()
     if (r.decision) return HttpResponse.json({ detail: `Already decided by ${r.decision.by.name}.` }, { status: 409 })

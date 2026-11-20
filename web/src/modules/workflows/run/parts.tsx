@@ -1,8 +1,8 @@
-import { ShieldAlert } from "lucide-react"
+import { Download, FileText, ShieldAlert } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import { STEP } from "../kinds"
-import type { StepStatus } from "../types"
+import type { FileRef, StepStatus } from "../types"
 
 export function StepIcon({ status, className }: { status: StepStatus; className?: string }) {
   const S = STEP[status]
@@ -41,3 +41,19 @@ export function JsonTree({ value, root, untrusted = [] }: { value: unknown; root
   return <div className="font-mono text-xs">{row(null, value, root, 0)}</div>
 }
 
+
+const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`)
+
+/** Run files as rows that download from the run's file route. */
+export function FileList({ files }: { files: FileRef[] }) {
+  return (
+    <>
+      {files.map((f) => (
+        <a key={f.url} href={f.url} download={f.name} className="group flex h-8 items-center gap-2 text-sm hover:text-link">
+          <FileText className="size-4 text-muted-foreground" /><span className="flex-1 truncate">{f.name}</span>
+          <span className="text-xs text-muted-foreground tabular">{kb(f.size)}</span><Download className="size-3.5 text-faint group-hover:text-link" aria-hidden />
+        </a>
+      ))}
+    </>
+  )
+}

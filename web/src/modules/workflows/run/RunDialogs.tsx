@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { useNavigate } from "react-router"
+import { Link, useNavigate } from "react-router"
 import { toast } from "sonner"
 
 import { Facts } from "@/components/panel"
@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import { useRunAction, useWorkflow } from "../api"
+import { useDecide, useRunAction, useWorkflow } from "../api"
 import { titleOf } from "../spec"
 import type { RunDetail } from "../types"
 import { choice, stepTitle, until } from "./lib"
@@ -35,17 +35,22 @@ export function Shell({ title, open, onOpenChange, children, footer, error, wide
   )
 }
 
-/** Decide a waiting approval from the run page: one button per route, Approve filled. */
+/** Decide a waiting approval from the run page: one button per route, Approve filled. It goes through the inbox, as every decision does. */
 export function ApprovalDialog({ run, stepKey, open, onOpenChange, onDone }: Open & { run: RunDetail; stepKey: string; onDone: () => void }) {
   const s = run.steps.find((x) => x.key === stepKey)
-  const act = useRunAction(run.id, () => { onOpenChange(false); onDone() })
+  const act = useDecide(s?.wait?.id ?? "", () => { onOpenChange(false); onDone() })
   const node = s && run.spec.nodes[s.node]
   const routes = Object.keys(node?.routes ?? { approve: "", reject: "" })
   const main = routes.includes("approve") ? "approve" : routes[0]
-  const go = (route: string) => act.mutate({ op: "approve", body: { step: stepKey, route } }, { onSuccess: () => toast(`${cap(route)}d`) })
+  const go = (route: string) => act.mutate({ route })
+  // Free text and forms are answered in the inbox, where the fields are.
+  const typed = node?.answer === "text" || node?.answer === "form"
   return (
-    <Shell title="Review approval" open={open} onOpenChange={onOpenChange} error={act.error?.message}
-      footer={<>
+    <Shell title={typed ? "Answer needed" : "Review approval"} open={open} onOpenChange={onOpenChange} error={act.error?.message}
+      footer={typed ? <>
+        <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button asChild><Link to={`/inbox?item=${s?.wait?.id}`}>Answer in the inbox</Link></Button>
+      </> : <>
         <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
         {routes.filter((r) => r !== main).map((r) => <Button key={r} variant="outline" disabled={act.isPending} onClick={() => go(r)}>{cap(r)}</Button>)}
         {main && <Button disabled={act.isPending} onClick={() => go(main)}>{cap(main)}</Button>}

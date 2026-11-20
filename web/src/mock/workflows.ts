@@ -1,18 +1,18 @@
 // Workflows: live specs, one draft each, versions and runs. Validation runs the same spec logic as the canvas.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import { allEdges, clone, diff, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
+import { allEdges, clone, diff, finishDeliver, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
 import { ACTIVE_RUN, project } from "@/modules/workflows/runs"
 import type {
-  AskReply, AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
-  WorkflowPatch, WorkflowSummary,
+  AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
+  Platform, WorkflowPatch, WorkflowSummary,
 } from "@/modules/workflows/types"
-import { fromYaml } from "@/modules/workflows/yaml"
+import { fromYaml, toYaml } from "@/modules/workflows/yaml"
 import { notFound, sleep, unauthorized, wait } from "./util"
 import { pendingOf } from "./workflows-store"
 import { me } from "./world"
 import {
-  cancel, chain, decideUnknown, decideWait, detailOf, redrive, start, stepDetail, summaryOf, verify, visible as released, type Decision, type Run, type Script,
+  cancel, chain, decideUnknown, detailOf, redrive, start, stepDetail, summaryOf, verify, visible as released, type Decision, type Run, type Script,
 } from "./workflows-runs"
 import { SPECS, TEMPLATE_SPECS } from "./workflows-specs"
 
@@ -35,11 +35,11 @@ export const CATALOG: Catalog = {
     ["gdrive/create_folder", "Create folder", true], ["github/create_comment", "Comment on issue", true], ["slack/post_message", "Post message", true],
     ["toggl/project_profitability", "Project profitability", false], ["bluedot/get_transcript", "Meeting transcript", false],
   ].map(([id, label, writes]) => ({ id: id as string, label: label as string, writes: writes as boolean })),
-  people: Object.values(P).slice(0, 3),
+  people: Object.values(P).slice(0, 3).map((p) => ({ ...p, platforms: ["discord", "slack"] as Platform[] })),
   channels: [
     ["C0SALES", "sales"], ["C0DELIVERY", "delivery"], ["C0LEADS", "leads"], ["C0TRIAGE", "triage"], ["C0ONCALL", "oncall"],
     ["C0CLIENTS", "clients"], ["C0MMM", "mmm-larkspur"], ["C0PRICING", "pricing"], ["C0ENG", "eng-review"],
-  ].map(([id, name]) => ({ id: id!, name: name! })),
+  ].map(([id, name], i) => ({ id: id!, name: name!, platform: "discord" as Platform, shared: i === 5 })),
 }
 
 const TEMPLATES: Template[] = [
@@ -185,7 +185,7 @@ export function runsOf(w: Stored): Run[] {
       id: `${w.id}_run${number}`, wf: { id: w.id, name: spec.name }, number, spec, version: code === "T" ? w.version! : w.version! - (i > 6 ? 1 : 0), inputs: inputsFor(spec, label),
       label, trigger: code === "T" ? { kind: "manual", id: "manual" } : { kind: trig.kind, id: trig.id },
       delivery: trig.kind === "webhook" && code !== "T" ? `dlv_${chain("", w.id + number).slice(0, 10)}` : null, by: code === "T" ? P.maya! : null, owner: w.owner,
-      test: code === "T" ? { live_writes: false, pinned: [] } : null, parent: null, script: scriptFor(w, spec, code, i), events: [],
+      test: code === "T" ? { live_writes: false, pinned: [], pinned_from: null } : null, parent: null, script: scriptFor(w, spec, code, i), events: [],
     }
     const at = code === "r" ? T0 - (w.id === "wf_research" ? 75_000 : 25_000) : T0 - (i * 19 + 1.5) * 3_600_000
     start(run, at)
@@ -198,7 +198,7 @@ const ticksOf = (w: Stored): Tick[] => runsOf(w).filter((r) => !r.test).slice(0,
   const s = summaryOf(r)
   return { number: r.number, status: s.status, at: s.started_at }
 })
-const allRuns = () => visible().flatMap((w) => runsOf(w))
+export const allRuns = () => visible().flatMap((w) => runsOf(w))
 export const findRun = (id: unknown) => allRuns().find((r) => r.id === id)
 
 /** Releases ledger rows as their time comes; resumes after `Last-Event-ID`. */
@@ -282,7 +282,7 @@ export const draftOf = (w: Stored): Draft => w.draft ?? mkDraft(w, clone(w.live!
 
 // ---------- Ask Daimon: one canned edit per prompt ----------
 
-function ask(spec: Spec, text: string): { reply: string; spec: Spec; changed: string[] } {
+export function ask(spec: Spec, text: string): { reply: string; spec: Spec; changed: string[] } {
   const s = clone(spec)
   const t = text.toLowerCase()
   const ids = Object.keys(s.nodes)
@@ -300,7 +300,7 @@ function ask(spec: Spec, text: string): { reply: string; spec: Spec; changed: st
   }
   if (t.includes("post") || t.includes("#")) {
     if (!finish) return { reply: "There is no Finish step to deliver from.", spec, changed: [] }
-    s.nodes[finish]!.deliver = { to: "#sales", message: s.nodes[finish]!.deliver?.message ?? "${{ steps." + ids[0] + ".summary }}" }
+    s.nodes[finish]!.deliver = { to: "#sales", message: finishDeliver(s.nodes[finish]!)?.message ?? "${{ steps." + ids[0] + ".summary }}" }
     return { reply: "The result now posts to #sales when the run finishes.", spec: s, changed: [finish] }
   }
   if (t.includes("retry") || t.includes("again")) {
@@ -316,7 +316,7 @@ function ask(spec: Spec, text: string): { reply: string; spec: Spec; changed: st
   return { reply: "Try one of the suggestions below. Each one makes a single edit you can undo.", spec, changed: [] }
 }
 
-const DESCRIBED = (text: string): Spec => ({
+export const DESCRIBED = (text: string): Spec => ({
   schema: "daimon.workflow/v1", name: "Risky deals digest", goal: text.slice(0, 120), visibility: "private", home: { channel: "C0SALES" },
   triggers: [{ id: "monday", kind: "schedule", cron: "0 9 * * 1", timezone: "Europe/Stockholm", catch_up: "run-once" }],
   defaults: { agent: "sales", budget_usd: 1 }, start: "collect",
@@ -330,14 +330,10 @@ const DESCRIBED = (text: string): Spec => ({
 })
 
 let seq = 100
-function create(body: NewWorkflow): { w: Stored; reply?: string } | { error: string } {
+function create(body: NewWorkflow): { w: Stored } | { error: string } {
   const m = me()!
   let spec: Spec
-  let reply: string | undefined
-  if (body.from === "describe") {
-    spec = DESCRIBED(body.text)
-    reply = "Drafted Risky deals digest: every Monday at 09:00 the Sales Desk finds deals with no activity in 14 days, you check the digest, then it posts to #sales."
-  } else if (body.from === "template") {
+  if (body.from === "template") {
     const t = TEMPLATE_SPECS[body.template]
     if (!t) return { error: "Unknown template" }
     spec = clone(t)
@@ -353,7 +349,7 @@ function create(body: NewWorkflow): { w: Stored; reply?: string } | { error: str
   const w: Stored = { id: `wf_${++seq}`, status: "draft", owner: me_, live: null, version: null, draft: null, ticks: "", spend: 0, next_h: null, editors: [], runners: [] }
   w.draft = mkDraft(w, spec, 1, me_, 0)
   W.unshift(w)
-  return { w, reply }
+  return { w }
 }
 
 /** Starts a run now; a webhook replay passes the trigger and delivery. */
@@ -391,7 +387,7 @@ export const workflowsHandlers: HttpHandler[] = [
     if (!me()) return unauthorized()
     const r = create((await request.json()) as NewWorkflow)
     if ("error" in r) return HttpResponse.json({ detail: r.error }, { status: 422 })
-    return HttpResponse.json({ ...detail(r.w), reply: r.reply ?? null }, { status: 201 })
+    return HttpResponse.json(detail(r.w), { status: 201 })
   }),
   http.get("/api/workflows/:id", async ({ params }) => {
     await wait()
@@ -440,16 +436,13 @@ export const workflowsHandlers: HttpHandler[] = [
     if (w.live) w.draft = null
     return HttpResponse.json(draftOf(w))
   }),
-  http.post("/api/workflows/:id/draft/ask", async ({ params, request }) => {
-    await wait(900)
+  http.get("/api/workflows/:id/export", async ({ params }) => {
+    await wait(120)
     const w = find(params.id)
     if (!w) return notFound()
-    const { text } = (await request.json()) as { text: string }
-    const cur = draftOf(w)
-    const r = ask(cur.spec, text)
-    if (r.changed.length) w.draft = mkDraft(w, r.spec, cur.revision + 1, { id: me()!.id, name: me()!.name }, 0)
-    const body: AskReply = { reply: r.reply, draft: draftOf(w), changed: r.changed }
-    return HttpResponse.json(body)
+    const spec = w.live ?? draftOf(w).spec
+    const name = spec.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    return new HttpResponse(toYaml(spec), { headers: { "Content-Type": "text/yaml", "Content-Disposition": `attachment; filename="${name}.yaml"` } })
   }),
   http.post("/api/workflows/:id/validate", async ({ params, request }) => {
     await wait(60)
@@ -493,7 +486,6 @@ const runOps: Record<string, (r: Run, body: Record<string, unknown>, by: Person)
   cancel: (r, _, by) => cancel(r, by),
   redrive: (r, _, by) => redrive(r, by),
   decide: (r, b, by) => decideUnknown(r, b as Decision, by),
-  approve: (r, b, by) => decideWait(r, String(b.step), String(b.route), by),
   rerun: (r, b, by) => fork(r, by, b),
   fork: (r, b, by) => fork(r, by, b),
 }
@@ -505,7 +497,7 @@ function fork(r: Run, by: Person, b: Record<string, unknown>) {
   const number = runs[0]!.number + 1
   const run: Run = {
     ...r, id: `${w.id}_run${number}`, number, spec, version: b.version === "live" ? w.version ?? r.version : r.version, inputs: (b.inputs as Record<string, unknown>) ?? r.inputs,
-    trigger: { kind: "manual", id: "manual" }, delivery: null, by, test: b.version === "draft" || r.test ? r.test ?? { live_writes: false, pinned: [] } : null,
+    trigger: { kind: "manual", id: "manual" }, delivery: null, by, test: b.version === "draft" || r.test ? r.test ?? { live_writes: false, pinned: [], pinned_from: null } : null,
     parent: b.step ? { id: r.id, number: r.number } : null, script: { pace: 0.4, decide_after: 2 }, events: [],
   }
   start(run, Date.now(), b.step ? { parent: r, from: String(b.step) } : undefined)
@@ -539,6 +531,13 @@ export const workflowRunsHandlers: HttpHandler[] = [
     await wait(500)
     const r = findRun(params.run)
     return r ? HttpResponse.json({ ok: verify(released(r)), events: released(r).length }) : notFound()
+  }),
+  http.get("/api/workflows/runs/:run/files/:name", async ({ params }) => {
+    await wait(120)
+    const r = findRun(params.run)
+    if (!r) return notFound()
+    const name = decodeURIComponent(String(params.name))
+    return new HttpResponse(`# ${name}\n\nA comparison of the three vendors.\n`, { headers: { "Content-Type": "text/markdown", "Content-Disposition": `attachment; filename="${name}"` } })
   }),
   http.get("/api/workflows/runs/:run/stream", ({ params, request }) => {
     const r = findRun(params.run)

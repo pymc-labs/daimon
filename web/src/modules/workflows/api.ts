@@ -6,8 +6,8 @@ import { ApiError, api, stream } from "@/lib/api"
 import { ACTIVE_RUN, project } from "./runs"
 import { diff, validate } from "./spec"
 import type {
-  AskReply, AttentionItem, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
-  StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowPatch, WorkflowSummary,
+  AttentionItem, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, MappingPreview, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
+  StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowChat, WorkflowPatch, WorkflowSummary,
 } from "./types"
 
 const base = (id: string) => `/api/workflows/${id}`
@@ -19,11 +19,14 @@ export const useRuns = (id: string) => useQuery({ queryKey: ["workflows", id, "r
 export const useCatalog = () => useQuery({ queryKey: ["workflows", "catalog"], queryFn: () => api.get<Catalog>("/api/workflows/catalog"), staleTime: Infinity })
 export const useTemplates = () => useQuery({ queryKey: ["workflows", "templates"], queryFn: () => api.get<Template[]>("/api/workflows/templates"), staleTime: Infinity })
 
-export type Created = Workflow & { reply: string | null }
+/** The workflow's subject thread of the web chat, where Ask Daimon talks. Created on first ask. */
+export const useWorkflowChat = (id: string, enabled = true) =>
+  useQuery({ queryKey: ["workflows", id, "chat"], queryFn: () => api.get<WorkflowChat>(`${base(id)}/chat`), enabled, staleTime: Infinity })
+
 export function useCreate() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (b: NewWorkflow) => api.post<Created>("/api/workflows", b),
+    mutationFn: (b: NewWorkflow) => api.post<Workflow>("/api/workflows", b),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["workflows"], exact: true }),
   })
 }
@@ -108,11 +111,11 @@ export function useLiveRun(run: RunDetail | undefined) {
   return { run: merged, events: events ?? [], fresh, follow }
 }
 
-/** Cancel, Retry from failure, decide an unknown step, approve, Run again and Run from here. */
+/** Cancel, Retry from failure, decide an unknown step, Run again and Run from here. Approvals are decided in the inbox. */
 export function useRunAction(id: string | undefined, after?: (r: RunSummary) => void) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ op, body }: { op: "cancel" | "redrive" | "decide" | "approve" | "rerun" | "fork"; body?: Record<string, unknown> }) =>
+    mutationFn: ({ op, body }: { op: "cancel" | "redrive" | "decide" | "rerun" | "fork"; body?: Record<string, unknown> }) =>
       api.post<RunSummary>(`${runBase(id!)}/${op}`, body ?? {}),
     onSuccess: (r) => {
       void qc.invalidateQueries({ queryKey: ["workflow-run"] })
@@ -143,6 +146,16 @@ export function useNow(on: boolean, every = 1000) {
     return () => clearInterval(t)
   }, [on, every])
   return now
+}
+
+/** `value`, once it has held still for `ms`. */
+export function useDebounced<T>(value: T, ms: number) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return v
 }
 
 /**
@@ -193,10 +206,13 @@ export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefine
   }
   /** Take a draft the server already saved (Ask Daimon, discard). */
   const adopt = (d: Draft) => { rev.current = d.revision; pending.current = null; clearTimeout(timer.current); qc.setQueryData(key, d) }
-  return { save, adopt }
+  /** Save what is waiting now and resolve once the server has it: before Daimon reads the draft. */
+  const settle = async () => { clearTimeout(timer.current); flush(); await chain.current }
+  /** Whether edits of ours are waiting or on their way. */
+  const dirty = () => !!pending.current || inflight.current > 0
+  return { save, adopt, settle, dirty, revision: () => rev.current }
 }
 
-export const askDaimon = (id: string, text: string) => api.post<AskReply>(`${base(id)}/draft/ask`, { text })
 export const discardDraft = (id: string) => api.del<Draft>(`${base(id)}/draft`)
 
 /** Publishing or requesting leaves the draft behind, so the caches the page reads are refreshed. */
@@ -244,32 +260,40 @@ export function useDecide(id: string, after?: () => void) {
 
 // ---------- webhook ----------
 
-export const useWebhook = (id: string, enabled: boolean, poll: boolean) =>
-  useQuery({ queryKey: ["workflows", id, "webhook"], queryFn: () => api.get<WebhookInfo>(`${base(id)}/webhook`), enabled, refetchInterval: poll ? 1200 : false })
-export const useDeliveries = (id: string, enabled: boolean, poll: boolean) =>
-  useQuery({ queryKey: ["workflows", id, "deliveries"], queryFn: () => api.get<DeliveryRow[]>(`${base(id)}/deliveries`), enabled, refetchInterval: poll ? 1200 : false })
+const hookBase = (id: string, tid: string) => `${base(id)}/triggers/${tid}`
+export const useWebhook = (id: string, tid: string, enabled: boolean, poll: boolean) =>
+  useQuery({ queryKey: ["workflows", id, "webhook", tid], queryFn: () => api.get<WebhookInfo>(`${hookBase(id, tid)}/webhook`), enabled, refetchInterval: poll ? 1200 : false })
+export const useDeliveries = (id: string, tid: string, enabled: boolean, poll: boolean) =>
+  useQuery({ queryKey: ["workflows", id, "deliveries", tid], queryFn: () => api.get<DeliveryRow[]>(`${hookBase(id, tid)}/deliveries`), enabled, refetchInterval: poll ? 1200 : false })
 
-export function useListen(id: string) {
+/** The trigger's mapping evaluated by the server against one delivery; a change of either runs it again. */
+export const usePreviewMapping = (id: string, tid: string, inputs: string, delivery: string | undefined) =>
+  useQuery({
+    queryKey: ["workflows", id, "preview", tid, inputs, delivery], enabled: !!inputs && !!delivery, placeholderData: (p) => p, retry: false,
+    queryFn: () => api.post<MappingPreview>(`${hookBase(id, tid)}/preview`, { inputs, delivery }, true),
+  })
+
+export function useListen(id: string, tid: string) {
   const qc = useQueryClient()
-  const done = (w: WebhookInfo) => qc.setQueryData(["workflows", id, "webhook"], w)
+  const done = (w: WebhookInfo) => qc.setQueryData(["workflows", id, "webhook", tid], w)
   return {
-    start: useMutation({ mutationFn: () => api.post<WebhookInfo>(`${base(id)}/webhook/listen`, {}), onSuccess: done }),
-    stop: useMutation({ mutationFn: () => api.del<WebhookInfo>(`${base(id)}/webhook/listen`), onSuccess: done }),
+    start: useMutation({ mutationFn: () => api.post<WebhookInfo>(`${hookBase(id, tid)}/listen`, {}), onSuccess: done }),
+    stop: useMutation({ mutationFn: () => api.del<WebhookInfo>(`${hookBase(id, tid)}/listen`), onSuccess: done }),
   }
 }
-export function useRotate(id: string) {
+export function useRotate(id: string, tid: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (overlap: string) => api.post<Secret>(`${base(id)}/webhook/rotate`, { overlap }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["workflows", id, "webhook"] }),
+    mutationFn: (overlap: string) => api.post<Secret>(`${hookBase(id, tid)}/rotate`, { overlap }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["workflows", id, "webhook", tid] }),
   })
 }
-export function useReplay(id: string) {
+export function useReplay(id: string, tid: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (delivery: string) => api.post<DeliveryRow>(`${base(id)}/deliveries/${delivery}/replay`, {}),
+    mutationFn: (delivery: string) => api.post<DeliveryRow>(`${hookBase(id, tid)}/deliveries/${delivery}/replay`, {}),
     onSuccess: (d) => {
-      void qc.invalidateQueries({ queryKey: ["workflows", id, "deliveries"] })
+      void qc.invalidateQueries({ queryKey: ["workflows", id, "deliveries", tid] })
       void qc.invalidateQueries({ queryKey: ["workflows", id, "runs"] })
       void qc.invalidateQueries({ queryKey: ["workflow-runs"] })
       toast(`Replayed as run ${d.run?.number ?? ""}`.trim())
@@ -294,4 +318,16 @@ export function useRestore(id: string) {
     },
     onError: (e) => toast.error(e.message),
   })
+}
+
+/** Download the spec as the server exports it: a published version, or the draft when `version` is omitted. */
+export async function exportWorkflow(id: string, name: string, format: "yaml" | "json" = "yaml", version?: number) {
+  const q = new URLSearchParams({ format, ...(version ? { version: String(version) } : {}) })
+  const res = await fetch(`${base(id)}/export?${q}`, { credentials: "include", headers: { "X-Daimon-Web": "1" } })
+  if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => null))?.detail ?? res.statusText)
+  const a = document.createElement("a")
+  a.href = URL.createObjectURL(await res.blob())
+  a.download = `${name.toLowerCase().replace(/\W+/g, "-")}.${format}`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }

@@ -13,9 +13,9 @@ const OVERLAP = [
 ]
 
 /** Rotate the signing secret: pick how long the old one keeps working, then the new one is shown once. */
-export function RotateDialog({ id, open, onOpenChange }: { id: string; open: boolean; onOpenChange: (o: boolean) => void }) {
+export function RotateDialog({ id, trigger, open, onOpenChange }: { id: string; trigger: string; open: boolean; onOpenChange: (o: boolean) => void }) {
   const [overlap, setOverlap] = useState("24h")
-  const rotate = useRotate(id)
+  const rotate = useRotate(id, trigger)
   const secret = rotate.data?.secret
   const close = (o: boolean) => { onOpenChange(o); if (!o) rotate.reset() }
   return (

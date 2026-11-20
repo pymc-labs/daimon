@@ -1,7 +1,7 @@
 // Webhook triggers: URLs, secret, deliveries, replay and Listen.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { DeliveryRow, Secret, WebhookInfo } from "@/modules/workflows/types"
+import type { DeliveryRow, MappingPreview, Secret, WebhookInfo } from "@/modules/workflows/types"
 import { notFound, wait } from "./util"
 import { ago, find, launch, runsOf, specOf, type Stored } from "./workflows"
 import { chain } from "./workflows-runs"
@@ -16,6 +16,23 @@ const hook = (w: Stored): Hook => {
 }
 const hint = (s: string) => `whsec_...${s.slice(-4)}`
 const triggerOf = (w: Stored) => specOf(w).triggers?.find((t) => t.kind === "webhook")
+
+/** `${{ payload.path }}` or `${{ headers.x-id }}`: a path into the delivery, as the server's evaluator reads it. */
+function evalMapping(expr: string, d: { headers: Record<string, string>; payload: unknown }): MappingPreview {
+  const m = expr.trim().match(/^\$\{\{\s*(.+?)\s*\}\}$/)
+  if (!m) return { ok: false, error: "Use ${{ payload.path }}" }
+  const parts = m[1]!.match(/[^.[\]]+/g) ?? []
+  const root = parts.shift()
+  if (root !== "payload" && root !== "headers") return { ok: false, error: `Unknown name ${root}` }
+  let v: unknown = root === "payload" ? d.payload : d.headers
+  const seen: string[] = [root]
+  for (const p of parts) {
+    seen.push(p)
+    if (v == null || typeof v !== "object" || !(p in v)) return { ok: false, error: `No ${seen.join(".")} in this delivery` }
+    v = (v as Record<string, unknown>)[p]
+  }
+  return { ok: true, value: v }
+}
 
 const HEADERS = (id: string, at: number) => ({
   "content-type": "application/json", "user-agent": "Formbridge/2.4", "webhook-id": id, "webhook-timestamp": String(Math.floor(at / 1000)), "webhook-signature": `v1,${chain("", id).slice(0, 24)}=`,
@@ -46,17 +63,25 @@ const info = (w: Stored): WebhookInfo => {
 }
 
 export const workflowsHooksHandlers: HttpHandler[] = [
-  http.get("/api/workflows/:id/webhook", async ({ params }) => {
+  http.post("/api/workflows/:id/triggers/:tid/preview", async ({ params, request }) => {
+    await wait(150)
+    const w = find(params.id)
+    if (!w) return notFound()
+    const b = (await request.json()) as { inputs: string; delivery: string }
+    const d = rows(w).find((x) => x.id === b.delivery)
+    return d ? HttpResponse.json(evalMapping(b.inputs, d)) : notFound()
+  }),
+  http.get("/api/workflows/:id/triggers/:tid/webhook", async ({ params }) => {
     await wait(120)
     const w = find(params.id)
     return w ? HttpResponse.json(info(w)) : notFound()
   }),
-  http.get("/api/workflows/:id/deliveries", async ({ params }) => {
+  http.get("/api/workflows/:id/triggers/:tid/deliveries", async ({ params }) => {
     await wait()
     const w = find(params.id)
     return w ? HttpResponse.json(rows(w)) : notFound()
   }),
-  http.post("/api/workflows/:id/webhook/rotate", async ({ params, request }) => {
+  http.post("/api/workflows/:id/triggers/:tid/rotate", async ({ params, request }) => {
     await wait(500)
     const w = find(params.id)
     if (!w) return notFound()
@@ -67,7 +92,7 @@ export const workflowsHooksHandlers: HttpHandler[] = [
     h.previous = overlap === "now" ? null : new Date(Date.now() + (overlap === "1h" ? 1 : overlap === "7d" ? 168 : 24) * 3_600_000).toISOString()
     return HttpResponse.json({ secret: h.secret, created_at: h.created, previous_expires_at: h.previous } satisfies Secret)
   }),
-  http.post("/api/workflows/:id/webhook/listen", async ({ params }) => {
+  http.post("/api/workflows/:id/triggers/:tid/listen", async ({ params }) => {
     await wait(150)
     const w = find(params.id)
     if (!w) return notFound()
@@ -84,14 +109,14 @@ export const workflowsHooksHandlers: HttpHandler[] = [
     }, 3500)
     return HttpResponse.json(info(w))
   }),
-  http.delete("/api/workflows/:id/webhook/listen", async ({ params }) => {
+  http.delete("/api/workflows/:id/triggers/:tid/listen", async ({ params }) => {
     await wait(100)
     const w = find(params.id)
     if (!w) return notFound()
     hook(w).listening = null
     return HttpResponse.json(info(w))
   }),
-  http.post("/api/workflows/:id/deliveries/:did/replay", async ({ params }) => {
+  http.post("/api/workflows/:id/triggers/:tid/deliveries/:did/replay", async ({ params }) => {
     await wait(500)
     const w = find(params.id)
     const d = w && rows(w).find((x) => x.id === params.did)

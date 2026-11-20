@@ -5,7 +5,7 @@ import { Prose } from "@/components/common"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
-import { titleOf, toolWrites, upstreamRefs } from "../spec"
+import { finishDeliver, titleOf, toolWrites, upstreamRefs } from "../spec"
 import type { Node } from "../types"
 import { KIND } from "../kinds"
 import { OutputTable } from "./OutputTable"
@@ -259,18 +259,19 @@ export function ForEachEditor(p: EditorProps) {
 
 export function FinishEditor(p: EditorProps) {
   const { n, set, ro, catalog, spec } = p
-  const [msg, setMsg] = useLocal(n.deliver?.message ?? "", (v) => set((x) => { x.deliver = { to: x.deliver?.to ?? "", message: v } }, 500))
+  const to = finishDeliver(n)
+  const [msg, setMsg] = useLocal(to?.message ?? "", (v) => set((x) => { x.deliver = { to: finishDeliver(x)?.to ?? "", message: v } }, 500))
   return (
     <>
       <Section>
         <div className="space-y-3">
           <Field label="Outcome"><Segmented value={n.outcome ?? "succeeded"} ro={ro} onChange={(v) => set((x) => { x.outcome = v })} options={[["succeeded", "Succeed"], ["failed", "Fail"]]} /></Field>
           <Field label="Output"><RefPicker value={typeof n.output === "string" ? n.output : ""} groups={upstreamRefs(spec, p.id)} ro={ro} onChange={(v) => set((x) => { x.output = v })} /></Field>
-          <Field label="Deliver to"><Pick value={n.deliver?.to ?? "none"} ro={ro} onChange={(v) => set((x) => { x.deliver = v === "none" ? undefined : { ...x.deliver, to: v } })}
+          <Field label="Deliver to"><Pick value={to?.to ?? "none"} ro={ro} onChange={(v) => set((x) => { x.deliver = v === "none" ? undefined : { ...finishDeliver(x), to: v } })}
             options={[{ value: "none", label: "Nowhere" }, ...(catalog?.channels ?? []).map((c) => ({ value: `#${c.name}`, label: `#${c.name}` }))]} /></Field>
         </div>
       </Section>
-      {n.deliver && (
+      {to && (
         <Section title="Message">
           <textarea value={msg} readOnly={ro} onChange={(e) => setMsg(e.target.value)} spellCheck={false} className="min-h-28 w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-[12.5px] leading-[1.7] outline-none focus-visible:border-ring" />
         </Section>

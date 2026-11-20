@@ -3,6 +3,7 @@ import {
   Minus, Pencil, Plus, Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
 } from "lucide-react"
 
+import { finishDeliver } from "./spec"
 import type { Effect } from "./review"
 import type { Catalog, GrantKind, Kind, Node, RunStatus, Spec, StepStatus, Trigger, TriggerKind } from "./types"
 
@@ -78,7 +79,7 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
     case "code": return ["Python", `Network ${n.network ?? "off"}`]
     case "workflow": return [n.workflow || "No workflow"]
     case "finish": {
-      const to = n.deliver?.to === "home" ? spec.home?.channel : n.deliver?.to
+      const to = finishDeliver(n)?.to === "home" ? spec.home?.channel : finishDeliver(n)?.to
       const channel = catalog?.channels.find((c) => c.id === to)?.name
       return [n.outcome === "failed" ? "Fail" : "Succeed", ...(to ? [channel ? `#${channel}` : to] : [])]
     }

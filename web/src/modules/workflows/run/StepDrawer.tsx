@@ -1,4 +1,4 @@
-import { CircleCheck, CircleDot, Circle, FileText, MessageSquare, StickyNote, Wrench } from "lucide-react"
+import { CircleCheck, CircleDot, Circle, MessageSquare, StickyNote, Wrench } from "lucide-react"
 
 import { Ago, Mono, Money } from "@/components/common"
 import { DrawerTabs, Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
@@ -11,10 +11,9 @@ import { useStep } from "../api"
 import { KIND, STEP } from "../kinds"
 import type { Proposal, RunDetail, RunEvent, StepDetail, StepRun } from "../types"
 import { clock, stepTitle, until } from "./lib"
-import { JsonTree, StepIcon } from "./parts"
+import { FileList, JsonTree, StepIcon } from "./parts"
 
 const PROPOSAL: Record<Proposal["status"], string> = { proposed: "Proposed", approved: "Approved", rejected: "Rejected", sent: "Sent", would_send: "Would send" }
-const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`)
 
 /** One step of a run: attempt picker, facts and the Summary, Input, Output, Activity and Events tabs. */
 export function StepView({ run, events, stepKey, now }: { run: RunDetail; events: RunEvent[]; stepKey: string; now: number }) {
@@ -121,9 +120,7 @@ function Summary({ run, s, d }: { run: RunDetail; s: StepRun; d: StepDetail }) {
       )}
       {d.files.length > 0 && (
         <PanelSection title="Files">
-          {d.files.map((f) => (
-            <div key={f.name} className="flex h-8 items-center gap-2 text-sm"><FileText className="size-4 text-muted-foreground" /><span className="flex-1 truncate">{f.name}</span><span className="text-xs text-muted-foreground tabular">{kb(f.size)}</span></div>
-          ))}
+          <FileList files={d.files} />
         </PanelSection>
       )}
     </>

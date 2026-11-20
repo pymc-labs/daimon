@@ -97,7 +97,7 @@ function exprsOf(n: Node): string[] {
     if (typeof v === "string") out.push(v)
     else if (v && typeof v === "object") Object.values(v).forEach(add)
   }
-  add([n.inputs, n.args, n.show, n.set, n.items, n.until, n.event?.match, n.deliver?.message, n.cases?.map((c) => c.when)])
+  add([n.inputs, n.args, n.show, n.set, n.items, n.until, n.event?.match, finishDeliver(n)?.message, n.cases?.map((c) => c.when)])
   if (typeof n.output === "string") add(n.output)
   if (n.form) add(Object.values(n.form).map((f) => f.default))
   if (n.do) out.push(...exprsOf(n.do))
@@ -114,6 +114,9 @@ export type Ref = { path: string; type: string; untrusted?: boolean }
 export type RefGroup = { id: string; label: string; kind?: Kind; refs: Ref[] }
 
 export const fieldType = (f?: Field) => (!f ? "any" : f.enum ? "choice" : f.type === "string" ? "text" : f.type === "boolean" ? "yes/no" : f.type === "array" ? "list" : f.type ?? "any")
+
+/** Where a Finish step delivers; an approval's `deliver` says where it asks instead. */
+export const finishDeliver = (n: Node) => (typeof n.deliver === "object" ? n.deliver : null)
 
 /** Output fields a step offers to later steps. */
 export function outputFields(n: Node): Record<string, Field> {

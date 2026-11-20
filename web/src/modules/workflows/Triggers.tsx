@@ -12,10 +12,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea"
 import { absolute } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { useDeliveries, useDraft, useDraftEditor, useListen, usePatch, useReplay, useWebhook } from "./api"
+import { useDebounced, useDeliveries, useDraft, useDraftEditor, useListen, usePatch, usePreviewMapping, useReplay, useWebhook } from "./api"
 import { cronWords, fromCron, KINDS, nextFires, toCron, WEEKDAYS, type Kind, type Spec as Sched } from "./cron"
 import { TRIGGER } from "./kinds"
-import { checkInputs, evalMapping, suggestMapping, type Row } from "./mapping"
+import { checkInputs, suggestMapping, type Row } from "./mapping"
 import { RotateDialog } from "./RotateDialog"
 import { JsonTree } from "./run/parts"
 import { until } from "./run/lib"
@@ -188,16 +188,18 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
   const id = c.wf.id
   const [since, setSince] = useState<number | null>(null)
   const [rotate, setRotate] = useState(false)
-  const info = useWebhook(id, true, since != null)
-  const deliveries = useDeliveries(id, true, since != null)
-  const listen = useListen(id)
-  const replay = useReplay(id)
+  const info = useWebhook(id, t.id, true, since != null)
+  const deliveries = useDeliveries(id, t.id, true, since != null)
+  const listen = useListen(id, t.id)
+  const replay = useReplay(id, t.id)
   const w = info.data
   const rows = deliveries.data ?? []
   const listening = !!w?.listening_until
   const captured = since != null ? rows.find((d) => isTest(d) && Date.parse(d.received_at) >= since) : undefined
   const last = rows.find((d) => d.outcome !== "rejected")
-  const mapped = last && t.inputs ? evalMapping(t.inputs, last) : null
+  const expr = useDebounced(t.inputs ?? "", 300)
+  const preview = usePreviewMapping(id, t.id, expr, last?.id).data
+  const mapped = t.inputs && preview ? preview : null
   const checked = mapped?.ok ? checkInputs(c.spec.inputs, mapped.value) : null
   const start = () => { setSince(Date.now()); listen.start.mutate() }
   const stop = () => { listen.stop.mutate(); setSince(null) }
@@ -247,7 +249,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
             </div>
           </SettingRow>
         </div>
-        <RotateDialog id={id} open={rotate} onOpenChange={setRotate} />
+        <RotateDialog id={id} trigger={t.id} open={rotate} onOpenChange={setRotate} />
       </Part>
       <Part title="Response">
         <ChoiceCards label="Response" disabled={c.ro} value={t.respond ?? "accepted"} onChange={(v) => c.set(t.id, (x) => { x.respond = v })}

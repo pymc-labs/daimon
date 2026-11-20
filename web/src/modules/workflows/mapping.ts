@@ -1,25 +1,5 @@
-// A webhook trigger's `inputs` expression, evaluated against a delivery, and the result checked against the workflow's inputs.
+// What a webhook trigger's mapping produced (the server evaluates it), checked against the workflow's inputs.
 import type { ObjectSchema } from "./types"
-
-export type Delivered = { headers: Record<string, string>; payload: unknown }
-export type Mapped = { ok: true; value: unknown } | { ok: false; error: string }
-
-/** `${{ payload.data.items[0].id }}` or `${{ headers.x-id }}`: a path into the delivery. */
-export function evalMapping(expr: string, d: Delivered): Mapped {
-  const m = expr.trim().match(/^\$\{\{\s*(.+?)\s*\}\}$/)
-  if (!m) return { ok: false, error: "Use ${{ payload.path }}" }
-  const parts = m[1]!.match(/[^.[\]]+/g) ?? []
-  const root = parts.shift()
-  if (root !== "payload" && root !== "headers") return { ok: false, error: `Unknown name ${root}` }
-  let v: unknown = root === "payload" ? d.payload : d.headers
-  const seen: string[] = [root]
-  for (const p of parts) {
-    seen.push(p)
-    if (v == null || typeof v !== "object" || !(p in v)) return { ok: false, error: `No ${seen.join(".")} in this delivery` }
-    v = (v as Record<string, unknown>)[p]
-  }
-  return { ok: true, value: v }
-}
 
 export type Row = { field: string; value: unknown; state: "ok" | "missing" | "wrong_type" | "empty" }
 export type Checked = { rows: Row[]; extra: string[]; valid: boolean }

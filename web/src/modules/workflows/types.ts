@@ -1,4 +1,5 @@
 // The workflow spec (schema daimon.workflow/v1) and the shapes the workflows API returns.
+import type { AgentRef } from "@/lib/types"
 
 export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "finish"] as const
 export type Kind = (typeof KINDS)[number]
@@ -33,7 +34,9 @@ export type Node = {
   // action
   tool?: string; args?: Record<string, string>; idempotent?: boolean
   // approval
-  approvers?: string[]; min_approvals?: number; show?: string; form?: Record<string, Field>; binds?: string | string[]; remind_every?: string
+  approvers?: string[]; min_approvals?: number; allow_self_approval?: boolean; show?: string; form?: Record<string, Field>; binds?: string | string[]; remind_every?: string
+  /** Where the ask is posted (`deliver`, with the channel for a thread), what it attaches (a files reference) and the shape of the answer. */
+  channel?: string; attach?: string; answer?: AnswerShape
   // wait
   for?: string; until?: string; event?: { source: string; match?: string }
   // for_each
@@ -41,8 +44,15 @@ export type Node = {
   // workflow
   workflow?: string; version?: "live" | number
   // finish
-  outcome?: "succeeded" | "failed"; deliver?: { to: string; message?: string } | null
+  outcome?: "succeeded" | "failed"
+  /** Finish: where the result goes. Approval: where the ask is posted. */
+  deliver?: { to: string; message?: string } | AskWhere | null
 }
+
+/** Where an approval is asked: the inbox only, a direct message, or a thread in a channel. */
+export type AskWhere = "inbox" | "dm" | "thread"
+export type AnswerShape = "approve" | "choice" | "text" | "form"
+export type Platform = "discord" | "slack" | "teams"
 
 export type TriggerKind = "manual" | "schedule" | "webhook" | "event" | "call"
 export type Trigger = {
@@ -129,9 +139,17 @@ export type Attempt = {
   session: string | null; error: { class: ErrorClass; message: string } | null
 }
 export type WaitKind = "approval" | "question" | "timer" | "event"
+/** A file a run holds: attached to an ask, or sent back with an answer. `url` is `/api/workflows/runs/:run/files/:fid`. */
+export type FileRef = { name: string; size: number; url: string }
+/** Where an ask was posted: a direct message or a thread, with a link when the platform gives one. */
+export type Sent = { platform: Platform; where: string; link: string | null; at: string }
+export type Answer = { by: Person; via: "web" | Platform; text: string | null; values: Record<string, unknown>; files: FileRef[]; at: string }
 export type RunWait = {
+  /** The wait's id: the inbox item to decide it by. */
+  id: string
   kind: WaitKind; status: "waiting" | "completed" | "timed_out" | "cancelled"; addressees: Person[]
   opened_at: string; expires_at: string | null; closed_at: string | null; decision: string | null; decider: Person | null
+  sent: Sent[]; attachments: FileRef[]; answer: Answer | null
 }
 /** One visit of a node, or one For each item. `key` is `node`, `node#2` for a later visit, `node[3]` for an item. */
 export type StepRun = {
@@ -154,7 +172,8 @@ export type RunState = {
   status: RunStatus; waiting_reason: WaitingReason | null; failure: RunFailure | null; outcome: "completed" | "nothing_to_do" | null
   ended_at: string | null; cost_usd: number; steps: StepRun[]; lanes: Lane[]; current_step: string | null
 }
-export type RunTest = { live_writes: boolean; pinned: string[] }
+/** `pinned` are the steps whose output is reused from run `pinned_from`. */
+export type RunTest = { live_writes: boolean; pinned: string[]; pinned_from: string | null }
 export type RunDetail = RunSummary & RunState & {
   spec: Spec; inputs: Record<string, unknown>; untrusted_inputs: boolean; parent: { id: string; number: number } | null
   delivery: string | null; test_options: RunTest | null; budget_usd: number; deadline_at: string | null
@@ -164,7 +183,7 @@ export type EventType =
   | "run.queued" | "run.started" | "run.waiting" | "run.resumed" | "run.succeeded" | "run.failed" | "run.cancelled" | "run.timed_out" | "run.redriven" | "run.forked_from"
   | "step.ready" | "step.skipped" | "step.started" | "step.brief_sent" | "step.question_asked" | "step.output_recorded" | "step.route_chosen"
   | "step.contract_rejected" | "step.nudged" | "step.retry_scheduled" | "step.succeeded" | "step.failed" | "step.cancelled" | "step.unknown" | "step.resolved_by"
-  | "proposal.recorded" | "proposal.decided" | "proposal.sent" | "wait.opened" | "wait.reminded" | "wait.decided" | "wait.timed_out"
+  | "proposal.recorded" | "proposal.decided" | "proposal.sent" | "wait.opened" | "wait.posted" | "wait.reminded" | "wait.answer_refused" | "wait.decided" | "wait.timed_out"
   | "budget.checked" | "budget.exceeded" | "delivery.queued" | "delivery.sent" | "delivery.skipped" | "delivery.refused"
 /** One ledger row. `data` carries what the projection needs; `hash` chains it to the row before. */
 export type RunEvent = {
@@ -176,7 +195,7 @@ export type Proposal = { id: string; tool: string; summary: string; status: "pro
 export type ActivityLine = { at: string; kind: "message" | "tool" | "note"; text: string; tool?: string }
 export type StepDetail = {
   key: string; attempt: number; agent: string | null; model: string | null
-  summary: string | null; route: { name: string; reason: string } | null; files: { name: string; size: number }[]
+  summary: string | null; route: { name: string; reason: string } | null; files: FileRef[]
   input: unknown; output: unknown
   /** JSON paths under `input` or `output` that came from an untrusted source, such as `input.lead.message`. */
   untrusted: string[]
@@ -191,17 +210,19 @@ export type AttentionItem = {
 }
 
 export type Template = { id: string; name: string; trigger: TriggerKind; kinds: Kind[] }
-export type NewWorkflow =
-  | { from: "describe"; text: string } | { from: "template"; template: string } | { from: "blank"; name: string } | { from: "import"; yaml: string }
+export type NewWorkflow = { from: "template"; template: string } | { from: "blank"; name: string } | { from: "import"; yaml: string }
 
 export type Catalog = {
   agents: { key: string; id: string; name: string; tools: number }[]
   tools: { id: string; label: string; writes: boolean }[]
-  people: Person[]; channels: { id: string; name: string }[]
+  /** `platforms` are where a person can be reached. */
+  people: (Person & { platforms: Platform[] })[]
+  /** `shared` channels include people from other organisations. */
+  channels: { id: string; name: string; platform: Platform; shared: boolean }[]
 }
 
-export type AskMessage = { role: "user" | "assistant"; text: string }
-export type AskReply = { reply: string; draft: Draft; changed: string[] }
+/** The thread Ask Daimon talks in: the workflow's subject thread of the web chat. */
+export type WorkflowChat = { session_id: string; agent: AgentRef }
 export type Delivery = { id: string; received_at: string; inputs: Record<string, unknown> }
 
 
@@ -226,12 +247,16 @@ export type InboxProposal = { id: string; tool: string; title: string; detail: s
 export type InboxDetail = InboxItem & {
   show: string | null; bound: Bound[]; proposals: InboxProposal[]; question: string | null
   form: ObjectSchema | null; values: Record<string, unknown>; routes: InboxRoute[]; publish: PublishRequest | null
+  /** Where the ask went, what came with it, and the answer once given. */
+  sent: Sent[]; attachments: FileRef[]; answer: Answer | null
 }
 export type InboxDecide = { route: string; comment?: string; selected?: string[]; values?: Record<string, unknown> }
 
 // ---------- Triggers ----------
 
 export type DeliveryOutcome = "accepted" | "rejected" | "duplicate"
+/** A mapping evaluated against one delivery by the server. */
+export type MappingPreview = { ok: true; value: unknown } | { ok: false; error: string }
 export type DeliveryRow = {
   id: string; received_at: string; verified: boolean; outcome: DeliveryOutcome; status: number; run: { id: string; number: number } | null
   headers: Record<string, string>; payload: unknown
