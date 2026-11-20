@@ -1,8 +1,9 @@
 """Release proposal: what promoting a staging-deployed SHA would ship, and how risky it is.
 
 `tier` is a pure function over a `Span`; everything else gathers facts with `git` and
-`gh` and renders markdown. Prints nothing when the CI run's post-deploy smoke step did
-not succeed (a superseded or failed deploy proposes nothing). Read-only: it never
+`gh` and renders markdown. Prints nothing unless the CI run's staging deploy marked its
+images promotable, the last step after every gate (a superseded or failed deploy proposes
+nothing). Read-only: it never
 dispatches or edits anything. Usage: proposal.py --repo OWNER/NAME --run CI_RUN_ID
 """
 
@@ -27,7 +28,8 @@ CORE_PATTERNS = (
     "*billing*", "*pricing*", "usage_*", "*auth*", "*access*", "*identity*",
     "*vault*", "*purge*", "*erasure*", "privacy*", "tenant_*",
 )  # fmt: skip
-SMOKE_JOB, SMOKE_STEP = "Deploy to GCP (staging)", "Post-deploy smoke turn"
+STAGING_JOB, PROMOTABLE_STEP = "Deploy to GCP (staging)", "Mark tested staging images promotable"
+PRODUCTION_JOB = "Promote to production / Deploy to GCP (production)"
 VERSIONS = "packages/core/alembic/versions/"
 _PR_MERGE = re.compile(r"^Merge pull request #(\d+)")
 _PR_SQUASH = re.compile(r"\(#(\d+)\)$")
@@ -37,8 +39,14 @@ _PROMOTE = re.compile(r"^Promote ([0-9a-f]{40})$")
 @dataclass(frozen=True)
 class Migration:
     file: str
-    schema: str  # expand | contract
+    declared: str  # `schema:` marker: expand | contract | undeclared
+    classified: str  # lint_migrations.py --classify: expand | contract
     downgrade: str  # safe | destructive | unsupported | undeclared
+
+    @property
+    def contract(self) -> bool:
+        """Contract when either says so: the author may know what the classifier cannot."""
+        return "contract" in (self.declared, self.classified)
 
 
 @dataclass(frozen=True)
@@ -60,7 +68,7 @@ def sensitive_path(path: str) -> bool:
 
 def tier(span: Span) -> tuple[str, list[str]]:
     """`(high|low, reasons)`; low has no reasons."""
-    reasons = [f"contract migration `{m.file}`" for m in span.migrations if m.schema == "contract"]
+    reasons = [f"contract migration `{m.file}`" for m in span.migrations if m.contract]
     reasons += [
         f"`downgrade: unsupported` in `{m.file}`"
         for m in span.migrations
@@ -73,22 +81,29 @@ def tier(span: Span) -> tuple[str, list[str]]:
     return (HIGH if reasons else LOW), reasons
 
 
-def smoke_succeeded(jobs: list[dict]) -> bool:
-    """True when the staging deploy's smoke step concluded `success` in this CI run."""
+def promotable(jobs: list[dict]) -> bool:
+    """True when this CI run's staging deploy wrote the tags promote.yml resolves."""
     return any(
-        j["name"].startswith(SMOKE_JOB) and s["name"] == SMOKE_STEP and s["conclusion"] == "success"
+        j["name"].startswith(STAGING_JOB)
+        and s["name"] == PROMOTABLE_STEP
+        and s["conclusion"] == "success"
         for j in jobs
         for s in j.get("steps", [])
     )
 
 
-def production_sha(promote_runs: list[dict]) -> str | None:
-    """The newest successful Promote run's title carries the SHA (newest first)."""
-    for run in promote_runs:
-        m = _PROMOTE.match(run["displayTitle"])
-        if m:
-            return m.group(1)
-    return None
+def production_sha(promotes: list[tuple[str, list[dict]]]) -> str | None:
+    """The SHA whose production deploy job finished last with success, from each Promote
+    run's title and jobs. Not the run's own result: a canary failing after the deploy
+    leaves production on that SHA, and runs are approved out of creation order."""
+    done = [
+        (job["completed_at"], m.group(1))
+        for title, jobs in promotes
+        if (m := _PROMOTE.match(title))
+        for job in jobs
+        if job["name"] == PRODUCTION_JOB and job["conclusion"] == "success"
+    ]
+    return max(done)[1] if done else None
 
 
 def _run(*cmd: str) -> str:
@@ -97,6 +112,13 @@ def _run(*cmd: str) -> str:
 
 def _gh_json(*args: str) -> object:
     return json.loads(_run("gh", *args))
+
+
+def _jobs(repo: str, run_id: object) -> list[dict]:
+    out = _run(
+        "gh", "api", "--paginate", f"repos/{repo}/actions/runs/{run_id}/jobs", "--jq", ".jobs[]"
+    )
+    return [json.loads(line) for line in out.splitlines()]
 
 
 def _marker(text: str, key: str) -> str | None:
@@ -112,12 +134,13 @@ def _migrations(prod: str, cand: str) -> tuple[Migration, ...]:
     if not added:
         return ()
     with tempfile.TemporaryDirectory() as tmp:
-        files, downgrades = [], {}
+        files, declared, downgrades = [], {}, {}
         for f in added:  # candidate content, classified by the checked-out linter
             text = _run("git", "show", f"{cand}:{f}")
             dest = Path(tmp) / Path(f).name
             dest.write_text(text, encoding="utf-8")
             files.append(str(dest))
+            declared[str(dest)] = _marker(text, "schema") or "undeclared"
             downgrades[str(dest)] = _marker(text, "downgrade") or "undeclared"
         out = _run(
             sys.executable,
@@ -126,7 +149,7 @@ def _migrations(prod: str, cand: str) -> tuple[Migration, ...]:
             *files,
         )
     classes = dict(line.rsplit(": ", 1) for line in out.splitlines())
-    return tuple(Migration(Path(f).name, classes[f], downgrades[f]) for f in files)
+    return tuple(Migration(Path(f).name, declared[f], classes[f], downgrades[f]) for f in files)
 
 
 def _prs(prod: str, cand: str) -> list[tuple[int, str]]:
@@ -161,23 +184,19 @@ def _listed(items: list[str]) -> list[str]:
 
 def build(repo: str, run_id: str) -> str:
     run = _gh_json("api", f"repos/{repo}/actions/runs/{run_id}")
-    out = _run(
-        "gh", "api", "--paginate", f"repos/{repo}/actions/runs/{run_id}/jobs", "--jq", ".jobs[]"
-    )
-    jobs = [json.loads(line) for line in out.splitlines()]
-    if not smoke_succeeded(jobs):  # superseded, no smoke needed, or failed
+    if not promotable(_jobs(repo, run_id)):  # superseded or failed
         return ""
     cand = run["head_sha"]
-    promotes = _gh_json(
-        *("run", "list", "-R", repo, "--workflow", "promote.yml", "--status", "success"),
-        *("--limit", "30", "--json", "displayTitle"),
+    runs = _gh_json(
+        *("run", "list", "-R", repo, "--workflow", "promote.yml", "--status", "completed"),
+        *("--limit", "30", "--json", "databaseId,displayTitle"),
     )
-    prod = production_sha(promotes)
+    prod = production_sha([(r["displayTitle"], _jobs(repo, r["databaseId"])) for r in runs])
     head = f"## Release proposal for `{cand}`\n\n"
     if prod is None:
         return (
             head
-            + "Production SHA unknown: no successful Promote run is titled `Promote <sha>`.\n"
+            + "Production SHA unknown: no Promote run titled `Promote <sha>` deployed.\n"
             + "Tier: **high**.\n"
         )
     ahead = int(_run("git", "rev-list", "--count", f"{prod}..{cand}"))
@@ -212,17 +231,19 @@ def build(repo: str, run_id: str) -> str:
     if prs:
         md += ["PRs:", *_listed([f"- #{n} {t}" for n, t in sorted(prs)]), ""]
     if migrations:
-        md += ["| Migration | schema | downgrade |", "|---|---|---|"]
-        md += [f"| `{m.file}` | {m.schema} | {m.downgrade} |" for m in migrations] + [""]
+        md += ["| Migration | declared | classified | downgrade |", "|---|---|---|---|"]
+        md += [
+            f"| `{m.file}` | {m.declared} | {m.classified} | {m.downgrade} |" for m in migrations
+        ] + [""]
     frags = _fragments(prod, cand)
     if frags:
         md += ["Changelog fragments:", *_listed([f"- {f}" for f in frags]), ""]
-    smoke = f"`{SMOKE_STEP}` succeeded"
+    marked = f"`{PROMOTABLE_STEP}` succeeded"
     canary = (
         ", ".join(f"[{c['conclusion'] or c['status']}]({c['url']})" for c in since[:5])
         or "none yet"
     )
-    md += ["Signals:", f"- main CI run: {run['html_url']} (`{run['conclusion']}`)", f"- {smoke}",
+    md += ["Signals:", f"- main CI run: {run['html_url']} (`{run['conclusion']}`)", f"- {marked}",
            f"- canary runs since: {canary}"]  # fmt: skip
     return "\n".join(md) + "\n"
 

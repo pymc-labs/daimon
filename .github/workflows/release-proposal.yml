@@ -4,8 +4,8 @@ name: Release proposal
 # with what promoting that SHA would ship (scripts/release/proposal.py): the span since
 # production, migration classes, changelog fragments, signals and a risk tier. It only
 # reads runs and writes that issue; it never dispatches a workflow and has no
-# environment. A run whose post-deploy smoke step did not succeed (superseded by a
-# newer main run, or failed) proposes nothing; the newer run proposes instead.
+# environment. A run whose staging deploy did not mark its images promotable (superseded
+# by a newer main run, or failed) proposes nothing; the newer run proposes instead.
 # Needs the repository label `release-proposal`.
 on:
   workflow_run:
@@ -51,7 +51,7 @@ jobs:
               --limit 1 --json databaseId --jq '.[0].databaseId')
           fi
           python3 scripts/release/proposal.py --repo "$GH_REPO" --run "$RUN_ID" > "$RUNNER_TEMP/proposal.md"
-          [ -s "$RUNNER_TEMP/proposal.md" ] || echo "No staging smoke success in run $RUN_ID; nothing to propose."
+          [ -s "$RUNNER_TEMP/proposal.md" ] || echo "Run $RUN_ID marked no images promotable; nothing to propose."
 
       - name: Update the issue
         run: |

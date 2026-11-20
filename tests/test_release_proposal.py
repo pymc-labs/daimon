@@ -16,7 +16,7 @@ proposal = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = proposal
 _SPEC.loader.exec_module(proposal)
 
-EXPAND = proposal.Migration("0230_a.py", "expand", "safe")
+EXPAND = proposal.Migration("0230_a.py", "expand", "expand", "safe")
 
 
 def span(**kw: object) -> object:
@@ -37,8 +37,10 @@ def test_tier_when_span_is_ordinary_is_low() -> None:
 @pytest.mark.parametrize(
     "kw",
     [
-        {"migrations": (proposal.Migration("0231_b.py", "contract", "safe"),)},
-        {"migrations": (proposal.Migration("0231_b.py", "expand", "unsupported"),)},
+        {"migrations": (proposal.Migration("0231_b.py", "expand", "contract", "safe"),)},
+        # Declared contract: the classifier cannot see a function body or a policy change.
+        {"migrations": (proposal.Migration("0231_b.py", "contract", "expand", "safe"),)},
+        {"migrations": (proposal.Migration("0231_b.py", "expand", "expand", "unsupported"),)},
         {"prs": 21},
         {"bad_signals": ("canary failed",)},
         {"paths": (".github/workflows/ci.yml",)},
@@ -73,24 +75,31 @@ def test_tier_when_exactly_twenty_prs_is_low() -> None:
 def _jobs(
     conclusion: str, name: str = "Deploy to GCP (staging) / Deploy to GCP (staging)"
 ) -> list[dict]:
-    return [{"name": name, "steps": [{"name": "Post-deploy smoke turn", "conclusion": conclusion}]}]
+    step = {"name": "Mark tested staging images promotable", "conclusion": conclusion}
+    return [{"name": name, "steps": [step]}]
 
 
-def test_smoke_succeeded_only_when_staging_smoke_step_succeeded() -> None:
-    assert proposal.smoke_succeeded(_jobs("success")), "green smoke proposes"
-    assert not proposal.smoke_succeeded(_jobs("skipped")), "a superseded run proposes nothing"
-    assert not proposal.smoke_succeeded(_jobs("failure")), "a failed smoke proposes nothing"
-    assert not proposal.smoke_succeeded(_jobs("success", "Deploy to GCP (production)")), (
-        "staging only"
-    )
+def test_promotable_only_when_staging_marked_its_images() -> None:
+    assert proposal.promotable(_jobs("success")), "promotable images propose"
+    assert not proposal.promotable(_jobs("skipped")), "a superseded run proposes nothing"
+    assert not proposal.promotable(_jobs("failure")), "a deploy failing late proposes nothing"
+    assert not proposal.promotable(_jobs("success", "Deploy to GCP (production)")), "staging only"
 
 
-def test_production_sha_takes_newest_titled_run() -> None:
-    sha = "a" * 40
+def _deploy(conclusion: str, completed_at: str) -> list[dict]:
+    job = "Promote to production / Deploy to GCP (production)"
+    return [{"name": job, "conclusion": conclusion, "completed_at": completed_at}]
+
+
+def test_production_sha_is_the_last_successful_production_deploy() -> None:
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
     runs = [
-        {"displayTitle": "Promote"},
-        {"displayTitle": f"Promote {sha}"},
-        {"displayTitle": f"Promote {'b' * 40}"},
+        ("Promote", _deploy("success", "2026-11-20T09:00:00Z")),
+        # Created last but approved first.
+        (f"Promote {a}", _deploy("success", "2026-11-19T10:00:00Z")),
+        # Deployed, then its canary failed: the run is red, production still runs b.
+        (f"Promote {b}", _deploy("success", "2026-11-19T12:00:00Z")),
+        (f"Promote {c}", _deploy("failure", "2026-11-19T13:00:00Z")),
     ]
-    assert proposal.production_sha(runs) == sha, "untitled runs are skipped, newest titled wins"
+    assert proposal.production_sha(runs) == b, "the latest successful deploy job wins"
     assert proposal.production_sha([]) is None, "no promote run means unknown"
