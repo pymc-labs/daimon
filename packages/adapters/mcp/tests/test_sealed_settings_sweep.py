@@ -467,6 +467,7 @@ EXEMPT: dict[str, str] = {
     "update_web_person": _TENANT,
     "wait_for_helpers": _TURN,
     "web_fetch": _READS,
+    "web_search": "eval runs only; the fake world answers it and changes no setting",
     "where_am_i": _READS,
 }
 
