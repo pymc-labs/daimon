@@ -27,7 +27,7 @@ from daimon.core._models import (
 )
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -332,8 +332,8 @@ async def record_event(
         .values(**values)
         .on_conflict_do_nothing(
             index_elements=["trigger_id", "delivery_id"],
-            index_where=(WorkflowTriggerEvent.delivery_id.is_not(None))
-            & (WorkflowTriggerEvent.status != "duplicate"),
+            # Literal, not bound: Postgres matches the partial index by its predicate.
+            index_where=text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
         )
         .returning(WorkflowTriggerEvent)
     )
@@ -362,13 +362,15 @@ async def count_events_since(
     trigger_id: uuid.UUID | None = None,
     tenant_id: uuid.UUID | None = None,
 ) -> int:
-    """Events of one trigger, or of every trigger of a workspace, since `since`."""
+    """Events of one trigger, or of every webhook trigger of a workspace, since `since`."""
     stmt = select(func.count()).where(WorkflowTriggerEvent.received_at >= since)
     if trigger_id is not None:
         stmt = stmt.where(WorkflowTriggerEvent.trigger_id == trigger_id)
     if tenant_id is not None:
         # Through the triggers, so the (trigger, received) index serves it.
-        ids = select(WorkflowTrigger.id).where(WorkflowTrigger.tenant_id == tenant_id)
+        ids = select(WorkflowTrigger.id).where(
+            WorkflowTrigger.tenant_id == tenant_id, WorkflowTrigger.kind == "webhook"
+        )
         stmt = stmt.where(WorkflowTriggerEvent.trigger_id.in_(ids))
     return await session.scalar(stmt) or 0
 
@@ -529,3 +531,44 @@ async def add_owner_notice(
         )
     )
     await session.flush()
+
+
+# --- the Triggers tab ---
+
+
+async def find_trigger(
+    session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID, key: str
+) -> TriggerRow | None:
+    orm = await session.scalar(
+        select(WorkflowTrigger).where(
+            WorkflowTrigger.tenant_id == tenant_id,
+            WorkflowTrigger.workflow_id == workflow_id,
+            WorkflowTrigger.trigger_key == key,
+        )
+    )
+    return None if orm is None else TriggerRow.model_validate(orm)
+
+
+async def run_numbers(session: AsyncSession, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
+    if not run_ids:
+        return {}
+    rows = await session.execute(
+        select(WorkflowRun.id, WorkflowRun.number).where(WorkflowRun.id.in_(run_ids))
+    )
+    return dict(rows.tuples().all())
+
+
+async def last_with_inputs(session: AsyncSession, *, workflow_id: uuid.UUID) -> EventRow | None:
+    """The newest webhook delivery of the workflow that mapped to inputs."""
+    orm = await session.scalar(
+        select(WorkflowTriggerEvent)
+        .join(WorkflowTrigger, WorkflowTrigger.id == WorkflowTriggerEvent.trigger_id)
+        .where(
+            WorkflowTrigger.workflow_id == workflow_id,
+            WorkflowTrigger.kind == "webhook",
+            func.jsonb_typeof(WorkflowTriggerEvent.inputs) == "object",
+        )
+        .order_by(WorkflowTriggerEvent.received_at.desc())
+        .limit(1)
+    )
+    return None if orm is None else EventRow.model_validate(orm)

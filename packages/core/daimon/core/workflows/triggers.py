@@ -25,7 +25,7 @@ from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.spec import CallTrigger, Spec, parse_duration, parse_spec
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -110,7 +110,10 @@ async def _spec_for(
     if workflow is None:
         return None
     if test:
-        return parse_spec(workflow.draft_spec), trigger.listener
+        try:
+            return parse_spec(workflow.draft_spec), trigger.listener
+        except ValidationError:
+            return None
     if workflow.live_version is None:
         return None
     live = await workflows.get_version(
