@@ -89,20 +89,22 @@ CI runs those four across its jobs. Its `lint` job also runs the repo's own
 linters — `scripts/lint_discord_modals.py` for Discord modal conventions,
 `scripts/lint_anti_patterns.sh` for test anti-patterns, plus the migration
 marker and leakage linters described below — and checks that the generated
-documentation still matches the code:
+`.env.example` still matches the code, and that the changelog fragments are
+well formed:
 
 ```bash
-uv run python scripts/generate_env_example.py --check      # .env.example
-uv run python scripts/generate_config_reference.py --check # docs/configuration.md
-uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
+uv run python scripts/generate_env_example.py --check # .env.example
+uv run python scripts/changelog.py check              # changes/*.md
 ```
 
-Those three pages are written by generators, so a change to a settings field's
-`Field(description=...)` or to an MCP tool's docstring is a change to their
-source: re-run the generator without `--check` and commit the result, rather
-than editing the page. `CLAUDE.md` says which page a change belongs on and
-how to write it; `scripts/check_docs.py` keeps the hand-written pages within
-their length budgets.
+The configuration, features and MCP tools pages are built from the code by the
+docs workflow and never committed, so a change to a settings field's
+`Field(description=...)`, the feature registry or an MCP tool's docstring needs
+no page edit. Run `scripts/generate_config_reference.py`,
+`generate_feature_reference.py` and `generate_mcp_tool_catalogue.py` to preview
+them under `docs/`. `CLAUDE.md` says which hand-written page a change belongs
+on and how to write it; `scripts/check_docs.py` keeps those pages within their
+length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
 suites (`core`, `mcp`, `discord`) into shards by test file with
@@ -181,4 +183,6 @@ Describe the behaviour instead.
   in the same PR.
 - Describe what changed and why in the PR description. Link any related
   issue.
+- Add a `changes/<topic>.md` fragment for anything a user can notice; do not
+  edit `CHANGELOG.md`.
 - Make sure the quality gates above pass locally before requesting review.

@@ -75,9 +75,15 @@ Declare its effect, tiers (per backend), binding, `requires` and `depends_on`.
 Read it from the `FeatureSnapshot` that `resolve_features` builds on every session
 and turn path; write it with `change_feature`.
 `packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
-paths. A new feature, or a changed default, tier or platform, must update the "All
-features" table in `docs/features.md`: re-run `scripts/generate_feature_reference.py`
-(CI runs it with `--check`) and add a `CHANGELOG.md` line.
+paths. A new feature, or a changed default, tier or platform, needs a changelog
+fragment. Add a spec, or an entry in a test's per-feature table, next to its
+closest sibling, never at the end.
+
+## Changelog
+
+Anything a user can notice gets a fragment: `changes/<topic>.md` with one
+`- **Bold lead.**` paragraph in the style of `CHANGELOG.md`. Never edit
+`CHANGELOG.md` in a change; `scripts/changelog.py fold` moves fragments into it.
 
 ## Documentation
 
@@ -85,17 +91,17 @@ features" table in `docs/features.md`: re-run `scripts/generate_feature_referenc
 It grew to 120k words by every PR appending a paragraph; these rules stop that.
 `scripts/check_docs.py` enforces the budgets in CI.
 
-**Generated pages.** Settings: `docs/configuration.md` and `.env.example`, from
-the field's `description=` (`scripts/generate_config_reference.py`,
-`scripts/generate_env_example.py`). MCP tools: `docs/mcp-tools.md`, from the
-docstring (`scripts/generate_mcp_tool_catalogue.py`). Features: `docs/features.md`,
-from the registry (`scripts/generate_feature_reference.py`). Re-run the generator;
-CI runs each with `--check`. Keep descriptions to one short paragraph.
+**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md` and
+`docs/features.md` are built by the docs workflow from `scripts/generate_*.py`
+(a setting's `description=`, a tool's docstring, the feature registry); never
+commit them. `.env.example` is committed: re-run
+`scripts/generate_env_example.py`, and on a merge conflict take either side and
+re-run it. Keep descriptions to one short paragraph.
 
 **When to touch a hand-written page.** Only when a fact a reader acts on
 changes: a command, flag, required setting, visible behaviour, limit or
 recovery step. Most PRs need no docs change. Implementation detail goes in
-docstrings and comments; history goes in `CHANGELOG.md` and the PR.
+docstrings and comments; history goes in a changelog fragment and the PR.
 
 **How to change it.**
 
@@ -130,4 +136,4 @@ docstrings and comments; history goes in `CHANGELOG.md` and the PR.
 | metering, pricing, gates | `docs/billing.md` |
 | packages, turn path, trust model | `docs/architecture.md` |
 | `packages/mux` | `docs/mux.md`, `packages/mux/README.md` |
-| anything a user can notice | `CHANGELOG.md` under `[Unreleased]` |
+| anything a user can notice | a fragment in `changes/` |

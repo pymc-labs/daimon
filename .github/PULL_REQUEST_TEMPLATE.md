@@ -10,3 +10,4 @@
 - [ ] `uv run pyright` passes locally (strict mode)
 - [ ] `uv run ruff check .` is clean
 - [ ] `uv run lint-imports` passes (package boundary contracts)
+- [ ] A user-visible change has a `changes/` fragment
