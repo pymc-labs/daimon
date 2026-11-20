@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar, Final
 
 from daimon.core import _erasure_guards
 from sqlalchemy import (
@@ -772,6 +772,17 @@ class UsageEvent(Base):
         Index("usage_events_tenant_idx", "tenant_id"),
         # The per-agent spend reads (a person's month by agent, a tenant's by agent).
         Index("usage_events_tenant_agent_occurred_idx", "tenant_id", "agent_id", "occurred_at"),
+        # Built concurrently by 0222; they also serve the SET NULL when a run is deleted.
+        Index(
+            "ix_usage_events_workflow_run",
+            "workflow_run_id",
+            postgresql_where=text("workflow_run_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_usage_events_workflow_step",
+            "workflow_step_id",
+            postgresql_where=text("workflow_step_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UuidPk]
@@ -796,6 +807,13 @@ class UsageEvent(Base):
     web_searches: Mapped[int] = mapped_column(server_default=text("0"))
     free_web_searches: Mapped[int] = mapped_column(server_default=text("0"))
     paid_web_searches: Mapped[int] = mapped_column(server_default=text("0"))
+    # The workflow run and step that spent it; SET NULL so retention keeps the money.
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL", name="fk_usage_events_workflow_runs")
+    )
+    workflow_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_steps.id", ondelete="SET NULL", name="fk_usage_events_workflow_steps")
+    )
 
 
 class WebSearchAllowance(Base):
@@ -5632,7 +5650,18 @@ class WebThread(Base):
     """One web chat: a person's conversation with the agent it was started with."""
 
     __tablename__ = "web_threads"
-    __table_args__ = (Index("ix_web_threads_person_updated", "person_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_web_threads_person_updated", "person_id", "updated_at"),
+        # One conversation per person and subject, such as a workflow's Ask Daimon.
+        Index(
+            "uq_web_threads_subject",
+            "tenant_id",
+            "person_id",
+            "subject",
+            unique=True,
+            postgresql_where=text("subject IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UuidPk]
     tenant_id: Mapped[TenantFK]
@@ -5643,6 +5672,8 @@ class WebThread(Base):
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
     deleted_at: Mapped[datetime | None]
+    #: What the thread is about, such as `{"kind": "workflow", "id": ...}`; hidden from /chat.
+    subject: Mapped[dict[str, Any] | None]
 
 
 class WebMessage(Base):
@@ -5815,6 +5846,709 @@ class MonitoredEvent(Base):
     content: Mapped[str | None]
     tool_name: Mapped[str | None]
     outcome: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+# ---------- Workflows (`daimon.core.workflows`; design: docs in the module) ----------
+
+WorkflowFK = Annotated[uuid.UUID, mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"))]
+RunFK = Annotated[uuid.UUID, mapped_column(ForeignKey("workflow_runs.id", ondelete="CASCADE"))]
+StepFK = Annotated[uuid.UUID, mapped_column(ForeignKey("workflow_steps.id", ondelete="CASCADE"))]
+WaitFK = Annotated[uuid.UUID, mapped_column(ForeignKey("workflow_waits.id", ondelete="CASCADE"))]
+Usd = Annotated[Decimal, mapped_column(Numeric(12, 6), server_default=text("0"))]
+JsonObject = Annotated[dict[str, Any], mapped_column(JSONB, server_default=text("'{}'::jsonb"))]
+JsonList = Annotated[list[Any], mapped_column(JSONB, server_default=text("'[]'::jsonb"))]
+
+
+def _one_of(
+    column: str, values: tuple[str, ...], table: str, *, nullable: bool = False
+) -> CheckConstraint:
+    allowed = ", ".join(f"'{v}'" for v in values)
+    rule = f"{column} IN ({allowed})"
+    return CheckConstraint(
+        f"{column} IS NULL OR {rule}" if nullable else rule, name=f"ck_{table}_{column}"
+    )
+
+
+WORKFLOW_RUN_STATES: Final = (
+    "queued",
+    "running",
+    "waiting",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timed_out",
+)
+WORKFLOW_STEP_STATES: Final = (
+    "pending",
+    "ready",
+    "running",
+    "waiting",
+    "succeeded",
+    "failed",
+    "skipped",
+    "cancelled",
+    "unknown",
+)
+WORKFLOW_WAITING_REASONS: Final = ("approval", "question", "timer", "event", "blocked", "unknown")
+WORKFLOW_ERROR_CLASSES: Final = ("retryable", "gate", "contract", "agent", "unknown", "fatal")
+
+
+class Workflow(Base):
+    """A workflow: its draft, its live version and who owns it.
+
+    The owner is SET NULL when their account is erased: a private workflow is deleted
+    by the erasure first, a shared one is left `needs_owner` for an editor to publish.
+    """
+
+    __tablename__ = "workflows"
+    __table_args__ = (
+        Index("ix_workflows_tenant", "tenant_id"),
+        Index("ix_workflows_owner", "owner_account_id"),
+        _one_of("visibility", ("private", "shared"), "workflows"),
+        _one_of("status", ("active", "paused", "needs_owner"), "workflows"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    home_channel_id: Mapped[str | None]
+    visibility: Mapped[str] = mapped_column(server_default="private")
+    status: Mapped[str] = mapped_column(server_default="active")
+    owner_account_id: Mapped[AccountSetNull]
+    live_version: Mapped[int | None]
+    draft_spec: Mapped[dict[str, Any]]
+    draft_revision: Mapped[int] = mapped_column(server_default=text("1"))
+    draft_base_version: Mapped[int | None]
+    draft_updated_by_account_id: Mapped[AccountSetNull]
+    draft_updated_at: Mapped[TsNow]
+    run_counter: Mapped[int] = mapped_column(server_default=text("0"))
+    monthly_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class WorkflowVersion(Base):
+    """A published spec. Runs pin one; the publisher is the run-as person of its unattended runs."""
+
+    __tablename__ = "workflow_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint("workflow_id", "number", name="pk_workflow_versions"),
+        Index("ix_workflow_versions_publisher", "published_by_account_id"),
+        _one_of("source", ("web", "chat", "import", "routine"), "workflow_versions"),
+    )
+
+    workflow_id: Mapped[WorkflowFK]
+    number: Mapped[int]
+    tenant_id: Mapped[TenantFK]
+    spec: Mapped[dict[str, Any]]
+    spec_hash: Mapped[str]
+    note: Mapped[str] = mapped_column(server_default="")
+    source: Mapped[str]
+    published_by_account_id: Mapped[AccountSetNull]
+    approved_by_account_id: Mapped[AccountSetNull]
+    published_at: Mapped[TsNow]
+
+
+class WorkflowAccess(Base):
+    """An editor, runner or viewer of a shared workflow: a person or a group."""
+
+    __tablename__ = "workflow_access"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "account_id", name="uq_workflow_access_account"),
+        UniqueConstraint("workflow_id", "group_id", name="uq_workflow_access_group"),
+        Index("ix_workflow_access_account", "account_id"),
+        CheckConstraint(
+            "(account_id IS NULL) <> (group_id IS NULL)", name="ck_workflow_access_subject"
+        ),
+        _one_of("role", ("editor", "runner", "viewer"), "workflow_access"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    group_id: Mapped[str | None]
+    role: Mapped[str]
+    granted_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+
+
+class WorkflowGrant(Base):
+    """An admin's approval of what a version needs at run time, pinned to the node's hash."""
+
+    __tablename__ = "workflow_grants"
+    __table_args__ = (
+        Index("ix_workflow_grants_version", "workflow_id", "version"),
+        _one_of(
+            "kind",
+            (
+                "unattended_write",
+                "builtins",
+                "code_network",
+                "untrusted_waiver",
+                "unverified_webhook",
+                "budget_over_default",
+            ),
+            "workflow_grants",
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    version: Mapped[int]
+    kind: Mapped[str]
+    node_id: Mapped[str | None]
+    tool: Mapped[str | None]
+    params: Mapped[JsonObject]
+    pins: Mapped[JsonObject]
+    approved_by_account_id: Mapped[AccountSetNull]
+    approved_at: Mapped[TsNow]
+    revoked_at: Mapped[datetime | None]
+    revoked_reason: Mapped[str | None]
+
+
+class WorkflowPublishRequest(Base):
+    """A publish that waits for an admin to approve its grants. One pending per workflow."""
+
+    __tablename__ = "workflow_publish_requests"
+    __table_args__ = (
+        Index(
+            "uq_workflow_publish_requests_pending",
+            "workflow_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_workflow_publish_requests_workflow", "workflow_id"),
+        _one_of("status", ("pending", "approved", "rejected"), "workflow_publish_requests"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    revision: Mapped[int]
+    spec: Mapped[dict[str, Any]]
+    note: Mapped[str] = mapped_column(server_default="")
+    grants: Mapped[JsonList]
+    status: Mapped[str] = mapped_column(server_default="pending")
+    version: Mapped[int | None]
+    requested_by_account_id: Mapped[AccountSetNull]
+    requested_at: Mapped[TsNow]
+    decided_by_account_id: Mapped[AccountSetNull]
+    decided_at: Mapped[datetime | None]
+    comment: Mapped[str | None]
+
+
+class WorkflowTrigger(Base):
+    """A trigger of the live version, keyed by its spec id; schedules carry their slot state."""
+
+    __tablename__ = "workflow_triggers"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "trigger_key", name="uq_workflow_triggers_key"),
+        Index(
+            "ix_workflow_triggers_routine",
+            "from_routine_id",
+            postgresql_where=text("from_routine_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_workflow_triggers_due",
+            "next_fire_at",
+            postgresql_where=text("enabled AND next_fire_at IS NOT NULL"),
+        ),
+        _one_of("kind", ("manual", "schedule", "webhook", "event", "call"), "workflow_triggers"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    trigger_key: Mapped[str]
+    kind: Mapped[str]
+    config: Mapped[JsonObject]
+    enabled: Mapped[bool] = mapped_column(server_default=text("true"))
+    next_fire_at: Mapped[datetime | None]
+    last_fired_slot: Mapped[datetime | None]
+    seeded_after: Mapped[datetime | None]
+    listening_until: Mapped[datetime | None]
+    from_routine_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("routines.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class WorkflowTriggerSecret(Base):
+    """A webhook signing secret, encrypted; a rotated one keeps working until `expires_at`."""
+
+    __tablename__ = "workflow_trigger_secrets"
+    __table_args__ = (Index("ix_workflow_trigger_secrets_trigger", "trigger_id"),)
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    trigger_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workflow_triggers.id", ondelete="CASCADE")
+    )
+    encrypted_secret: Mapped[bytes]
+    hint: Mapped[str]
+    created_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime | None]
+
+
+class WorkflowTriggerEvent(Base):
+    """One delivery, schedule slot or event for a trigger; the starts loop turns accepted ones
+    into runs. The payload is bounded and cleared after the payload retention."""
+
+    __tablename__ = "workflow_trigger_events"
+    __table_args__ = (
+        Index(
+            "uq_workflow_trigger_events_delivery",
+            "trigger_id",
+            "delivery_id",
+            unique=True,
+            postgresql_where=text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
+        ),
+        Index(
+            "ix_workflow_trigger_events_accepted",
+            "received_at",
+            postgresql_where=text("status = 'accepted'"),
+        ),
+        Index("ix_workflow_trigger_events_trigger", "trigger_id", "received_at"),
+        Index("ix_workflow_trigger_events_run", "run_id"),
+        _one_of(
+            "status",
+            ("accepted", "started", "skipped", "rejected", "duplicate"),
+            "workflow_trigger_events",
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    trigger_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workflow_triggers.id", ondelete="CASCADE")
+    )
+    delivery_id: Mapped[str | None]
+    test: Mapped[FalseFlag]
+    verified: Mapped[FalseFlag]
+    status: Mapped[str]
+    http_status: Mapped[int | None]
+    reason: Mapped[str | None]
+    headers: Mapped[dict[str, Any] | None]
+    payload: Mapped[dict[str, Any] | None]
+    payload_hash: Mapped[str | None]
+    inputs: Mapped[dict[str, Any] | None]
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL")
+    )
+    received_at: Mapped[TsNow]
+
+
+class WorkflowRun(Base):
+    """One run of a version: the projection of its ledger (`workflow_run_events`).
+
+    `triggered_by` says who or what started it (`{"kind": "person", "account_id": ...}`,
+    a schedule slot, a delivery, an event or a parent run); erasure tombstones a person in it.
+    """
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "number", name="uq_workflow_runs_number"),
+        Index("ix_workflow_runs_workflow_created", "workflow_id", "created_at"),
+        Index("ix_workflow_runs_run_as", "run_as_account_id"),
+        Index(
+            "ix_workflow_runs_parent",
+            "parent_run_id",
+            postgresql_where=text("parent_run_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_workflow_runs_forked_from",
+            "forked_from_run_id",
+            postgresql_where=text("forked_from_run_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_workflow_runs_active",
+            "tenant_id",
+            "status",
+            postgresql_where=text("status IN ('queued', 'running', 'waiting')"),
+        ),
+        _one_of("mode", ("live", "test"), "workflow_runs"),
+        _one_of("status", WORKFLOW_RUN_STATES, "workflow_runs"),
+        _one_of("waiting_reason", WORKFLOW_WAITING_REASONS, "workflow_runs", nullable=True),
+        _one_of("outcome", ("completed", "nothing_to_do"), "workflow_runs", nullable=True),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    version: Mapped[int]
+    number: Mapped[int]
+    mode: Mapped[str] = mapped_column(server_default="live")
+    status: Mapped[str] = mapped_column(server_default="queued")
+    waiting_reason: Mapped[str | None]
+    outcome: Mapped[str | None]
+    failure_reason: Mapped[str | None]
+    failure_message: Mapped[str | None]
+    failure_step: Mapped[str | None]
+    run_as_account_id: Mapped[AccountSetNull]
+    triggered_by: Mapped[JsonObject]
+    trigger_kind: Mapped[str]
+    trigger_key: Mapped[str]
+    inputs: Mapped[JsonObject]
+    untrusted_inputs: Mapped[FalseFlag]
+    label: Mapped[str | None]
+    concurrency_key: Mapped[str | None]
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL")
+    )
+    parent_step_id: Mapped[uuid.UUID | None]
+    forked_from_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL")
+    )
+    forked_from_step: Mapped[str | None]
+    redrive_count: Mapped[int] = mapped_column(server_default=text("0"))
+    test_options: Mapped[dict[str, Any] | None]
+    budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    cost_usd: Mapped[Usd]
+    deadline_at: Mapped[datetime | None]
+    last_seq: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    head_hash: Mapped[str | None]
+    started_at: Mapped[datetime | None]
+    ended_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class WorkflowStep(Base):
+    """One visit of a node, or one For each item (`parent_step_id`), with its lease."""
+
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "node_id",
+            "visit",
+            "item_index",
+            name="uq_workflow_steps_visit",
+            postgresql_nulls_not_distinct=True,
+        ),
+        Index("ix_workflow_steps_ready", "ready_at", postgresql_where=text("status = 'ready'")),
+        Index(
+            "ix_workflow_steps_leased",
+            "lease_expires_at",
+            postgresql_where=text("status = 'running'"),
+        ),
+        _one_of("status", WORKFLOW_STEP_STATES, "workflow_steps"),
+        _one_of("waiting_reason", WORKFLOW_WAITING_REASONS, "workflow_steps", nullable=True),
+        _one_of("error_class", WORKFLOW_ERROR_CLASSES, "workflow_steps", nullable=True),
+        _one_of("reused", ("fork", "pinned"), "workflow_steps", nullable=True),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[RunFK]
+    node_id: Mapped[str]
+    visit: Mapped[int] = mapped_column(server_default=text("1"))
+    item_index: Mapped[int | None]
+    parent_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_steps.id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(server_default="pending")
+    waiting_reason: Mapped[str | None]
+    inputs: Mapped[dict[str, Any] | None]
+    output: Mapped[dict[str, Any] | None]
+    summary: Mapped[str | None]
+    route: Mapped[str | None]
+    route_reason: Mapped[str | None]
+    error_class: Mapped[str | None]
+    error_message: Mapped[str | None]
+    #: JSON paths under `input` or `output` that came from an untrusted source.
+    taint: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    via: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    lane: Mapped[str | None]
+    reused: Mapped[str | None]
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
+    generation: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    cost_usd: Mapped[Usd]
+    ready_at: Mapped[datetime | None]
+    started_at: Mapped[datetime | None]
+    ended_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+
+
+class WorkflowAttempt(Base):
+    """One try of a step: its session, when the brief was about to be sent, usage and error."""
+
+    __tablename__ = "workflow_attempts"
+    __table_args__ = (
+        UniqueConstraint("step_id", "number", name="uq_workflow_attempts_number"),
+        Index("ix_workflow_attempts_session", "session_id"),
+        _one_of("status", ("running", "succeeded", "failed", "abandoned"), "workflow_attempts"),
+        _one_of("error_class", WORKFLOW_ERROR_CLASSES, "workflow_attempts", nullable=True),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    step_id: Mapped[StepFK]
+    number: Mapped[int]
+    status: Mapped[str] = mapped_column(server_default="running")
+    session_id: Mapped[str | None]
+    send_intent_at: Mapped[datetime | None]
+    usage: Mapped[dict[str, Any] | None]
+    cost_usd: Mapped[Usd]
+    error_class: Mapped[str | None]
+    error_message: Mapped[str | None]
+    started_at: Mapped[TsNow]
+    ended_at: Mapped[datetime | None]
+
+
+class WorkflowLane(Base):
+    """An agent session that steps of one run continue (`session:` in the spec)."""
+
+    __tablename__ = "workflow_lanes"
+    __table_args__ = (
+        UniqueConstraint("run_id", "lane_key", name="uq_workflow_lanes_key"),
+        _one_of("status", ("open", "archived"), "workflow_lanes"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[RunFK]
+    lane_key: Mapped[str]
+    agent_id: Mapped[str]
+    session_id: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="open")
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class WorkflowWait(Base):
+    """A step waiting on people, a timer, an event, a gate or the owner.
+
+    Holds what was shown (and its hash, checked before a bound action runs) and the
+    deciding answer. Answer text, values and files live here, not in the ledger, so
+    erasure can delete them while the chain still verifies.
+    """
+
+    __tablename__ = "workflow_waits"
+    __table_args__ = (
+        Index("ix_workflow_waits_run", "run_id"),
+        Index("ix_workflow_waits_step", "step_id"),
+        Index("ix_workflow_waits_open", "expires_at", postgresql_where=text("status = 'waiting'")),
+        Index(
+            "ix_workflow_waits_event",
+            "tenant_id",
+            "event_source",
+            "event_key",
+            postgresql_where=text("status = 'waiting' AND kind = 'event'"),
+        ),
+        Index("ix_workflow_waits_decider", "decided_by_account_id"),
+        _one_of("kind", WORKFLOW_WAITING_REASONS, "workflow_waits"),
+        _one_of("status", ("waiting", "completed", "timed_out", "cancelled"), "workflow_waits"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[RunFK]
+    step_id: Mapped[StepFK]
+    kind: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default="waiting")
+    addressees: Mapped[JsonList]
+    deliver: Mapped[str | None]
+    min_approvals: Mapped[int] = mapped_column(server_default=text("1"))
+    shown: Mapped[dict[str, Any] | None]
+    shown_hash: Mapped[str | None]
+    event_source: Mapped[str | None]
+    event_key: Mapped[str | None]
+    expires_at: Mapped[datetime | None]
+    remind_at: Mapped[datetime | None]
+    decision: Mapped[str | None]
+    decided_by_account_id: Mapped[AccountSetNull]
+    decided_via: Mapped[str | None]
+    comment: Mapped[str | None]
+    answer_text: Mapped[str | None]
+    answer_values: Mapped[dict[str, Any] | None]
+    answer_files: Mapped[list[Any] | None] = mapped_column(JSONB)
+    opened_at: Mapped[TsNow]
+    closed_at: Mapped[datetime | None]
+
+
+class WorkflowWaitAnswer(Base):
+    """One person's answer to a wait; N of M approvals count distinct people.
+
+    The platform message id is the idempotency key, so a redelivered reply counts once.
+    """
+
+    __tablename__ = "workflow_wait_answers"
+    __table_args__ = (
+        UniqueConstraint("wait_id", "account_id", name="uq_workflow_wait_answers_person"),
+        UniqueConstraint("wait_id", "idempotency_key", name="uq_workflow_wait_answers_idempotency"),
+        Index("ix_workflow_wait_answers_account", "account_id"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    wait_id: Mapped[WaitFK]
+    account_id: Mapped[AccountFK]
+    route: Mapped[str]
+    via: Mapped[str]
+    comment: Mapped[str | None]
+    idempotency_key: Mapped[str | None]
+    answered_at: Mapped[TsNow]
+
+
+class WorkflowProposal(Base):
+    """A write an agent step proposed (`writes: propose`); sent only once approved."""
+
+    __tablename__ = "workflow_proposals"
+    __table_args__ = (
+        Index("ix_workflow_proposals_step", "step_id"),
+        _one_of(
+            "status",
+            ("proposed", "approved", "rejected", "sent", "failed", "unknown"),
+            "workflow_proposals",
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    step_id: Mapped[StepFK]
+    server_url: Mapped[str]
+    tool: Mapped[str]
+    arguments: Mapped[JsonObject]
+    arguments_hash: Mapped[str]
+    reason: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="proposed")
+    result: Mapped[dict[str, Any] | None]
+    decided_by_account_id: Mapped[AccountSetNull]
+    decided_at: Mapped[datetime | None]
+    sent_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+
+
+class WorkflowRunEvent(Base):
+    """The run ledger: append-only, `hash = sha256(prev_hash || canonical event)`.
+
+    Rows hold references (ids, hashes), never personal content.
+    """
+
+    __tablename__ = "workflow_run_events"
+    __table_args__ = (PrimaryKeyConstraint("run_id", "seq", name="pk_workflow_run_events"),)
+
+    run_id: Mapped[RunFK]
+    seq: Mapped[int] = mapped_column(BigInteger)
+    tenant_id: Mapped[TenantFK]
+    at: Mapped[TsNow]
+    type: Mapped[str]
+    step_key: Mapped[str | None]
+    actor: Mapped[str]
+    data: Mapped[JsonObject]
+    prev_hash: Mapped[str]
+    hash: Mapped[str]
+
+
+class WorkflowStepActivity(Base):
+    """Activity lines of a step, as the status card builds them; bounded per step."""
+
+    __tablename__ = "workflow_step_activity"
+    __table_args__ = (
+        Index("ix_workflow_step_activity_step", "step_id", "id"),
+        _one_of("kind", ("message", "tool", "note"), "workflow_step_activity"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    step_id: Mapped[StepFK]
+    at: Mapped[TsNow]
+    kind: Mapped[str]
+    text: Mapped[str]
+    tool: Mapped[str | None]
+
+
+class WorkflowEventBuffer(Base):
+    """An event held for a wait that may open later; swept after `expires_at`."""
+
+    __tablename__ = "workflow_event_buffer"
+    __table_args__ = (
+        Index("ix_workflow_event_buffer_match", "tenant_id", "source", "event_key"),
+        Index("ix_workflow_event_buffer_expires", "expires_at"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    source: Mapped[str]
+    event_key: Mapped[str | None]
+    payload: Mapped[JsonObject]
+    received_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+
+
+class WorkflowDelivery(Base):
+    """A post the delivery loop sends: a Finish result, an ask, a reminder, an ask's
+    update or an owner notice. Policy runs at post time."""
+
+    __tablename__ = "workflow_deliveries"
+    __table_args__ = (
+        Index(
+            "ix_workflow_deliveries_due",
+            "created_at",
+            postgresql_where=text("status IN ('pending', 'claimed')"),
+        ),
+        Index("ix_workflow_deliveries_workflow", "workflow_id"),
+        Index("ix_workflow_deliveries_run", "run_id"),
+        Index("ix_workflow_deliveries_wait", "wait_id"),
+        _one_of(
+            "kind", ("finish", "ask", "reminder", "ask_update", "notice"), "workflow_deliveries"
+        ),
+        _one_of(
+            "status",
+            ("pending", "claimed", "sent", "skipped", "refused", "failed"),
+            "workflow_deliveries",
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    workflow_id: Mapped[WorkflowFK]
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE")
+    )
+    wait_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_waits.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str]
+    target: Mapped[dict[str, Any]]
+    payload: Mapped[dict[str, Any]]
+    status: Mapped[str] = mapped_column(server_default="pending")
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
+    attempts: Mapped[int] = mapped_column(server_default=text("0"))
+    note: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    sent_at: Mapped[datetime | None]
+
+
+class WorkflowWaitPost(Base):
+    """Where an ask was posted, so a reply in that thread or to that message answers it."""
+
+    __tablename__ = "workflow_wait_posts"
+    __table_args__ = (
+        Index("ix_workflow_wait_posts_wait", "wait_id"),
+        Index("ix_workflow_wait_posts_thread", "tenant_id", "platform", "thread_id"),
+        Index("ix_workflow_wait_posts_message", "tenant_id", "platform", "message_id"),
+        _one_of("platform", ("discord", "slack", "teams"), "workflow_wait_posts"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    wait_id: Mapped[WaitFK]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str | None]
+    message_id: Mapped[str]
+    addressee_account_id: Mapped[AccountSetNull]
     created_at: Mapped[TsNow]
 
 
