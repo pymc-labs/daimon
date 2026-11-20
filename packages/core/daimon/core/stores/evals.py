@@ -14,6 +14,7 @@ from daimon.core._models import (
     EvalCase,
     EvalCaseRevision,
     EvalComment,
+    EvalReviewAssignment,
     EvalReviewQueue,
     EvalRun,
     EvalRunItem,
@@ -61,6 +62,35 @@ class CaseRevisionRow(_Row):
     document: Document
     sha256: str
     scrub_status: str | None
+
+
+class QueueRow(_Row):
+    id: uuid.UUID
+    run_id: uuid.UUID
+    key: str
+    document: Document
+
+
+class AssignmentRow(_Row):
+    item_key: str
+    reviewer_key: str
+    reserved_until: datetime | None
+    done_at: datetime | None
+
+
+class CommentRow(_Row):
+    key: str
+    run_id: uuid.UUID | None
+    suite_id: uuid.UUID | None
+    document: Document
+
+
+class ItemIndexRow(_Row):
+    key: str
+    case_key: str
+    arm_key: str
+    repeat: int
+    status: str
 
 
 class PinRow(_Row):
@@ -561,3 +591,187 @@ async def item_by_id(
 async def run_by_id(session: AsyncSession, run_id: uuid.UUID) -> RunRow | None:
     row = await session.get(EvalRun, run_id)
     return row and RunRow.model_validate(row)
+
+
+# ---------- items, scores, queues and comments ----------
+
+
+async def item_index(session: AsyncSession, *, run_id: uuid.UUID) -> list[ItemIndexRow]:
+    """Every item of a run without its document, in a stable order."""
+    rows = await session.execute(
+        select(
+            EvalRunItem.key, EvalRunItem.case_key, EvalRunItem.arm_key, EvalRunItem.repeat,
+            EvalRunItem.status,
+        )
+        .where(EvalRunItem.run_id == run_id)
+        .order_by(EvalRunItem.case_key, EvalRunItem.repeat, EvalRunItem.arm_key)
+    )  # fmt: skip
+    return [ItemIndexRow.model_validate(r, from_attributes=True) for r in rows]
+
+
+async def items_by_key(
+    session: AsyncSession, *, run_id: uuid.UUID, keys: Iterable[str]
+) -> dict[str, ItemRow]:
+    rows = await session.scalars(
+        select(EvalRunItem).where(EvalRunItem.run_id == run_id, EvalRunItem.key.in_(list(keys)))
+    )
+    return {r.key: ItemRow.model_validate(r) for r in rows}
+
+
+async def all_items(session: AsyncSession, *, run_id: uuid.UUID) -> list[ItemRow]:
+    rows = await session.scalars(
+        select(EvalRunItem).where(EvalRunItem.run_id == run_id).order_by(EvalRunItem.key)
+    )
+    return [ItemRow.model_validate(r) for r in rows]
+
+
+async def scores_of_run(session: AsyncSession, *, run_id: uuid.UUID) -> list[Document]:
+    rows = await session.scalars(
+        select(EvalScore.document)
+        .where(EvalScore.run_id == run_id)
+        .order_by(EvalScore.created_at, EvalScore.key)
+    )
+    return list(rows)
+
+
+async def put_scores(
+    session: AsyncSession, *, tenant_id: uuid.UUID, run_id: uuid.UUID, scores: Sequence[Document]
+) -> None:
+    """Store scores; one with the id of an earlier score replaces it."""
+    for score in scores:
+        values = {
+            "item_key": score.get("item_id"), "criterion": score["criterion"],
+            "grader_kind": str(_get(score, "grader", "kind")), "document": score,
+        }  # fmt: skip
+        await session.execute(
+            insert(EvalScore)
+            .values(tenant_id=tenant_id, run_id=run_id, key=score["id"], **values)
+            .on_conflict_do_update(constraint="uq_eval_scores_run_key", set_=values)
+        )
+
+
+async def queues_of_run(session: AsyncSession, *, run_id: uuid.UUID) -> list[QueueRow]:
+    rows = await session.scalars(
+        select(EvalReviewQueue)
+        .where(EvalReviewQueue.run_id == run_id)
+        .order_by(EvalReviewQueue.created_at, EvalReviewQueue.key)
+    )
+    return [QueueRow.model_validate(r, from_attributes=True) for r in rows]
+
+
+async def queue_by_key(
+    session: AsyncSession, *, run_id: uuid.UUID, key: str, lock: bool = False
+) -> QueueRow | None:
+    query = select(EvalReviewQueue).where(
+        EvalReviewQueue.run_id == run_id, EvalReviewQueue.key == key
+    )
+    row = await session.scalar(query.with_for_update() if lock else query)
+    return row and QueueRow.model_validate(row, from_attributes=True)
+
+
+async def put_queue(
+    session: AsyncSession, *, tenant_id: uuid.UUID, run_id: uuid.UUID, document: Document
+) -> QueueRow:
+    """Create a review queue, or replace the settings of the one with the same id."""
+    row = await session.scalar(
+        insert(EvalReviewQueue)
+        .values(tenant_id=tenant_id, run_id=run_id, key=document["id"], document=document)
+        .on_conflict_do_update(
+            constraint="uq_eval_review_queues_run_key", set_={"document": document}
+        )
+        .returning(EvalReviewQueue)
+    )
+    return QueueRow.model_validate(row, from_attributes=True)
+
+
+async def assignments_of(session: AsyncSession, *, queue_id: uuid.UUID) -> list[AssignmentRow]:
+    rows = await session.scalars(
+        select(EvalReviewAssignment).where(EvalReviewAssignment.queue_id == queue_id)
+    )
+    return [AssignmentRow.model_validate(r, from_attributes=True) for r in rows]
+
+
+async def reserve_item(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    queue_id: uuid.UUID,
+    item_key: str,
+    reviewer_key: str,
+    until: datetime,
+) -> None:
+    values = {"reserved_until": until}
+    await session.execute(
+        insert(EvalReviewAssignment)
+        .values(
+            queue_id=queue_id,
+            item_key=item_key,
+            reviewer_key=reviewer_key,
+            tenant_id=tenant_id,
+            **values,
+        )
+        .on_conflict_do_update(
+            index_elements=["queue_id", "item_key", "reviewer_key"],
+            set_=values,
+            where=EvalReviewAssignment.done_at.is_(None),
+        )
+    )
+
+
+async def finish_item(
+    session: AsyncSession, *, queue_id: uuid.UUID, item_key: str, reviewer_key: str, at: datetime
+) -> None:
+    await session.execute(
+        update(EvalReviewAssignment)
+        .where(
+            EvalReviewAssignment.queue_id == queue_id,
+            EvalReviewAssignment.item_key == item_key,
+            EvalReviewAssignment.reviewer_key == reviewer_key,
+        )
+        .values(done_at=at, reserved_until=None)
+    )
+
+
+async def add_comment(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID | None,
+    suite_id: uuid.UUID | None,
+    document: Document,
+) -> None:
+    session.add(
+        EvalComment(
+            tenant_id=tenant_id, run_id=run_id, suite_id=suite_id, key=document["id"],
+            document=document,
+        )
+    )  # fmt: skip
+    await session.flush()
+
+
+async def comments_of_run(session: AsyncSession, *, run_id: uuid.UUID) -> list[CommentRow]:
+    rows = await session.scalars(
+        select(EvalComment)
+        .where(EvalComment.run_id == run_id)
+        .order_by(EvalComment.created_at, EvalComment.key)
+    )
+    return [CommentRow.model_validate(r, from_attributes=True) for r in rows]
+
+
+async def comment_by_key(
+    session: AsyncSession, *, tenant_id: uuid.UUID, key: str
+) -> CommentRow | None:
+    row = await session.scalar(
+        select(EvalComment).where(EvalComment.tenant_id == tenant_id, EvalComment.key == key)
+    )
+    return row and CommentRow.model_validate(row, from_attributes=True)
+
+
+async def set_comment(
+    session: AsyncSession, *, tenant_id: uuid.UUID, key: str, document: Document
+) -> None:
+    await session.execute(
+        update(EvalComment)
+        .where(EvalComment.tenant_id == tenant_id, EvalComment.key == key)
+        .values(document=document)
+    )

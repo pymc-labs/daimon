@@ -2926,6 +2926,14 @@ class ComputeSettings(BaseModel):
     )
 
 
+class JudgeModelSetting(BaseModel):
+    backend: str | None = Field(
+        default=None, description="Provider that serves the model. Unset: the default one."
+    )
+    model: str = Field(description="Model id.")
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class EvalsSettings(BaseModel):
     signing_key: SecretStr | None = Field(
         default=None,
@@ -2947,6 +2955,19 @@ class EvalsSettings(BaseModel):
     )
     max_bundle_mb: int = Field(
         default=512, gt=0, description="Largest eval bundle import accepts, unpacked, in MiB."
+    )
+    judge_models: list[JudgeModelSetting] = Field(
+        default_factory=lambda: [JudgeModelSetting(model="claude-sonnet-5-5")],
+        description=(
+            "The judge panel for eval runs that name none: each model scores each item and the "
+            "panel votes. Every model needs a known price."
+        ),
+    )
+    kappa_warn: float = Field(
+        default=0.4,
+        ge=-1,
+        le=1,
+        description="A judge whose kappa against human scores is below this is flagged.",
     )
 
 
