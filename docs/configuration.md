@@ -243,9 +243,9 @@ Label this deployment writes as the source of the bundles it exports.
 
 ### `DAIMON_EVALS__MAX_BUNDLE_MB`
 
-`int` · optional · default `512`
+`int` · optional · default `128`
 
-Largest eval bundle import accepts, in MiB.
+Largest eval bundle import or export handles, in MiB.
 
 ## Long Jobs
 
