@@ -26,6 +26,7 @@ from daimon.adapters.teams import (
     thread_handoff,
     tool_confirmation,
     wizard,
+    workflow_cards,
 )
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
 from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
@@ -87,6 +88,7 @@ from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
+from daimon.core.workflows import chat_cards
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import UninstalledActivity
@@ -332,6 +334,7 @@ def create_teams_http_service(
         "settings": show_settings,
         "model": show_model,
         "routines": routines.command,
+        "workflows": functools.partial(workflow_cards.command, runtime),
         "memory": show_memory,
         "privacy": privacy.command,
         "billing": billing.command,
@@ -439,6 +442,12 @@ def create_teams_http_service(
         ),
         workflow_poster=make_teams_workflow_poster(
             runtime.sessionmaker, direct, tenant_id=installs.tenant_id, settings=runtime.settings
+        ),
+        run_cards=chat_cards.follower(
+            runtime.sessionmaker,
+            runtime.settings,
+            platform="teams",
+            edit=workflow_cards.card_editor(TimedSender(teams_app)),
         ),
     )
 

@@ -430,6 +430,7 @@ class TeamsApp:
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
         workflow_poster: WorkflowPoster | None = None,
+        run_cards: Callable[[], Awaitable[int]] | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
         catch_up: RestartCatchUp | None = None,
@@ -467,6 +468,7 @@ class TeamsApp:
         self._routine_poster = routine_poster
         # Posts workflow results and notices beside them; None leaves them pending.
         self._workflow_poster = workflow_poster
+        self._run_cards = run_cards
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
         # Graph subscriptions to private and shared channels; None leaves them mention-only.
@@ -568,6 +570,7 @@ class TeamsApp:
                         platform="teams",
                         post=self._routine_poster,
                         workflow=self._workflow_poster,
+                        run_cards=self._run_cards,
                         should_stop=lambda: self.draining,
                     )
                     self._delivery_poller = asyncio.create_task(

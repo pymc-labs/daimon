@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
+from daimon.adapters.teams import workflow_cards
 from daimon.adapters.teams.card_actions import card_actor, replace_card, submitted_fields, toast
 from daimon.core import host_calls, switch_cards
 from daimon.core.features.snapshot import deployment_on
@@ -31,7 +32,7 @@ UNAVAILABLE = "This card is unavailable. Ask again to redo it."
 
 
 class TeamsOwnCards:
-    """Answers presses on call and switch cards."""
+    """Answers presses on call, switch and workflow cards."""
 
     def __init__(self, runtime: TeamsRuntime) -> None:
         self._runtime = runtime
@@ -41,6 +42,8 @@ class TeamsOwnCards:
     ) -> AdaptiveCardInvokeResponse:
         activity = ctx.activity
         custom_id = str(submitted_fields(activity.value.action.data).get("custom_id") or "")
+        if workflow_cards.is_workflow_press(custom_id):
+            return await workflow_cards.answer(self._runtime, activity)
         actor = await card_actor(self._runtime, activity)
         message_id = activity.reply_to_id
         if actor is None or not message_id:

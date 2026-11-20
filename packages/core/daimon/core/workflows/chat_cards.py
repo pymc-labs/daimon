@@ -52,7 +52,6 @@ FOLLOW_FOR: Final[timedelta] = timedelta(minutes=10)
 PANEL_LIMIT: Final[int] = 25
 _STEP_LINES: Final[int] = 15
 
-NOT_IN_WORKSPACE: Final[str] = "This card is not for this workspace."
 STALE: Final[str] = "This draft changed since the card. Ask for a new card."
 CHANGED: Final[str] = "This workflow changed since the card. Ask again to run it."
 UNAVAILABLE: Final[str] = "This card is unavailable. Ask again to redo it."

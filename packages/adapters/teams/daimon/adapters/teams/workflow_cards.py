@@ -1,0 +1,156 @@
+"""Workflow cards on Teams: presses, the run form, `workflows` and the run card editor.
+
+Every decision is `daimon.core.workflows.chat_cards`, as the person who pressed. A Teams
+press answers on the pressed card itself: a form, the run card or the workflow's card
+replaces it, and the run card follower edits it while the run goes.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import TYPE_CHECKING, Any
+
+import structlog
+from daimon.adapters.teams.card import notice_adaptive_card
+from daimon.adapters.teams.card_actions import card_actor, replace_card, submitted_fields, toast
+from daimon.adapters.teams.lifecycle import TeamsSender
+from daimon.core.posted_controls import PostedCard
+from daimon.core.posted_controls.teams_card import CONTROL_VERB, build_adaptive_card
+from daimon.core.teams_bot_framework import SERVICE_URL
+from daimon.core.workflows import chat_cards
+from daimon.core.workflows.chat_cards import ChatPlace, Presser, RunForm
+from daimon.core.workflows.views import seq
+from microsoft_teams.api import MessageActivityInput
+from microsoft_teams.cards import AdaptiveCard
+
+if TYPE_CHECKING:
+    from daimon.adapters.teams.commands import CommandContext
+    from daimon.adapters.teams.runtime import TeamsRuntime
+    from daimon.core.workflows import views
+    from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
+
+log = structlog.get_logger(__name__)
+
+PREFIXES = ("wfc:", "wfl:", "wff:")
+#: Fields a run form shows before the web app runs it instead.
+FORM_LIMIT = 10
+PICK_FIELD = "workflow"
+
+
+def is_workflow_press(custom_id: str) -> bool:
+    return custom_id.startswith(PREFIXES)
+
+
+def _adaptive(card: PostedCard) -> AdaptiveCard:
+    return AdaptiveCard.model_validate(build_adaptive_card(card))
+
+
+def _execute(title: str, custom_id: str) -> dict[str, Any]:
+    data = {"action": CONTROL_VERB, "custom_id": custom_id}
+    return {"type": "Action.Execute", "title": title, "verb": CONTROL_VERB, "data": data}
+
+
+def form_card(form: RunForm) -> AdaptiveCard:
+    """The run form in place of the pressed card; Run submits what was typed."""
+    body: list[dict[str, Any]] = [{"type": "TextBlock", "text": form.title, "weight": "Bolder"}]
+    for field in form.fields:
+        box: dict[str, Any] = {
+            "type": "Input.Text",
+            "id": field.key,
+            "label": field.label,
+            "isRequired": field.required,
+            "isMultiline": field.kind == "text",
+            "value": field.default,
+        }
+        if field.choices:
+            box["placeholder"] = " or ".join(field.choices)
+        if field.max_length:
+            box["maxLength"] = field.max_length
+        body.append(box)
+    card = {"type": "AdaptiveCard", "version": "1.5", "body": body}
+    return AdaptiveCard.model_validate(card | {"actions": [_execute("Run", form.submit_id)]})
+
+
+def panel_card(listed: list[views.WorkflowSummary]) -> AdaptiveCard:
+    """`workflows`: the headline and a picker of up to 25 workflows, then Open."""
+    card = build_adaptive_card(chat_cards.notice(chat_cards.panel_headline(listed)))
+    if rows := chat_cards.panel_rows(listed):
+        choices = [{"title": f"{name}: {status}", "value": wid} for wid, name, status in rows]
+        picker = {"type": "Input.ChoiceSet", "id": PICK_FIELD, "choices": choices}
+        card["body"] = [*seq(card.get("body")), picker]
+        card["actions"] = [_execute("Open", chat_cards.PICK_ID)]
+    return AdaptiveCard.model_validate(card)
+
+
+async def answer(
+    runtime: TeamsRuntime, activity: AdaptiveCardInvokeActivity
+) -> AdaptiveCardInvokeResponse:
+    """One press on a workflow card, the run form or the panel, as the person who pressed."""
+    fields = submitted_fields(activity.value.action.data)
+    custom_id = str(fields.get("custom_id") or "")
+    actor = await card_actor(runtime, activity)
+    if actor is None or not activity.reply_to_id:
+        return toast(chat_cards.UNAVAILABLE)
+    presser = Presser(actor.tenant_id, "teams", actor.user_id)
+    place = ChatPlace("teams", activity.conversation.id, activity.reply_to_id)
+    sm, settings = runtime.sessionmaker, runtime.settings
+    try:
+        if custom_id == chat_cards.PICK_ID:
+            picked = str(fields.get(PICK_FIELD) or "")
+            return replace_card(_adaptive(await chat_cards.pick(sm, settings, presser, picked)))
+        if custom_id.startswith("wff:"):
+            raw = {k: str(v) for k, v in fields.items() if k not in ("action", "custom_id")}
+            submitted = await chat_cards.submit_form(
+                sm, settings, presser=presser, form_id=custom_id, raw=raw, limit=FORM_LIMIT
+            )
+            if isinstance(submitted, str):
+                return toast(submitted)
+            env, form, inputs = submitted
+            shown = await chat_cards.start_on_card(
+                env, form.workflow_id, inputs, test=form.test, place=place
+            )
+            return replace_card(_adaptive(shown))
+        # An invoke carries no card text: a confirmation's inputs cannot be read back here.
+        pressed = await chat_cards.press(
+            sm, settings, presser=presser, custom_id=custom_id, place=place, form_limit=FORM_LIMIT
+        )
+        if pressed.form is not None:
+            return replace_card(form_card(pressed.form))
+        if pressed.card is not None:
+            return replace_card(_adaptive(pressed.card))
+        if pressed.start is not None:
+            env = await chat_cards.env_of(sm, settings, presser)
+            if env is None:
+                return toast(chat_cards.UNAVAILABLE)
+            workflow_id, test = pressed.start
+            shown = await chat_cards.start_on_card(env, workflow_id, {}, test=test, place=place)
+            return replace_card(_adaptive(shown))
+        say = pressed.say or chat_cards.UNAVAILABLE
+        return toast(f"{say} {pressed.link}" if pressed.link else say)
+    except Exception:
+        # Boundary: a failed press must answer the presser, not leave the click hanging.
+        log.exception("workflow_card.press_failed", custom_id=custom_id)
+        return toast(chat_cards.UNAVAILABLE)
+
+
+async def command(runtime: TeamsRuntime, context: CommandContext) -> None:
+    """`workflows`: the panel for the person who asked, or the refusal."""
+    presser = Presser(context.tenant_id, "teams", context.inbound.user_id)
+    listed = await chat_cards.list_for(runtime.sessionmaker, runtime.settings, presser)
+    if isinstance(listed, str):
+        await context.send_card(notice_adaptive_card(listed))
+        return
+    await context.send_card(panel_card(listed))
+
+
+def card_editor(sender: TeamsSender) -> chat_cards.CardEditor:
+    """The run card follower's editor: the card's conversation, sent again with its id."""
+
+    async def edit(_: uuid.UUID, place: ChatPlace, card: PostedCard) -> None:
+        update = MessageActivityInput(id=place.message_id).add_card(_adaptive(card))
+        await sender.send(place.channel_id, update, service_url=SERVICE_URL)
+
+    return edit
+
+
+__all__ = ["answer", "card_editor", "command", "form_card", "is_workflow_press", "panel_card"]
