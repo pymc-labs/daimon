@@ -41,7 +41,7 @@ from daimon.core.evals.service import (
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
 from daimon.core.evals.web_thread import WebChatSource
 from daimon.core.stores.tenants import get_tenant
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
 evals_app = typer.Typer(help="Eval suites, cases, arms, run items and bundles.")
@@ -74,7 +74,13 @@ _KEY = typer.Option(
     envvar="DAIMON_EVALS__SCRUB_KEY",
     help="Scrub key, at least 16 characters. Prefer the environment variable.",
 )
-_MAP = typer.Option("--map", help="Fake map file, kept between runs (private; read and written).")
+_MAP = typer.Option(
+    "--map", help="Fake map file, kept between runs (private; read and written). Required."
+)
+_SALT = typer.Option(
+    "--salt",
+    help="Tenant or suite name mixed into the key; use the same one on every run. Required.",
+)
 _NER = typer.Option("--ner-model", help="spaCy model for names; empty to use known names only.")
 
 
@@ -319,11 +325,17 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
         raise typer.Exit(code=1)
 
 
-def _scrubber(entities: Path | None, key: str | None, map_path: Path | None, ner: str) -> Scrubber:
+def _scrubber(
+    entities: Path | None, key: str | None, salt: str, map_path: Path, ner: str
+) -> Scrubber:
     if entities is None or not key:
         raise typer.BadParameter("--entities and a scrub key (DAIMON_EVALS__SCRUB_KEY) are needed.")
     try:
-        return load_scrubber(entities, key, map_path=map_path, ner_model=ner or None)
+        return load_scrubber(entities, key, salt=salt, map_path=map_path, ner_model=ner or None)
+    except ValidationError as failed:
+        # Only where and what kind: the message would quote the private names.
+        bad = [f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in failed.errors()]
+        raise _Failed("the entities file is not valid: " + "; ".join(bad)) from None
     except (InvalidDocument, OSError, ValueError) as failed:
         problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
         raise _Failed("; ".join(problems)) from None
@@ -336,25 +348,25 @@ def _leftover_rows(found: Sequence[Leftover]) -> list[JsonObject]:
 @bundle_app.command("scrub")
 def bundle_scrub(
     path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Write here, not in place.")] = None,
-    map_path: Annotated[Path | None, _MAP] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
 ) -> None:
     """Scrub a bundle folder, zip or encrypted file offline, in place or into --out.
 
-    Prints counts and places only, never the text found. Exits 1 when something is left.
+    Prints counts and places only, never the text found. Exits 1 unless fully scrubbed.
     """
-    scrubber = _scrubber(entities, key, map_path, ner_model)
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model)
     try:
         report = scrub_path(path, out, scrubber, passphrase=passphrase)
     except (InvalidDocument, OSError) as failed:
         problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
         raise _Failed("; ".join(problems)) from None
-    if map_path is not None:
-        save_map(scrubber, map_path)
+    save_map(scrubber, map_path)
     _print(
         {
             "status": report.status,
@@ -365,21 +377,22 @@ def bundle_scrub(
             "leftovers": _leftover_rows(report.leftovers),
         }
     )
-    if report.leftovers:
+    if report.leftovers or report.status != "scrubbed":
         raise typer.Exit(code=1)
 
 
 @bundle_app.command("leftovers")
 def bundle_leftovers(
     path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
-    map_path: Annotated[Path | None, _MAP] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
 ) -> None:
     """List what a scrub would still change in a bundle, by place and kind. Exits 1 if any."""
-    scrubber = _scrubber(entities, key, map_path, ner_model)
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model)
     try:
         found = leftovers_of(path, scrubber, passphrase=passphrase)
     except (InvalidDocument, OSError) as failed:

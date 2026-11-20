@@ -53,6 +53,7 @@ class DedupeCases(BaseModel):
     keep: int | None = Field(default=None, ge=1)
     threshold: float = Field(default=0.8, gt=0, le=1)
 
+
 Caller = Annotated[WebCaller, Depends(requires("evals.use"))]
 
 
