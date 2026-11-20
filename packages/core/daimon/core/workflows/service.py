@@ -292,7 +292,13 @@ async def _draft(env: Env, workflow: WorkflowRow) -> views.Draft:
     """The draft as shown; call it after your transaction ends, it opens its own."""
     validation = await _validate(env, workflow.draft_spec)
     async with env.sm() as session:
-        return await views.draft_view(session, workflow, validation)
+        # A spec with grants parsed when it was validated.
+        new = (
+            (await _held_grants(session, workflow, parse_spec(workflow.draft_spec), grants))[1]
+            if (grants := validation.grants)
+            else []
+        )
+        return await views.draft_view(session, workflow, validation, new)
 
 
 async def get_draft(env: Env, workflow_id: uuid.UUID) -> views.Draft:
@@ -853,7 +859,7 @@ async def start(
             triggered_by={"kind": "person", "account_id": str(env.who.account_id)},
             inputs=inputs,
             mode="test" if test is not None else "live",
-            untrusted_inputs=not trusted,
+            untrusted_inputs=True,
             label=_label(spec, inputs, env.now),
             pinned=pins,
             pinned_from=pinned_from,

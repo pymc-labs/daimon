@@ -21,6 +21,7 @@ from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow, Workflo
 from daimon.core.workflows import preflight
 from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.spec import parse_spec
+from daimon.core.workflows.validate import Grant as ValidationGrant
 from daimon.core.workflows.validate import Validation
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,6 +133,9 @@ class Draft(BaseModel):
     spec: dict[str, Any]
     changes: list[Change]
     validation: Validation
+    #: Grants the draft needs that the live version does not hold for the same unchanged node:
+    #: publishing waits on an admin for these.
+    new_grants: list[Grant]
     updated_at: str
     updated_by: Person
 
@@ -479,6 +483,7 @@ async def draft_view(
     session: AsyncSession,
     workflow: WorkflowRow,
     validation: Validation,
+    new_grants: list[ValidationGrant],
 ) -> Draft:
     versions = await _versions_of(session, workflow)
     live = versions.get(workflow.live_version) if workflow.live_version else None
@@ -489,6 +494,7 @@ async def draft_view(
         spec=workflow.draft_spec,
         changes=diff(live.spec if live else None, workflow.draft_spec),
         validation=validation,
+        new_grants=[Grant.model_validate(g.model_dump()) for g in new_grants],
         updated_at=iso(workflow.draft_updated_at) or "",
         updated_by=person(names, workflow.draft_updated_by_account_id),
     )

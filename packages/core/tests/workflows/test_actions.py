@@ -383,6 +383,8 @@ async def test_a_write_grant_is_requested_approved_and_carried_over(
         return summary.status
 
     assert await status() == "needs_review", "the live version lacks its write grant"
+    draft = await service.get_draft(owner, world.workflow_id)
+    assert [g.kind for g in draft.new_grants] == ["unattended_write"], "the draft says so"
     with pytest.raises(service.Refused, match="Request approval"):
         await service.publish(owner, world.workflow_id, "Ship")
     await service.request_publish(owner, world.workflow_id, "Ship")
@@ -392,5 +394,7 @@ async def test_a_write_grant_is_requested_approved_and_carried_over(
     tools = FakeTools()
     await drive(world, (await world.run()).id, {}, tools)
     assert [t for _, t, _ in tools.calls] == ["send_message"], "it runs under the grant"
+    draft = await service.get_draft(owner, world.workflow_id)
+    assert draft.new_grants == [], "an unchanged node carries its grant over"
     await service.publish(owner, world.workflow_id, "Again")
     assert await status() == "live", "an unchanged node keeps its grant"
