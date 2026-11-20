@@ -39,6 +39,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.private_answer import PrivateOffers
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
+from daimon.adapters.discord.workflow_asks import claim_message
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.channel_audience import (
@@ -1176,6 +1177,13 @@ class DirectMessageCog(commands.Cog):
             or message.author.bot
             or not isinstance(message.channel, discord.DMChannel)
         ):
+            return
+        # A reply to a workflow's ask answers it, before any conversation starts.
+        tenants = tuple(
+            derive_tenant_uuid(platform="discord", workspace_id=str(g.id))
+            for g in message.author.mutual_guilds
+        )
+        if await claim_message(self.bot.runtime, message, tenants):
             return
         key = (message.author.id, message.channel.id)
         if (burst := self._bursts.join(key, message)) is not None:

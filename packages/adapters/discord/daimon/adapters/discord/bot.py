@@ -20,7 +20,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
-from daimon.adapters.discord import theme
+from daimon.adapters.discord import theme, workflow_asks
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.audience_sync import AudienceSync
@@ -101,6 +101,7 @@ from daimon.adapters.discord.typed_stop import (
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.adapters.discord.workflow_cards import card_editor
+from daimon.adapters.discord.workflow_asks import AskButton
 from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
@@ -1292,6 +1293,7 @@ class DaimonBot(commands.Bot):
                         self.runtime.sessionmaker,
                         settings=self.runtime.settings,
                         fetch_channel=self._channel_by_id,
+                        open_dm=self.open_member_dm,
                         membership_resolver=self.membership_resolver,
                         output_client=self.runtime.anthropic,
                     ),
@@ -1428,6 +1430,8 @@ class DaimonBot(commands.Bot):
         # A setup panel from before picture uploads were turned off can still
         # show Change; the click gets the refusal instead of "interaction failed".
         self.add_dynamic_items(StalePictureChangeButton)
+        # A workflow ask's buttons outlive the process that posted them.
+        self.add_dynamic_items(AskButton)
 
     async def _post_to_guild(
         self, guild: discord.Guild, embed: discord.Embed
@@ -3110,6 +3114,18 @@ class DaimonBot(commands.Bot):
         )
         if self.draining:
             return
+        if (
+            not startup_replay
+            and not resume_admitted
+            and not isinstance(message, ButtonMessage)
+            and message.guild is not None
+            and await workflow_asks.claim_message(
+                self.runtime,
+                message,
+                (derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id)),),
+            )
+        ):
+            return  # a workflow ask's answer, not a turn
         if (
             not startup_replay
             and not resume_admitted

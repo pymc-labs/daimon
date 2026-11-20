@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import discord
 import pytest
 from daimon.adapters.discord import workflow_delivery
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
@@ -48,6 +49,9 @@ async def _delivered(
     async def membership(tenant_id: object, guild_id: object, user_id: object) -> Membership:
         return Membership(is_member=True)
 
+    async def no_dm(guild_id: int, user_id: int) -> discord.abc.Messageable:
+        raise AssertionError("these posts go to the home thread")
+
     async def no_routine(row: RoutineRow) -> DeliveryOutcome:
         raise AssertionError("no routine is due")
 
@@ -56,6 +60,7 @@ async def _delivered(
         world.sm,
         settings=world.settings,
         fetch_channel=fetch,
+        open_dm=no_dm,
         membership_resolver=CachedMembershipResolver(membership),
     )
     assert await poll_once(
