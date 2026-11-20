@@ -29,7 +29,8 @@ SCORE_SCHEMA: Final = "daimon.eval.score/1"
 REVIEW_SCHEMA: Final = "daimon.eval.review/1"
 
 Platform = Literal["discord", "slack", "teams", "web"]
-Backend = Literal["anthropic", "openai", "gemini", "harness"]
+Backend = str
+"""A model backend or `harness`; the schema lists the accepted names."""
 ScrubStatus = Literal["scrubbed", "partial", "unscrubbed"]
 Origin = Literal["recorded", "overlay", "simulated", "denied", "passthrough", "sandbox", "live"]
 CardKind = Literal[
@@ -176,7 +177,7 @@ class ToolAlias(FormatModel):
 
 
 class ModelChoice(FormatModel):
-    backend: Literal["anthropic", "openai", "gemini"] | None = None
+    backend: Backend | None = None
     model: str
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
 

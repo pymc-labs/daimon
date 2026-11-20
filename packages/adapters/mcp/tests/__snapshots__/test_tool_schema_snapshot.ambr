@@ -3706,12 +3706,6 @@
                 'default': None,
               }),
               'backend': dict({
-                'enum': list([
-                  'anthropic',
-                  'openai',
-                  'gemini',
-                  'harness',
-                ]),
                 'type': 'string',
               }),
               'effort': dict({
@@ -4195,11 +4189,6 @@
               'backend': dict({
                 'anyOf': list([
                   dict({
-                    'enum': list([
-                      'anthropic',
-                      'openai',
-                      'gemini',
-                    ]),
                     'type': 'string',
                   }),
                   dict({
@@ -4834,11 +4823,6 @@
               'backend': dict({
                 'anyOf': list([
                   dict({
-                    'enum': list([
-                      'anthropic',
-                      'openai',
-                      'gemini',
-                    ]),
                     'type': 'string',
                   }),
                   dict({
