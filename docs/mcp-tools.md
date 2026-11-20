@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 249 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 250 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,7 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **eval runs only** — carries the `eval-world` tag.
 - **OpenAI and Gemini agents** — carries the `host-memory` tag.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
@@ -271,6 +272,14 @@ Environment tools: list / get / create / update / archive.
 | `get_environment` | all callers | Return one environment by name. |
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
+
+## `eval_world`
+
+The search tool eval agents get in place of a provider's own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `web_search` | eval runs only | Search the public web and return the top results: title, link and a short extract. |
 
 ## `evals`
 
