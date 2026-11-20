@@ -27,6 +27,7 @@ class DeliveryRow(BaseModel):
     tenant_id: uuid.UUID
     workflow_id: uuid.UUID
     run_id: uuid.UUID | None
+    wait_id: uuid.UUID | None
     kind: str
     target: dict[str, Any]
     payload: dict[str, Any]
@@ -47,11 +48,13 @@ async def queue_delivery(
     kind: DeliveryKind,
     target: dict[str, Any],
     payload: dict[str, Any],
+    wait_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     orm = WorkflowDelivery(
         tenant_id=tenant_id,
         workflow_id=workflow_id,
         run_id=run_id,
+        wait_id=wait_id,
         kind=kind,
         target=target,
         payload=payload,
@@ -151,3 +154,30 @@ async def settle_delivery(
     ).scalar_one_or_none()
     await session.flush()
     return None if orm is None else DeliveryRow.model_validate(orm)
+
+
+async def get_last_delivery(
+    session: AsyncSession, *, tenant_id: uuid.UUID, workflow_id: uuid.UUID
+) -> DeliveryRow | None:
+    """The workflow's latest Finish post, for the run page's "last delivery"."""
+    orm = await session.scalar(
+        select(WorkflowDelivery)
+        .where(
+            WorkflowDelivery.tenant_id == tenant_id,
+            WorkflowDelivery.workflow_id == workflow_id,
+            WorkflowDelivery.kind == "finish",
+        )
+        .order_by(WorkflowDelivery.created_at.desc(), WorkflowDelivery.id.desc())
+        .limit(1)
+    )
+    return None if orm is None else DeliveryRow.model_validate(orm)
+
+
+async def deliveries_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[DeliveryRow]:
+    """A wait's asks, reminders, updates and notice, oldest first."""
+    found = await session.scalars(
+        select(WorkflowDelivery)
+        .where(WorkflowDelivery.wait_id == wait_id)
+        .order_by(WorkflowDelivery.created_at, WorkflowDelivery.id)
+    )
+    return [DeliveryRow.model_validate(o) for o in found]

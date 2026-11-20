@@ -9,10 +9,11 @@ from daimon.core._models import WorkflowDelivery
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.outbound.reach import ReachPlan
 from daimon.core.stores import accounts, tenants
+from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
 from daimon.core.workflows.delivery import (
-    DM_UNSUPPORTED,
+    DM_OFF,
     WorkflowPost,
     clear_post,
     post_refusal,
@@ -92,14 +93,15 @@ async def test_the_owner_is_told_once_per_streak_of_failures(db_session: AsyncSe
     assert notices[0].target["channel_id"] == "555", "the notice goes to the home channel"
 
 
-async def test_post_time_rules_and_the_dm_gap(db_session: AsyncSession) -> None:
+async def test_post_time_rules_and_dms(db_session: AsyncSession) -> None:
     world = await make_world(db_session, _digest("owner"), "t", platform="slack", home="C0HOME")
     await world.run(inputs={"n": 1})
     [dm] = await _rows(world)
     assert dm.target["kind"] == "dm", "owner and run_as deliver by DM"
-    assert await clear_post(world.sm, dm, platform="slack") == DM_UNSUPPORTED, (
-        "recorded gap: no platform sends a workflow DM yet"
-    )
+    assert await clear_post(world.sm, dm, platform="slack") == DM_OFF, "Slack DMs start off"
+    await set_dm_enabled(db_session, tenant_id=world.tenant_id, enabled=True)
+    await db_session.commit()
+    assert await clear_post(world.sm, dm, platform="slack") == "recipient_not_on_platform"
     home = dm.model_copy(
         update={"target": {"kind": "channel", "channel_id": "C0HOME", "home": True}}
     )
@@ -111,6 +113,9 @@ async def test_post_time_rules_and_the_dm_gap(db_session: AsyncSession) -> None:
         db_session, platform="slack", external_id="U1", tenant=tenant, account=owner
     )
     await db_session.commit()
+    to_owner = await clear_post(world.sm, dm, platform="slack")
+    assert isinstance(to_owner, WorkflowPost) and to_owner.dm_to == "U1", to_owner
+    assert await post_refusal(to_owner, place_id="", limits=ReachPlan(places=0, people=0)) is None
     post = await clear_post(world.sm, home, platform="slack")
     assert isinstance(post, WorkflowPost) and post.speaker == "U1", post
     tight = ReachPlan(places=0, people=1)

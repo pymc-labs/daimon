@@ -1,8 +1,8 @@
 """Store for wait decisions, the inbox reads and the event buffer.
 
 Opening and closing waits with their steps is `workflow_runs`; this module holds a wait's
-answers (one per person, deduplicated by idempotency key), its decided state, and events
-held for event waits. Lock order stays run, then wait, then step.
+answers (one per person, deduplicated by idempotency key), its decided state, where its
+asks were posted on chat, and events held for event waits. Lock order stays run, wait, step.
 """
 
 from __future__ import annotations
@@ -12,7 +12,12 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from daimon.core._models import WorkflowEventBuffer, WorkflowWait, WorkflowWaitAnswer
+from daimon.core._models import (
+    WorkflowEventBuffer,
+    WorkflowWait,
+    WorkflowWaitAnswer,
+    WorkflowWaitPost,
+)
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -272,3 +277,82 @@ async def source_used(session: AsyncSession, *, tenant_id: uuid.UUID, source: st
 
 async def drop_expired_events(session: AsyncSession, *, now: datetime) -> None:
     await session.execute(delete(WorkflowEventBuffer).where(WorkflowEventBuffer.expires_at <= now))
+
+
+class WaitPost(_Row):
+    id: uuid.UUID
+    wait_id: uuid.UUID
+    platform: str
+    channel_id: str
+    thread_id: str | None
+    message_id: str
+    addressee_account_id: uuid.UUID | None
+    created_at: datetime
+
+
+async def record_post(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    wait_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str | None,
+    message_id: str,
+    addressee_account_id: uuid.UUID | None,
+) -> WaitPost:
+    orm = WorkflowWaitPost(
+        tenant_id=tenant_id,
+        wait_id=wait_id,
+        platform=platform,
+        channel_id=channel_id,
+        thread_id=thread_id,
+        message_id=message_id,
+        addressee_account_id=addressee_account_id,
+    )
+    session.add(orm)
+    await session.flush()
+    return WaitPost.model_validate(orm)
+
+
+async def posts_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[WaitPost]:
+    found = await session.scalars(
+        select(WorkflowWaitPost)
+        .where(WorkflowWaitPost.wait_id == wait_id)
+        .order_by(WorkflowWaitPost.created_at, WorkflowWaitPost.id)
+    )
+    return [WaitPost.model_validate(o) for o in found]
+
+
+async def open_post_for(
+    session: AsyncSession,
+    *,
+    tenant_ids: Sequence[uuid.UUID],
+    platform: str,
+    thread_id: str | None,
+    reply_to: str | None,
+) -> tuple[WaitPost, Wait] | None:
+    """The open ask a message answers: posted into its thread, or the message it replies to."""
+    for column, value in (
+        (WorkflowWaitPost.thread_id, thread_id),
+        (WorkflowWaitPost.message_id, reply_to),
+    ):
+        if value is None:
+            continue
+        row = (
+            await session.execute(
+                select(WorkflowWaitPost, WorkflowWait)
+                .join(WorkflowWait, WorkflowWait.id == WorkflowWaitPost.wait_id)
+                .where(
+                    WorkflowWaitPost.tenant_id.in_(tenant_ids),
+                    WorkflowWaitPost.platform == platform,
+                    column == value,
+                    WorkflowWait.status == "waiting",
+                )
+                .order_by(WorkflowWaitPost.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is not None:
+            return WaitPost.model_validate(row[0]), Wait.model_validate(row[1])
+    return None

@@ -12,15 +12,23 @@ with the brief.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final, Literal, Protocol, cast
 
+import anthropic
+import structlog
+from anthropic import AsyncAnthropic
 from daimon.core.capability_tools import WORKFLOW_AUTHORING_TOOLS
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.config import Settings
 from daimon.core.headless_runner import StepTurn
+from daimon.core.output_delivery import MAX_BYTES_CEILING, poll_output_files
+from daimon.core.routine_files import MAX_FILES, RoutineFile
 from daimon.core.stores import workflow_proposals, workflow_runs
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_waits import Wait
@@ -71,6 +79,45 @@ OWN_TOOLS: Final = frozenset(
     {PROXY_TOOL_NAME, SEARCH_TOOL_NAME, "update_plan", *step_tools.STEP_TOOLS}
 )
 _DAIMON: Final = frozenset({DAIMON_SERVER_NAME})
+log = structlog.get_logger(__name__)
+
+#: A session's output files as Files API refs; the scheduler binds the client.
+CollectFiles = Callable[[str], Awaitable[list[dict[str, JsonValue]]]]
+
+
+async def session_files(client: AsyncAnthropic, session_id: str) -> list[dict[str, JsonValue]]:
+    """The files a step's session made, as refs `steps.<id>.files` and asks attach.
+
+    Same listing as a routine's files; a failed listing keeps the step's result.
+    """
+    try:
+        listed = await poll_output_files(client, session_id=session_id, sleep=asyncio.sleep)
+    except anthropic.APIError as error:
+        log.warning("workflow.step_files_failed", causes=backend_refusal_causes(error))
+        return []
+    return [
+        RoutineFile(
+            file_id=meta.id,
+            filename=meta.filename,
+            mime_type=meta.mime_type,
+            size_bytes=meta.size_bytes,
+        ).model_dump()
+        for meta in listed.values()
+        if not meta.filename.startswith(HANDOFF_FILENAME_PREFIX)
+        and 0 < meta.size_bytes <= MAX_BYTES_CEILING
+    ][:MAX_FILES]
+
+
+def _earlier_file_ids(context: Mapping[str, JsonValue]) -> set[str]:
+    """Files earlier steps already hold: a shared lane's session lists them again."""
+    steps = context.get("steps")
+    ids: set[str] = set()
+    for view in (steps if isinstance(steps, dict) else {}).values():
+        files = view.get("files") if isinstance(view, dict) else None
+        for ref in files if isinstance(files, list) else []:
+            if isinstance(ref, dict) and isinstance(ref.get("file_id"), str):
+                ids.add(str(ref["file_id"]))
+    return ids
 
 
 class LaneTurn(Protocol):
@@ -240,6 +287,7 @@ class AgentStepExecutor:
     #: Records proposed writes and sends them once approved; without it proposals are refused.
     tools: ToolClient | None = None
     owner_dm: OwnerDm | None = None
+    collect_files: CollectFiles | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     async def __call__(self, work: StepWork) -> engine.Outcome | Park:
@@ -353,15 +401,24 @@ class AgentStepExecutor:
             if failed is not None:
                 return failed
             result = await self._recorded(work, attempt.id)
+        outcome = None if result is None else step_tools.outcome(result)
+        if isinstance(outcome, engine.Succeeded) and self.collect_files is not None:
+            async with self.sm() as s:
+                made_in = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
+            if made_in is not None:
+                earlier = _earlier_file_ids(work.context)
+                files = [
+                    f for f in await self.collect_files(made_in) if f.get("file_id") not in earlier
+                ]
+                outcome = replace(outcome, files=tuple(files))
         if node.session == FRESH:
             await self._close_lane(work, lane)
-        if result is None:
+        if outcome is None:
             return engine.Failed(
                 "contract",
                 "The agent stopped without calling complete_step or fail_step",
                 reason="no_result",
             )
-        outcome = step_tools.outcome(result)
         if isinstance(outcome, engine.Succeeded):
             review = await review_proposals(
                 self.sm, self.settings, self.tools, work, outcome, self.clock()

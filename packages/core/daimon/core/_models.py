@@ -6263,6 +6263,8 @@ class WorkflowStep(Base):
     waiting_reason: Mapped[str | None]
     inputs: Mapped[dict[str, Any] | None]
     output: Mapped[dict[str, Any] | None]
+    #: Files API refs of the files the step made (`steps.<id>.files`).
+    files: Mapped[JsonList]
     summary: Mapped[str | None]
     route: Mapped[str | None]
     route_reason: Mapped[str | None]

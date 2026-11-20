@@ -23,7 +23,8 @@ from daimon.core.stores import workflow_proposals, workflow_runs, workflow_waits
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, step_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
-from daimon.core.workflows import callbacks, engine, runs
+from daimon.core.stores.workflows import WorkflowRow
+from daimon.core.workflows import asks, callbacks, engine, runs
 from daimon.core.workflows.access import Who, holders, rights_of
 from daimon.core.workflows.engine import Event, Outcome
 from daimon.core.workflows.expressions import ExpressionError, render
@@ -146,6 +147,17 @@ def needs_comment(node: AnyNode | None, kind: str, route: str) -> bool:
     return route == REJECT and routes_of(node, kind) == [REJECT, APPROVE]
 
 
+async def _trusted(session: AsyncSession, who: Who, run: RunRow) -> bool:
+    """The owner or an editor: their answers are not outside input (Rule of Two)."""
+    workflow = await workflows.get_workflow(
+        session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
+    )
+    if workflow is None:
+        return False
+    access = await workflows.list_access(session, tenant_id=run.tenant_id, workflow_id=workflow.id)
+    return rights_of(workflow, access, Who(who.tenant_id, who.account_id)).edit
+
+
 async def answerable(session: AsyncSession, who: Who, wait: Wait, run: RunRow) -> bool:
     return may_answer(who, wait, sees_run=await _sees_run(session, who, run))
 
@@ -155,8 +167,8 @@ async def answerable(session: AsyncSession, who: Who, wait: Wait, run: RunRow) -
 
 async def approvers_of(
     session: AsyncSession, work: StepWork, approvers: Sequence[str], now: datetime
-) -> tuple[list[str], list[str]]:
-    """Accounts the approver tokens name, and the tokens checked at answer time."""
+) -> tuple[list[str], list[str], WorkflowRow]:
+    """Accounts the approver tokens name, the tokens checked at answer time, and the workflow."""
     workflow = await workflows.get_workflow(
         session, tenant_id=work.run.tenant_id, workflow_id=work.run.workflow_id
     )
@@ -182,7 +194,26 @@ async def approvers_of(
         else:
             tokens.append(token)
     seen = list(dict.fromkeys(str(a) for a in accounts if a is not None))
-    return seen, tokens
+    return seen, tokens, workflow
+
+
+def _shape(node: ApprovalNode) -> asks.AskShape:
+    return node.answer or "approve"
+
+
+def _labels(names: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    return tuple((n, "Answer" if n == ANSWER else n[:1].upper() + n[1:]) for n in names)
+
+
+def _attachments(value: JsonValue) -> tuple[dict[str, JsonValue], ...]:
+    """File refs an ask attaches (`attach: ${{ steps.x.files }}`); anything else is dropped."""
+    items = value if isinstance(value, list) else [value]
+    refs = [i for i in items if isinstance(i, dict) and isinstance(i.get("file_id"), str)]
+    return tuple(refs[:10])
+
+
+def home_of(spec: Spec, workflow: WorkflowRow) -> str | None:
+    return spec.home.channel if spec.home is not None else workflow.home_channel_id
 
 
 def _account(value: object) -> uuid.UUID | None:
@@ -205,9 +236,12 @@ class ApprovalExecutor:
         now = self.clock()
         try:
             async with self.sm() as session:
-                addressees, tokens = await approvers_of(session, work, node.approvers or [], now)
+                addressees, tokens, workflow = await approvers_of(
+                    session, work, node.approvers or [], now
+                )
             show = render(node.show, work.context, now=now) if node.show else None
             binds = bound_preview(work.spec, node, work.context, now)
+            attach = render(node.attach, work.context, now=now) if node.attach else None
             values = {
                 k: render(f.default, work.context, now=now)
                 for k, f in (node.form or {}).items()
@@ -217,16 +251,34 @@ class ApprovalExecutor:
             return engine.Failed("fatal", str(err))
         if not addressees and not tokens:
             return engine.Failed("fatal", "No one can answer this approval")
+        shown_text = show if isinstance(show, str) or show is None else json.dumps(show)
+        title = node.title or work.step.node_id
+        files = _attachments(attach)
+        ask = asks.Ask(
+            deliver=node.deliver or "dm",
+            workflow=workflow.name,
+            title=title,
+            text=f"{title}\n\n{shown_text}" if shown_text else title,
+            shape=_shape(node),
+            routes=_labels(routes_of(node, "approval")),
+            home=home_of(work.spec, workflow),
+            channel=node.channel,
+            files=files,
+            fields=tuple((k, f.title or k) for k, f in (node.form or {}).items()),
+        )
         return Park(
             "approval",
             addressees=tuple(addressees),
-            deliver=node.deliver or "inbox",
+            deliver=ask.deliver,
+            ask=ask,
             min_approvals=node.min_approvals or 1,
             shown={
                 "approvers": tokens,
-                "show": show if isinstance(show, str) or show is None else json.dumps(show),
+                "show": shown_text,
                 "values": values,
                 "preview": binds,
+                "title": title,
+                "attachments": list(files),
             },
             expires_at=now + parse_duration(node.timeout.after) if node.timeout else None,
             remind_at=now + parse_duration(node.remind_every) if node.remind_every else None,
@@ -363,6 +415,7 @@ async def ask(
     )
     askee = _triggered_by(g.run) or (workflow.owner_account_id if workflow else None)
     addressees = [str(askee)] if askee else []
+    title = question[:120]
     wait = await workflow_runs.open_wait(
         session,
         tenant_id=g.run.tenant_id,
@@ -371,11 +424,27 @@ async def ask(
         kind="question",
         expires_at=None,
         remind_at=None,
-        shown={"question": question, "options": list(options), "attempt": str(g.attempt.id)},
+        shown={
+            "question": question,
+            "options": list(options),
+            "attempt": str(g.attempt.id),
+            "title": title,
+        },
         addressees=addressees,
-        deliver="inbox",
+        deliver="dm",
         now=now,
     )
+    choices = f"\n\nOptions: {', '.join(options)}" if options else ""
+    ask = asks.Ask(
+        deliver="dm",
+        workflow=workflow.name if workflow else "",
+        title=title,
+        text=f"{question}{choices}",
+        shape="question",
+        routes=_labels([ANSWER]),
+        home=home_of(await runs.spec_of(session, g.run), workflow) if workflow else None,
+    )
+    queued = await asks.queue(session, run=g.run, wait_id=wait.id, addressees=addressees, ask=ask)
     events = [
         NewEvent(
             "step.question_asked", g.key, {"attempt": str(g.attempt.id), "wait": str(wait.id)}
@@ -385,6 +454,7 @@ async def ask(
             g.key,
             {"id": str(wait.id), "kind": "question", "addressees": addressees, "expires_at": None},
         ),
+        *(NewEvent(e.type, g.key, dict(e.data)) for e in queued),
     ]
     await append_events(session, run_id=g.run.id, events=events, actor=ENGINE, at=now)
     return "Asked. End your turn now; the answer arrives as your next message."
@@ -492,9 +562,13 @@ async def decide_wait(
     *,
     via: Via,
     idempotency_key: str | None = None,
+    in_thread: bool = False,
     now: datetime,
 ) -> Decided:
-    """A person's answer to an approval or a question. Raises `WaitError` when refused."""
+    """A person's answer to an approval or a question. Raises `WaitError` when refused.
+
+    `in_thread`: the answer came in the thread the ask was posted to, so a `thread`
+    approver who can read it may answer."""
     if who.external:
         raise NotYours("Only a person can answer this. Ask them to answer in the app.")
     async with sm.begin() as session:
@@ -505,7 +579,10 @@ async def decide_wait(
         wait = await workflow_waits.lock_wait(session, wait_id)
         step = await workflow_runs.lock_step(session, found.step_id)
         assert run is not None and wait is not None and step is not None
-        if not await answerable(session, who, wait, run):
+        if not (
+            await answerable(session, who, wait, run)
+            or (in_thread and may_answer(who, wait, sees_run=True))
+        ):
             raise NotYours("This request is for someone else.")
         if wait.status != "waiting":
             raise WaitGone("This was already answered.")
@@ -574,6 +651,13 @@ async def decide_wait(
             shown_hash=call_hash("binds", shown["binds"]) if shown and "binds" in shown else None,
             now=now,
         )
+        label = {APPROVE: "Approved", REJECT: "Rejected"}.get(answer.route, "Answered")
+        await asks.queue_updates(
+            session, wait, await asks.answered_status(session, wait, by=who.account_id, label=label)
+        )
+        if not await _trusted(session, who, run):
+            # An answer from someone who is not an editor is outside input (Rule of Two).
+            await workflow_runs.mark_taint(session, step_id=step.id, taint="output")
         key = runs.key_of(step)
         event = Event(
             "wait.decided",
@@ -646,7 +730,8 @@ async def on_due(
             if isinstance(node, ApprovalNode) and node.remind_every:
                 nxt = now + parse_duration(node.remind_every)
                 await workflow_waits.set_remind_at(session, wait_.id, nxt)
-                events = [NewEvent("wait.reminded", key, {"id": str(wait_.id)})]
+                posts = await asks.queue_reminders(session, wait_)
+                events = [NewEvent("wait.reminded", key, {"id": str(wait_.id), "posts": posts})]
                 await append_events(session, run_id=run.id, events=events, actor=ENGINE, at=now)
             else:
                 await workflow_waits.set_remind_at(session, wait_.id, None)
@@ -675,6 +760,8 @@ async def on_due(
         await workflow_waits.decide(
             session, wait_.id, status=status, decision=route, by=None, via=None, now=now
         )
+        if wait_.kind in ("approval", "question"):
+            await asks.queue_updates(session, wait_, "Expired: no one answered in time.")
         data: dict[str, JsonValue] = {
             "id": str(wait_.id),
             "decision" if event == "wait.decided" else "route": route,

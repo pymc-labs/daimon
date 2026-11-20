@@ -556,6 +556,12 @@ def create_tables() -> None:
         sa.Column("waiting_reason", sa.Text(), nullable=True),
         sa.Column("inputs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("output", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "files",
+            postgresql.JSONB(astext_type=sa.Text()),
+            server_default=sa.text("'[]'::jsonb"),
+            nullable=False,
+        ),
         sa.Column("summary", sa.Text(), nullable=True),
         sa.Column("route", sa.Text(), nullable=True),
         sa.Column("route_reason", sa.Text(), nullable=True),

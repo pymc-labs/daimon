@@ -68,6 +68,7 @@ REFUSALS: Final[frozenset[str]] = frozenset(
         "audience_unreadable",
         "reach",
         "speaker_not_on_platform",
+        "dm_disabled",
     }
 )
 
@@ -186,6 +187,11 @@ async def _settle(
             actor="delivery",
             at=now,
         )
+    if settled is not None and settled.kind == "ask" and status != "sent":
+        # Lazy: the asks module reaches this one through the routine delivery rules.
+        from daimon.core.workflows.asks import tell_owner_undelivered
+
+        await tell_owner_undelivered(session, settled, outcome.note)
     return settled is not None
 
 

@@ -26,7 +26,8 @@ from daimon.core.stores import (
 )
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
-from daimon.core.workflows import callbacks, delivery, engine
+from daimon.core.workflows import asks, callbacks, delivery, engine
+from daimon.core.workflows.asks import Ask
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
@@ -131,6 +132,8 @@ class Park:
     event_key: str | None = None
     expires_at: datetime | None = None
     remind_at: datetime | None = None
+    #: What the wait posts on chat (an approval's DMs or thread).
+    ask: Ask | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,7 @@ def _view(s: StepRow) -> StepView:
         output=s.output,
         summary=s.summary,
         via=tuple(s.via),
+        files=tuple(s.files),
         error_class=s.error_class,
         error_message=s.error_message,
         reused=s.reused,
@@ -266,6 +270,7 @@ def _write(view: StepView, now: datetime) -> StepWrite:
     write: StepWrite = {
         "status": view.status,
         "output": view.output,
+        "files": list(view.files),
         "summary": view.summary,
         "route": view.route,
         "via": list(view.via),
@@ -545,7 +550,11 @@ async def _settle_item(
     assert item.parent_step_id is not None and item.item_index is not None
     key = key_of(item)
     if isinstance(outcome, engine.Succeeded):
-        write = _ended("succeeded", now) | {"output": outcome.output, "summary": outcome.summary}
+        write = _ended("succeeded", now) | {
+            "output": outcome.output,
+            "summary": outcome.summary,
+            "files": list(outcome.files),
+        }
         event = Event("step.succeeded", key, {})
     else:
         error_class = outcome.error_class if isinstance(outcome, engine.Failed) else "unknown"
@@ -923,6 +932,7 @@ def _fork_copies(
         (s.node_id, s.visit): {
             "status": "succeeded",
             "output": s.output,
+            "files": s.files,
             "summary": s.summary,
             "route": s.route,
             "via": s.via,
@@ -1048,6 +1058,7 @@ async def execute(
             outcome = engine.Failed("fatal", _cut(f"{type(err).__name__}: {err}") or "")
     if isinstance(outcome, Park):
         await _park(sm, settings, claimed, outcome, now=clock())
+        return
     if isinstance(outcome, Parked):
         await park(sm, settings, claimed, outcome, now=clock())
         return
@@ -1211,6 +1222,14 @@ async def _park(
             if blocked:
                 data["reason"] = blocked.reason
             events.append(Event("wait.opened", key_of(step), data))
+            if park.ask is not None:
+                events += await asks.queue(
+                    session,
+                    run=run,
+                    wait_id=wait.id,
+                    addressees=park.addressees,
+                    ask=park.ask,
+                )
             if kind == "event":
                 await _notify(session, WAITS_CHANNEL, str(wait.id))  # a held event may match
         write: StepWrite = {

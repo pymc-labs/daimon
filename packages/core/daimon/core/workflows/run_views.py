@@ -11,7 +11,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
@@ -651,7 +651,7 @@ class StepDetail(BaseModel):
 def _view(s: StepRow) -> StepView:
     return StepView(
         s.node_id, s.visit, s.status, route=s.route, output=s.output, summary=s.summary,
-        via=tuple(s.via),
+        via=tuple(s.via), files=tuple(s.files),
     )  # fmt: skip
 
 
@@ -722,7 +722,7 @@ async def step_detail(
         model=node.get("model") if node.get("kind") == "agent" else None,
         summary=step.summary if done else None,
         route={"name": route, "reason": ""} if route else None,
-        files=[],
+        files=[_file_view(run, f) for f in step.files] if done else [],
         input=shown,
         output=step.output if done else None,
         untrusted=untrusted,
@@ -735,6 +735,18 @@ async def step_detail(
         activity=[],
         plan=[],
     )
+
+
+def _file_view(run: RunRow, ref: object) -> dict[str, Any]:
+    """A step's file as the web shows it, downloaded through the run's files route."""
+    file: dict[str, Any] = cast("dict[str, Any]", ref) if isinstance(ref, dict) else {}
+    return {
+        "id": file.get("file_id"),
+        "name": file.get("filename"),
+        "type": file.get("mime_type"),
+        "size": file.get("size_bytes"),
+        "url": f"/runs/{run.id}/files/{file.get('file_id')}",
+    }
 
 
 def _refs(text: str) -> list[Ref]:

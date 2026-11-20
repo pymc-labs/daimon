@@ -91,6 +91,7 @@ class StepRow(_Row):
     status: StepStatus
     waiting_reason: str | None
     output: Any
+    files: list[Any] = []
     summary: str | None
     route: str | None
     error_class: ErrorClass | None
@@ -138,6 +139,7 @@ class StepWrite(TypedDict, total=False):
     status: str
     waiting_reason: str | None
     output: Any
+    files: list[Any]
     summary: str | None
     route: str | None
     error_class: str | None
@@ -576,6 +578,15 @@ async def set_attempt_session(
         .where(WorkflowAttempt.id == attempt_id)
         .values(session_id=session_id, send_intent_at=now)
     )
+
+
+async def mark_taint(session: AsyncSession, *, step_id: uuid.UUID, taint: str) -> None:
+    """Add a JSON path to the step's untrusted paths."""
+    current = await session.scalar(select(WorkflowStep.taint).where(WorkflowStep.id == step_id))
+    if current is not None and taint not in current:
+        await session.execute(
+            update(WorkflowStep).where(WorkflowStep.id == step_id).values(taint=[*current, taint])
+        )
 
 
 async def set_lane(session: AsyncSession, *, step_id: uuid.UUID, lane: str) -> None:

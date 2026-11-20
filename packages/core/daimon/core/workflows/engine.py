@@ -85,6 +85,7 @@ class StepView:
     error_class: ErrorClass | None = None
     error_message: str | None = None
     reused: Literal["fork", "pinned"] | None = None
+    files: tuple[dict[str, JsonValue], ...] = ()
 
     @property
     def key(self) -> str:
@@ -121,6 +122,8 @@ class Succeeded:
     output: JsonValue = None
     route: str | None = None
     summary: str | None = None
+    #: Files API refs of the files the step made.
+    files: tuple[dict[str, JsonValue], ...] = ()
     #: `finish_early`: the run ends here as succeeded with outcome `nothing_to_do`.
     early: bool = False
 
@@ -242,7 +245,7 @@ def expression_context(
             "summary": s.summary,
             "route": s.route,
             "status": s.status,
-            "files": [],
+            "files": list(s.files),
             "visits": counts.get(nid, 0),
         }
     up = ancestors(spec, node_id)
@@ -423,6 +426,7 @@ class _Walk:
                 output=outcome.output,
                 route=outcome.route,
                 summary=outcome.summary,
+                files=outcome.files,
                 reused=reused,
                 error_class=None,
                 error_message=None,

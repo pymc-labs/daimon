@@ -173,7 +173,7 @@ async def review_proposals(
         return await send_proposals(sm, settings, tools, work, _held(outcome), now)
     approvers = node.review if isinstance(node.review, list) else []
     async with sm() as s:
-        addressees, tokens = await approvers_of(s, work, approvers, now)
+        addressees, tokens, _ = await approvers_of(s, work, approvers, now)
     return Park(
         "approval",
         addressees=tuple(addressees),

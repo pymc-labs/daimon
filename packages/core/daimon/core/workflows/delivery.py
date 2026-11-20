@@ -8,8 +8,9 @@ placed the channel): a live workspace, a readable access policy, a speaker still
 to invoke, no write protection, the audience gate, and reach. The adapter checks that
 the speaker may post in the channel themselves.
 
-Recorded gap: a post to a person's DM (`owner`, `run_as`, and every test run, which
-delivers to the tester) is sent on no platform yet; it settles `skipped/dm_unsupported`.
+A post to a person's DM (`owner`, `run_as`, an ask's addressee, and every test run, which
+delivers to the tester) goes on the workspace's platform when it has DMs on and the person
+is linked there; the channel rules then have no channel to check.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from daimon.core.routine_hold import DeliveryGate, workflow_delivery_gate
 from daimon.core.stores import workflow_deliveries, workflow_runs
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import platform_external_ids
 from daimon.core.stores.tenants import get_tenant
@@ -47,7 +49,7 @@ from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
-    "DM_UNSUPPORTED",
+    "DM_OFF",
     "WorkflowPost",
     "clear_post",
     "post_refusal",
@@ -58,7 +60,7 @@ __all__ = [
     "target_for",
 ]
 
-DM_UNSUPPORTED: Final[str] = "dm_unsupported"
+DM_OFF: Final[str] = "dm_disabled"
 NOTICE_TITLE: Final[str] = "Workflow run failed"
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
 _TEAMS_THREAD: Final[str] = ";messageid="
@@ -79,7 +81,7 @@ def target_for(
     """
     if mode == "test" or to in ("owner", "run_as"):
         account = owner if to == "owner" and mode == "live" else run_as
-        return {"kind": "dm", "account_id": None if account is None else str(account)}
+        return dm_target(account, home=home)
     channel = home if to == "home" else to
     thread: str | None = None
     if channel is not None and _TEAMS_THREAD in channel:
@@ -92,6 +94,11 @@ def target_for(
         "thread_id": thread,
         "home": channel is not None and channel == home,
     }
+
+
+def dm_target(account: uuid.UUID | str | None, *, home: str | None) -> dict[str, Any]:
+    """A DM to `account`. `via` is the home channel, where Teams finds the person's roster id."""
+    return {"kind": "dm", "account_id": None if account is None else str(account), "via": home}
 
 
 def _home(spec: Spec, home_channel_id: str | None) -> str | None:
@@ -175,7 +182,7 @@ async def queue_failure_notice(
     target = (
         target_for("home", home=home, mode=run.mode, run_as=run.run_as_account_id, owner=owner)
         if home is not None
-        else {"kind": "dm", "account_id": str(owner)}
+        else dm_target(owner, home=None)
     )
     delivery_id = await workflow_deliveries.queue_delivery(
         session,
@@ -204,8 +211,13 @@ class WorkflowPost:
     speaker: str
     channel_id: str
     thread_id: str | None
-    gate: DeliveryGate
+    #: None for a DM, which no channel rule covers.
+    gate: DeliveryGate | None
     link: str | None
+    #: A DM's recipient on the platform; `channel_id` is then the target's `via`, or "".
+    dm_to: str | None = None
+    #: A reminder or an ask's update goes to this earlier post (`reply`, `edit` targets).
+    message_id: str | None = None
 
     @property
     def notice(self) -> bool:
@@ -214,6 +226,11 @@ class WorkflowPost:
     @property
     def home(self) -> bool:
         return self.row.target.get("home") is True
+
+    @property
+    def placed(self) -> bool:
+        """A reminder or update in a place an ask already passed the rules for."""
+        return self.row.target.get("kind") in ("reply", "edit")
 
 
 def reach_limits(settings: Settings) -> ReachPlan:
@@ -244,21 +261,49 @@ async def clear_post(
     Asked before the adapter resolves or sends anything, and again before each file.
     """
     target = row.target
+    kind = target.get("kind")
     async with sessionmaker() as session:
         tenant = await get_tenant(session, row.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return "tenant_archived"
-        if target.get("kind") == "dm":
-            return DM_UNSUPPORTED
-        channel_id = target.get("channel_id")
-        if not isinstance(channel_id, str) or not channel_id:
-            return "destination_unavailable"
+        dm_to: str | None = None
+        if kind == "dm":
+            recipient = _uuid(target.get("account_id"))
+            if recipient is None:
+                return "destination_unavailable"
+            if not await dm_enabled(session, tenant_id=row.tenant_id):
+                return DM_OFF
+            dm_to = (
+                await platform_external_ids(
+                    session, tenant_id=row.tenant_id, platform=platform, account_ids=[recipient]
+                )
+            ).get(recipient)
+            if dm_to is None:
+                return "recipient_not_on_platform"
+            channel_id = str(target.get("via") or "")
+        else:
+            channel_id = target.get("channel_id")
+            if not isinstance(channel_id, str) or not channel_id:
+                return "destination_unavailable"
         try:
             policy = await load_access_policy(session, tenant_id=row.tenant_id)
         except AccessPolicyUnreadable:
             return "access_policy_unreadable"
-        raw = row.payload.get("speaker")
-        account_id = uuid.UUID(raw) if isinstance(raw, str) else None
+        thread = target.get("thread_id")
+        message = target.get("message_id")
+        if kind == "edit":
+            # Daimon edits its own ask; no one speaks.
+            return WorkflowPost(
+                row=row,
+                policy=policy,
+                speaker="",
+                channel_id=channel_id,
+                thread_id=thread if isinstance(thread, str) else None,
+                gate=None,
+                link=None,
+                message_id=message if isinstance(message, str) else None,
+            )
+        account_id = _uuid(row.payload.get("speaker"))
         speaker = (
             None
             if account_id is None
@@ -290,17 +335,18 @@ async def clear_post(
         creator_is_admin=account is not None and account.role is Role.ADMIN,
     ):
         return refusal
-    try:
-        gate = await workflow_delivery_gate(
-            sessionmaker,
-            tenant_id=row.tenant_id,
-            platform=platform,
-            channel_id=channel_id,
-            agent=str(row.payload.get("workflow") or "workflow"),
-        )
-    except Exception:  # named boundary: an unreadable audience mode refuses the post
-        return "audience_unreadable"
-    thread = target.get("thread_id")
+    gate: DeliveryGate | None = None
+    if dm_to is None and kind != "reply":
+        try:
+            gate = await workflow_delivery_gate(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                agent=str(row.payload.get("workflow") or "workflow"),
+            )
+        except Exception:  # named boundary: an unreadable audience mode refuses the post
+            return "audience_unreadable"
     return WorkflowPost(
         row=row,
         policy=policy,
@@ -309,7 +355,16 @@ async def clear_post(
         thread_id=thread if isinstance(thread, str) else None,
         gate=gate,
         link=run_link(web, row),
+        dm_to=dm_to,
+        message_id=message if isinstance(message, str) else None,
     )
+
+
+def _uuid(raw: object) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(raw) if isinstance(raw, str) else None
+    except ValueError:
+        return None
 
 
 async def post_refusal(
@@ -322,7 +377,9 @@ async def post_refusal(
     mentioned: tuple[str, ...] = (),
 ) -> str | None:
     """Why the placed post must not go, or None. `place_id` is the channel or thread posted
-    into; a Slack or Teams thread is placed at its channel."""
+    into; a Slack or Teams thread is placed at its channel. A DM or edit has no gate."""
+    if post.gate is None:
+        return None
     try:
         audience = await post.gate.audience(place_id, parent_channel_id)
     except Exception:  # named boundary: an unreadable audience refuses the post

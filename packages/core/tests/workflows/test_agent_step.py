@@ -20,7 +20,12 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPoli
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.workflows import brief, runs, step_tools, waits
 from daimon.core.workflows.access import Who
-from daimon.core.workflows.agent_step import AgentStepExecutor, Writes, step_decider
+from daimon.core.workflows.agent_step import (
+    AgentStepExecutor,
+    CollectFiles,
+    Writes,
+    step_decider,
+)
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.spec import AgentNode, SchemaField, parse_spec
 from daimon.testing.workflows import NOW, World, make_world
@@ -115,11 +120,15 @@ async def finishes_early(lane: Lane, work: StepWork, message: str) -> None:
     await lane.call(lambda s, g: step_tools.finish_early(s, g, summary="nothing new", now=NOW))
 
 
-async def drive(world: World, run_id: uuid.UUID, lane: Lane) -> None:
+async def drive(
+    world: World, run_id: uuid.UUID, lane: Lane, files: CollectFiles | None = None
+) -> None:
     """The steps loop by hand: claim each ready agent step and execute it."""
     for i in range(10):
         now = NOW + timedelta(minutes=i)
-        executor = AgentStepExecutor(world.sm, world.settings, lane, clock=lambda now=now: now)
+        executor = AgentStepExecutor(
+            world.sm, world.settings, lane, collect_files=files, clock=lambda now=now: now
+        )
         ready = [k for k, s in (await world.steps(run_id)).items() if s.status == "ready"]
         if not ready:
             return
@@ -194,6 +203,25 @@ async def test_digest_continues_the_main_lane_through_a_branch(db_session: Async
     assert steps["collect"].cost_usd > 0 and steps["write"].cost_usd > 0, "each step has its cost"
     assert done.cost_usd == steps["collect"].cost_usd + steps["write"].cost_usd, f"{done}"
     await world.verified(run.id)
+
+
+async def test_a_steps_files_are_the_new_ones_its_session_made(db_session: AsyncSession) -> None:
+    world = await make_world(db_session, COLLECT, "collect")
+    run = await world.run()
+    lane = Lane(
+        world,
+        [completes({"risky_count": 1, "deals": ["Acme"]}), completes({"digest": "Acme: call"})],
+    )
+    made: list[dict[str, JsonValue]] = []
+
+    async def files(session_id: str) -> list[dict[str, JsonValue]]:
+        made.append({"file_id": f"file_{len(made)}", "filename": "chart.png"})
+        return list(made)
+
+    await drive(world, run.id, lane, files)
+    steps = await world.steps(run.id)
+    assert [f["file_id"] for f in steps["collect"].files] == ["file_0"], steps["collect"]
+    assert [f["file_id"] for f in steps["write"].files] == ["file_1"], "only the new file"
 
 
 async def test_finish_early_ends_the_run_with_nothing_to_do(db_session: AsyncSession) -> None:
