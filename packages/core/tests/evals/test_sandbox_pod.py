@@ -51,7 +51,7 @@ async def test_pod_reaches_only_the_world(
     })  # fmt: skip
     item_id = await make_running_item(db_session, tenant.id, case)
     token = await issue_world_token(db_session, item_id)
-    simulator = ScriptedSimulator({"status": 200, "body": {"answer": "simulated"}})
+    simulator = ScriptedSimulator({"status": 200, "body": {"answer": "invented"}})
     world = FakeWorld(db_session_factory, simulator, tmp_path / "world")
     item = await world.item(item_id)
     assert item is not None, "the item runs"
@@ -68,7 +68,7 @@ async def test_pod_reaches_only_the_world(
                 return done.exit_code, (done.stdout + done.stderr).decode()
 
             assert "recorded" in (await run("curl -sS https://api.example.com/v1/ping"))[1]
-            assert "simulated" in (await run("curl -sS https://unknown.example.org/x"))[1]
+            assert "invented" in (await run("curl -sS https://unknown.example.org/x"))[1]
             cloned = await run("git clone -q https://github.com/acme/app /tmp/a && cat /tmp/a/*")
             assert cloned == (0, "hello\n"), f"the case repository clones: {cloned}"
             raw = await run("timeout 10 bash -c 'echo > /dev/tcp/192.0.2.1/22'")
