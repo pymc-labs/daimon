@@ -1,8 +1,9 @@
-"""Store for the eval tables: suites and their versions, case revisions, shares, blobs, arms,
-runs with their items, scores and reviews, and the bundles moved in and out."""
+"""Store for the eval tables: suites and their versions, case revisions, shares, blob
+metadata, arms, runs with their items, scores and reviews, and the bundles moved in and out."""
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime
@@ -14,6 +15,7 @@ from daimon.core._models import (
     EvalCase,
     EvalCaseRevision,
     EvalComment,
+    EvalInstance,
     EvalReviewAssignment,
     EvalReviewQueue,
     EvalRun,
@@ -25,7 +27,7 @@ from daimon.core._models import (
     EvalSuiteVersionCase,
 )
 from pydantic import BaseModel, ConfigDict, JsonValue
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,6 +126,8 @@ class RunRow(_Row):
     suite_version: int
     status: str
     origin: str
+    scrub_status: str
+    signature: str | None
     document: Document
 
 
@@ -151,10 +155,12 @@ async def list_suites(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Su
     return [SuiteRow.model_validate(r) for r in rows]
 
 
-async def suite_by_key(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> SuiteRow | None:
-    row = await session.scalar(
-        select(EvalSuite).where(EvalSuite.tenant_id == tenant_id, EvalSuite.key == key)
-    )
+async def suite_by_key(
+    session: AsyncSession, *, tenant_id: uuid.UUID, key: str, lock: bool = False
+) -> SuiteRow | None:
+    """`lock` holds the row until the transaction ends, so writes to one suite queue up."""
+    query = select(EvalSuite).where(EvalSuite.tenant_id == tenant_id, EvalSuite.key == key)
+    row = await session.scalar(query.with_for_update() if lock else query)
     return row and SuiteRow.model_validate(row)
 
 
@@ -173,15 +179,18 @@ async def create_suite(
     name: str,
     owner_key: str,
     source_instance: str | None = None,
-) -> SuiteRow:
-    row = EvalSuite(
-        tenant_id=tenant_id, key=key, name=name, owner_key=owner_key, current_version=0,
-        source_instance=source_instance,
+) -> SuiteRow | None:
+    """A new suite with no versions, or None when the key is taken."""
+    row = await session.scalar(
+        insert(EvalSuite)
+        .values(
+            tenant_id=tenant_id, key=key, name=name, owner_key=owner_key, current_version=0,
+            scrub_status="scrubbed", source_instance=source_instance,
+        )
+        .on_conflict_do_nothing(constraint="uq_eval_suites_tenant_key")
+        .returning(EvalSuite)
     )  # fmt: skip
-    session.add(row)
-    await session.flush()
-    await session.refresh(row)
-    return SuiteRow.model_validate(row)
+    return row and SuiteRow.model_validate(row)
 
 
 async def add_suite_version(
@@ -193,12 +202,13 @@ async def add_suite_version(
     pins: Sequence[PinRow],
     scrub_status: str,
     created_by: str | None,
+    signature: str | None = None,
 ) -> None:
     """Store one suite version with its pins; the suite's latest moves to it if newer."""
     session.add(
         EvalSuiteVersion(
             suite_id=suite.id, version=version, tenant_id=suite.tenant_id, document=document,
-            created_by=created_by,
+            scrub_status=scrub_status, signature=signature, created_by=created_by,
         )
     )  # fmt: skip
     await session.flush()
@@ -210,15 +220,16 @@ async def add_suite_version(
         for position, pin in enumerate(pins)
     )  # fmt: skip
     name = document.get("name")
-    await session.execute(
-        update(EvalSuite)
-        .where(EvalSuite.id == suite.id)
-        .values(
-            current_version=func.greatest(EvalSuite.current_version, version),
-            name=name if isinstance(name, str) and version >= suite.current_version else suite.name,
-            scrub_status=scrub_status,
+    if version > suite.current_version:
+        await session.execute(
+            update(EvalSuite)
+            .where(EvalSuite.id == suite.id)
+            .values(
+                current_version=version,
+                name=name if isinstance(name, str) else suite.name,
+                scrub_status=scrub_status,
+            )
         )
-    )
     await session.flush()
 
 
@@ -231,6 +242,29 @@ async def suite_document(
         )
     )
     return row
+
+
+async def version_scrub(session: AsyncSession, *, suite_id: uuid.UUID, version: int) -> str | None:
+    """How scrubbed a suite version's cases are; None when there is no such version."""
+    return await session.scalar(
+        select(EvalSuiteVersion.scrub_status).where(
+            EvalSuiteVersion.suite_id == suite_id, EvalSuiteVersion.version == version
+        )
+    )
+
+
+async def revision_scrubs(
+    session: AsyncSession, keys: Sequence[tuple[uuid.UUID, int]]
+) -> list[str | None]:
+    """The stored scrub status of each (case id, revision); a missing one reads as None."""
+    if not keys:
+        return []
+    rows = await session.execute(
+        select(EvalCaseRevision.case_id, EvalCaseRevision.revision, EvalCaseRevision.scrub_status)
+        .where(tuple_(EvalCaseRevision.case_id, EvalCaseRevision.revision).in_(list(keys)))
+    )  # fmt: skip
+    found = {(c, r): s for c, r, s in rows.tuples()}
+    return [found.get(k) for k in keys]
 
 
 async def version_cases(
@@ -355,13 +389,24 @@ async def set_shares(session: AsyncSession, suite: SuiteRow, shares: Iterable[Sh
 
 
 async def put_blob(
-    session: AsyncSession, *, tenant_id: uuid.UUID, blob: BlobRow, content: bytes
+    session: AsyncSession, *, tenant_id: uuid.UUID, blob: BlobRow, content: bytes | None
 ) -> None:
-    """Keep a blob; one already kept under the same sha256 stays as it is."""
+    """Keep a blob's metadata, and its bytes when there is no artifact store (`content`).
+
+    The same bytes kept again only get worse: unscrubbed and needing a check stick.
+    """
+    new = insert(EvalBlob).values(tenant_id=tenant_id, content=content, **blob.model_dump())
     await session.execute(
-        insert(EvalBlob)
-        .values(tenant_id=tenant_id, content=content, **blob.model_dump())
-        .on_conflict_do_nothing(index_elements=[EvalBlob.tenant_id, EvalBlob.sha256])
+        new.on_conflict_do_update(
+            index_elements=[EvalBlob.tenant_id, EvalBlob.sha256],
+            set_={
+                "scrub": case(
+                    (new.excluded.scrub == "unscrubbed", "unscrubbed"), else_=EvalBlob.scrub
+                ),
+                "needs_human_check": EvalBlob.needs_human_check | new.excluded.needs_human_check,
+                "content": func.coalesce(EvalBlob.content, new.excluded.content),
+            },
+        )
     )
 
 
@@ -386,34 +431,39 @@ async def blob_content(session: AsyncSession, *, tenant_id: uuid.UUID, sha256: s
     )
 
 
-async def suites_using_blob(
+async def blob_uses(
     session: AsyncSession, *, tenant_id: uuid.UUID, sha256: str
-) -> set[uuid.UUID]:
-    """Suites whose cases or runs reference a blob."""
+) -> list[tuple[uuid.UUID, str | None]]:
+    """Each suite whose case revisions or run items reference a blob, with how scrubbed that
+    revision or run is."""
     cases = (
-        select(EvalCase.suite_id)
+        select(EvalCase.suite_id, EvalCaseRevision.scrub_status)
         .join(EvalCaseRevision, EvalCaseRevision.case_id == EvalCase.id)
         .where(
             EvalCaseRevision.tenant_id == tenant_id, EvalCaseRevision.blob_shas.contains([sha256])
         )
     )
     runs = (
-        select(EvalRun.suite_id)
+        select(EvalRun.suite_id, EvalRun.scrub_status)
         .join(EvalRunItem, EvalRunItem.run_id == EvalRun.id)
         .where(EvalRunItem.tenant_id == tenant_id, EvalRunItem.blob_shas.contains([sha256]))
     )
+    return list((await session.execute(cases.union(runs))).tuples())
+
+
+async def suite_blobs(session: AsyncSession, *, suite_id: uuid.UUID) -> set[str]:
+    """Every blob the suite's case revisions or run items reference."""
+    cases = (
+        select(func.unnest(EvalCaseRevision.blob_shas))
+        .join(EvalCase, EvalCase.id == EvalCaseRevision.case_id)
+        .where(EvalCase.suite_id == suite_id)
+    )
+    runs = (
+        select(func.unnest(EvalRunItem.blob_shas))
+        .join(EvalRun, EvalRun.id == EvalRunItem.run_id)
+        .where(EvalRun.suite_id == suite_id)
+    )
     return set(await session.scalars(cases.union(runs)))
-
-
-async def exported_by(session: AsyncSession, *, tenant_id: uuid.UUID, sha256: str) -> set[str]:
-    """Who exported the bundle stored as this blob."""
-    rows = await session.scalars(
-        select(EvalBundle.actor_key).where(
-            EvalBundle.tenant_id == tenant_id, EvalBundle.blob_sha256 == sha256,
-            EvalBundle.direction == "export",
-        )
-    )  # fmt: skip
-    return set(rows)
 
 
 async def record_bundle(
@@ -423,16 +473,30 @@ async def record_bundle(
     direction: str,
     manifest: Document,
     actor_key: str,
-    blob_sha256: str | None = None,
+    signature: str | None,
 ) -> None:
     session.add(
         EvalBundle(
             tenant_id=tenant_id, direction=direction, key=str(manifest["id"]), manifest=manifest,
             actor_key=actor_key, scrub_status=str(_get(manifest, "scrub", "status")),
-            blob_sha256=blob_sha256,
+            signature=signature,
         )
     )  # fmt: skip
     await session.flush()
+
+
+async def instance_secret(session: AsyncSession, *, tenant_id: uuid.UUID) -> str:
+    """The workspace's random secret behind its bundle source name and people labels."""
+    await session.execute(
+        insert(EvalInstance)
+        .values(tenant_id=tenant_id, secret=secrets.token_hex(32))
+        .on_conflict_do_nothing(index_elements=[EvalInstance.tenant_id])
+    )
+    found = await session.scalar(
+        select(EvalInstance.secret).where(EvalInstance.tenant_id == tenant_id)
+    )
+    assert found is not None
+    return found
 
 
 def _get(document: Document, *path: str) -> JsonValue:
@@ -502,14 +566,17 @@ async def add_run(
     items: Sequence[tuple[Document, Iterable[str]]],
     scores: Sequence[Document],
     reviews: Sequence[Document],
+    scrub_status: str,
     created_by: str | None,
+    signature: str | None = None,
 ) -> uuid.UUID:
-    """Store a whole run as a bundle carries it; items come with the blobs they reference."""
+    """Store a whole run as a bundle carries it; items come with the blobs they reference.
+    `scrub_status` is the worst of the run's content and the suite version it ran."""
     suite_pin = _get(document, "suite", "version")
     run = EvalRun(
         tenant_id=tenant_id, key=document["id"], suite_id=suite_id, suite_version=suite_pin,
         status=document["status"], origin=str(_get(document, "origin", "kind")), document=document,
-        created_by=created_by,
+        scrub_status=scrub_status, signature=signature, created_by=created_by,
     )  # fmt: skip
     session.add(run)
     await session.flush()

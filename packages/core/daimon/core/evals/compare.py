@@ -1,15 +1,13 @@
-"""Side-by-side comparison of a run's arms, case by case; blind for reviewer-only readers."""
+"""Side-by-side comparison of a run's arms, case by case; blind for reviewers."""
 
 from __future__ import annotations
 
 import random
 from collections import defaultdict
-from collections.abc import Sequence
-from hashlib import sha256
+from collections.abc import Mapping, Sequence
 from typing import Final
 
-from daimon.core.evals.blind import arm_names, mask_text, neutral_labels
-from daimon.core.evals.blind import handle as blind_handle
+from daimon.core.evals.blind import arm_labels, arm_names, handle, mask_text
 from daimon.core.evals.format import Case, Run, RunItem, Score
 from daimon.core.evals.scoring.checks import bot_messages
 from daimon.core.evals.scoring.summary import outcome
@@ -33,9 +31,9 @@ class ScoreLine(_Out):
 
 class CompareColumn(_Out):
     label: str
-    """The arm's label, or a neutral letter when blind."""
+    """The arm's label, or its neutral label when blind."""
     item_id: str
-    """The item's id, or an opaque handle when blind."""
+    """The item's id, or its opaque id (what the item view takes) when blind."""
     status: str
     passed: bool | None
     rubric: float | None
@@ -47,6 +45,7 @@ class CompareRow(_Out):
     case_id: str
     title: str
     repeat: int
+    """0 when blind: a repeat index tells live arms from recorded ones."""
     columns: list[CompareColumn]
 
 
@@ -62,21 +61,17 @@ def _reply(case: Case | None, item: RunItem, names: frozenset[str] | None) -> st
     return mask_text(text, names) if text and names is not None else text
 
 
-def _lines(scores: Sequence[Score], names: frozenset[str] | None) -> list[ScoreLine]:
+def _lines(scores: Sequence[Score]) -> list[ScoreLine]:
     replaced = {s.supersedes for s in scores if s.supersedes}
-    found: list[ScoreLine] = []
-    for s in scores:
-        if s.id in replaced:
-            continue
-        why = s.rationale if s.grader.kind not in _NO_RATIONALE else None
-        found.append(
-            ScoreLine(
-                criterion=s.criterion, grader=s.grader.kind, passed=s.value.pass_,
-                score=s.value.score, unknown=bool(s.value.unknown),
-                rationale=mask_text(why, names) if why and names is not None else why,
-            )
-        )  # fmt: skip
-    return found
+    return [
+        ScoreLine(
+            criterion=s.criterion, grader=s.grader.kind, passed=s.value.pass_,
+            score=s.value.score, unknown=bool(s.value.unknown),
+            rationale=s.rationale if s.grader.kind not in _NO_RATIONALE else None,
+        )
+        for s in scores
+        if s.id not in replaced
+    ]  # fmt: skip
 
 
 def build_comparison(
@@ -86,18 +81,21 @@ def build_comparison(
     cases: Sequence[Case],
     *,
     blind: bool,
-    arm_ids: Sequence[str] | None = None,
-    salt: str | None = None,
+    arms: Sequence[str] | None = None,
+    item_ids: Mapping[str, str] | None = None,
 ) -> Comparison:
-    """One row per case and repeat, one column per arm that has an item for it.
+    """One row per case and repeat, one column per arm that has an item for it. `arms` picks
+    arms by id, or by neutral label when blind.
 
-    Blind: columns carry neutral letters and opaque item handles, replies and rationales have
-    model names masked, and each row's column order is a fixed random shuffle of the salt and
-    the row, so position never tells the arm.
+    Blind: columns carry the arms' neutral labels and the items' opaque ids (`item_ids`),
+    replies have model names masked, scores are left out, only repeats every chosen arm has
+    are shown, and each row's column order is a fixed shuffle, so position never tells the arm.
     """
-    salt = salt or run.id
     names = arm_names(run) if blind else None
-    labels = neutral_labels([a.id for a in run.arms], salt, run.blind_labels)
+    labels = arm_labels(run)
+    chosen = {a.id for a in run.arms}
+    if arms is not None:
+        chosen = {a for a in chosen if (labels[a] if blind else a) in arms}
     arm_label = {a.id: a.label for a in run.arms}
     case_by_id = {c.id: c for c in cases}
     judges = {j.id: j for j in run.judges or []}
@@ -107,37 +105,36 @@ def build_comparison(
             by_item[s.item_id].append(s)
     groups: dict[tuple[str, int], list[RunItem]] = defaultdict(list)
     for item in items:
-        if item.status in ("done", "error") and (arm_ids is None or item.arm_id in arm_ids):
+        if item.status in ("done", "error") and item.arm_id in chosen:
             groups[(item.case.id, item.repeat)].append(item)
     rows: list[CompareRow] = []
     for (case_id, repeat), group in sorted(groups.items()):
+        if blind and {i.arm_id for i in group} != chosen:
+            continue
         group.sort(key=lambda i: i.arm_id)
         if blind:
-            seed = int(sha256(f"{salt}|{case_id}|{repeat}".encode()).hexdigest(), 16)
+            seed = int(handle(run.id, f"{case_id}|{repeat}")[2:], 16)
             random.Random(seed).shuffle(group)
         case = case_by_id.get(case_id)
         columns: list[CompareColumn] = []
         for item in group:
             own = by_item.get(item.id, [])
             result = outcome(item, case, own, judges)
-            label = labels.get(item.arm_id, "arm") if blind else arm_label.get(item.arm_id, "")
             columns.append(
                 CompareColumn(
-                    label=label,
-                    item_id=blind_handle(salt, item.id) if blind else item.id,
+                    label=labels[item.arm_id] if blind else arm_label.get(item.arm_id, ""),
+                    item_id=(item_ids or {}).get(item.id, "") if blind else item.id,
                     status=item.status,
-                    passed=result.passed,
-                    rubric=result.rubric,
+                    passed=None if blind else result.passed,
+                    rubric=None if blind else result.rubric,
                     reply=_reply(case, item, names),
-                    scores=_lines(own, names),
-                )  # fmt: skip
-            )
+                    scores=[] if blind else _lines(own),
+                )
+            )  # fmt: skip
         rows.append(
             CompareRow(
-                case_id=case_id,
-                title=case.title if case else case_id,
-                repeat=repeat,
-                columns=columns,
+                case_id=case_id, title=case.title if case else case_id,
+                repeat=0 if blind else repeat, columns=columns,
             )
-        )
-    return Comparison(run_id=run.id if not blind else "run", blind=blind, rows=rows)
+        )  # fmt: skip
+    return Comparison(run_id=run.id, blind=blind, rows=rows)
