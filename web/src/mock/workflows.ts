@@ -1,10 +1,10 @@
 // Workflows: live specs, one draft each, versions and runs. Validation runs the same spec logic as the canvas.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import { allEdges, clone, diff, finishDeliver, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
+import { allEdges, clone, diff, finishDeliver, insertNode, safety, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
 import { ACTIVE_RUN, project } from "@/modules/workflows/runs"
 import type {
-  AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Node as SpecNode, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
+  AttentionItem, Catalog, Draft, DraftPut, Grant, NewWorkflow, Node as SpecNode, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
   Platform, WorkflowPatch, WorkflowSummary,
 } from "@/modules/workflows/types"
 import { fromYaml, toYaml } from "@/modules/workflows/yaml"
@@ -94,8 +94,16 @@ export const W: Stored[] = [
   { id: "wf_renewal", status: "needs_owner", owner: P.alex!, live: SPECS.renewal, version: 3, draft: null, ticks: "ssssssssss", spend: 3.1, next_h: 20, editors: [], runners: [] },
 ]
 
+const gkey = (g: Grant) => `${g.kind}|${g.node ?? ""}|${g.detail}`
+/** Grants the draft needs that the live version did not already hold, as the server computes them. */
+export function newGrants(live: Spec | null, next: Spec): Grant[] {
+  const held = new Set((live ? safety(live).grants : []).map(gkey))
+  return safety(next).grants.filter((g) => !held.has(gkey(g)))
+}
+
 export const mkDraft = (w: Stored, spec: Spec, revision: number, by: Person = w.owner, h = 2): Draft => ({
-  revision, base_version: w.version, spec, changes: diff(w.live, spec), validation: validate(spec), updated_at: ago(h), updated_by: by,
+  revision, base_version: w.version, spec, changes: diff(w.live, spec), validation: validate(spec),
+  new_grants: newGrants(w.live, spec), updated_at: ago(h), updated_by: by,
 })
 
 // Inbound lead: research instructions changed, a deal note added after send (a typo in its note reference), spam tagging with no next step.

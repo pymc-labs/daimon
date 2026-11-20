@@ -113,7 +113,8 @@ export type Validation = { errors: Problem[]; warnings: Problem[]; grants: Grant
 export type Change = { node: string | null; field?: string; effect: "added" | "changed" | "removed" }
 export type Draft = {
   revision: number; base_version: number | null; spec: Spec; changes: Change[]; validation: Validation
-  updated_at: string; updated_by: Person
+  /** Grants the live version does not hold; publishing them waits on an admin. */
+  new_grants: Grant[]; updated_at: string; updated_by: Person
 }
 export type DraftPut = { base_revision: number; spec: Spec }
 

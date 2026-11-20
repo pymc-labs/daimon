@@ -1,7 +1,6 @@
 // Publish and approval: requests for grants, the inbox, and versions you can open, compare and restore.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import { newGrants } from "@/modules/workflows/review"
 import { project } from "@/modules/workflows/runs"
 import { clone } from "@/modules/workflows/spec"
 import type {
@@ -170,7 +169,7 @@ export const workflowsInboxHandlers: HttpHandler[] = [
     if (!w?.draft) return notFound()
     if (w.draft.validation.errors.length) return HttpResponse.json({ detail: "Fix the problems first." }, { status: 422 })
     const { note } = (await request.json().catch(() => ({ note: "" }))) as { note: string }
-    if (newGrants(w.live, w.draft.spec).length && me()!.role !== "admin") return forbidden("New grants need an admin. Request approval instead.")
+    if (w.draft.new_grants.length && me()!.role !== "admin") return forbidden("New grants need an admin. Request approval instead.")
     publishNow(w, w.draft.spec, who(), note, null)
     return HttpResponse.json(detail(w))
   }),
@@ -180,7 +179,7 @@ export const workflowsInboxHandlers: HttpHandler[] = [
     if (!w?.draft) return notFound()
     if (w.draft.validation.errors.length) return HttpResponse.json({ detail: "Fix the problems first." }, { status: 422 })
     const { note } = (await request.json().catch(() => ({ note: "" }))) as { note: string }
-    requests.add({ workflow: { id: w.id, name: w.draft.spec.name }, version: (w.version ?? 0) + 1, note, by: who(), revision: w.draft.revision, grants: newGrants(w.live, w.draft.spec), spec: clone(w.draft.spec) })
+    requests.add({ workflow: { id: w.id, name: w.draft.spec.name }, version: (w.version ?? 0) + 1, note, by: who(), revision: w.draft.revision, grants: w.draft.new_grants, spec: clone(w.draft.spec) })
     return HttpResponse.json(detail(w), { status: 201 })
   }),
   http.get("/api/workflows/inbox", async () => {

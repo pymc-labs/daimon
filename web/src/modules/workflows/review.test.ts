@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import { SPECS } from "@/mock/workflows-specs"
-import { lineDiff, newGrants, reviewDiff, reviewCount, trimContext } from "./review"
+import { newGrants } from "@/mock/workflows"
+import { lineDiff, reviewDiff, reviewCount, trimContext } from "./review"
 import { clone } from "./spec"
 
 describe("lineDiff", () => {

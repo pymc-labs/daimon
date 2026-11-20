@@ -1,6 +1,6 @@
 // What a publish changes: per-node diffs, triggers, access and the grants a version needs.
-import { safety, titleOf } from "./spec"
-import type { Grant, Kind, Node, Spec, Trigger, TriggerKind } from "./types"
+import { titleOf } from "./spec"
+import type { Kind, Node, Spec, Trigger, TriggerKind } from "./types"
 
 export type Effect = "added" | "changed" | "removed"
 /** One labelled value that differs; null on a side means it is absent there. */
@@ -101,10 +101,3 @@ export function reviewDiff(live: Spec | null, next: Spec, opts: ReviewOpts = {})
 }
 
 export const reviewCount = (r: Review) => r.workflow.length + r.nodes.length + r.triggers.length + r.access.length
-
-const gkey = (g: Grant) => `${g.kind}|${g.node ?? ""}|${g.detail}`
-/** Grants the draft needs that the live version did not already hold; only these need an admin. */
-export function newGrants(live: Spec | null, next: Spec): Grant[] {
-  const held = new Set((live ? safety(live).grants : []).map(gkey))
-  return safety(next).grants.filter((g) => !held.has(gkey(g)))
-}

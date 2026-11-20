@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { useCatalog, usePublish, useRequestPublish } from "./api"
 import { EFFECT, GRANT, KIND, TRIGGER } from "./kinds"
-import { newGrants, reviewCount, reviewDiff, type FieldChange, type Line, type Review } from "./review"
+import { reviewCount, reviewDiff, type FieldChange, type Line, type Review } from "./review"
 import { titleOf } from "./spec"
 import type { Draft, Problem, Workflow } from "./types"
 
@@ -103,7 +103,7 @@ export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: 
   const { data: catalog } = useCatalog()
   const live = wf.live_version ? wf.spec : null
   const r = useMemo(() => reviewDiff(live, draft.spec, { channel: (id) => `#${catalog?.channels.find((c) => c.id === id)?.name ?? id}` }), [live, draft.spec, catalog])
-  const grants = useMemo(() => newGrants(live, draft.spec), [live, draft.spec])
+  const grants = draft.new_grants
   const errors = draft.validation.errors
   const next = (wf.live_version ?? 0) + 1
   return (
@@ -145,8 +145,7 @@ export function ReviewDialog({ wf, draft, open, onOpenChange }: { wf: Workflow; 
   const [note, setNote] = useState("")
   const publish = usePublish(wf.id)
   const request = useRequestPublish(wf.id)
-  const live = wf.live_version ? wf.spec : null
-  const needs = useMemo(() => newGrants(live, draft.spec).length > 0 && !wf.is_admin, [live, draft.spec, wf.is_admin])
+  const needs = draft.new_grants.length > 0 && !wf.is_admin
   const errors = draft.validation.errors
   const act = needs ? request : publish
   const done = { onSuccess: () => onOpenChange(false) }

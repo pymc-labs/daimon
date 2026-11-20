@@ -179,6 +179,7 @@ export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefine
 
   const local = (spec: Spec): Draft => ({
     revision: rev.current ?? 0, base_version: wf?.live_version ?? null, spec, changes: diff(live, spec), validation: validate(spec),
+    new_grants: draft?.new_grants ?? [],
     updated_at: new Date().toISOString(), updated_by: draft?.updated_by ?? { id: "", name: "" },
   })
   const flush = () => {

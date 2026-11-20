@@ -65,6 +65,9 @@ const DUR: Record<Node["kind"], number> = {
 }
 const agentOf = (spec: Spec, n: Node) => n.agent ?? spec.defaults?.agent ?? "daimon"
 export const agentName = (key: string) => CATALOG.agents.find((a) => a.key === key)?.name ?? key
+/** A webhook body or a typed form is untrusted; the publisher's grants never vouch for either. */
+const untrustedRun = (run: Run) => run.trigger?.kind === "webhook" || run.trigger?.kind === "manual"
+
 function durMs(s?: string) {
   const m = s?.match(/^(\d+)\s*([smhd])$/)
   return m ? Number(m[1]) * { s: S, m: M, h: H, d: 24 * H }[m[2] as "s"] : null
@@ -406,7 +409,7 @@ export function detailOf(run: Run, now = Date.now()): RunDetail {
   const sum = summaryOf(run, now)
   const deadline = durMs(run.spec.limits?.deadline)
   return {
-    ...sum, ...project(ev), spec: run.spec, inputs: run.inputs, untrusted_inputs: run.trigger.kind === "webhook", parent: run.parent,
+    ...sum, ...project(ev), spec: run.spec, inputs: run.inputs, untrusted_inputs: untrustedRun(run), parent: run.parent,
     delivery: run.delivery, test_options: run.test, budget_usd: run.spec.limits?.budget_usd ?? (run.spec.defaults?.budget_usd ?? 1) * Math.max(agents, 1),
     deadline_at: deadline ? iso(ms(sum.started_at) + deadline) : null, events: ev.length, head_hash: ev.at(-1)?.hash ?? GENESIS,
   }
@@ -470,7 +473,7 @@ export function stepDetail(run: Run, key: string, attempt: number | null, now = 
   const mine = ev.filter((e) => e.step === key)
   const exprs = n.kind === "agent" ? n.inputs ?? {} : n.kind === "action" ? n.args ?? {} : {}
   const input = Object.fromEntries(Object.entries(exprs).map(([k, e]) => [k, resolve(run, e, st.item?.label)]))
-  const untrusted = !run.trigger || run.trigger.kind !== "webhook" ? [] : Object.entries(exprs).flatMap(([k, e]) =>
+  const untrusted = !untrustedRun(run) ? [] : Object.entries(exprs).flatMap(([k, e]) =>
     /^\$\{\{\s*inputs\s*\}\}$/.test(e) ? Object.keys(run.inputs).map((f) => `input.${k}.${f}`) : /inputs\./.test(e) ? [`input.${k}`] : [])
   const done = st.status === "succeeded" && (!a || a.status === "succeeded")
   const skipped = mine.find((e) => e.type === "step.succeeded" && "skipped_with" in e.data)
