@@ -19,7 +19,7 @@ from daimon.core.workflows.spec import AgentNode, SchemaField, Spec
 from pydantic import JsonValue
 
 NUDGE: Final = (
-    "You ended your turn without finishing the workflow step. Call complete_step with your"
+    "You stopped without finishing the workflow step. Call complete_step with your"
     " output, or fail_step with a reason."
 )
 

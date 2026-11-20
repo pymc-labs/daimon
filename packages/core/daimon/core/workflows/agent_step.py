@@ -314,7 +314,7 @@ class AgentStepExecutor:
         if result is None:
             return engine.Failed(
                 "contract",
-                "The agent ended its turn without calling complete_step or fail_step",
+                "The agent stopped without calling complete_step or fail_step",
                 reason="no_result",
             )
         return step_tools.outcome(result)

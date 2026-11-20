@@ -36,7 +36,7 @@ REJECTED: Final = "step.contract_rejected"
 FailKind = Literal["missing_tool", "missing_data", "blocked", "other"]
 Result = Literal["complete", "fail", "finish_early"]
 _GONE: Final = "This workflow step is not running any more."
-_DONE: Final = "Recorded. End your turn now."
+_DONE: Final = "Recorded. Stop here: the step is done."
 
 
 class StepRefused(Exception):
@@ -116,7 +116,7 @@ async def recorded(
 
 async def _record(session: AsyncSession, g: Grant, now: datetime, **data: JsonValue) -> None:
     if await recorded(session, run_id=g.run.id, key=g.key, attempt_id=g.attempt.id):
-        raise StepRefused("This step already has a result. End your turn now.")
+        raise StepRefused("This step already has a result. Stop here.")
     await append_events(
         session,
         run_id=g.run.id,

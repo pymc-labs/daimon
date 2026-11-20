@@ -56,7 +56,7 @@ async def test_complete_step_records_for_the_owner_and_refuses_others(
         await call(output={"count": 1})
     who["account"] = world.owner
     assert (await call(output={"count": "x"})).startswith("Not recorded"), "errors come back"
-    assert await call(output={"count": 1}) == "Recorded. End your turn now."
+    assert await call(output={"count": 1}) == "Recorded. Stop here: the step is done."
     with pytest.raises(ToolError, match="already has a result"):
         await call(output={"count": 2})
     async with world.sm() as s:
