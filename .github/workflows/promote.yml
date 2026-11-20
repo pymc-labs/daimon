@@ -132,9 +132,11 @@ jobs:
       source_registry: ${{ needs.validate.outputs.registry }}
 
   # A real turn per backend right after the deploy; a failed canary turns the promote red.
+  # Off until the production-canary environment is set up (canary.yml).
   verify:
     name: Production canary
     needs: deploy
+    if: vars.PRODUCTION_CANARY == 'true'
     permissions:
       contents: read
       id-token: write

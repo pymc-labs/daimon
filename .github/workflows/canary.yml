@@ -14,11 +14,20 @@ name: Canary
 # read the QA bot token and write logs, nothing else, so production is judged
 # by the reply alone. Those grants live in the operator's cloud configuration,
 # outside this repository.
+#
+# The production leg runs only once the repository variable PRODUCTION_CANARY is
+# `true`, so GitHub never creates `production-canary` unprotected. A leg whose
+# environment lacks any of those variables is skipped with a warning, not a page.
 on:
   schedule:
     - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
+      environment:
+        description: "Environment to run in (production-canary needs PRODUCTION_CANARY)"
+        type: choice
+        options: [staging, production-canary]
+        default: staging
       force_fail:
         description: "Judge against a 0 s limit so every backend fails and the alert fires"
         type: boolean
@@ -41,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: ${{ fromJSON(inputs.environments || '["staging", "production-canary"]') }}
+        environment: ${{ fromJSON(inputs.environments || ((inputs.environment == 'staging' || vars.PRODUCTION_CANARY != 'true') && '["staging"]') || (inputs.environment && format('["{0}"]', inputs.environment)) || '["staging", "production-canary"]') }}
     environment: ${{ matrix.environment }}
     # One run per environment at a time; a promote's canary queues apart from
     # the hourly one (github.workflow is the caller's), so neither cancels the other.
@@ -52,18 +61,30 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Check the environment is set up
+        id: ready
+        env:
+          SET_UP: ${{ vars.GCP_PROJECT_ID && vars.GCP_WIF_PROVIDER && vars.GCP_DEPLOY_SA && vars.CANARY_BOT_ID && vars.CANARY_CHANNELS && 'true' || '' }}
+        run: |
+          if [ -n "$SET_UP" ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "::warning::${{ matrix.environment }} lacks a GCP_* or CANARY_* variable; canary skipped."
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: steps.ready.outputs.ready == 'true'
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: steps.ready.outputs.ready == 'true'
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SA }}
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: steps.ready.outputs.ready == 'true'
         with:
           skip_install: true
 
       - name: One turn per backend
+        if: steps.ready.outputs.ready == 'true'
         env:
           CANARY_PROJECT: ${{ vars.GCP_PROJECT_ID }}
           CANARY_ZONE: ${{ vars.GCP_ZONE }}
@@ -79,7 +100,7 @@ jobs:
       # The script reports each backend itself; this catches a run that died
       # before it could (or whose own log write failed), so the alert still fires.
       - name: Alert on a run that could not report
-        if: failure()
+        if: failure() && steps.ready.outputs.ready == 'true'
         env:
           ENVIRONMENT: ${{ matrix.environment }}
           PROJECT: ${{ vars.GCP_PROJECT_ID }}

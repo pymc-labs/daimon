@@ -347,8 +347,15 @@ def test_every_promote_ends_with_a_production_canary_judged_by_the_reply() -> No
     assert verify["needs"] == "deploy"
     assert verify["uses"] == "./.github/workflows/canary.yml"
     assert verify["with"]["environments"] == '["production-canary"]'
+    # GitHub would create a missing environment with no branch policy.
+    assert verify["if"] == "vars.PRODUCTION_CANARY == 'true'"
     job = _workflow("canary.yml")["jobs"]["canary"]
     assert job["environment"] == "${{ matrix.environment }}", "auth comes from the environment"
+    assert "vars.PRODUCTION_CANARY != 'true'" in job["strategy"]["matrix"]["environment"]
+    for step in job["steps"][1:]:
+        assert "steps.ready.outputs.ready == 'true'" in step["if"], (
+            f"{step.get('name') or step['uses']}: a leg without its variables must skip, not page"
+        )
     run = next(step for step in job["steps"] if step.get("name") == "One turn per backend")
     assert run["env"]["NO_OUTCOMES"] == (
         "${{ matrix.environment != 'staging' && '--no-outcomes' || '' }}"
