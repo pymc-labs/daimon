@@ -401,6 +401,7 @@ def _engine(model: str) -> object | None:
         from presidio_analyzer.nlp_engine.ner_model_configuration import (
             MODEL_TO_PRESIDIO_ENTITY_MAPPING,
         )
+        from spacy.language import Language
 
         provider = NlpEngineProvider(
             nlp_configuration={
@@ -415,7 +416,16 @@ def _engine(model: str) -> object | None:
                 },
             }
         )
-        return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
+        nlp_engine = provider.create_engine()
+        nlp = getattr(nlp_engine, "nlp", {}).get("en")
+        assert isinstance(nlp, Language)
+        # Only names are read: every other pipe (parser, tagger...) unless NER reads its output.
+        for name in nlp.pipe_names:
+            if name != "ner" and "ner" not in getattr(
+                nlp.get_pipe(name), "listening_components", ()
+            ):
+                nlp.disable_pipe(name)
+        return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
     except (ImportError, OSError, ValueError):
         return None
 

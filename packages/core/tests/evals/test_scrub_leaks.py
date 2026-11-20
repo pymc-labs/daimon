@@ -267,9 +267,21 @@ def test_fakes_when_dictionary_is_large_then_readable() -> None:
 def test_sweep_when_ner_widens_a_fake_then_clean_unless_a_real_word_joins() -> None:
     scrubber = _scrubber()
     fake = adapt("AcmeCorp", scrubber.fakes.fake("company", "Acme Corp"))
-    scrubber.detector = Detector([], _Names(f"{fake} Team", f"{fake} Johnson"))
+    scrubber.detector = Detector(
+        [], _Names(f"{fake} Team", f"{fake}_weekly_report", f"{fake} Johnson")
+    )
     assert scrubber.residue(f"{fake} Team") == {}
+    assert scrubber.residue(f"{fake}_weekly_report") == {}, "lowercase words are no name"
     assert scrubber.residue(f"{fake} Johnson") == {"person": 1}
+
+
+def test_text_when_a_fake_lets_ner_find_a_name_beside_it_then_replaced() -> None:
+    scrubber = _scrubber()
+    fake = scrubber.fakes.fake("person", "Dana")
+    scrubber.detector = Detector([], _Names("Dana", f"{fake} and Kim"))
+    out = scrubber.text("Thanks Dana and Kim.")
+    assert "Kim" not in out and fake not in out
+    assert scrubber.residue(out) == {}
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ from daimon.core.evals.scrub.detect import (
     Hit,
     Ner,
     TermIndex,
+    common_words,
     fold,
     namey,
 )
@@ -69,6 +70,7 @@ _BESIDE_FAKE: Final = frozenset(
     {"the", "of", "and", "team", "group", "inc", "llc", "ltd", "corp", "co", "company", "labs",
      "mr", "mrs", "ms", "dr", "prof", "sir", "jr", "sr"}
 )  # fmt: skip
+_WORD: Final = re.compile(r"[^\W\d_]{2,}")
 _INLINE_B64: Final = re.compile(r"(?<![\w+/-])[A-Za-z0-9+/_-]{12,}={0,2}(?![\w+/=-])")
 # Keys whose short values name a person, an account, a company or a project.
 _IDENTITY: Final = {
@@ -271,6 +273,7 @@ class Scrubber:
         self._fake_cache: tuple[int, set[str]] = (0, set())
         self._fake_index = TermIndex()
         self._indexed = 0
+        self._fake_words: set[str] = set()
         self._ids: dict[str, str] = {}
 
     @property
@@ -361,13 +364,14 @@ class Scrubber:
         values = self.fakes.values()
         for value in values[self._indexed :]:
             self._fake_index.add(Term("phrase", value))
+            self._fake_words.update(w.casefold() for w in _WORD.findall(value))
         self._indexed = len(values)
         view = fold(text)
         return [view.span(s, e) for s, e, _ in self._fake_index.find(view.text)]
 
     def _own(self, text: str, hit: Hit, fakes: list[tuple[int, int]]) -> bool:
         """Whether a hit in scrubbed text is ours: a fake, or a name the NER widened from one by
-        a title or a word like "Team"."""
+        words no name is written in (a title, "Team", a fake's word, a lowercase word)."""
         if _in_marker(text, hit):
             return True
         matched = text[hit.start : hit.end]
@@ -385,7 +389,14 @@ class Scrubber:
         left = "".join(rest)
         if hit.kind not in _SHAPED:
             return not re.search(r"[^\W_]", left)
-        return all(w.casefold() in _BESIDE_FAKE for w in re.findall(r"[^\W\d_]{2,}", left))
+        return all(self._beside(w) for w in _WORD.findall(left))
+
+    def _beside(self, word: str) -> bool:
+        folded = word.casefold()
+        return (
+            word.islower() or folded in _BESIDE_FAKE or folded in self._fake_words
+            or folded in common_words()
+        )  # fmt: skip
 
     # ---------- text ----------
 
@@ -410,11 +421,21 @@ class Scrubber:
 
     def text(self, text: str, *, names: bool = True, words: bool = True) -> str:
         text = _INLINE_B64.sub(self._b64_word, text)
+        done = self._replace(text, names=names, words=words, own=None)
+        if names and done != text:
+            # A fake changes the context NER reads: a name it finds next to one is replaced too.
+            done = self._replace(done, names=names, words=words, own=self._fake_spans(done))
+        return done
+
+    def _replace(
+        self, text: str, *, names: bool, words: bool, own: list[tuple[int, int]] | None
+    ) -> str:
+        """`text` with its hits replaced; `own` holds the fake spans of already-scrubbed text."""
         out: list[str] = []
         pos = 0
         for hit in self.detector.find(text, names=names, words=words):
             matched = text[hit.start : hit.end]
-            if self._keep(text, hit):
+            if self._keep(text, hit) if own is None else self._own(text, hit, own):
                 continue
             out += [text[pos : hit.start], self._replacement(matched, hit)]
             self.counts[hit.kind] += 1
