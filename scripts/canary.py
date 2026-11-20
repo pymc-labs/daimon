@@ -1,19 +1,23 @@
-"""Hourly staging canary: one tiny real turn per staging backend, judged by its outcome row.
+"""Hourly canary: one tiny real turn per backend, judged by its reply and outcome row.
 
 For each backend, the QA bot asks Daimon "Reply with the single word: done" in that
-backend's staging QA channel, waits for the answer, then reads the turn's outcome row
-from the staging database over IAP. A backend passes when Daimon answered "done" in
-the thread it opened on the question, and that thread's single outcome row ended
-`completed`, both in under `--limit` seconds. Every result is written to Cloud Logging as
-`daimon-canary` (ERROR when it failed), which the staging alert policy
-"staging-daimon: canary turn failed" watches. Exit status 1 if any backend failed.
+backend's QA channel and waits for the answer. A backend passes when Daimon answered
+"done" in the thread it opened on the question in under `--limit` seconds and, unless
+`--no-outcomes`, that thread's single outcome row (read from the database in the
+workers VM over IAP) ended `completed` in under `--limit` too. Every result is written
+to Cloud Logging as `daimon-canary` (ERROR when it failed), which an alert policy in
+the project watches. Exit status 1 if any backend failed.
 
-Staging only: the project, channels and VM are staging's, and the QA bot token is
-read from staging Secret Manager. Uses only the standard library and `gcloud`.
+The environment names the deployment, so no cloud or Discord id lives here:
+`CANARY_PROJECT` (its Secret Manager holds DISCORD_QA_BOT_TOKEN), `CANARY_BOT_ID`
+(Daimon's Discord user), `CANARY_CHANNELS` (JSON, backend to QA channel id), and for
+the outcome read `CANARY_ZONE` and `CANARY_WORKERS_VM`. Uses only the standard
+library and `gcloud`.
 
-    python3 scripts/staging_canary.py                    # every backend
-    python3 scripts/staging_canary.py --backend gemini   # one
-    python3 scripts/staging_canary.py --force-fail       # proves the alert path
+    python3 scripts/canary.py                    # every backend
+    python3 scripts/canary.py --backend gemini   # one
+    python3 scripts/canary.py --no-outcomes      # judge by the reply alone, no VM access
+    python3 scripts/canary.py --force-fail       # proves the alert path
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
@@ -30,20 +35,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
-PROJECT = "pymc-daimon-staging"
-ZONE = "us-east4-c"
-WORKERS_VM = "staging-daimon-workers"
-DAIMON_BOT = "1530628070405308456"
+PROJECT = os.environ.get("CANARY_PROJECT", "")
+ZONE = os.environ.get("CANARY_ZONE", "")
+WORKERS_VM = os.environ.get("CANARY_WORKERS_VM", "")
+DAIMON_BOT = os.environ.get("CANARY_BOT_ID", "")
 API = "https://discord.com/api/v10"
 PROMPT = "Reply with the single word: done"
 
-CHANNELS = {
-    "anthropic": "1560946913925140613",
-    "openai": "1565273362098290838",
-    "gemini": "1565149447187603607",
-}
-"""Staging QA channels, each bound to one backend's agent (Haiku 5.5, GPT-6 Luna,
-Gemini 3.8 Flash). Selfhosted is not deployed on staging."""
+CHANNELS: dict[str, str] = json.loads(os.environ.get("CANARY_CHANNELS") or "{}")
+"""QA channels, each bound to one backend's agent."""
 
 PROGRESS = ("thinking", "working")
 """Daimon's placeholder lines before the answer settles."""
@@ -91,7 +91,7 @@ class Discord:
             headers={
                 "Authorization": f"Bot {self.token}",
                 "Content-Type": "application/json",
-                "User-Agent": "daimon-staging-canary (1.0)",
+                "User-Agent": "daimon-canary (1.0)",
             },
         )
         for attempt in range(4):
@@ -169,8 +169,8 @@ asyncio.run(main())
 
 
 def outcomes(threads: list[str]) -> list[dict[str, object]]:
-    """The outcome rows of exactly these canary threads, read in the staging Discord
-    worker. Thread ids are Discord snowflakes, checked before they leave."""
+    """The outcome rows of exactly these canary threads, read in the Discord worker.
+    Thread ids are Discord snowflakes, checked before they leave."""
     assert threads and all(t.isdigit() for t in threads)
     code = base64.b64encode(QUERY.format(wanted=json.dumps(threads)).encode()).decode()
     remote = (
@@ -208,8 +208,16 @@ def settle(checks: list[Check], wait_s: float = 60.0) -> list[dict[str, object]]
         time.sleep(10)
 
 
-def judge(check: Check, rows: list[dict[str, object]], limit_s: float) -> None:
+def judge(check: Check, rows: list[dict[str, object]] | None, limit_s: float) -> None:
+    """`rows` is None under `--no-outcomes`: the reply alone decides."""
     if check.problem is not None:
+        return
+    waited_s = check.seconds or 0.0
+    if rows is None:
+        if waited_s < limit_s:
+            check.ok = True
+        else:
+            check.problem = f"the answer took {waited_s:.0f} s, not under {limit_s:.0f} s"
         return
     mine = [row for row in rows if str(row["thread_id"]) == check.thread]
     if len(mine) != 1:
@@ -219,7 +227,6 @@ def judge(check: Check, rows: list[dict[str, object]], limit_s: float) -> None:
     check.reason = str(row["reason"])
     check.cost_usd = None if row["cost_usd"] is None else str(row["cost_usd"])
     duration_s = int(str(row["duration_ms"] or 0)) / 1000
-    waited_s = check.seconds or 0.0
     if row["channel_id"] != check.channel:
         check.problem = "the outcome row names another channel"
     elif check.reason != "completed":
@@ -232,10 +239,10 @@ def judge(check: Check, rows: list[dict[str, object]], limit_s: float) -> None:
         check.ok = True
 
 
-def report(check: Check, run_url: str | None) -> None:
+def report(check: Check, env: str, run_url: str | None) -> None:
     payload = {
         "event": "canary.turn",
-        "env": "staging",
+        "env": env,
         "run_url": run_url,
         **{k: v for k, v in asdict(check).items() if k != "started"},
     }
@@ -250,7 +257,7 @@ def report(check: Check, run_url: str | None) -> None:
     )
 
 
-def run(checks: list[Check], limit: float, wait_s: float) -> None:
+def run(checks: list[Check], limit: float, wait_s: float, read_outcomes: bool) -> None:
     """Every failure lands on a check, so each backend is still reported."""
     try:
         discord = Discord(qa_token())
@@ -269,7 +276,7 @@ def run(checks: list[Check], limit: float, wait_s: float) -> None:
     with ThreadPoolExecutor(len(checks)) as pool:
         list(pool.map(one, checks))
     try:
-        rows = settle(checks)
+        rows = settle(checks) if read_outcomes else None
     except Exception as error:
         for check in checks:
             check.problem = check.problem or f"outcome read failed: {type(error).__name__}"
@@ -283,18 +290,26 @@ def main() -> int:
     parser.add_argument("--backend", action="append", choices=sorted(CHANNELS))
     parser.add_argument("--limit", type=float, default=180.0, help="seconds an answer may take")
     parser.add_argument("--run-url", default=None)
+    parser.add_argument("--env", default="staging", help="the environment named in each log entry")
+    parser.add_argument(
+        "--no-outcomes",
+        action="store_true",
+        help="judge by the reply alone, for a deployment the canary cannot reach over IAP",
+    )
     parser.add_argument(
         "--force-fail",
         action="store_true",
         help="judge against a 0 s limit, so every backend fails and the alert fires",
     )
     args = parser.parse_args()
+    if not (PROJECT and DAIMON_BOT and CHANNELS) or not (args.no_outcomes or ZONE and WORKERS_VM):
+        parser.error("set the CANARY_* environment variables the docstring names")
     checks = [Check(b, CHANNELS[b]) for b in (args.backend or sorted(CHANNELS))]
-    run(checks, 0.0 if args.force_fail else args.limit, args.limit)
+    run(checks, 0.0 if args.force_fail else args.limit, args.limit, not args.no_outcomes)
     reported = True
     for check in checks:
         try:
-            report(check, args.run_url)
+            report(check, args.env, args.run_url)
         except Exception as error:
             print(f"report failed for {check.backend}: {type(error).__name__}", file=sys.stderr)
             reported = False

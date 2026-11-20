@@ -1,13 +1,19 @@
-name: Staging canary
+name: Canary
 
-# One tiny real turn per staging backend every hour (scripts/staging_canary.py).
-# Staging only: there is no production job and no production input. A failed
-# turn writes an ERROR `daimon-canary` log entry, which the staging alert policy
-# "staging-daimon: canary turn failed" watches, and turns this run red.
+# One tiny real turn per backend every hour, in staging and production
+# (scripts/canary.py), and once more right after every promote (promote.yml
+# calls this with production only). A failed turn writes an ERROR
+# `daimon-canary` log entry in that environment's project, which its alert
+# policy watches, and turns this run red.
 #
-# The deploy service account needs secretAccessor on DISCORD_QA_BOT_TOKEN and
-# log writing in the staging project; both grants live in the operator's cloud
-# configuration, outside this repository, like the contract workflow's.
+# Each GitHub Environment supplies its own project, auth and QA ids:
+# GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOY_SA, CANARY_BOT_ID and
+# CANARY_CHANNELS (JSON, backend to QA channel id). Staging authenticates as its
+# deploy service account and also reads each turn's outcome row over IAP.
+# `production-canary` authenticates as a canary-only service account that can
+# read the QA bot token and write logs, nothing else, so production is judged
+# by the reply alone. Those grants live in the operator's cloud configuration,
+# outside this repository.
 on:
   schedule:
     - cron: "17 * * * *"
@@ -17,20 +23,31 @@ on:
         description: "Judge against a 0 s limit so every backend fails and the alert fires"
         type: boolean
         default: false
+  workflow_call:
+    inputs:
+      environments:
+        description: "JSON list of the GitHub Environments to run in"
+        type: string
+        default: '["staging", "production-canary"]'
 
 permissions:
   contents: read
 
-concurrency:
-  group: staging-canary
-  cancel-in-progress: false
-
 jobs:
   canary:
-    name: Canary turn per backend (staging)
+    name: Canary turn per backend (${{ matrix.environment }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: staging
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ${{ fromJSON(inputs.environments || '["staging", "production-canary"]') }}
+    environment: ${{ matrix.environment }}
+    # One run per environment at a time; a promote's canary queues apart from
+    # the hourly one (github.workflow is the caller's), so neither cancels the other.
+    concurrency:
+      group: canary-${{ github.workflow }}-${{ matrix.environment }}
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -48,17 +65,26 @@ jobs:
 
       - name: One turn per backend
         env:
+          CANARY_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          CANARY_ZONE: ${{ vars.GCP_ZONE }}
+          CANARY_WORKERS_VM: ${{ vars.GCP_AR_REPO }}-workers
+          CANARY_BOT_ID: ${{ vars.CANARY_BOT_ID }}
+          CANARY_CHANNELS: ${{ vars.CANARY_CHANNELS }}
+          ENVIRONMENT: ${{ matrix.environment }}
+          NO_OUTCOMES: ${{ matrix.environment != 'staging' && '--no-outcomes' || '' }}
           FORCE_FAIL: ${{ inputs.force_fail && '--force-fail' || '' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 scripts/staging_canary.py --run-url "$RUN_URL" $FORCE_FAIL
+        run: python3 scripts/canary.py --env "$ENVIRONMENT" --run-url "$RUN_URL" $NO_OUTCOMES $FORCE_FAIL
 
       # The script reports each backend itself; this catches a run that died
       # before it could (or whose own log write failed), so the alert still fires.
       - name: Alert on a run that could not report
         if: failure()
         env:
+          ENVIRONMENT: ${{ matrix.environment }}
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           gcloud logging write daimon-canary \
-            "{\"event\": \"canary.turn\", \"env\": \"staging\", \"backend\": \"all\", \"problem\": \"the canary run failed\", \"run_url\": \"$RUN_URL\"}" \
-            --payload-type=json --severity=ERROR --project=pymc-daimon-staging
+            "{\"event\": \"canary.turn\", \"env\": \"$ENVIRONMENT\", \"backend\": \"all\", \"problem\": \"the canary run failed\", \"run_url\": \"$RUN_URL\"}" \
+            --payload-type=json --severity=ERROR --project="$PROJECT"
