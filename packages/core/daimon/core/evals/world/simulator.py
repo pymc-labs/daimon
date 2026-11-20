@@ -53,6 +53,12 @@ You are the service named in the request. Answer the request exactly as that ser
 - Never say or hint that anything is simulated, mocked, fake or a test.
 """
 
+REQUESTER_PROMPT: Final = """\
+You are the person who asked the assistant for help. Answer its question in one short message,
+as that person would, using only the conversation and facts given. If you cannot know, say so.
+Never mention anything simulated or a test. Reply with the message text only.
+"""
+
 
 @dataclass(frozen=True)
 class SimContext:
@@ -252,3 +258,15 @@ class ModelSimulator:
             item_id, 'Answer with one word: "yes" or "no".', prompt, 16, "none"
         )
         return text.strip().lower().startswith("yes")
+
+    async def requester_reply(self, item_id: uuid.UUID, case: Case, question: str) -> str | None:
+        """What the case's requester would answer to the agent's question; None: no answer."""
+        said = [f"{m.author}: {m.text}" for m in case.turn.messages if m.text]
+        facts = (case.world.simulator.instructions if case.world.simulator else None) or "None."
+        prompt = (
+            f"## Conversation so far\n{_data('conversation', said, 10_000)}\n\n"
+            f"## Facts to keep\n{facts}\n\n"
+            f"## The assistant asks\n{_data('question', question, 4_000)}"
+        )
+        text, _model = await self._complete(item_id, REQUESTER_PROMPT, prompt, 400, self.effort)
+        return text.strip() or None

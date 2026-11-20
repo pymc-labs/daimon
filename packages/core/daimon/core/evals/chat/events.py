@@ -97,10 +97,12 @@ def _action(label: str) -> Literal["approve", "deny", "skip", "save", "custom"]:
     return "custom"
 
 
-def answered(card: NeutralCard, button: CardButton | None, by: str) -> NeutralCard:
+def answered(
+    card: NeutralCard, button: CardButton | None, by: str, fields: dict[str, str] | None = None
+) -> NeutralCard:
     """The card after `by` pressed `button`; no button: it expired."""
     if button is None:
         return card.model_copy(update={"state": "expired"})
     return card.model_copy(
-        update={"state": "answered", "answer": CardAnswer(by=by, button=button.id)}
+        update={"state": "answered", "answer": CardAnswer(by=by, button=button.id, fields=fields)}
     )
