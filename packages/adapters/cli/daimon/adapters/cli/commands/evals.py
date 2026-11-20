@@ -22,10 +22,12 @@ from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
 from daimon.core.evals.bundle import DirSource, open_path, to_zip
+from daimon.core.evals.cost import default_cap
 from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
 from daimon.core.evals.review import ReviewService, ScoreDraft
+from daimon.core.evals.runs import RunDraft, RunService
 from daimon.core.evals.scoring.client import MuxJudgeClient
 from daimon.core.evals.scoring.service import JudgeRequest, ScoringService
 from daimon.core.evals.scrub.engine import Scrubber
@@ -52,7 +54,7 @@ suites_app = typer.Typer(help="Eval suites.")
 cases_app = typer.Typer(help="Cases of an eval suite.")
 arms_app = typer.Typer(help="Arms: the agent setups a run compares.")
 items_app = typer.Typer(help="Items of an eval run.")
-runs_app = typer.Typer(help="Compare and judge eval runs.")
+runs_app = typer.Typer(help="Estimate, start, stop, compare and judge eval runs.")
 review_app = typer.Typer(help="Review tasks: take the next one, submit scores.")
 bundle_app = typer.Typer(help="Validate, export and import bundles.")
 for name, sub in (
@@ -328,6 +330,77 @@ def _scoring(rt: CliRuntime) -> ScoringService:
     return ScoringService(
         rt.sessionmaker, rt.settings, _evals(rt), client=MuxJudgeClient(rt.anthropic)
     )
+
+
+def _runs(rt: CliRuntime) -> RunService:
+    return RunService(rt.sessionmaker, rt.settings, _evals(rt))
+
+
+def _draft(path: Path) -> RunDraft:
+    try:
+        return RunDraft.model_validate(_read_json(path))
+    except ValidationError as exc:
+        raise _Failed(f"{path}: {exc}") from None
+
+
+_CAP = typer.Option("--cap", min=0.01, help="Stop the run once it has spent this many USD.")
+
+
+@runs_app.command("list")
+def runs_list(ctx: typer.Context, suite: str | None = None) -> None:
+    """List runs, newest first."""
+    _serve(ctx, _runs, lambda s, a: s.runs(a, suite))
+
+
+@runs_app.command("estimate")
+def runs_estimate(ctx: typer.Context, draft: Path) -> None:
+    """Estimate a run from a JSON draft (suite, arm_ids, case_ids, repeats, judge_ids)."""
+    body = _draft(draft)
+    _serve(ctx, _runs, lambda s, a: s.estimate(a, body))
+
+
+@runs_app.command("start")
+def runs_start(
+    ctx: typer.Context,
+    draft: Path,
+    cap: Annotated[float | None, _CAP] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Start without asking; needs --cap.")] = False,
+) -> None:
+    """Estimate a run, then start it with a spending cap: --cap, or the estimate's high end
+    with a margin."""
+    if yes and cap is None:
+        raise typer.BadParameter("--yes needs --cap.")
+    body = _draft(draft)
+
+    async def work(runs: RunService, actor: Subject) -> object:
+        limit = cap
+        if limit is None:
+            estimate = await runs.estimate(actor, body)
+            limit = default_cap(estimate)
+            _console.print(f"Expected {estimate.expected_usd:.2f} USD, cap {limit:.2f} USD.")
+        if not yes and not typer.confirm("Start this run?"):
+            raise typer.Abort
+        return await runs.start(actor, body, cap_usd=limit)
+
+    _serve(ctx, _runs, work)
+
+
+@runs_app.command("show")
+def runs_show(ctx: typer.Context, run_id: str) -> None:
+    """Show a run: status, estimate, approval and spend."""
+    _serve(ctx, _runs, lambda s, a: s.status(a, run_id))
+
+
+@runs_app.command("cancel")
+def runs_cancel(ctx: typer.Context, run_id: str) -> None:
+    """Stop a run: no more items start, and running ones are interrupted."""
+    _serve(ctx, _runs, lambda s, a: s.cancel(a, run_id))
+
+
+@runs_app.command("approve")
+def runs_approve(ctx: typer.Context, run_id: str, cap: Annotated[float, _CAP]) -> None:
+    """Approve a run waiting for an admin, with its spending cap."""
+    _serve(ctx, _runs, lambda s, a: s.approve(a, run_id, cap_usd=cap))
 
 
 @runs_app.command("compare")

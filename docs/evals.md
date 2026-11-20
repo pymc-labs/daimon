@@ -183,6 +183,26 @@ A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
 passphrase another way than the file. MCP tools never take a passphrase: export
 and import encrypted bundles from the command line or the web app.
 
+## Runs
+
+A run plays each case against each arm, `repeats` times. Each item gets a fresh
+session, the fake world and a simulated chat: the case's script plays the people,
+pressing buttons, reacting and replying.
+
+```bash
+daimon evals runs estimate draft.json        # low, expected and high cost in USD
+daimon evals runs start draft.json --cap 10  # start, spending at most 10 USD
+daimon evals runs show RUN_ID
+daimon evals runs cancel RUN_ID
+daimon evals runs approve RUN_ID --cap 40    # admins only
+```
+
+Every run needs a spending cap. A cap above
+[`DAIMON_EVALS__ADMIN_APPROVAL_USD`](configuration.md#daimon_evals__admin_approval_usd)
+waits for an admin. An item starts only while its estimate fits under the cap, so a
+run that reaches it stops early as `partial` and keeps the items already done. An
+agent can start a run only on the person's card in chat.
+
 ## Scoring
 
 Deterministic checks (call and effect matching in `strict`, `unordered`, `subset` or
