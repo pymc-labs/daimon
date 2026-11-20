@@ -16,6 +16,7 @@ import hashlib
 import html
 import multiprocessing
 import re
+from array import array
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
@@ -68,8 +69,8 @@ class View:
     """`text` folded for matching; `starts`/`ends` map each folded char to the source span."""
 
     text: str
-    starts: list[int] | None = None
-    ends: list[int] | None = None
+    starts: array[int] | None = None
+    ends: array[int] | None = None
 
     def span(self, start: int, end: int) -> tuple[int, int]:
         if self.starts is None or self.ends is None:
@@ -81,8 +82,8 @@ def fold(text: str) -> View:
     if text.isascii() and "\\" not in text and "%" not in text and "&" not in text:
         return View(text)
     chars: list[str] = []
-    starts: list[int] = []
-    ends: list[int] = []
+    starts = array("i")  # arrays, not lists: a long text has a million of each
+    ends = array("i")
 
     def emit(out: str, start: int, end: int) -> None:
         chars.extend(out)
@@ -364,8 +365,10 @@ _NER_KINDS: Final = {
     "PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place", "PHONE_NUMBER": "phone",
 }  # fmt: skip
 _NER_CHUNK: Final = 50_000
-_NER_CACHE: Final = 1_000_000
+_NER_CACHE: Final = 100_000
 _NER_BATCH: Final = 64
+# spaCy holds a whole batch at once (25 chunks of 50k characters took 1.4 GB): one chunk each.
+_NER_BATCH_CHARS: Final = 50_000
 # spaCy labels Presidio has no entity for: ignored instead of warned about on every call.
 _NER_IGNORED: Final = (
     "CARDINAL", "ORDINAL", "QUANTITY", "PERCENT", "MONEY", "DATE", "TIME", "LANGUAGE", "LAW",
@@ -424,13 +427,28 @@ def _analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]
     assert isinstance(engine, AnalyzerEngine)
     out: list[list[tuple[int, int, str]]] = []
     batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    for text, artifacts in batches(texts, "en", batch_size=_NER_BATCH):
-        found = engine.analyze(
-            text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
-            nlp_artifacts=artifacts,
-        )  # fmt: skip
-        out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
+    for group in _groups(texts, _NER_BATCH):
+        for text, artifacts in batches(group, "en", batch_size=len(group)):
+            found = engine.analyze(
+                text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
+                nlp_artifacts=artifacts,
+            )  # fmt: skip
+            out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
     return out
+
+
+def _groups(texts: list[str], count: int) -> list[list[str]]:
+    """`texts` in order, in groups of at most `count` texts and `_NER_BATCH_CHARS` characters
+    (a text over the limit is a group of its own)."""
+    groups: list[list[str]] = []
+    size = 0
+    for text in texts:
+        if not groups or len(groups[-1]) >= count or size + len(text) > _NER_BATCH_CHARS:
+            groups.append([])
+            size = 0
+        groups[-1].append(text)
+        size += len(text)
+    return groups
 
 
 _WORKER: dict[str, object] = {}
@@ -483,9 +501,8 @@ class Ner:
             return [[] for _ in texts]
         if self._pool is None:
             return _analyze(self._engine, texts)
-        size = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
-        chunks = [texts[i : i + size] for i in range(0, len(texts), size)]
-        return [r for part in self._pool.map(_worker_analyze, chunks) for r in part]
+        count = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
+        return [r for part in self._pool.map(_worker_analyze, _groups(texts, count)) for r in part]
 
     def prefetch(self, texts: Iterable[str]) -> None:
         """Run the model over the `texts` not seen yet, in batches."""

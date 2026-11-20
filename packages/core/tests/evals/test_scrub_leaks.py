@@ -16,6 +16,7 @@ import pytest
 from daimon.core.evals.bundle import BundleHeader, DirSource, build_files, write_dir
 from daimon.core.evals.format import BlobEntry, SourceInfo, case_hash, sha256_hex
 from daimon.core.evals.from_thread import ThreadRecord, build_cases
+from daimon.core.evals.scrub import detect
 from daimon.core.evals.scrub.detect import Detector, Hit, Ner
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import KnownEntities, load_entities, terms_of
@@ -425,3 +426,38 @@ def test_bundle_when_output_file_rebuilt_and_case_id_faked_then_valid(tmp_path: 
         "288838c5"
         not in (tmp_path / "out" / "suites").joinpath("support-basics", "cases.jsonl").read_text()
     ), "the case id is faked and its pins follow"
+
+
+# ---------- memory ----------
+
+
+def test_ner_when_many_texts_then_cache_stays_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-text cache is cleared at its limit, so a long scrub never grows without bound."""
+    monkeypatch.setattr(detect, "_NER_CACHE", 5)
+
+    class _Fixed(Ner):
+        @property
+        def available(self) -> bool:
+            return True
+
+        def _run(self, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+            return [[(0, 1, "person")] for _ in texts]
+
+    ner = _Fixed("none")
+    for n in range(50):
+        ner.find(f"text {n}")
+    ner.prefetch(f"more {n}" for n in range(50))
+    assert len(ner._cache) <= 5, "the cache grew past its limit"  # pyright: ignore[reportPrivateUsage]
+
+
+def test_ner_when_texts_are_long_then_batches_are_bounded_by_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """spaCy holds a whole batch of documents at once: a batch is capped by characters too."""
+    monkeypatch.setattr(detect, "_NER_BATCH_CHARS", 100)
+    texts = ["x" * 40] * 7 + ["y" * 500] + ["z"] * 100
+    groups = detect._groups(texts, 64)  # pyright: ignore[reportPrivateUsage]
+    assert [t for g in groups for t in g] == texts, "texts keep their order"
+    assert all(len(g) == 1 or sum(map(len, g)) <= 100 for g in groups), "a batch is too large"
+    assert all(len(g) <= 64 for g in groups), "a batch has too many texts"
+    assert len(groups) < len(texts), "texts are still batched"
