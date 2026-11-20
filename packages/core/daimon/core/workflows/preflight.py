@@ -25,7 +25,7 @@ GATE_REASONS: Final = frozenset(
     {"balance_depleted", "budget_exceeded", "allowance_exhausted", "cap_exceeded"}
 )
 _GATE_MESSAGES: Final = {
-    "balance_depleted": "The workspace balance is used up. Ask an admin to add funds.",
+    "balance_depleted": "The team's balance is used up. Ask an admin to add funds.",
     "budget_exceeded": "The home channel's budget is used up. Ask an admin to raise it.",
     "allowance_exhausted": "The person this runs as has no allowance left. Ask an admin.",
     "cap_exceeded": "The person this runs as reached their monthly limit. Ask an admin.",
@@ -75,7 +75,7 @@ async def check(
     async with sm() as session:
         tenant = await tenants.get_tenant(session, place.tenant_id)
         if tenant is None:
-            return Refusal("workflows_off", "This workspace is gone.")
+            return Refusal("workflows_off", "This team is gone.")
         channel = place.workflow.home_channel_id
         features = workflow_features(
             await resolve_features(
@@ -96,7 +96,7 @@ async def check(
         account_id = place.run_as_account_id
         account = None if account_id is None else await accounts.get_account(session, account_id)
         if account_id is None or account is None or account.tenant_id != tenant.id:
-            return Refusal("run_as_not_allowed", "The person this runs as is not in the workspace.")
+            return Refusal("run_as_not_allowed", "The person this runs as is not on the team.")
         default = features.run_budget_usd
         if place.mode == "live" and (missing := await _missing_grant(session, place, default)):
             return Refusal("grant_needs_review", f"{missing} needs approval. Ask the owner.")
