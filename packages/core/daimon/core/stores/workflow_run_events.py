@@ -100,3 +100,18 @@ async def list_events(
         .order_by(WorkflowRunEvent.seq)
     )
     return [EventRow.model_validate(orm) for orm in rows]
+
+
+async def step_events(
+    session: AsyncSession, run_id: uuid.UUID, *, step_key: str, types: Sequence[str]
+) -> list[EventRow]:
+    rows = await session.scalars(
+        select(WorkflowRunEvent)
+        .where(
+            WorkflowRunEvent.run_id == run_id,
+            WorkflowRunEvent.step_key == step_key,
+            WorkflowRunEvent.type.in_(types),
+        )
+        .order_by(WorkflowRunEvent.seq)
+    )
+    return [EventRow.model_validate(orm) for orm in rows]

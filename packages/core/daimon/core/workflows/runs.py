@@ -137,7 +137,7 @@ def _cut(text: str | None) -> str | None:
     return None if text is None else text[:_MESSAGE_LIMIT]
 
 
-async def _spec_of(session: AsyncSession, run: RunRow) -> Spec:
+async def spec_of(session: AsyncSession, run: RunRow) -> Spec:
     if run.mode == "test" and run.test_options is not None:
         return parse_spec(run.test_options["spec"])
     version = await workflows.get_version(
@@ -158,7 +158,7 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
     )
     assert workflow is not None, "a run's workflow outlives it"
-    spec = await _spec_of(session, run)
+    spec = await spec_of(session, run)
     pinned = (run.test_options or {}).get("pinned", {})
     facts = RunFacts(
         inputs=run.inputs,
@@ -461,7 +461,7 @@ async def promote_queued(
         await workflows.get_workflow(
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, lock=True
         )
-        spec = await _spec_of(session, run)
+        spec = await spec_of(session, run)
         active = await workflow_runs.count_active_runs(session, workflow_id=run.workflow_id)
         if active >= _active_limit(spec, settings):
             return False
