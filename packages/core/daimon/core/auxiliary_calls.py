@@ -21,7 +21,7 @@ from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider, Scope
 from mux.drivers.anthropic import AnthropicCompletions
 
-type AuxiliaryPurpose = Literal["thread_naming", "classifier"]
+type AuxiliaryPurpose = Literal["thread_naming", "classifier", "eval_simulator"]
 type CompletionsFactory = Callable[[], Completions]
 
 
