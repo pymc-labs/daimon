@@ -4,15 +4,20 @@ import { useEffect, useRef, useState } from "react"
 import { bytes, MAX_FILE_BYTES } from "./format"
 import { cn } from "@/lib/utils"
 
-export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, autoFocus, canAttach }: {
+export function Composer({ onSend, onStop, busy, placeholder, disabled, picker, autoFocus, canAttach, fill }: {
   onSend: (text: string, files: File[]) => void; onStop: () => void; busy: boolean; canAttach: boolean
   placeholder: string; disabled?: boolean; picker: React.ReactNode; autoFocus?: boolean
+  /** Puts text in the box and focuses it; a new `id` does it again. */
+  fill?: { text: string; id: number }
 }) {
   const [text, setText] = useState("")
   const [files, setFiles] = useState<File[]>([])
   const [tooBig, setTooBig] = useState<string[]>([])
   const ref = useRef<HTMLTextAreaElement>(null)
   const pick = useRef<HTMLInputElement>(null)
+  const [filled, setFilled] = useState(fill)
+  if (fill !== filled) { setFilled(fill); if (fill) setText(fill.text) }
+  useEffect(() => { if (fill) ref.current?.focus() }, [fill])
   useEffect(() => {
     const t = ref.current
     if (!t) return
