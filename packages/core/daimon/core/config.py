@@ -2948,6 +2948,20 @@ class EvalsSettings(BaseModel):
     max_bundle_mb: int = Field(
         default=512, gt=0, description="Largest eval bundle import accepts, unpacked, in MiB."
     )
+    simulator_model: str = Field(
+        default="claude-opus-5-5",
+        description="Anthropic model that answers eval world calls nobody recorded.",
+    )
+    simulator_effort: Literal["none", "low", "medium", "high"] = Field(
+        default="low", description="Effort the eval world simulator runs at."
+    )
+    world_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL where eval sandbox gateways reach the eval worker's fake world, e.g. "
+            "http://eval-worker:8090. Unset: no sandbox can be enclosed."
+        ),
+    )
 
 
 class LongJobsSettings(BaseModel):

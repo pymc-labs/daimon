@@ -21,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.5",
     "cryptography>=43",
     "jsonschema>=4.23",
+    "graphql-core>=3.2,<4",
     "pyyaml>=6.0",
     "sentry-sdk>=2.61",
     "structlog>=24.1",
