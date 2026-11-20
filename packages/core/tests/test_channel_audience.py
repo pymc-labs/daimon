@@ -262,7 +262,7 @@ async def test_standing_follows_event_roles_then_mirror_then_one_fetch_then_outs
     assert await standing(event_role_ids=None, resolver=None) is RequesterOrg.OUTSIDER
 
 
-async def test_a_server_with_no_internal_roles_and_mode_off_give_host(
+async def test_a_server_with_no_internal_roles_fails_closed_in_mode_on_and_is_host_otherwise(
     db_session: AsyncSession,
 ) -> None:
     from daimon.core.channel_audience import requester_standing
@@ -272,8 +272,13 @@ async def test_a_server_with_no_internal_roles_and_mode_off_give_host(
     kw: dict[str, Any] = {"user_id": USER, "event_role_ids": ("1",)}
     assert (
         await requester_standing(db_session, tenant_id=plain.id, mode="on", **kw)
-        is RequesterOrg.HOST
+        is RequesterOrg.OUTSIDER
     )
+    for mode in ("off", "shadow"):
+        assert (
+            await requester_standing(db_session, tenant_id=plain.id, mode=mode, **kw)  # pyright: ignore[reportArgumentType]
+            is RequesterOrg.HOST
+        )
     assert (
         await requester_standing(db_session, tenant_id=server.id, mode="off", **kw)
         is RequesterOrg.HOST
@@ -309,3 +314,27 @@ async def test_shadow_standing_logs_the_outsider_and_changes_nothing(
         "agent",
         "reason",
     }
+
+
+async def test_a_failed_facts_read_in_shadow_falls_back_to_the_registry(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shadow changes nothing, so a broken facts read does not stop a turn; `on` fails closed."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-7")
+    await mark_channel_shared(
+        db_session, tenant_id=tenant.id, platform="discord", channel_id=ROOM, source="client"
+    )
+
+    async def broken(*_a: object, **_k: object) -> object:
+        raise RuntimeError("facts table is down")
+
+    monkeypatch.setattr("daimon.core.channel_audience.read_channel_facts", broken)
+
+    shadow = await channel_has_outsiders(
+        db_session, tenant_id=tenant.id, platform="discord", channel_id=ROOM, mode="shadow"
+    )
+    assert (shadow.contained, shadow.source, shadow.shadow) == (True, "registry", None)
+    with pytest.raises(RuntimeError, match="facts table is down"):
+        await channel_has_outsiders(
+            db_session, tenant_id=tenant.id, platform="discord", channel_id=ROOM, mode="on"
+        )

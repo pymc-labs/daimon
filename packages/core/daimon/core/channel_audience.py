@@ -88,16 +88,30 @@ async def channel_has_outsiders(
     if platform == "discord":
         if mode is None:
             mode = await audience_mode(session, FeaturePlace(tenant_id, platform, channel_id))
-        if mode != "off":
-            live = await _facts_audience(
+        if mode == "on":
+            return await _facts_audience(
                 session,
                 tenant_id=tenant_id,
                 channel_id=channel_id,
                 thread_id=thread_id,
                 now=now,
             )
-            if mode == "on":
-                return live
+        if mode == "shadow":
+            # Shadow changes nothing: a failed facts read is logged and the registry answers.
+            live: ChannelAudience | None = None
+            try:
+                async with session.begin_nested():
+                    live = await _facts_audience(
+                        session,
+                        tenant_id=tenant_id,
+                        channel_id=channel_id,
+                        thread_id=thread_id,
+                        now=now,
+                    )
+            except Exception:
+                _log.warning(
+                    "audience.shadow_facts_failed", tenant_id=str(tenant_id), exc_info=True
+                )
             return _registry_audience(
                 await is_channel_shared(
                     session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
@@ -216,9 +230,10 @@ async def requester_standing(
     """HOST or OUTSIDER for a Discord requester: whether they hold an internal role.
 
     Sources in order: the roles in the event, the member mirror, one fresh `resolver`
-    lookup (a member fetch), then OUTSIDER for this turn only. Nothing is recorded. A server with no
-    `internal_role_ids`, and mode `off`, give HOST. Mode `shadow` gives HOST and logs
-    the person it would refuse (`outsider`, or `dm_refused` for a private conversation).
+    lookup (a member fetch), then OUTSIDER for this turn only. Nothing is recorded. A server with
+    no `internal_role_ids` gives OUTSIDER in mode `on` (fail closed, logged) and HOST in mode
+    `shadow`; mode `off` gives HOST. Mode `shadow` also logs the person it would refuse
+    (`outsider`, or `dm_refused` for a private conversation).
     """
     if mode is None:
         mode = await audience_mode(session, FeaturePlace(tenant_id, "discord", channel_id))
@@ -226,6 +241,10 @@ async def requester_standing(
         return RequesterOrg.HOST
     internal_roles = (await load_access_policy(session, tenant_id=tenant_id)).internal_role_ids
     if not internal_roles:
+        if mode == "on":
+            # No way to tell who is internal: fail closed, and say so.
+            _log.warning("audience.no_internal_roles", tenant_id=str(tenant_id))
+            return RequesterOrg.OUTSIDER
         return RequesterOrg.HOST
     internal = await _is_internal(
         session,

@@ -1240,8 +1240,8 @@ async def run_dm_routine(
     prompt: str,
     source: DmSource | None,
     budget_channel_id: str | None,
+    requester_org: RequesterOrg,
     sandbox: RoutineSandbox | None = None,
-    requester_org: RequesterOrg = RequesterOrg.HOST,
 ) -> DmRoutineReply:
     """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
@@ -1249,8 +1249,10 @@ async def run_dm_routine(
     scope with no history. Every session is gated, so a call needing Approve is
     refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
     rechecked for a seal whenever the session is built; `budget_channel_id` only
-    bills. Nothing is posted here: the caller queues the final output. Built-ins stay
-    off unless `sandbox` is an operator's agent-level opt-in the session matches.
+    bills. `requester_org` is the owner's standing at this fire, so an owner who lost the
+    internal role starts no private turn. Nothing is posted here: the caller queues the
+    final output. Built-ins stay off unless `sandbox` is an operator's agent-level opt-in
+    the session matches.
     """
     token = dm_routine_sandbox.set(sandbox)
     try:

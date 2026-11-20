@@ -645,6 +645,59 @@ async def test_a_foreign_daimon_server_is_healed_at_the_bind_and_in_the_update(
     assert fourth.continuity == ContinuityOutcome(), "and that reads as current after"
 
 
+@pytest.mark.parametrize("held", [True, False])
+async def test_a_session_does_not_keep_identity_servers_for_a_turn_in_a_contained_room(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: bool,
+) -> None:
+    """A room that became contained drops the signed-identity servers: the reused provider
+    session loses them too (an update or a replacement), not only the admission's agent."""
+    from daimon.core.relay_scope import without_identity_relays
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    payload = _agent_with_servers().model_dump(mode="json")
+    payload["mcp_servers"].append(
+        {"type": "url", "name": "grove", "url": "https://daimon.example/mcp-identity/grove"}
+    )
+    payload["tools"].append(_toolset("grove"))
+    agent = BetaManagedAgentsAgent.model_validate(payload)
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+    stripped, names = without_identity_relays(agent, public_url=_PUBLIC_URL)
+    assert names == {"grove"}
+
+    first = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    assert "grove" in {
+        s.name for s in transport.state.sessions[first.ma_session_id].agent.mcp_servers
+    }
+
+    hold = TurnHold(platform="discord", channel_id="C-1", client=False)
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account, agent=stripped), hold=hold if held else None),
+        tenant=tenant,
+        account=account,
+    )
+
+    assert isinstance(second, PreparedTurn)
+    assert second.continuity != ContinuityOutcome(), "the session is not reused unchanged"
+    if second.ma_session_id == first.ma_session_id:
+        # Reused: the provider session is updated in place, without the identity server.
+        [update] = transport.updates
+        assert {s["name"] for s in update["agent"]["mcp_servers"]} == {"daimon-mcp", "linear"}
+        assert "grove" not in {t.get("mcp_server_name") for t in update["agent"]["tools"]}
+    else:
+        live = transport.state.sessions[second.ma_session_id].agent.mcp_servers
+        assert "grove" not in {s.name for s in live}
+
+
 @pytest.mark.parametrize("first_held", [False, True])
 async def test_a_held_turn_never_shares_a_session_with_an_unheld_one(
     db_session: AsyncSession,

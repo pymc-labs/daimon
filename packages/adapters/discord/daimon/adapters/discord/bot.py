@@ -216,6 +216,7 @@ from daimon.core.turn.admission import (
     Admission,
     AdmissionDenied,
     MissingTurnConfigError,
+    StandingRequest,
     admit,
     backend_facts,
 )
@@ -252,6 +253,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
@@ -4477,21 +4479,13 @@ class DaimonBot(commands.Bot):
             if not post_state.may_post:
                 raise AdmissionDenied(reason="writers_none")
             category_id, category_unresolved = await _resolve_category(thread, fetch=False)
-        async with self.runtime.sessionmaker() as session:
-            standing = await requester_standing(
-                session,
-                tenant_id=tenant_id,
-                user_id=row.requester_external_user_id,
-                channel_id=row.parent_channel_id,
-                # A failed lookup reads as no roles (`requester_role`): leave it to the
-                # member mirror and one fresh fetch rather than call it an outsider.
-                event_role_ids=tuple(_role_ids) or None,
-                resolver=self.membership_resolver,
-            )
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
-            requester_org=standing,
+            requester_org=RequesterOrg.HOST,
+            # A failed lookup reads as no roles (`requester_role`): leave it to the member
+            # mirror and one fresh fetch rather than call it an outsider.
+            standing=StandingRequest(tuple(_role_ids) or None),
             platform="discord",
             external_user_id=row.requester_external_user_id,
             channel_id=row.parent_channel_id,
@@ -5414,23 +5408,16 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
-        async with self.runtime.sessionmaker() as session:
-            standing = await requester_standing(
-                session,
-                tenant_id=tenant_id,
-                user_id=str(author.id),
-                channel_id=parent_channel_id,
-                event_role_ids=member_role_ids(author)
-                if isinstance(author, discord.Member)
-                else None,
-                resolver=self.membership_resolver,
-            )
         try:
             admission = await admit(
                 self.runtime.turn_deps,
                 origin="chat",
                 tenant_id=tenant_id,
-                requester_org=standing,
+                requester_org=RequesterOrg.HOST,
+                # Admission works out the standing in its own transaction.
+                standing=StandingRequest(
+                    tuple(member_role_ids(author)) if isinstance(author, discord.Member) else None
+                ),
                 platform="discord",
                 external_user_id=str(message.author.id),
                 channel_id=parent_channel_id,

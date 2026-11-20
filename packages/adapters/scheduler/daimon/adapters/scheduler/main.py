@@ -51,6 +51,7 @@ from daimon.core.authz import (
     build_subject,
 )
 from daimon.core.billing import BillingConfig, load_billing_config
+from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import (
     agent_native_provider,
     backend_refusal_causes,
@@ -513,9 +514,21 @@ async def _build_fire(
             if row.source_channel_id is not None
             else None
         )
+        deps = _turn_deps()
         try:
+            # The owner's standing at this fire: an owner who lost the internal role
+            # starts no private turn (member mirror, then one fresh member fetch).
+            async with sm() as standing_session:
+                standing = await requester_standing(
+                    standing_session,
+                    tenant_id=row.tenant_id,
+                    user_id=owner_user_id,
+                    is_dm=True,
+                    resolver=deps.membership_resolver,
+                )
             reply = await run_dm_routine(
-                _turn_deps(),
+                deps,
+                requester_org=standing,
                 tenant_id=row.tenant_id,
                 owner_user_id=owner_user_id,
                 agent_name=row.agent_name,

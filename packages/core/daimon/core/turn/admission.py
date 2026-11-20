@@ -56,6 +56,7 @@ from daimon.core.channel_audience import (
     channel_has_outsiders,
     log_shadow,
     mode_of,
+    requester_standing,
 )
 from daimon.core.channel_backend import (
     BackendUnsupported,
@@ -189,6 +190,7 @@ __all__ = [
     "MissingTurnConfigError",
     "admit",
     "backend_platform_skills",
+    "StandingRequest",
     "reauthorize",
 ]
 
@@ -211,6 +213,18 @@ class DmSource:
     channel_id: str | None
     thread_id: str | None
     thread_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class StandingRequest:
+    """Ask `admit` to work out a Discord requester's standing inside its own transaction.
+
+    `event_role_ids` are the roles the event carried (None when it carried none); the
+    member mirror and one fresh fetch (`deps.membership_resolver`) follow, in that order.
+    The result replaces the `requester_org` passed in.
+    """
+
+    event_role_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -700,6 +714,7 @@ async def admit(
     category_unresolved: bool = False,
     observer: AdmissionObserver | None = None,
     requester_org: RequesterOrg,
+    standing: StandingRequest | None = None,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
     origin: str,
@@ -748,6 +763,7 @@ async def admit(
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 requester_org=requester_org,
+                standing=standing,
                 requester_home_id=requester_home_id,
                 channel_shared=channel_shared,
                 origin=origin,
@@ -881,6 +897,7 @@ async def admit_impl(
     category_id: str | None = None,
     category_unresolved: bool = False,
     requester_org: RequesterOrg,
+    standing: StandingRequest | None = None,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
     origin: str,
@@ -918,6 +935,7 @@ async def admit_impl(
         category_id=category_id,
         category_unresolved=category_unresolved,
         requester_org=requester_org,
+        standing=standing,
         requester_home_id=requester_home_id,
         channel_shared=channel_shared,
         origin=origin,
@@ -957,6 +975,7 @@ async def _admit_gates(
     category_id: str | None = None,
     category_unresolved: bool = False,
     requester_org: RequesterOrg,
+    standing: StandingRequest | None = None,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
     origin: str,
@@ -989,6 +1008,24 @@ async def _admit_gates(
             platform=principal_platform or platform,
             external_id=external_user_id,
         )
+        # Only a Discord server has a mode; every other platform is `off`. One read
+        # serves this admission's standing, hold and facts.
+        mode: AudienceMode = (
+            await audience_mode(session, FeaturePlace(tenant_id, platform, channel_id))
+            if platform == "discord"
+            else "off"
+        )
+        if standing is not None and platform == "discord":
+            requester_org = await requester_standing(
+                session,
+                tenant_id=tenant_id,
+                user_id=external_user_id,
+                channel_id=channel_id,
+                is_dm=is_dm,
+                event_role_ids=standing.event_role_ids,
+                resolver=deps.membership_resolver,
+                mode=mode,
+            )
         client = requester_org is not RequesterOrg.HOST or principal.foreign_home_id is not None
         await _record_requester(
             session,
@@ -1001,12 +1038,6 @@ async def _admit_gates(
         )
         shared = False
         source_shared = False
-        # Only a Discord server has a mode; every other platform is `off`.
-        mode: AudienceMode = (
-            await audience_mode(session, FeaturePlace(tenant_id, platform, channel_id))
-            if platform == "discord"
-            else "off"
-        )
         audience: ChannelAudience | None = None
         # A DM has no channel of its own to share; /dm-me asks about the channel
         # it copies history from.

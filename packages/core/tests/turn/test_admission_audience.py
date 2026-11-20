@@ -11,12 +11,19 @@ import pytest
 import structlog
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.audience_facts import RoomFacts
+from daimon.core.channel_audience import audience_mode as _real_audience_mode
 from daimon.core.features.snapshot import CACHE, FeaturePlace
 from daimon.core.stores.audience_facts import StoredRoom, publish_facts
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.shared_channels import is_channel_shared
-from daimon.core.turn.admission import Admission, AdmissionDenied, admit, reauthorize
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    StandingRequest,
+    admit,
+    reauthorize,
+)
 from daimon.core.turn.errors import DmSourceSealedError
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.testing.builders import admit_chat
@@ -403,3 +410,68 @@ async def test_an_open_room_keeps_an_agent_with_only_an_unscoped_identity_server
 
     assert admission.hold is None and not admission.relay_scoped
     assert {s.name for s in admission.agent.mcp_servers} == {"tools", "other"}
+
+
+async def test_a_mode_off_mention_turn_reads_the_mode_once_and_no_audience_rows(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Query count: standing, hold and facts share one mode read; off touches no facts,
+    members or policy-role rows for them."""
+    from sqlalchemy import event
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    reads: list[str] = []
+    real = _real_audience_mode
+
+    async def counting(*args: object, **kwargs: object) -> str:
+        reads.append("mode")
+        return await real(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr("daimon.core.turn.admission.audience_mode", counting)
+    monkeypatch.setattr("daimon.core.channel_audience.audience_mode", counting)
+    statements: list[str] = []
+    sync_target = db_session_factory.kw["bind"].sync_connection  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+
+    def record(_conn: object, _cur: object, statement: str, *_a: object) -> None:
+        statements.append(statement)
+
+    event.listen(sync_target, "before_cursor_execute", record)
+    try:
+        admission = await _admit(
+            db_session_factory, tmp_path, tenant, standing=StandingRequest(("1",))
+        )
+    finally:
+        event.remove(sync_target, "before_cursor_execute", record)
+
+    assert admission.hold is None
+    assert reads == ["mode"], "one mode read serves standing, hold and facts"
+    touched = [
+        t
+        for t in ("discord_channel_audience", "discord_audience_state", "workspace_members")
+        for st in statements
+        if t in st
+    ]
+    assert touched == [], "mode off reads no audience facts or member rows"
+
+
+async def test_admission_works_out_the_standing_in_its_own_transaction(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    from daimon.core.access_policy import TenantAccessPolicy
+
+    tenant = await _seed_admittable_tenant(
+        db_session, policy=TenantAccessPolicy(internal_role_ids=("9001",))
+    )
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+
+    outsider = await _admit(db_session_factory, tmp_path, tenant, standing=StandingRequest(("1",)))
+    internal = await _admit(
+        db_session_factory, tmp_path, tenant, standing=StandingRequest(("9001",))
+    )
+
+    assert outsider.hold is not None and outsider.hold.client
+    assert internal.hold is None
