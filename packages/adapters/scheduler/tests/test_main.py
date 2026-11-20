@@ -4662,3 +4662,81 @@ async def test_routine_refuses_role_gated_agent_without_a_resolver(
     after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, None)
     assert not seen
     assert after.last_error is not None
+
+
+async def test_a_routine_result_is_queued_with_the_hold_its_fire_ran_under(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delivery reads the hold the fire ran under: held to the shared channel, or explicitly
+    unheld, written with the pending result."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u-owner",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await mark_channel_shared(
+        db_session,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="chan-shared",
+        source="platform",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+
+    async def fake_run_turn(**kwargs: object) -> str:
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+    stored: list[object] = []
+    with (
+        unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        for channel in ("chan-shared", "chan-private"):
+            async with db_session_factory.begin() as session:
+                await update_routine(
+                    session,
+                    row.id,
+                    tenant_id=tenant.id,
+                    destination_kind="channel",
+                    destination_id=channel,
+                    channel_id=channel,
+                    edited_by="u-owner",
+                )
+                placed = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert placed is not None
+            await fire(placed)
+            async with db_session_factory() as session:
+                current = await get_routine(session, row.id, tenant_id=tenant.id)
+            assert current is not None and current.delivery_status == "pending"
+            stored.append(current.delivery_hold)
+    await fake_client.close()
+
+    assert stored == [
+        {"held": True, "channel_id": "chan-shared", "client": False, "relay": False},
+        {"held": False},
+    ]

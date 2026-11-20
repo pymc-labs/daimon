@@ -335,6 +335,7 @@ class RoutineRow(BaseModel):
     delivery_status: RoutineDeliveryStatus | None = None
     delivery_note: str | None = None
     delivery_payload: str | None = None
+    delivery_hold: dict[str, Any] | None = None
     delivery_lease_owner: str | None = None
     delivery_lease_expires_at: datetime | None = None
     delivered_at: datetime | None = None

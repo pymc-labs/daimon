@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
+from daimon.core.access_policy import place_thread_id
+from daimon.core.audience_gate import (
+    AUDIENCE_CONTAINED,
+    GATED_PLATFORMS,
+    log_shadow_refusal,
+    read_audience_mode,
+)
+from daimon.core.audience_refusal import audience_refusal
+from daimon.core.channel_audience import AudienceMode, channel_has_outsiders
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_hold import TurnHold
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @dataclass
@@ -78,3 +90,56 @@ class OutputGate:
                 return await call(*args, **kwargs)
 
         return guarded
+
+
+def audience_output_check(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str | None,
+    thread_id: str | None,
+    hold: TurnHold | None,
+    agent: str | None,
+) -> Callable[[], Awaitable[None]] | None:
+    """Gate A: the check a turn's output latch runs before each post and edit in its room.
+
+    None when there is nothing to check: a platform with no `audience_hold`, or a turn
+    with no room (a direct message, the web app). The mode is read once, at the first
+    output; a failed read raises and that output is refused. A refusal is
+    `AdmissionDenied`, which the latch keeps for the rest of the turn.
+    """
+    if platform not in GATED_PLATFORMS or channel_id is None:
+        return None
+    thread = place_thread_id(thread_id)
+    thread = None if thread == channel_id else thread
+    destination = thread or channel_id
+    parent = channel_id if thread else None
+    state: dict[str, AudienceMode | bool] = {}
+
+    async def check() -> None:
+        mode = state.get("mode")
+        if mode is None:
+            mode = state["mode"] = await read_audience_mode(
+                sessionmaker,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=destination,
+                parent_id=parent,
+            )
+        if mode == "off":
+            return
+        async with sessionmaker() as session:
+            fact = await channel_has_outsiders(
+                session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+            )
+        if audience_refusal(fact, hold, destination, parent) is None:
+            return
+        if mode == "shadow":
+            if not state.get("logged"):
+                state["logged"] = True
+                log_shadow_refusal(tenant_id=tenant_id, channel_id=destination, agent=agent)
+            return
+        raise AdmissionDenied(reason="invoker_not_allowed", detail=AUDIENCE_CONTAINED)
+
+    return check

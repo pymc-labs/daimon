@@ -188,6 +188,45 @@ async def test_record_result_clears_last_error_on_success(
     assert ok_row.last_result_tail == "all good", "tail must be persisted"
 
 
+async def test_a_pending_result_stores_its_fires_hold_and_a_newer_one_replaces_it(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await new_routine(
+        db_session, tenant_id, trigger_message="m", destination_kind="channel", destination_id="c1"
+    )
+    held = {"held": True, "channel_id": "c1", "client": False, "relay": False}
+    await record_result(
+        db_session, row.id, tail="a", error=None, delivery="pending", delivery_hold=held
+    )
+    stored = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert stored is not None and stored.delivery_hold == held
+
+    # The unheld case is stored explicitly, and replaces the earlier fire's hold.
+    await record_result(
+        db_session,
+        row.id,
+        tail="b",
+        error=None,
+        delivery="pending",
+        delivery_hold={"held": False},
+    )
+    stored = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert stored is not None and stored.delivery_hold == {"held": False}
+
+    # A write that names no hold is a legacy value (SQL NULL), never an earlier fire's hold.
+    await record_result(db_session, row.id, tail="c", error=None, delivery="pending")
+    stored = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert stored is not None and stored.delivery_hold is None
+
+    # A write with no delivery leaves the outbox, hold included, as it was.
+    await record_result(
+        db_session, row.id, tail="d", error=None, delivery="pending", delivery_hold=held
+    )
+    await record_result(db_session, row.id, tail="e", error=None)
+    stored = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert stored is not None and stored.delivery_hold == held
+
+
 async def test_routine_persists_across_session_reopen(
     db_session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from daimon.core.audience_gate import PostAudience
 from daimon.core.continuity.continuation import WATCH_REASONS
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
@@ -181,6 +182,8 @@ async def require_watch_parent_access(
                 channel_id=row.parent_channel_id,
                 thread_id=None,
                 resolve_category=rest_category,
+                # The run that fills the new thread is held to a contained parent.
+                audience=PostAudience("discord", held_if_contained=True),
             )
             permissions = parent.permissions_for(member)
             if not protection.may_post:

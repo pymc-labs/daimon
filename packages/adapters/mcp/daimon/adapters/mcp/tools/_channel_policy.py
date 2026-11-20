@@ -35,6 +35,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
 )
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.audience_gate import audience_fact
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -45,6 +46,7 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
+from daimon.core.channel_audience import ChannelAudience
 from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.dm_access import DmGroups, sender_admits
@@ -106,6 +108,14 @@ _HELD_OUTSIDE_MSG = (
 #: Why `authorize` refuses a held credential: the target lies outside the hold, or the
 #: requester is a client for whom the action is never available.
 _HELD_REASONS = frozenset({"outside_hold", "client_requester", "origin_required"})
+_AUDIENCE_MSG = (
+    "people outside the team can read this channel, and this conversation is not kept to it, "
+    "so daimon does not post there. Tell the caller. Do not retry."
+)
+_AUDIENCE_UNREADABLE_MSG = (
+    "who can read this channel could not be checked, so daimon did not post there. "
+    "Tell the caller to try again later."
+)
 _AMBIGUOUS_HOLD_MSG = (
     "this agent is answering in more than one channel kept to its own agents at once, so "
     "daimon can't tell which one this call belongs to and did nothing. Tell the caller to "
@@ -176,11 +186,26 @@ async def require_channel_writable(
         own_dm=_is_requesters_own_dm(channel_id),
     )
     subject = mcp_subject(auth)
+    # Who can read the destination is read first and is final: a room that outsiders can
+    # read takes a post only from a turn held to it, whatever the rules below say.
+    audience = await _audience_for_post(
+        runtime,
+        auth,
+        channel_id=channel_id,
+        parent_channel_id=parent_channel_id,
+        own_dm=place.own_dm,
+        agent=agent,
+    )
     # The credential's hold is decided first: it is the authority for a held turn, so
     # neither the quick paths below nor a model-supplied origin can widen it.
-    first = authorize(policy, subject=subject, action=Action.POST, place=place, hold=auth.hold)
+    first = authorize(
+        policy, subject=subject, action=Action.POST, place=place, hold=auth.hold, audience=audience
+    )
     if not first:
         _raise_if_held_refused(Action.POST, first)
+    if first.reason == "audience_contained":
+        record_authz_denial(Action.POST, first.reason)
+        raise ToolError(_AUDIENCE_MSG)
     # Writers none, the own-DM allowance and a tenant without agent rules need no agent
     # lookup; settle those first.
     if first.reason == "writers_none":
@@ -213,6 +238,36 @@ async def require_channel_writable(
             raise ToolError(_HELD_SEND_MSG)
     if not decision:
         raise ToolError(_RUNS_IN_SEND_MSG)
+
+
+async def _audience_for_post(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    parent_channel_id: str | None,
+    own_dm: bool,
+    agent: AgentRef | None,
+) -> ChannelAudience | None:
+    """The destination's audience when `audience_hold` is `on` for it, else None.
+
+    A requester's own direct message is no room. A failed read refuses the post.
+    """
+    if own_dm or auth.platform is None:
+        return None
+    try:
+        return await audience_fact(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            platform=auth.platform,
+            channel_id=channel_id,
+            parent_id=parent_channel_id,
+            hold=auth.hold,
+            agent=agent.names[0] if agent is not None and agent.names else None,
+        )
+    except Exception as exc:
+        _log.warning("audience.unreadable", tenant_id=str(auth.tenant_id), error=type(exc).__name__)
+        raise ToolError(_AUDIENCE_UNREADABLE_MSG) from exc
 
 
 def _origin_at_home(policy: TenantAccessPolicy, origin: Place | None) -> bool:

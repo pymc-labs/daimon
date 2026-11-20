@@ -1324,3 +1324,176 @@ async def test_a_shared_channels_routine_never_leaves_it_by_dm(
 
     assert (outcome.status, outcome.note) == ("skipped", expected)
     assert dms.sent == [], "the result never goes by DM"
+
+
+# ── audience_hold: the stored hold of a fire, and the room's current audience ──
+
+
+class _Audience:
+    """The patched `audience_hold` mode and room facts the routine gate reads."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from daimon.core import audience_gate, routine_hold
+        from daimon.core.channel_audience import ChannelAudience
+
+        self.mode: Any = "on"
+        self.contained: set[str] = set()
+
+        async def mode(session: object, place: object) -> str:
+            if isinstance(self.mode, Exception):
+                raise self.mode
+            return self.mode
+
+        async def fact(
+            session: object, *, tenant_id: object, platform: str, channel_id: str
+        ) -> ChannelAudience:
+            return ChannelAudience(
+                contained=channel_id in self.contained,
+                known=True,
+                narrow=False,
+                source="live",
+            )
+
+        monkeypatch.setattr(audience_gate, "audience_mode", mode)
+        monkeypatch.setattr(audience_gate, "channel_has_outsiders", fact)
+        monkeypatch.setattr(routine_hold, "channel_has_outsiders", fact)
+
+
+@pytest.fixture
+def audience(monkeypatch: pytest.MonkeyPatch) -> _Audience:
+    return _Audience(monkeypatch)
+
+
+_HELD_555 = {"held": True, "channel_id": "555", "client": False, "relay": False}
+
+
+async def _stored(
+    db_session: AsyncSession, hold: dict[str, Any] | None, **kwargs: Any
+) -> RoutineRow:
+    row = await _routine(db_session, **kwargs)
+    await record_result(
+        db_session,
+        row.id,
+        tail="All green @everyone.",
+        error=None,
+        delivery="pending",
+        delivery_hold=hold,
+    )
+    await db_session.commit()
+    return row.model_copy(update={"delivery_hold": hold})
+
+
+async def test_a_held_fire_never_falls_back_to_a_dm_after_the_outsider_leaves(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The fire ran held to room 555. The room is open again and the post fails."""
+    row = await _stored(db_session, _HELD_555)
+    gone = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, gone, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "destination_unavailable")
+    assert dms.sent == []
+
+    # With the feature off the result takes today's path: the registry says nothing, so it DMs.
+    audience.mode = "off"
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, gone, dms=dms)(row)
+    assert outcome.status == "delivered" and len(dms.sent) == 1
+
+
+async def test_a_held_fire_posts_in_its_contained_room(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, _HELD_555)
+    channel = _text_channel()
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    channel.send.assert_awaited_once()
+
+
+async def test_a_held_fire_posts_in_a_thread_under_its_contained_room(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"444"}
+    row = await _stored(
+        db_session,
+        {"held": True, "channel_id": "444", "client": False, "relay": False},
+        destination_kind="thread",
+        channel_id="444",
+    )
+    thread = _uncached_thread(parent_id=444, creator_in_thread=True)
+    outcome = await _poster(db_session_factory, {555: thread, 444: _text_channel()})(row)
+    assert outcome.status == "delivered"
+    thread.send.assert_awaited_once()
+
+
+async def test_an_unheld_result_is_not_posted_in_a_room_outsiders_can_now_read(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_contained")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []
+
+
+async def test_a_legacy_result_keeps_todays_logic(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.contained = {"555"}
+    row = await _stored(db_session, None)
+    channel = _text_channel()
+    outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    channel.send.assert_awaited_once()
+
+
+async def test_shadow_delivers_and_logs_the_refusal(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from structlog.testing import capture_logs
+
+    audience.mode = "shadow"
+    audience.contained = {"555"}
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    with capture_logs() as logs:
+        outcome = await _poster(db_session_factory, channel)(row)
+    assert outcome.status == "delivered"
+    records = [log for log in logs if log["event"] == "audience.shadow"]
+    assert [(r["kind"], r["channel_id"], r["reason"]) for r in records] == [
+        ("post_refused", "555", "audience_contained")
+    ]
+    assert "green" not in str(records)
+
+
+async def test_a_failed_mode_read_refuses_the_delivery(
+    audience: _Audience,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    audience.mode = RuntimeError("database down")
+    row = await _stored(db_session, {"held": False})
+    channel = _text_channel()
+    dms = _Dms()
+    outcome = await _poster(db_session_factory, channel, dms=dms)(row)
+    assert (outcome.status, outcome.note) == ("skipped", "audience_unreadable")
+    channel.send.assert_not_awaited()
+    assert dms.sent == []

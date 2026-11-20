@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
@@ -14,6 +14,7 @@ from daimon.core.access_policy import (
     is_invoker_allowed,
     place_thread_id,
 )
+from daimon.core.audience_refusal import AUDIENCE_CONTAINED, audience_refusal
 from daimon.core.defaults.metadata import (
     LEGACY_BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_NAME,
@@ -41,6 +42,9 @@ from daimon.core.permissions import (
     session_readable_from,
 )
 from daimon.core.turn_hold import TurnHold
+
+if TYPE_CHECKING:
+    from daimon.core.channel_audience import ChannelAudience
 
 
 class Action(StrEnum):
@@ -368,6 +372,8 @@ DenyReason = Literal[
     "origin_required",
     # A change to a private channel or its own agent must come from inside the channel.
     "sealed_channel",
+    # POST: the destination may be read by outsiders and the execution is not held to it.
+    "audience_contained",
 ]
 
 
@@ -424,6 +430,9 @@ class Request:
     # MINT_CODING_TOKEN: the subject owns the target agent, read live by the caller
     # (`daimon.core.agent_ownership.owns_agent`), never from a panel snapshot.
     owned_by_caller: bool = False
+    # POST: the destination's audience, read by a caller that enforces `audience_hold`
+    # (`daimon.core.audience_gate.audience_fact`). None: the audience is not checked.
+    audience: ChannelAudience | None = None
 
 
 #: What a client requester may never do, whatever its place or surface.
@@ -789,6 +798,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if may_mint and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.POST:
+        if req.audience is not None and (
+            audience_refusal(req.audience, req.hold, place.channel_id, place.parent_channel_id)
+            == AUDIENCE_CONTAINED
+        ):
+            return _deny("audience_contained")
         # A caller with no agent (the CLI, an operator token) is input: only
         # the writers rule stops it.
         if not agent.present:
@@ -1081,6 +1095,7 @@ def authorize(
     hold: TurnHold | None = None,
     answering: bool = False,
     owned_by_caller: bool = False,
+    audience: ChannelAudience | None = None,
 ) -> Decision:
     """Decide one action against the tenant access policy. Pure; see the module docstring."""
     agent = agent if agent is not None else AgentRef.none()
@@ -1107,6 +1122,7 @@ def authorize(
             hold=hold,
             answering=answering,
             owned_by_caller=owned_by_caller,
+            audience=audience,
         ),
     )
     # The channel, not a thread under it: its own rule is the thread's to keep.

@@ -447,6 +447,7 @@ async def _save_routine_edit(
             last_result_tail=None,
             last_error=None,
             delivery_payload=None,
+            delivery_hold=None,
             delivery_status=None if cleared_public else "skipped",
             delivery_note=(
                 None
@@ -746,6 +747,7 @@ async def record_result(
     delivery: Literal["pending", "skipped"] | None = None,
     delivery_note: str | None = None,
     delivery_payload: str | None = None,
+    delivery_hold: dict[str, Any] | None = None,
     expected_destination: tuple[str | None, str | None] | None = None,
     expected_private: RoutineRow | None = None,
     expected_row: RoutineRow | None = None,
@@ -759,6 +761,11 @@ async def record_result(
 
     `delivery_payload` may override the reply with a versioned file-reference
     envelope; the preview always remains plain text.
+
+    `delivery_hold` is the hold of the fire that produced a `pending` result
+    (`daimon.core.routine_hold.delivery_hold_value`), written in the same UPDATE as
+    `delivery_payload`. Omitted, a queued or skipped result stores NULL: the legacy
+    value, which keeps today's delivery logic, and never an earlier fire's hold.
 
     `delivery` is only passed for a routine with a destination:
     `pending` queues this fire's complete reply for the adapter to post (copied into
@@ -793,6 +800,7 @@ async def record_result(
                 else delivery_note
             ),
             delivery_payload=queued_payload if delivery == "pending" else None,
+            delivery_hold=delivery_hold if delivery == "pending" else None,
             delivery_lease_owner=None,
             delivery_lease_expires_at=None,
             delivered_at=None,
@@ -873,6 +881,7 @@ async def queue_failure_notice(
                 delivery_status="pending",
                 delivery_note=FAILURE_NOTICE,
                 delivery_payload=notice,
+                delivery_hold=None,
                 delivery_lease_owner=None,
                 delivery_lease_expires_at=None,
                 delivered_at=None,
