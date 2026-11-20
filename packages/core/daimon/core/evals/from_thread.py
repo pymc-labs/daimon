@@ -101,6 +101,8 @@ class ThreadRecord(_Model):
     workspace: Place | None = None
     channel: Place | None = None
     thread: Place | None = None
+    place_ids: list[str] = Field(default_factory=list[str])
+    """Ids of the workspace, channel and thread when their names are not known."""
     people: list[ThreadPerson]
     """Everyone in the thread, the agent included (`is_bot`)."""
     messages: list[ThreadMessage]
@@ -122,7 +124,8 @@ class ThreadRecord(_Model):
                 if not p.is_bot
             ],
             channels=[NamedEntry(name=p.name, aliases=[p.id]) for p in places if p.name],
-            ids=[p.id for p in places],
+            groups=sorted({g for p in self.people for g in p.groups}),
+            ids=[p.id for p in places] + self.place_ids,
         )
 
 
@@ -230,6 +233,11 @@ def build_cases(record: ThreadRecord, scrubber: Scrubber) -> list[BuiltCase]:
         raise ValueError("the thread has no agent")
     cache: dict[str, tuple[str, ScrubbedBlob]] = {}
     built: list[BuiltCase] = []
+    # Names anywhere in the thread are known before any file or turn is scrubbed.
+    scrubber.learn(
+        [record.title or "", *(m.text for m in record.messages)]
+        + [v for m in record.messages for c in m.calls for v in (c.args, c.result)]
+    )
 
     def attachments(message: ThreadMessage, blobs: dict[str, ScrubbedBlob]) -> list[Attachment]:
         out: list[Attachment] = []
@@ -245,6 +253,12 @@ def build_cases(record: ThreadRecord, scrubber: Scrubber) -> list[BuiltCase]:
                 done = scrub_blob(scrubber, f.data, f.media_type, f.name)
                 cache[raw] = (sha256_hex(done.data), done)
             sha, done = cache[raw]
+            if done.scrub == "unscrubbed":
+                # A type that cannot be rebuilt is never stored: the case lists it as missing.
+                out.append(
+                    Attachment(id=ident, name=f.name, media_type=f.media_type, state="missing")
+                )
+                continue
             blobs[sha] = done
             state: Literal["present", "rebuilt", "redacted"] = (
                 "rebuilt"
@@ -271,7 +285,9 @@ def build_cases(record: ThreadRecord, scrubber: Scrubber) -> list[BuiltCase]:
         history = [_message(m, attachments(m, blobs)) for m in before]
         asked = [_message(m, attachments(m, blobs)) for m in turn.asked]
         calls = [c for m in turn.asked for c in m.calls]
-        files_missing = any(f.data is None for m in (*before, *turn.asked) for f in m.files)
+        files_missing = any(
+            a.state == "missing" for m in (*history, *asked) for a in m.attachments or []
+        )
         speakers = {m.author for m in (*before, *turn.asked)} | {last.author}
         participants = [
             _participant(p, requester=p.id == last.author)
@@ -320,8 +336,7 @@ def build_cases(record: ThreadRecord, scrubber: Scrubber) -> list[BuiltCase]:
             "expect": {"reference": to_document(Reference(text=answer))} if answer else {},
             "review_flags": flags,
         }
-        reasons = {sha: b.reason for sha, b in blobs.items() if b.reason}
-        done, leftovers = scrub_case(scrubber, document, blob_reasons=reasons)
+        done, leftovers = scrub_case(scrubber, document, blobs=blobs)
         built.append(
             BuiltCase(
                 done,

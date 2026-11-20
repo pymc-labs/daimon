@@ -37,7 +37,10 @@ def _record(texts: list[str], events: bool = True) -> ThreadRecord:
 
 def _cases(record: ThreadRecord) -> list[dict[str, object]]:
     return [
-        b.case for b in build_cases(record, Scrubber(record.entities(), b"k" * 20, ner_model=None))
+        b.case
+        for b in build_cases(
+            record, Scrubber(record.entities(), b"k" * 20, salt="t1", ner_model=None)
+        )
     ]
 
 

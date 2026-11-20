@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import importlib.util
 import json
 import tempfile
 import time
@@ -68,9 +69,13 @@ from daimon.core.evals.format import (
     to_document,
 )
 from daimon.core.evals.from_thread import ThreadNotFound, ThreadSource, build_cases
-from daimon.core.evals.scrub.bundle import scrub_case
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import KnownEntities, load_entities, merge_entities
+from daimon.core.evals.scrub.entities import (
+    KnownEntities,
+    PersonEntry,
+    load_entities,
+    merge_entities,
+)
 from daimon.core.evals.scrub.offline import MIN_KEY
 from daimon.core.evals.validate import (
     MANIFEST_PATH,
@@ -202,18 +207,6 @@ class ImportReport(_Out):
     blobs: int
     signature: bundles.SignatureState
     warnings: list[str]
-
-
-class Leftover(_Out):
-    where: str
-    kind: str
-    count: int
-
-
-class ScrubResult(_Out):
-    case: JsonObject
-    status: ScrubStatus
-    leftovers: list[Leftover]
 
 
 class DraftResult(_Out):
@@ -616,7 +609,8 @@ class EvalService:
                 session, suite=suite, key=key, revision=model.revision, document=document,
                 sha256=str(document["hash"]), fidelity=model.fidelity.level,
                 flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
-                scrub_status=_case_scrub(model), created_by=actor.key,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
+                created_by=actor.key,
             )  # fmt: skip
         return CaseRef(id=key, revision=model.revision, hash=str(document["hash"]))
 
@@ -629,6 +623,10 @@ class EvalService:
             raise EvalRefused(
                 f"Scrubbing needs DAIMON_EVALS__SCRUB_KEY, at least {MIN_KEY} characters."
             )
+        if importlib.util.find_spec("faker") is None:
+            raise EvalRefused(
+                "Scrubbing needs the evals extra installed here. Ask an admin or an owner."
+            )
         file = (
             [load_entities(Path(settings.scrub_entities_file))]
             if settings.scrub_entities_file
@@ -636,14 +634,36 @@ class EvalService:
         )
         async with self._sessions() as session:
             fakes = await eval_scrub.load_map(session, tenant_id=tenant_id)
+            names = await eval_scrub.deployment_names(session, tenant_id=tenant_id)
         return Scrubber(
-            merge_entities(known, *file), key.encode(),
-            ner_model=settings.scrub_ner_model or None, known=fakes,
+            merge_entities(known, _deployment_entities(names), *file), key.encode(),
+            salt=str(tenant_id), ner_model=settings.scrub_ner_model or None, known=fakes,
         )  # fmt: skip
 
-    async def _keep_fakes(self, tenant_id: uuid.UUID, scrubber: Scrubber) -> None:
-        async with self._sessions() as session, session.begin():
-            await eval_scrub.save_map(session, tenant_id=tenant_id, rows=scrubber.fakes.added)
+    async def _pin(
+        self, actor: Subject, suite_id: str, refs: Sequence[CaseRef], drop: Iterable[str] = ()
+    ) -> None:
+        """Save the suite's next version pinning `refs` (added or moved to that revision)."""
+        current = await self.suite(actor, suite_id)
+        moved = {r.id: r.revision for r in refs}
+        gone = set(drop)
+        picks = [
+            SuiteCasePick(
+                id=c.id, revision=moved.pop(c.id, c.revision), weight=c.weight, split=c.split
+            )
+            for c in current.cases
+            if c.id not in gone
+        ]
+        picks += [SuiteCasePick(id=key, revision=rev) for key, rev in moved.items()]
+        await self.save_suite(
+            actor,
+            SuiteDraft(
+                id=current.id, name=current.name, description=current.description,
+                tags=current.tags, tool_aliases=current.tool_aliases, defaults=current.defaults,
+                cases=picks,
+            ),
+            new=False,
+        )  # fmt: skip
 
     async def cases_from_thread(
         self, actor: Subject, source: ThreadSource, ref: str, suite_id: str
@@ -662,47 +682,21 @@ class EvalService:
             raise EvalRefused("That thread has no turn the agent answered.")
         async with self._sessions() as session, session.begin():
             await eval_scrub.save_map(session, tenant_id=actor.tenant_id, rows=scrubber.fakes.added)
-            for item in built:
-                for sha, blob in item.blobs.items():
-                    row = store.BlobRow(
-                        sha256=sha, size=len(blob.data), media_type=blob.media_type,
-                        scrub=blob.scrub, needs_human_check=blob.needs_human_check,
-                    )  # fmt: skip
-                    await store.put_blob(
-                        session, tenant_id=actor.tenant_id, blob=row, content=blob.data
-                    )
-        return [await self.put_case(actor, suite_id, item.case) for item in built]
-
-    async def scrub_case(self, actor: Subject, case: JsonObject) -> ScrubResult:
-        """`case` with fakes for who it names, and what a person should still check."""
-        await self._check_on(actor)
-        model = _case_model(case)
-        people = [*model.surface.participants, model.surface.bot]
-        scrubber = await self._scrubber(
-            actor.tenant_id,
-            KnownEntities.model_validate(
-                {
-                    "people": [
-                        {
-                            "name": p.display_name,
-                            "emails": [p.email] if p.email else [],
-                            "handles": [p.handle] if p.handle else [],
-                            "ids": [p.id],
-                        }
-                        for p in people
-                        if not p.is_bot
-                    ]
-                }
-            ),
-        )
-        done, leftovers = await asyncio.to_thread(scrub_case, scrubber, case)
-        await self._keep_fakes(actor.tenant_id, scrubber)
-        scrub = _case_model(done).provenance.scrub
-        return ScrubResult(
-            case=done,
-            status=scrub.status if scrub else "partial",
-            leftovers=[Leftover(where=x.where, kind=x.kind, count=x.count) for x in leftovers],
-        )
+        refs = [
+            await self.put_case(
+                actor, suite_id, item.case,
+                blobs={
+                    BlobEntry(
+                        sha256=sha, size=len(b.data), media_type=b.media_type,
+                        scrub=b.scrub, needs_human_check=b.needs_human_check,  # pyright: ignore[reportArgumentType]
+                    ): b.data
+                    for sha, b in item.blobs.items()
+                },
+            )
+            for item in built
+        ]  # fmt: skip
+        await self._pin(actor, suite_id, refs)
+        return refs
 
     async def draft_expectations(
         self,
@@ -715,11 +709,13 @@ class EvalService:
     ) -> DraftResult:
         """Draft expectations for cases with a model. Without `confirm` only the cost estimate."""
         await self._check_on(actor)
+        async with self._sessions() as session:
+            await self._suite(session, actor, suite_id, "edit")  # before any paid call
         documents = [await self.case(actor, suite_id, key) for key in case_ids]
         for document in documents:
             scrub = _case_model(document).provenance.scrub
-            if scrub and scrub.status == "unscrubbed":
-                raise EvalRefused("Drafting sends a case to a model: scrub it first.")
+            if scrub is None or scrub.status != "scrubbed":
+                raise EvalRefused("Drafting sends a case to a model: only scrubbed cases can go.")
         try:
             estimate = estimate_draft(documents, draft_model(self._settings.evals.draft_model))
             if not confirm:
@@ -732,6 +728,7 @@ class EvalService:
                 refs.append(await self.put_case(actor, suite_id, drafted))
         except DraftError as exc:
             raise EvalRefused(str(exc)) from None
+        await self._pin(actor, suite_id, refs)
         return DraftResult(estimate=estimate, drafted=refs)
 
     async def dedupe(
@@ -750,30 +747,18 @@ class EvalService:
             rows = await store.version_cases(
                 session, suite_id=suite.id, version=suite.current_version
             )
-        found = dedupe.groups([r.document for r in rows], threshold)
-        for ids in found:
-            name = dedupe.group_id(ids)
-            for key in ids:
-                document = next(r.document for r in rows if r.key == key)
-                if document.get("dedupe_group") != name:
-                    await self.put_case(actor, suite_id, {**document, "dedupe_group": name})
+        found = await asyncio.to_thread(dedupe.groups, [r.document for r in rows], threshold)
+        by_key = {r.key: r.document for r in rows}
+        marked = [
+            await self.put_case(actor, suite_id, {**by_key[key], "dedupe_group": name})
+            for ids in found
+            for name in [dedupe.group_id(ids)]
+            for key in ids
+            if by_key[key].get("dedupe_group") != name
+        ]
         dropped = dedupe.thin(found, keep) if keep is not None else []
-        if dropped:
-            current = await self.suite(actor, suite_id)
-            await self.save_suite(
-                actor,
-                SuiteDraft(
-                    id=current.id, name=current.name, description=current.description,
-                    tags=current.tags, tool_aliases=current.tool_aliases,
-                    defaults=current.defaults,
-                    cases=[
-                        SuiteCasePick(id=c.id, weight=c.weight, split=c.split)
-                        for c in current.cases
-                        if c.id not in dropped
-                    ],
-                ),
-                new=False,
-            )  # fmt: skip
+        if marked or dropped:
+            await self._pin(actor, suite_id, marked, dropped)  # one new version for all of it
         return DedupeReport(groups=found, dropped=dropped)
 
     async def share(self, actor: Subject, suite_id: str, shares: Sequence[Share]) -> None:
@@ -1175,11 +1160,13 @@ class EvalService:
             model = _case_model(case)
             if (model.id, model.revision) in stored:
                 continue
+            shas = blob_refs(case)
             await store.add_case_revision(
                 session, suite=suite, key=model.id, revision=model.revision, document=case,
                 sha256=str(case["hash"]), fidelity=model.fidelity.level,
-                flags=[f.reason for f in model.review_flags or []], blob_shas=blob_refs(case),
-                scrub_status=_case_scrub(model), created_by=actor.key,
+                flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
+                created_by=actor.key,
             )  # fmt: skip
 
     async def _import_run(
@@ -1242,6 +1229,27 @@ def eval_service(
     )
 
 
+# Default channel names are everyday words: faking them would rewrite ordinary text.
+_COMMON_PLACES: Final = frozenset(
+    {"general", "random", "announcements", "help", "support", "dev", "test", "chat", "team",
+     "off-topic", "introductions", "welcome", "rules", "news", "questions", "feedback"}
+)  # fmt: skip
+
+
+def _deployment_entities(names: eval_scrub.DeploymentNames) -> KnownEntities:
+    return KnownEntities(
+        people=[
+            PersonEntry(
+                name=name, handles=[handle] if handle else [], ids=[uid] if uid else [],
+                emails=[email] if email else [],
+            )
+            for name, handle, uid, email in names.people
+        ],
+        channels=[p for p in names.places if p.casefold().lstrip("#") not in _COMMON_PLACES],
+        repos=names.repos,
+    )  # fmt: skip
+
+
 def _matches(entry: BlobEntry, data: bytes) -> bool:
     return sha256_hex(data) == entry.sha256 and len(data) == entry.size
 
@@ -1267,6 +1275,18 @@ def _case_model(document: JsonObject) -> Case:
 
 def _case_scrub(case: Case) -> str | None:
     return case.provenance.scrub.status if case.provenance.scrub else None
+
+
+async def _with_blobs(
+    session: AsyncSession, tenant_id: uuid.UUID, case: Case, shas: Iterable[str]
+) -> str | None:
+    """How scrubbed a case is, files included: one that holds a raw file is at best `partial`,
+    so it can be neither shared nor exported as scrubbed."""
+    status = _case_scrub(case)
+    if status != "scrubbed":
+        return status
+    rows = await store.blob_rows(session, tenant_id=tenant_id, shas=shas)
+    return "partial" if any(r.scrub == "unscrubbed" for r in rows.values()) else status
 
 
 def _labelled(
