@@ -233,6 +233,11 @@ def _inline_b64(word: str) -> tuple[str, bool] | None:
     return (text, urlsafe) if text and len(text.strip()) >= 4 else None
 
 
+def _in_marker(text: str, hit: Hit) -> bool:
+    """Whether `hit` lies inside a `[REDACTED]` this scrub wrote ("?k=[REDACTED" ends a URL)."""
+    return text.find(REDACTED, max(0, hit.end - len(REDACTED)), hit.start + len(REDACTED)) >= 0
+
+
 def _id_safe(text: str) -> str:
     """`text` as the schema's ids are written: a fake's spaces and signs become dashes."""
     return _ID_UNSAFE.sub("-", text).lstrip("._:-")[:_ID_MAX] or "x"
@@ -346,10 +351,10 @@ class Scrubber:
     def _stable_fake(self, hit: Hit) -> bool:
         return hit.kind in _STABLE_FAKES and hit.canon is None and self._is_fake(hit.text)
 
-    def _keep(self, matched: str, hit: Hit) -> bool:
+    def _keep(self, text: str, hit: Hit) -> bool:
         """Whether a hit in raw text stays: our marker, or a fake no real value has. A real name
         equal to a fake is still replaced."""
-        return matched == REDACTED or self._stable_fake(hit)
+        return _in_marker(text, hit) or self._stable_fake(hit)
 
     def _fake_spans(self, text: str) -> list[tuple[int, int]]:
         """Where `text` holds our fakes, written any way (`CruzPartners`, `cruz-partners`)."""
@@ -363,9 +368,9 @@ class Scrubber:
     def _own(self, text: str, hit: Hit, fakes: list[tuple[int, int]]) -> bool:
         """Whether a hit in scrubbed text is ours: a fake, or a name the NER widened from one by
         a title or a word like "Team"."""
-        matched = text[hit.start : hit.end]
-        if matched == REDACTED:
+        if _in_marker(text, hit):
             return True
+        matched = text[hit.start : hit.end]
         if hit.kind == SECRET:
             return False
         rest = list(matched)
@@ -409,7 +414,7 @@ class Scrubber:
         pos = 0
         for hit in self.detector.find(text, names=names, words=words):
             matched = text[hit.start : hit.end]
-            if self._keep(matched, hit):
+            if self._keep(text, hit):
                 continue
             out += [text[pos : hit.start], self._replacement(matched, hit)]
             self.counts[hit.kind] += 1
@@ -419,11 +424,7 @@ class Scrubber:
 
     def spans(self, text: str) -> list[tuple[int, int]]:
         """Where `text` holds something to replace, for masking OCR lines in images."""
-        return [
-            (h.start, h.end)
-            for h in self.detector.find(text)
-            if not self._keep(text[h.start : h.end], h)
-        ]
+        return [(h.start, h.end) for h in self.detector.find(text) if not self._keep(text, h)]
 
     def residue(self, text: str, *, names: bool = True, words: bool = True) -> Counter[str]:
         """What a scrub would still replace in already-scrubbed `text`, by kind."""

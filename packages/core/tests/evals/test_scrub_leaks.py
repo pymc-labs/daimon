@@ -318,6 +318,7 @@ def test_text_when_labelled_encoded_or_home_path_then_nothing_left(text: str) ->
     out = scrubber.text(text)
     leaked = ("hunter2", "abc123", "horse", "staple", "s3cr3t", "0123456789abcdef", "asmith")
     assert _real_in(out) == [] and not [x for x in leaked if x in out], out
+    assert scrubber.residue(out) == {}, "the sweep finds nothing, nor its own markers"
     for word in re.findall(r"[A-Za-z0-9+/_-]{12,}={0,2}", out):
         body = word.rstrip("=")
         if len(body) % 4 != 1:
