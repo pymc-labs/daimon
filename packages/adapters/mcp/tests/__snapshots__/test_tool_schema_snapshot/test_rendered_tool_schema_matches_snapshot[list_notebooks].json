@@ -1,0 +1,16 @@
+{
+  "description": [
+    "List what you've published — scratch notebooks and permanent blogs alike.",
+    "",
+    "Each entry carries slug, url, alive, permanent (true = a blog, kept until",
+    "deleted) and, for a scratch notebook, expires_at. url is null while a",
+    "notebook is stopped; its published link still works. The slug",
+    "is the bare name: pass it straight to delete_notebook to reclaim a host",
+    "port, or to create_notebook_upload_url to re-upload over it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

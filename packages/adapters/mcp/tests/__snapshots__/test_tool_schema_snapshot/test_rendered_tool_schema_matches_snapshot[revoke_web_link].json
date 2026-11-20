@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Revoke a web invite (id) or a person's sign-in links (id is the person)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "invite",
+          "visitor_link"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

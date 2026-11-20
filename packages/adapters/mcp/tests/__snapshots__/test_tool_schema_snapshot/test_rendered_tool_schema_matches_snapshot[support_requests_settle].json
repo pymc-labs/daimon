@@ -1,0 +1,51 @@
+{
+  "description": [
+    "Settle a support request at ``charge`` credits, or decline it (null). Admin-only.",
+    "",
+    "``accept`` true, with ``charge`` null, charges a fixed or steps price as it is.",
+    "A range or quoted option takes an amount within its bounds. A request",
+    "already charged at submit (``charge`` shown, not pending) keeps that",
+    "charge when ``charge`` equals it or on ``accept``, or is refunded when null. To correct",
+    "or refund one a person settled, pass its current charge as",
+    "``expected_charge``. The person who asked is not told; read ``text`` back.",
+    "Example: ``request_id`` from ``support_requests_list``, ``charge=\"2.5\"``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "accept": {
+        "default": false,
+        "type": "boolean"
+      },
+      "charge": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "expected_charge": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "request_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "request_id",
+      "charge"
+    ],
+    "type": "object"
+  }
+}

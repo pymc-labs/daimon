@@ -1,0 +1,40 @@
+{
+  "description": [
+    "Launch your own temporary Fly machine from an operator image profile.",
+    "",
+    "Requires approval in an attended conversation. List profiles for fixed CPU/RAM,",
+    "regions and image before choosing. No shared credentials are mounted. Sessions",
+    "are deleted after their idle lease; export files before stopping or expiry."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "region": {
+        "default": "iad",
+        "type": "string"
+      },
+      "template": {
+        "type": "string"
+      },
+      "ttl_hours": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "template",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

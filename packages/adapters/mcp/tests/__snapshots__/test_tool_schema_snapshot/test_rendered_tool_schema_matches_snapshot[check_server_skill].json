@@ -1,0 +1,21 @@
+{
+  "description": [
+    "Check a server skill for an update now. An update that needs review waits as",
+    "``pending_digest``; a person approves it with ``approve_server_skill_update``.",
+    "Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id"
+    ],
+    "type": "object"
+  }
+}

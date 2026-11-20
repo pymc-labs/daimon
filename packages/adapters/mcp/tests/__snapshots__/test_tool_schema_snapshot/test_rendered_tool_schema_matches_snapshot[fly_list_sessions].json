@@ -1,0 +1,17 @@
+{
+  "description": [
+    "List your live sessions in this conversation. Other people's sessions are private."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

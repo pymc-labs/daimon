@@ -1,0 +1,32 @@
+{
+  "description": [
+    "Stop an agent answering in a channel by clearing its default routing.",
+    "For example, stop churn-explorer answering in #growth. Use",
+    "``set_agent_default`` to choose a replacement instead.",
+    "",
+    "When ``channel_id`` is provided only that channel's default is cleared;",
+    "omit it to clear the workspace-wide default.  If the scope had no",
+    "default the call is a no-op (idempotent). Requires an admin.",
+    "",
+    "``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from",
+    "turn_controls, never the current thread's id. Clearing a thread id is a",
+    "silent no-op that leaves the channel's real default in place."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

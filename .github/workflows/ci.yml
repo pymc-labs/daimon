@@ -86,20 +86,28 @@ jobs:
       - name: lint migrations
         run: uv run python scripts/lint_migrations.py
 
+      - name: changelog fragments
+        run: uv run python scripts/changelog.py check
+
+      - name: check migration chain
+        run: uv run python scripts/rechain_migrations.py --check
+
       - name: lint private material leakage
         run: bash scripts/lint_designators.sh
 
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
 
-      - name: config reference check
-        run: uv run python scripts/generate_config_reference.py --check
+      # Built by the docs workflow and never committed: run, not compared, so a
+      # generator that stops working fails here before it fails there.
+      - name: config reference builds
+        run: uv run python scripts/generate_config_reference.py
 
-      - name: mcp tool catalogue check
-        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
+      - name: mcp tool catalogue builds
+        run: uv run python scripts/generate_mcp_tool_catalogue.py
 
-      - name: feature reference check
-        run: uv run python scripts/generate_feature_reference.py --check
+      - name: feature reference builds
+        run: uv run python scripts/generate_feature_reference.py
 
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
@@ -677,7 +685,7 @@ jobs:
             daimon-harness:test bash -c \
             'mount -o remount,hidepid=2,gid=60002 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
-  # Unique candidate tags are deliberately not the 7-char SHA tags consumed
+  # Unique candidate tags are deliberately not the full-SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;
   # deploy.yml assigns promotable SHA tags only after all staging gates pass.
   docker-publish-candidate:

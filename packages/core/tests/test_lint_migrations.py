@@ -321,6 +321,156 @@ def test_finding_format_matches_file_line_rule_message_shape(tmp_path: Path) -> 
     assert "migrations/missing-marker" in formatted, "format() should include the rule id"
 
 
+_VERSIONS = _REPO_ROOT / "packages" / "core" / "alembic" / "versions"
+
+
+@pytest.mark.parametrize(
+    ("stem", "expected"),
+    [
+        ("0221_routine_delivery_hold", "expand"),
+        ("0220_discord_audience_facts", "expand"),
+        # Replaces a trigger function 0142 created, which changes what old code runs.
+        ("0217_monitored_events", "contract"),
+        ("0216_usage_obs_observed_at", "contract"),
+    ],
+)
+def test_classify_reads_the_shape_of_real_migrations(stem: str, expected: str) -> None:
+    assert lint_migrations.classify_file(_VERSIONS / f"{stem}.py") == expected, stem
+
+
+_LOCKED = "    op.execute(\"SET LOCAL lock_timeout = '5s'\")\n"
+EXPAND_HEADER = '''"""a migration.
+
+downgrade: destructive
+schema: {schema}
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+'''
+
+
+def _expand(body: str, schema: str = "expand") -> str:
+    return (
+        EXPAND_HEADER.format(schema=schema)
+        + "def upgrade() -> None:\n"
+        + body
+        + "\n\ndef downgrade() -> None:\n    op.drop_column('t', 'c')\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "line_text"),
+    [
+        ("    op.drop_column('t', 'c')\n", "op.drop_column"),
+        (
+            "    op.execute(\"SET LOCAL lock_timeout = '5s'\")\n"
+            "    op.add_column('t', sa.Column('c', sa.Text(), nullable=False))\n",
+            "NOT NULL column without a server_default",
+        ),
+        (
+            "    op.add_column('t', sa.Column('c', sa.Text(), nullable=True))\n",
+            "before SET LOCAL lock_timeout",
+        ),
+        ("    op.execute('UPDATE t SET c = 1')\n", "UPDATE"),
+        ("    op.execute(f'SELECT {1}')\n", "not a literal"),
+        ("    op.create_index('ix', 't', ['c'])\n", "without concurrently"),
+        (_LOCKED + "    op.execute('CREATE INDEX ix ON t (c)')\n", "without CONCURRENTLY"),
+        (
+            "    op.create_index('ix', 't', ['c'], unique=True, postgresql_concurrently=True)\n",
+            "unique index",
+        ),
+        (
+            _LOCKED
+            + "    op.execute('CREATE TRIGGER g BEFORE INSERT ON t EXECUTE FUNCTION f()')\n",
+            "trigger or policy",
+        ),
+        (_LOCKED + "    op.execute('CREATE POLICY p ON t AS RESTRICTIVE')\n", "trigger or policy"),
+        ("    op.execute('CREATE OR REPLACE FUNCTION f() RETURNS int')\n", "OR REPLACE"),
+        (
+            "    op.create_table('w', sa.Column('t_id', sa.Integer(), sa.ForeignKey('t.id')))\n",
+            "foreign key to an existing table",
+        ),
+        (
+            "    op.create_table('w')\n    op.create_foreign_key('fk', 'w', 't', ['t_id'], ['id'])\n",
+            "foreign key to an existing table",
+        ),
+        (
+            _LOCKED + "    op.add_column('t', sa.Column('c', sa.Integer(), primary_key=True))\n",
+            "NOT NULL",
+        ),
+        (
+            "    session = sa.orm.Session(bind=op.get_bind())\n    session.delete(1)\n",
+            "may write",
+        ),
+        ("    op.execute(\"COMMENT ON TABLE t IS 'a -- b'; DROP TABLE x\")\n", "DROP TABLE x"),
+    ],
+)
+def test_expand_declared_but_not_expand_is_reported_with_its_line(
+    tmp_path: Path, body: str, line_text: str
+) -> None:
+    path = tmp_path / "0222_x.py"
+    path.write_text(_expand(body), encoding="utf-8")
+
+    findings = [
+        f for f in lint_migrations.lint_file(path) if f.rule == "migrations/expand-not-expand"
+    ]
+
+    assert findings and line_text in findings[0].message, f"{line_text!r} in {findings}"
+    assert findings[0].line > 8, "the finding names the offending line, not the docstring"
+    assert lint_migrations.classify_file(path) == "contract", "the classifier agrees"
+
+
+def test_additive_upgrade_declared_expand_passes_and_contract_may_be_declared_loosely(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "    op.execute(\"SET LOCAL lock_timeout = '5s'\")\n"
+        "    op.add_column('t', sa.Column('c', sa.Text(), server_default='x', nullable=False))\n"
+        "    op.create_index('ix', 't', ['c'], postgresql_concurrently=True)\n"
+        "    op.create_table('w', sa.Column('t_id', sa.Integer(), sa.ForeignKey('t.id')))\n"
+        "    op.execute('CREATE TRIGGER g BEFORE INSERT ON w EXECUTE FUNCTION f()')\n"
+    )
+    expand, contract = tmp_path / "0222_a.py", tmp_path / "0223_b.py"
+    expand.write_text(_expand(body), encoding="utf-8")
+    contract.write_text(_expand(body, "contract"), encoding="utf-8")
+
+    assert lint_migrations.lint_file(expand) == [], "additive upgrade passes as expand"
+    assert lint_migrations.lint_file(contract) == [], "declaring contract is always allowed"
+
+
+def test_a_call_through_an_aliased_op_is_classified(tmp_path: Path) -> None:
+    path = tmp_path / "0222_x.py"
+    source = _expand("    o.drop_column('t', 'c')\n")
+    path.write_text(source.replace("from alembic import op\n", "from alembic import op as o\n"))
+
+    assert lint_migrations.classify_file(path) == "contract", "o is alembic's op"
+
+
+def test_schema_marker_is_required_from_the_first_new_number_only(tmp_path: Path) -> None:
+    source = VALID_SAFE
+    old, new = tmp_path / "0221_old.py", tmp_path / "0222_new.py"
+    old.write_text(source, encoding="utf-8")
+    new.write_text(source, encoding="utf-8")
+
+    assert lint_migrations.lint_file(old) == [], "files up to 0221 need no schema marker"
+    assert [f.rule for f in lint_migrations.lint_file(new)] == ["migrations/missing-schema"]
+    placeholder = _expand("    pass\n", "TODO-declare (expand|contract)")
+    new.write_text(placeholder, encoding="utf-8")
+    assert [f.rule for f in lint_migrations.lint_file(new)] == ["migrations/invalid-schema"]
+
+
+def test_classify_prints_one_line_per_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "0222_x.py"
+    path.write_text(_expand("    op.create_table('w')\n"), encoding="utf-8")
+
+    assert lint_migrations.main(["--classify", str(path)]) == 0
+    assert capsys.readouterr().out == f"{path}: expand\n"
+
+
 def test_module_is_stdlib_only() -> None:
     source = _SCRIPT_PATH.read_text(encoding="utf-8")
     allowed_prefixes = (

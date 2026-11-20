@@ -19,13 +19,12 @@ imported. They are workspace members the root project does not depend on, so
 `uv sync --all-packages`; reading the files directly makes the page generate
 from a plain checkout too, and yields the identical model either way.
 
-Run: uv run python scripts/generate_config_reference.py [--check]
+Run: uv run python scripts/generate_config_reference.py
 """
 
 from __future__ import annotations
 
 import argparse
-import difflib
 import importlib.util
 import sys
 import textwrap
@@ -158,7 +157,7 @@ def _render_default(leaf: SettingsLeaf, *, is_secret: bool) -> str:
     """The default an operator gets when they leave the variable unset.
 
     Never the evaluated value of an env-dependent default_factory — that
-    would make --check depend on the machine the generator ran on — and
+    would make the page depend on the machine the generator ran on — and
     never a secret.
     """
     if leaf.env_name in ENV_DEPENDENT_PLACEHOLDERS:
@@ -467,37 +466,11 @@ def render_reference() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Generate docs/configuration.md from the settings models.",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Verify the committed page matches generator output; exit nonzero on drift.",
-    )
-    args = parser.parse_args(argv)
-
-    generated = render_reference()
-
-    if args.check:
-        current = REFERENCE_PATH.read_text() if REFERENCE_PATH.exists() else ""
-        if current != generated:
-            diff = difflib.unified_diff(
-                current.splitlines(keepends=True),
-                generated.splitlines(keepends=True),
-                fromfile="docs/configuration.md (committed)",
-                tofile="docs/configuration.md (generated)",
-            )
-            sys.stderr.writelines(diff)
-            print(
-                "\ndocs/configuration.md is out of date. "
-                "Run: uv run python scripts/generate_config_reference.py",
-                file=sys.stderr,
-            )
-            return 1
-        return 0
-
-    REFERENCE_PATH.write_text(generated)
+    # No --check: the docs workflow builds the page, which is never committed.
+    argparse.ArgumentParser(
+        description="Generate docs/configuration.md from the settings models."
+    ).parse_args(argv)
+    REFERENCE_PATH.write_text(render_reference())
     return 0
 
 

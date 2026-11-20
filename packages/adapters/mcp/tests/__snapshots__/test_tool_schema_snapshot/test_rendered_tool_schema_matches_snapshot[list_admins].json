@@ -1,0 +1,13 @@
+{
+  "description": [
+    "List this tenant's explicit Daimon admin grants (any member).",
+    "",
+    "Platform admins always have Daimon authority live and are not stored in",
+    "this list. A role grant applies only while the member holds it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

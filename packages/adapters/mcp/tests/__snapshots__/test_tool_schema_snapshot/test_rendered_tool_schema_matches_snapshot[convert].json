@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Convert an ISO-8601 ``time`` from ``from_tz`` to ``to_tz``.",
+    "",
+    "Naive input is interpreted as ``from_tz``; aware input must agree",
+    "with ``from_tz`` at that wall time."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "from_tz": {
+        "type": "string"
+      },
+      "time": {
+        "type": "string"
+      },
+      "to_tz": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "time",
+      "from_tz",
+      "to_tz"
+    ],
+    "type": "object"
+  }
+}

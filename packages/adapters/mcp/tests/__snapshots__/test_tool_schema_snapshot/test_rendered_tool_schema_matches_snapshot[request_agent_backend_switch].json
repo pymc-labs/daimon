@@ -1,0 +1,235 @@
+{
+  "description": [
+    "Change an agent's model to another provider's.",
+    "",
+    "Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI",
+    "or Gemini. It stays the same agent on a new model: say \"Researcher now uses",
+    "Gemini 4 Argon\", never a version, copy or variant. A member can make a copy",
+    "they own with fork_agent and switch that copy.",
+    "If the named model isn't available, say that with the allowed list.",
+    "A person may name a model naturally: \"switch Researcher to argon\" or",
+    "\"switch Researcher to luna\". For an Anthropic model change such as",
+    "\"set Writer to opus 5.5\", use update_agent with that natural model name.",
+    "``model`` accepts natural names or one of",
+    "the returned ``models``; omit it for the provider's default. A provider",
+    "alone (\"switch to GPT\", \"to Gemini\") means its default: omit ``model``;",
+    "never ask which model. Never ask the person for a model id.",
+    "Ambiguous model names return the choices.",
+    "The switch applies to new conversations wherever the agent answers, and to",
+    "this conversation from the next message when the switched agent answers here",
+    "(the result's summary says which). The summary also says what is off on the",
+    "new provider: tell the person. A move to another provider first returns",
+    "status \"preview\" and changes nothing: call again with the same arguments and",
+    "its expected_revision, and the person confirms on a card that names the",
+    "provider. A model change within the provider applies at once. The",
+    "server's default or built-in agent switches only when the person says",
+    "it's for everyone (for_everyone=true); otherwise offer the copy",
+    "below. For \"make a copy of yourself on Gemini\": copy the agent with",
+    "fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier",
+    "one; use the name it returns from here on), then switch the copy here.",
+    "Don't hand_off_task first: the switch hands this conversation to the copy",
+    "and moves it to Gemini from the next message.",
+    "Pass ``handoff_summary``: a short summary of this conversation",
+    "(what was asked, decided and still open; no secrets, keys or tool output),",
+    "which the copy starts from there, since the history itself can't move.",
+    "If the call asks the uncommitted-work question, ask the person and call",
+    "again with their answer as ``unsaved_work``.",
+    "``expected_revision`` refuses a switch when the agent changed since it was",
+    "read; it is also what asks for the card. ``preview_digest`` and ``accepted_drops``",
+    "are ignored.",
+    "Pass this active turn's origin_context_id.",
+    "The same tool states the agent's own settings: ``thread_mode`` (\"shared\"",
+    "to share threads where the channel allows it, admins only; or \"per_caller\") and",
+    "``required_capabilities`` (a channel that can't give one refuses the turn).",
+    "Pass both together; an omitted one returns to the default. ``effort``",
+    "(low, medium or high) sets the reasoning effort on OpenAI and Gemini; the",
+    "agent keeps its own effort unless you pass one. To change only",
+    "settings, pass the agent's current target_backend and model."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "accepted_drops": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "agent_name": {
+        "type": "string"
+      },
+      "effort": {
+        "anyOf": [
+          {
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_revision": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "for_everyone": {
+        "default": false,
+        "type": "boolean"
+      },
+      "handoff_summary": {
+        "anyOf": [
+          {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "preview_digest": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "required_capabilities": {
+        "anyOf": [
+          {
+            "items": {
+              "enum": [
+                "thread_workspace_persistence",
+                "turn_lifecycle",
+                "cancel",
+                "tool_loop",
+                "required_actions",
+                "skills_bundle",
+                "artifacts",
+                "usage_observations",
+                "reconcile",
+                "steer",
+                "tool_confirmation",
+                "native_event_replay",
+                "event_previews",
+                "vaults",
+                "memory_stores",
+                "session_resources",
+                "skills_versions",
+                "multiagent",
+                "environments_fork",
+                "native_schedules",
+                "model_request_usage",
+                "model_request_limit",
+                "input_token_limit",
+                "output_token_limit",
+                "session_spend_control",
+                "workspace_export_import",
+                "neutral_catalog",
+                "agent_delete"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "target_backend": {
+        "enum": [
+          "anthropic",
+          "openai",
+          "gemini",
+          "selfhosted"
+        ],
+        "type": "string"
+      },
+      "thread_mode": {
+        "anyOf": [
+          {
+            "enum": [
+              "per_caller",
+              "shared"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "unsaved_work": {
+        "anyOf": [
+          {
+            "enum": [
+              "copy",
+              "leave"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_name",
+      "target_backend"
+    ],
+    "type": "object"
+  }
+}

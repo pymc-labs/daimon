@@ -89,20 +89,22 @@ CI runs those four across its jobs. Its `lint` job also runs the repo's own
 linters — `scripts/lint_discord_modals.py` for Discord modal conventions,
 `scripts/lint_anti_patterns.sh` for test anti-patterns, plus the migration
 marker and leakage linters described below — and checks that the generated
-documentation still matches the code:
+`.env.example` still matches the code, and that the changelog fragments are
+well formed:
 
 ```bash
-uv run python scripts/generate_env_example.py --check      # .env.example
-uv run python scripts/generate_config_reference.py --check # docs/configuration.md
-uv run python scripts/generate_mcp_tool_catalogue.py --check # docs/mcp-tools.md
+uv run python scripts/generate_env_example.py --check # .env.example
+uv run python scripts/changelog.py check              # changes/*.md
 ```
 
-Those three pages are written by generators, so a change to a settings field's
-`Field(description=...)` or to an MCP tool's docstring is a change to their
-source: re-run the generator without `--check` and commit the result, rather
-than editing the page. `CLAUDE.md` says which page a change belongs on and
-how to write it; `scripts/check_docs.py` keeps the hand-written pages within
-their length budgets.
+The configuration, features and MCP tools pages are built from the code by the
+docs workflow and never committed, so a change to a settings field's
+`Field(description=...)`, the feature registry or an MCP tool's docstring needs
+no page edit. Run `scripts/generate_config_reference.py`,
+`generate_feature_reference.py` and `generate_mcp_tool_catalogue.py` to preview
+them under `docs/`. `CLAUDE.md` says which hand-written page a change belongs
+on and how to write it; `scripts/check_docs.py` keeps those pages within their
+length budgets.
 
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
 suites (`core`, `mcp`, `discord`) into shards by test file with
@@ -143,20 +145,29 @@ Explain invariants and causal reasons in product comments and docstrings. Keep
 ticket numbers, review rounds, lane names and checklist labels in commit or PR
 provenance.
 
-### Migration downgrade-safety markers
+### Migrations
 
-Every file under `packages/core/alembic/versions/` must carry a
-`downgrade: safe | destructive | unsupported` line in its module docstring:
+Each file under `packages/core/alembic/versions/` declares two docstring lines:
 
-- `safe` — `downgrade()` reverses the migration cleanly, no data loss.
-- `destructive` — `downgrade()` reverses the migration but loses data.
-- `unsupported` — `downgrade()` raises `NotImplementedError`.
+- `downgrade: safe | destructive | unsupported`: `downgrade()` reverses
+  cleanly, loses data, or raises `NotImplementedError`.
+- `schema: expand | contract`: `expand` only adds new tables, nullable or
+  defaulted columns, non-unique indexes (concurrently on existing tables), new
+  functions, or triggers and policies on new tables, and sets `lock_timeout`
+  before touching or referencing an existing table. Everything else, backfills
+  and replaced functions included, is `contract`.
 
-`alembic revision` emits an invalid `downgrade: TODO-declare
-(safe|destructive|unsupported)` placeholder — replace it with the real
-value. `scripts/lint_migrations.py` (wired into pre-commit and CI)
-AST-cross-checks the declared value against the `downgrade()` body, so
-declaring `unsupported` requires actually raising `NotImplementedError`.
+`alembic revision` writes `TODO-declare` placeholders that fail
+`scripts/lint_migrations.py` (pre-commit and CI) until replaced; the lint
+checks both lines against the code.
+
+The chain is linear and `packages/core/alembic/head.txt` names its head. After
+you merge or rebase `main`, run `uv run python scripts/rechain_migrations.py`:
+it renumbers your branch's new migrations onto `main`'s head, updates the files
+you changed that mention them, and rewrites `head.txt`. From a fork, pass
+`--base upstream/main` (your fork's `main` may be stale). CI runs it with `--check`.
+Land a schema change in its own PR before the code that needs it; a `contract`
+migration lands alone, after the release that stopped using what it removes.
 
 ### Designators in comments
 
@@ -181,4 +192,6 @@ Describe the behaviour instead.
   in the same PR.
 - Describe what changed and why in the PR description. Link any related
   issue.
+- Add a `changes/<topic>.md` fragment for anything a user can notice; do not
+  edit `CHANGELOG.md`.
 - Make sure the quality gates above pass locally before requesting review.

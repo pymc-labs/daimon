@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Save a new memory file at `path` (for example `/notes/project.md`)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "personal": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "path",
+      "content"
+    ],
+    "type": "object"
+  }
+}

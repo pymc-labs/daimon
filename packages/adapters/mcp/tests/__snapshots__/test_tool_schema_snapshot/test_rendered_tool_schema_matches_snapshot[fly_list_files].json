@@ -1,0 +1,30 @@
+{
+  "description": [
+    "List paths and sizes on your session. This does not extend its lease."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "pattern": {
+        "default": "*",
+        "type": "string"
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "path",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}
