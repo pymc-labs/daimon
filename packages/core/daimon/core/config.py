@@ -3067,6 +3067,9 @@ class EvalsSettings(BaseModel):
         gt=0,
         description="Eval spending ceilings above this, in USD, need an admin to approve them.",
     )
+    worker_concurrency: int = Field(
+        default=2, ge=1, le=32, description="Eval items one eval worker runs at once."
+    )
     kappa_warn: float = Field(
         default=0.4,
         ge=-1,

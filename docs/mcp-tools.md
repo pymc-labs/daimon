@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 259 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 263 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -306,6 +306,10 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_review_next` | all callers | Get your next review task from a queue (`run~queue`), or none when none is left. |
 | `eval_review_queues` | all callers | List the open eval review queues you may work, across every run you review. |
 | `eval_review_submit` | all callers | Submit your scores for a review task: one per criterion the task asks for, naming the column (A, B...) each is about. |
+| `eval_run_cancel` | all callers | Stop an eval run: no more items start, and running ones are interrupted. |
+| `eval_run_estimate` | all callers | Estimate what an eval run would cost: low, expected and high in USD, per category. |
+| `eval_run_start` | all callers | Start an eval run that stops once it has spent `cap_usd`. |
+| `eval_run_status` | all callers | Read an eval run: its status, spend so far and estimate. |
 | `eval_suite_create` | all callers | Create an eval suite with no cases; you own it. |
 | `eval_suite_get` | all callers | Read an eval suite: its cases, weights and defaults. |
 | `eval_suite_share` | all callers | Replace who an eval suite is shared with: people or groups, as viewer, reviewer or editor. |

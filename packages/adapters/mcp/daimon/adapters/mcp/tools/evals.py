@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._dm_groups import slack_groups, slack_http, teams_groups
 from daimon.adapters.mcp.tools._eval_threads import thread_source
@@ -31,6 +32,7 @@ from daimon.core.evals.review import (
     ReviewTask,
     ScoreDraft,
 )
+from daimon.core.evals.runs import RunDraft, RunEstimate, RunService
 from daimon.core.evals.scoring.service import JudgeOutcome, JudgeRequest, ScoringService
 from daimon.core.evals.service import (
     CaseCheck,
@@ -97,6 +99,7 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     service = eval_service(runtime.session_factory, runtime.settings, runtime.client)
     scoring = ScoringService(runtime.session_factory, runtime.settings, service)
     review = ReviewService(runtime.session_factory, service)
+    runs = RunService(runtime.session_factory, runtime.settings, service)
 
     async def actor(ctx: Context) -> Subject:
         return eval_subject(runtime, await _auth(ctx))
@@ -241,6 +244,35 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         a person approves the estimate and a spending ceiling on the evals page or in the CLI."""
         ask = (request or JudgeRequest()).model_copy(update={"approve_cap_usd": None})
         return await _call(scoring.judge(await actor(ctx), run_id, ask))
+
+    @mcp.tool
+    async def eval_run_estimate(ctx: Context, draft: RunDraft) -> RunEstimate:  # pyright: ignore[reportUnusedFunction]
+        """Estimate what an eval run would cost: low, expected and high in USD, per category.
+        Runs nothing; start it with eval_run_start."""
+        return await _call(runs.estimate(await actor(ctx), draft))
+
+    @mcp.tool
+    async def eval_run_start(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, draft: RunDraft, cap_usd: float, origin_context_id: str
+    ) -> JsonObject:
+        """Start an eval run that stops once it has spent `cap_usd`. Runs only on the person's
+        card in chat. A cap above the admin limit waits for an admin to approve it."""
+        auth = await _auth(ctx)
+        await require_card(
+            runtime, auth, tool_name="eval_run_start", origin_context_id=origin_context_id
+        )
+        run = await _call(runs.start(eval_subject(runtime, auth), draft, cap_usd=cap_usd))
+        return to_document(run)
+
+    @mcp.tool
+    async def eval_run_status(ctx: Context, run_id: str) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+        """Read an eval run: its status, spend so far and estimate."""
+        return to_document(await _call(runs.status(await actor(ctx), run_id)))
+
+    @mcp.tool
+    async def eval_run_cancel(ctx: Context, run_id: str) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+        """Stop an eval run: no more items start, and running ones are interrupted."""
+        return to_document(await _call(runs.cancel(await actor(ctx), run_id)))
 
     @mcp.tool
     async def eval_review_queues(ctx: Context) -> list[QueueView]:  # pyright: ignore[reportUnusedFunction]

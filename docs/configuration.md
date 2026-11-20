@@ -376,6 +376,12 @@ arm it judges. Empty: judging names its models.
 
 Eval spending ceilings above this, in USD, need an admin to approve them.
 
+### `DAIMON_EVALS__WORKER_CONCURRENCY`
+
+`int` · optional · default `2`
+
+Eval items one eval worker runs at once.
+
 ### `DAIMON_EVALS__KAPPA_WARN`
 
 `float` · optional · default `0.4`

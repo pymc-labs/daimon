@@ -24,6 +24,7 @@ from daimon.core.evals.review import (
     ReviewTask,
     ScoreDraft,
 )
+from daimon.core.evals.runs import RunDraft, RunEstimate, RunService
 from daimon.core.evals.scoring.client import MuxJudgeClient
 from daimon.core.evals.scoring.service import JudgeOutcome, JudgeRequest, ScoringService
 from daimon.core.evals.scoring.summary import RunSummary
@@ -67,6 +68,14 @@ class DedupeCases(BaseModel):
 
 
 Caller = Annotated[WebCaller, Depends(requires("evals.use"))]
+
+
+class RunStart(RunDraft):
+    cap_usd: float
+
+
+class CapBody(BaseModel):
+    cap_usd: float
 
 
 class QueueCreate(BaseModel):
@@ -115,6 +124,7 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
         runtime.sessionmaker, runtime.settings, service, client=MuxJudgeClient(runtime.anthropic)
     )
     review = ReviewService(runtime.sessionmaker, service)
+    runs = RunService(runtime.sessionmaker, runtime.settings, service)
 
     async def subject(caller: WebCaller) -> Subject:
         async with runtime.sessionmaker() as db:
@@ -221,6 +231,30 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/arms")
     async def save_arm(caller: Caller, arm: Arm) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
         return to_document(await _call(service.save_arm(await subject(caller), arm)))
+
+    @router.get("/runs")
+    async def list_runs(caller: Caller, suite: str | None = None) -> list[JsonObject]:  # pyright: ignore[reportUnusedFunction]
+        return [to_document(r) for r in await _call(runs.runs(await subject(caller), suite))]
+
+    @router.post("/runs/estimate")
+    async def estimate_run(caller: Caller, draft: RunDraft) -> RunEstimate:  # pyright: ignore[reportUnusedFunction]
+        return await _call(runs.estimate(await subject(caller), draft))
+
+    @router.post("/runs")
+    async def start_run(caller: Caller, body: RunStart) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+        draft = RunDraft.model_validate(body.model_dump(exclude={"cap_usd"}))
+        return to_document(
+            await _call(runs.start(await subject(caller), draft, cap_usd=body.cap_usd))
+        )
+
+    @router.post("/runs/{run_id}/cancel")
+    async def cancel_run(caller: Caller, run_id: str) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+        return to_document(await _call(runs.cancel(await subject(caller), run_id)))
+
+    @router.post("/approvals/{run_id}")
+    async def approve_run(caller: Caller, run_id: str, body: CapBody) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
+        actor = await subject(caller)
+        return to_document(await _call(runs.approve(actor, run_id, cap_usd=body.cap_usd)))
 
     @router.get("/runs/{run_id}")
     async def get_run(caller: Caller, run_id: str) -> JsonObject:  # pyright: ignore[reportUnusedFunction]

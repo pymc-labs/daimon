@@ -243,6 +243,9 @@
     "teams": "daimon.adapters.teams.billing_panel"
    }
   },
+  "POST /api/evals/approvals/{run_id}": {
+   "exempt": "an admin approves a spending cap in the web app or the CLI"
+  },
   "POST /api/evals/arms": {
    "tool": "eval_arm_create"
   },
@@ -260,6 +263,15 @@
   },
   "POST /api/evals/queues": {
    "exempt": "review queue setup is done by a person in the web app or the CLI"
+  },
+  "POST /api/evals/runs": {
+   "tool": "eval_run_start"
+  },
+  "POST /api/evals/runs/estimate": {
+   "tool": "eval_run_estimate"
+  },
+  "POST /api/evals/runs/{run_id}/cancel": {
+   "tool": "eval_run_cancel"
   },
   "POST /api/evals/runs/{run_id}/judge": {
    "tool": "eval_judge_run"
