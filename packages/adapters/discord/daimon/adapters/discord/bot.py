@@ -100,6 +100,7 @@ from daimon.adapters.discord.typed_stop import (
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
+from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -1284,6 +1285,13 @@ class DaimonBot(commands.Bot):
                             workspace_id=guild_id,
                             default_agent_name=self.runtime.deployment_default.agent_name,
                         ),
+                    ),
+                    workflow=make_discord_workflow_poster(
+                        self.runtime.sessionmaker,
+                        settings=self.runtime.settings,
+                        fetch_channel=self._channel_by_id,
+                        membership_resolver=self.membership_resolver,
+                        output_client=self.runtime.anthropic,
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )

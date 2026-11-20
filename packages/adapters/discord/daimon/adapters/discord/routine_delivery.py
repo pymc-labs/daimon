@@ -121,7 +121,7 @@ async def _untagged(
     )
 
 
-async def _placement(
+async def channel_placement(
     channel: object, fetch_channel: ChannelFetcher
 ) -> tuple[str | None, str | None, int | None, object] | None:
     """(parent_channel_id, category_id, guild_id, permission_source) of a
@@ -323,7 +323,7 @@ def make_discord_routine_poster(
             if await creator_still_cleared(row) is not None:
                 return False
             if isinstance(destination, discord.TextChannel | discord.Thread):
-                placement = await _placement(destination, fetch_channel)
+                placement = await channel_placement(destination, fetch_channel)
                 if placement is None or row.created_by_user_id is None:
                     return False
                 parent, category, _guild, permissions = placement
@@ -525,7 +525,7 @@ def make_discord_routine_poster(
             channel = await fetch_channel(int(target.channel_id))
         except discord.HTTPException:
             return await fallback("destination_unavailable")
-        placement = await _placement(channel, fetch_channel)
+        placement = await channel_placement(channel, fetch_channel)
         if placement is None or str(placement[2]) != tenant.external_id:
             # Not a text channel or thread, its parent is unknown, or it is in
             # another guild.
