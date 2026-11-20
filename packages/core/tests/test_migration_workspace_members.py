@@ -49,12 +49,19 @@ async def test_workspace_members_migration_down_up_matches_the_model(
             inspector = inspect(sync)
             for table in _TABLES:
                 columns = [c["name"] for c in inspector.get_columns(table, schema=here)]
-                assert columns == list(Base.metadata.tables[table].columns.keys()), table
+                # `role_ids` arrives with 0220, after this migration.
+                expected = [
+                    name
+                    for name in (c.name for c in Base.metadata.tables[table].columns)
+                    if name != "role_ids"
+                ]
+                assert columns == expected, table
             indexes = {i["name"] for i in inspector.get_indexes("platform_principals", schema=here)}
             assert "ix_platform_principals_account_id" in indexes, "the account lookup is indexed"
             differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
             touched = (*_TABLES, "ix_platform_principals_account_id")
-            assert not [d for d in differences if any(t in str(d) for t in touched)], differences
+            later = [d for d in differences if "role_ids" not in str(d)]
+            assert not [d for d in later if any(t in str(d) for t in touched)], differences
             sync.commit()
 
     async with engine.connect() as connection:

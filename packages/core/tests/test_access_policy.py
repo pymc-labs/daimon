@@ -261,3 +261,14 @@ def test_internal_roles_validate_and_deduplicate() -> None:
     assert TenantAccessPolicy.model_validate_json(policy.model_dump_json()) == policy
     with pytest.raises(ValueError):
         TenantAccessPolicy(internal_role_ids=("not-a-role",))
+
+
+def test_team_roles_are_internal_roles_and_default_empty() -> None:
+    assert TenantAccessPolicy().team_role_ids == ()
+    policy = TenantAccessPolicy(internal_role_ids=("222", "333"), team_role_ids=("333", "333"))
+    assert policy.team_role_ids == ("333",)
+    assert TenantAccessPolicy.model_validate_json(policy.model_dump_json()) == policy
+    with pytest.raises(ValueError, match="internal"):
+        TenantAccessPolicy(internal_role_ids=("222",), team_role_ids=("333",))
+    with pytest.raises(ValueError):
+        TenantAccessPolicy(internal_role_ids=("222",), team_role_ids=("not-a-role",))

@@ -12,17 +12,21 @@ import asyncio
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.member_reloads import ReloadChanges, overlay
+from daimon.core.member_reloads import MemberState, ReloadChanges, overlay
 from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
+
+if TYPE_CHECKING:
+    from daimon.adapters.discord.audience_sync import AudienceSync
 
 log = structlog.get_logger(__name__)
 
@@ -39,13 +43,19 @@ def tenant_of(guild_id: int) -> uuid.UUID:
     return derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
 
 
-def admin_flags(guild: discord.Guild, members: Iterable[discord.Member]) -> dict[str, bool]:
-    """Each human member's id and whether they are a server admin."""
-    return {
-        str(m.id): is_member_guild_admin(m, guild_owner_id=guild.owner_id)
-        for m in members
-        if not m.bot
-    }
+def member_state(guild: discord.Guild, member: discord.Member) -> MemberState:
+    """Whether the member is a server admin, and their roles (not @everyone)."""
+    return MemberState(
+        is_admin=is_member_guild_admin(member, guild_owner_id=guild.owner_id),
+        role_ids=tuple(str(role.id) for role in member.roles if not role.is_default()),
+    )
+
+
+def member_states(
+    guild: discord.Guild, members: Iterable[discord.Member]
+) -> dict[str, MemberState]:
+    """Each human member's id and state."""
+    return {str(m.id): member_state(guild, m) for m in members if not m.bot}
 
 
 class MemberSync:
@@ -55,15 +65,20 @@ class MemberSync:
         self,
         sessionmaker: async_sessionmaker[AsyncSession],
         clock: Callable[[], datetime] = _utcnow,
+        audience: AudienceSync | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._clock = clock
+        self._audience = audience
         self._changes = ReloadChanges()
 
     async def reload(self, guild: discord.Guild) -> None:
         """Replace the server's list with its full member list, for a live install."""
         tenant_id = tenant_of(guild.id)
         self._changes.start(tenant_id)
+        if self._audience is not None:
+            # The cache fills while the reload runs: no room fact holds until it ends.
+            await self._audience.mark_unknown(guild)
         try:
             loaded = await self._replace(guild, tenant_id)
         finally:
@@ -73,6 +88,8 @@ class MemberSync:
                 await members_store.apply_changes(
                     session, tenant_id=tenant_id, changes=late, now=self._clock()
                 )
+        if loaded and self._audience is not None:
+            await self._audience.publish(guild, reconciled=True)
 
     async def _replace(self, guild: discord.Guild, tenant_id: uuid.UUID) -> bool:
         """Whether the server is installed, and so its list written."""
@@ -82,7 +99,7 @@ class MemberSync:
             tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.archived_at is not None:
                 return False
-            members = overlay(admin_flags(guild, guild.members), self._changes.seen(tenant_id))
+            members = overlay(member_states(guild, guild.members), self._changes.seen(tenant_id))
             await members_store.replace_members(
                 session,
                 tenant_id=tenant_id,
@@ -110,20 +127,23 @@ class MemberSync:
                     guild_id=str(guild.id),
                     err_type=type(err).__name__,
                 )
+                if self._audience is not None:
+                    await self._audience.mark_unknown(guild)
 
     async def joined(self, member: discord.Member) -> None:
-        """A member joined, or changed roles: listed, with their admin flag."""
+        """A member joined, or changed roles: listed, with their admin flag and roles."""
         if member.bot:
             return
         tenant_id = tenant_of(member.guild.id)
-        is_admin = is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
-        self._changes.note(tenant_id, str(member.id), is_admin)
+        state = member_state(member.guild, member)
+        self._changes.note(tenant_id, str(member.id), state)
         async with self._sessionmaker.begin() as session:
             await members_store.upsert_member(
                 session,
                 tenant_id=tenant_id,
                 platform_user_id=str(member.id),
-                is_admin=is_admin,
+                is_admin=state.is_admin,
+                role_ids=state.role_ids,
                 now=self._clock(),
             )
 
@@ -137,16 +157,16 @@ class MemberSync:
             )
 
     async def admins_changed(self, guild: discord.Guild, members: Iterable[discord.Member]) -> None:
-        """Recompute the admin flag of `members` after a role or owner change."""
-        flags = admin_flags(guild, members)
-        if not flags:
+        """Recompute the admin flag and roles of `members` after a role or owner change."""
+        states = member_states(guild, members)
+        if not states:
             return
         tenant_id = tenant_of(guild.id)
-        for user_id, is_admin in flags.items():
-            self._changes.note(tenant_id, user_id, is_admin)
+        for user_id, state in states.items():
+            self._changes.note(tenant_id, user_id, state)
         async with self._sessionmaker.begin() as session:
-            await members_store.update_admin_flags(
-                session, tenant_id=tenant_id, flags=flags, now=self._clock()
+            await members_store.update_member_states(
+                session, tenant_id=tenant_id, states=states, now=self._clock()
             )
 
     async def removed(self, guild_id: int) -> None:

@@ -470,6 +470,7 @@ source_modules = [
     "daimon.core.agent_target",
     "daimon.core.agent_tool_rule_admin",
     "daimon.core.allowance_limits",
+    "daimon.core.audience_facts",
     "daimon.core.audit_trail",
     "daimon.core.channel_audience",
     "daimon.core.channel_changes",

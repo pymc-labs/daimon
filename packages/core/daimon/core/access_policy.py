@@ -137,6 +137,9 @@ class TenantAccessPolicy(BaseModel):
     invoker_role_ids: tuple[str, ...] = ()
     # Discord organisation membership for visibility warnings, independent of invoker access.
     internal_role_ids: tuple[str, ...] = ()
+    # The part of `internal_role_ids` that counts as the team: a room that shuts out
+    # several of them is narrow. Always a subset of the internal roles.
+    team_role_ids: tuple[str, ...] = ()
     invoker_admin_bypass: bool = True
     approvals: Approvals = Field(default="inherit", exclude_if=lambda value: value == "inherit")
     approvals_set_by: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -165,12 +168,18 @@ class TenantAccessPolicy(BaseModel):
             return {**fields, "backends_explicit": True}
         return fields
 
-    @field_validator("invoker_role_ids", "internal_role_ids")
+    @field_validator("invoker_role_ids", "internal_role_ids", "team_role_ids")
     @classmethod
     def _role_snowflakes(cls, ids: tuple[str, ...]) -> tuple[str, ...]:
         if not all(is_discord_snowflake(value) for value in ids):
             raise ValueError("role ids must contain numeric role IDs")
         return tuple(dict.fromkeys(ids))
+
+    @model_validator(mode="after")
+    def _team_roles_are_internal(self) -> TenantAccessPolicy:
+        if not set(self.team_role_ids) <= set(self.internal_role_ids):
+            raise ValueError("team roles must also be internal roles")
+        return self
 
     @field_validator("enabled_backends")
     @classmethod

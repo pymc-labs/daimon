@@ -342,3 +342,44 @@ async def test_here_confidential_shortcut_rechecks_admin(
         assert (await load_access_policy(session, tenant_id=tenant.id)).channel_rules[
             str(CHANNEL_ID)
         ].readers == "own"
+
+
+async def test_team_role_picker_saves_internal_roles_only_and_follows_the_internal_set(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(GUILD_ID))
+        account = await make_account(session, tenant=tenant)
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(internal_role_ids=("222", "333")),
+        )
+    base = _view(_runtime(db_session_factory), account.id)
+    assert not hasattr(base, "team_roles_select"), "no team choice before internal roles"
+    view = PermissionsView(
+        base.state,
+        runtime=base.runtime,
+        allowed_user_id=42,
+        status=ChannelRuleStatus(OPEN_RULE, ()),
+        internal_role_ids=("222", "333"),
+    )
+
+    async def saved() -> TenantAccessPolicy:
+        async with db_session_factory() as session:
+            return await load_access_policy(session, tenant_id=tenant.id)
+
+    view.team_roles_select._values = [discord.Object(id=333, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_team_roles(_interaction(admin=False))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == (), "only an admin may choose"
+    await view._on_team_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == ("333",)
+
+    view.team_roles_select._values = [discord.Object(id=999, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_team_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    assert (await saved()).team_role_ids == ("333",), "a role that is not internal is refused"
+
+    view.internal_roles_select._values = [discord.Object(id=222, type=discord.Role)]  # pyright: ignore[reportPrivateUsage]
+    await view._on_internal_roles(_interaction(admin=True))  # pyright: ignore[reportPrivateUsage]
+    policy = await saved()
+    assert policy.internal_role_ids == ("222",) and policy.team_role_ids == ()

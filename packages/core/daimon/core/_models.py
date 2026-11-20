@@ -5458,6 +5458,9 @@ class WorkspaceMember(Base):
     platform_user_id: Mapped[str] = mapped_column(primary_key=True)
     is_admin: Mapped[FalseFlag]
     updated_at: Mapped[TsNow]
+    # The member's role ids, where the platform has roles (Discord). None: not recorded
+    # (a Slack member, or a row written before roles were kept), so it says nothing.
+    role_ids: Mapped[list[str] | None]
 
 
 class WorkspaceMemberSync(Base):
@@ -5472,6 +5475,36 @@ class WorkspaceMemberSync(Base):
     tenant_id: Mapped[TenantPk]
     workspace_name: Mapped[str] = mapped_column(server_default="")
     synced_at: Mapped[datetime]
+
+
+class DiscordAudienceState(Base):
+    """Whether a Discord server's room facts are complete, and until when they stay fresh.
+
+    The bot writes it; the scheduler and MCP processes read it. A missing row, an
+    incomplete one or one past `fresh_until` makes every room of the server unknown.
+    """
+
+    __tablename__ = "discord_audience_state"
+
+    tenant_id: Mapped[TenantPk]
+    complete: Mapped[bool] = mapped_column(server_default=text("false"))
+    generation: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    fresh_until: Mapped[datetime | None]
+    updated_at: Mapped[TsNow]
+
+
+class DiscordChannelAudience(Base):
+    """One room's facts from the generation that `DiscordAudienceState` names."""
+
+    __tablename__ = "discord_channel_audience"
+
+    tenant_id: Mapped[TenantPk]
+    channel_id: Mapped[str] = mapped_column(primary_key=True)
+    parent_id: Mapped[str | None]
+    contained: Mapped[bool]
+    narrow: Mapped[bool]
+    generation: Mapped[int] = mapped_column(BigInteger)
+    computed_at: Mapped[datetime]
 
 
 class WorkspaceAdmin(Base):

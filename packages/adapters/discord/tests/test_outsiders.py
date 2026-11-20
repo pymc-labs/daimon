@@ -1,134 +1,76 @@
-"""Outsider checks must retain uncached overwrites and fail conservatively."""
+"""The warning screens read the same per-person room check that the facts use."""
 
-from unittest.mock import AsyncMock, MagicMock
+from __future__ import annotations
 
 import discord
-import pytest
-from daimon.adapters.discord.outsiders import MEMBER_OVERWRITE_CAP, channel_outsiders
+from daimon.adapters.discord.outsiders import channel_outsiders, guild_rooms
 from daimon.core.outsiders import INTERNAL_ROLES_HINT
 
-INTERNAL = "900000000000000001"
+from . import audience_fakes as fake
+
+INTERNAL = (str(fake.CORE), str(fake.FRIEND))
+TEAM = (str(fake.CORE),)
 
 
-def _role(role_id: int, *, view: bool = False, admin: bool = False) -> MagicMock:
-    role = MagicMock(spec=discord.Role)
-    role.id = role_id
-    role.permissions = discord.Permissions(view_channel=view, administrator=admin)
-    return role
+def _open(channel_id: int = 1) -> object:
+    return fake.channel(channel_id, "planning", fake.internal_only())
 
 
-def _channel(*, everyone_view: bool = False) -> MagicMock:
-    channel = MagicMock(spec=discord.TextChannel)
-    channel.id = 123
-    channel.guild.id = 100
-    channel.guild.fetch_channel = AsyncMock(return_value=channel)
-    channel.guild.fetch_roles = AsyncMock(
-        return_value=[
-            _role(100, view=everyone_view),
-            _role(int(INTERNAL), view=True),
-            _role(200),
-        ]
-    )
-    channel.guild.fetch_member = AsyncMock()
-    channel.overwrites = {}
-    return channel
+def _guest(channel_id: int = 2, name: str = "guest") -> object:
+    overwrites = fake.internal_only()
+    overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(view_channel=True)
+    return fake.channel(channel_id, name, overwrites)
 
 
-async def test_without_internal_roles_does_not_claim_visibility() -> None:
-    channel = _channel(everyone_view=True)
-    result = await channel_outsiders(channel, ())
-    assert result.outsiders_can_view is None
-    assert result.note == INTERNAL_ROLES_HINT
-    channel.guild.fetch_roles.assert_not_awaited()
+def test_without_internal_roles_does_not_claim_visibility() -> None:
+    result = channel_outsiders(_guest(), (), ())  # type: ignore[arg-type]
+
+    assert result.outsiders_can_view is None and result.note == INTERNAL_ROLES_HINT
 
 
-@pytest.mark.parametrize("everyone_view", [True, False])
-async def test_everyone_or_internal_only(everyone_view: bool) -> None:
-    result = await channel_outsiders(_channel(everyone_view=everyone_view), (INTERNAL,))
-    assert result.outsiders_can_view is everyone_view
+def test_a_room_shows_outsiders_only_when_a_person_with_no_internal_role_can_view() -> None:
+    guest, closed = _guest(), _open()
+    server = fake.guild(channels=[guest, closed])
+
+    assert channel_outsiders(guest, INTERNAL, TEAM).outsiders_can_view is True  # type: ignore[arg-type]
+    assert channel_outsiders(closed, INTERNAL, TEAM).outsiders_can_view is False  # type: ignore[arg-type]
+    assert server.members[7].bot, "the bot has no internal role and is not an outsider"
 
 
-async def test_non_internal_role_channel_allow_beats_everyone_deny() -> None:
-    channel = _channel(everyone_view=True)
-    channel.overwrites = {
-        discord.Object(id=100, type=discord.Role): discord.PermissionOverwrite(view_channel=False),
-        discord.Object(id=200, type=discord.Role): discord.PermissionOverwrite(view_channel=True),
-    }
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is True
+def test_a_bot_overwrite_is_not_an_outsider() -> None:
+    overwrites = fake.internal_only()
+    overwrites[fake.target(discord.User, 40)] = discord.PermissionOverwrite(view_channel=True)
+    room = fake.channel(3, "bots", overwrites)
+    fake.guild(channels=[room])
+
+    assert channel_outsiders(room, INTERNAL, TEAM).outsiders_can_view is False
 
 
-async def test_synced_overwrites_are_taken_from_fresh_channel() -> None:
-    channel = _channel(everyone_view=True)
-    fresh = _channel(everyone_view=True)
-    fresh.overwrites = {
-        discord.Object(id=100, type=discord.Role): discord.PermissionOverwrite(view_channel=False),
-        discord.Object(id=int(INTERNAL), type=discord.Role): discord.PermissionOverwrite(
-            view_channel=True
-        ),
-    }
-    channel.guild.fetch_channel.return_value = fresh
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is False
+def test_a_partial_member_cache_never_certifies_a_room_as_closed() -> None:
+    room = _open()
+    server = fake.guild(channels=[room], chunked=False)
+
+    assert guild_rooms(server, internal_role_ids=INTERNAL, team_role_ids=TEAM) is None
+    assert channel_outsiders(room, INTERNAL, TEAM).outsiders_can_view is True  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("internal", [True, False])
-async def test_uncached_member_allow_fetches_roles(internal: bool) -> None:
-    channel = _channel()
-    channel.overwrites = {
-        discord.Object(id=300, type=discord.User): discord.PermissionOverwrite(view_channel=True),
-    }
-    channel.guild.fetch_member.return_value.roles = [_role(int(INTERNAL) if internal else 200)]
-    result = await channel_outsiders(channel, (INTERNAL,))
-    assert result.outsiders_can_view is not internal
-    channel.guild.fetch_member.assert_awaited_once_with(300)
+def test_rooms_carry_their_parent_and_threads_follow_it() -> None:
+    guest, closed = _guest(), _open()
+    public = fake.thread(11, 2)
+    private = fake.thread(12, 1, private=True)
+    server = fake.guild(channels=[guest, closed], threads=[public, private])
+
+    rooms = guild_rooms(server, internal_role_ids=INTERNAL, team_role_ids=TEAM)
+
+    assert rooms is not None
+    assert rooms["11"].parent_id == "2" and rooms["11"].facts.contained
+    assert rooms["12"].facts.narrow and not rooms["12"].facts.contained
+    assert rooms["1"].parent_id is None
 
 
-async def test_member_deny_does_not_grant_visibility() -> None:
-    channel = _channel()
-    channel.overwrites = {
-        discord.Object(id=300, type=discord.User): discord.PermissionOverwrite(view_channel=False),
-    }
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is False
-    channel.guild.fetch_member.assert_not_awaited()
+def test_an_archived_thread_the_cache_lacks_is_checked_from_the_channel_itself() -> None:
+    guest = _guest()
+    archived = fake.thread(13, 2, private=True)
+    archived.guild = fake.guild(channels=[guest])
 
-
-async def test_member_cap_flags_without_fetching_members() -> None:
-    channel = _channel()
-    channel.overwrites = {
-        discord.Object(id=300 + i, type=discord.User): discord.PermissionOverwrite(
-            view_channel=True
-        )
-        for i in range(MEMBER_OVERWRITE_CAP + 1)
-    }
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is True
-    channel.guild.fetch_member.assert_not_awaited()
-
-
-async def test_failed_member_lookup_flags() -> None:
-    channel = _channel()
-    channel.overwrites = {
-        discord.Object(id=300, type=discord.User): discord.PermissionOverwrite(view_channel=True)
-    }
-    channel.guild.fetch_member.side_effect = discord.Forbidden(MagicMock(status=403), "forbidden")
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is True
-
-
-async def test_non_internal_administrator_bypasses_deny() -> None:
-    channel = _channel()
-    channel.guild.fetch_roles.return_value.append(_role(500, admin=True))
-    channel.overwrites = {
-        discord.Object(id=500, type=discord.Role): discord.PermissionOverwrite(view_channel=False)
-    }
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is True
-
-
-async def test_exact_member_cap_checks_every_grant() -> None:
-    channel = _channel()
-    channel.overwrites = {
-        discord.Object(id=300 + i, type=discord.User): discord.PermissionOverwrite(
-            view_channel=True
-        )
-        for i in range(MEMBER_OVERWRITE_CAP)
-    }
-    channel.guild.fetch_member.return_value.roles = [_role(int(INTERNAL))]
-    assert (await channel_outsiders(channel, (INTERNAL,))).outsiders_can_view is False
-    assert channel.guild.fetch_member.await_count == MEMBER_OVERWRITE_CAP
+    assert channel_outsiders(archived, INTERNAL, TEAM).outsiders_can_view is True

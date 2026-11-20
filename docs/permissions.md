@@ -276,12 +276,13 @@ people outside the organisation can view a channel whose readers are not
 `own`. Admins can press **Make confidential** to set readers to `own`.
 
 On Discord, admins name the organisation's internal roles with **Name your
-internal roles** on the Permissions screen. Any other role that can view the
-channel triggers the warning. Without internal roles the check is not made.
-Operators can set them too:
+internal roles** on the Permissions screen. The warning shows when a person
+with none of them can view the channel; without them it is not made. **Name
+your team roles** picks the team. Operators can set them:
 
 ```bash
 daimon tenants access-policy set discord GUILD_ID --internal-role ROLE_ID
+daimon tenants access-policy set discord GUILD_ID --team-role ROLE_ID
 daimon tenants access-policy set discord GUILD_ID --clear-internal-roles
 ```
 

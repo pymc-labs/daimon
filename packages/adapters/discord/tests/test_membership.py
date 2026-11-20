@@ -72,6 +72,8 @@ async def test_member_update_remove_and_guild_unavailability_revoke_cached_grant
         _allows_guild=lambda _: True,
         user=None,
         _member_sync=SimpleNamespace(joined=AsyncMock(), left=AsyncMock()),
+        _audience_sync=SimpleNamespace(schedule=MagicMock(), mark_unknown=AsyncMock()),
+        get_guild=lambda _: None,
     )
     resolver.observe(tenant, "1", "2", Membership(is_member=True, role_ids=("123",)))
     member.roles = []

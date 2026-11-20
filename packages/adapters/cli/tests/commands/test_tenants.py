@@ -1037,3 +1037,100 @@ def test_policy_rule_display_includes_agent_invoker_roles() -> None:
     [row] = permission_rule_rows(policy)
     assert row.model_dump()["invoker_role_ids"] == ["123"]
     assert row.runs_in is None
+
+
+@pytest.mark.asyncio
+async def test_team_roles_are_set_inside_the_internal_roles_and_cleared(  # type: ignore[no-untyped-def]
+    db_session_factory, stub_anthropic
+):
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    set_policy = tenants_access_policy_set
+    with pytest.raises(typer.BadParameter, match="internal"):
+        await set_policy(
+            rt=rt, console=_make_console(), platform="discord", external_id="111", team_role=["222"]
+        )
+    await set_policy(
+        rt=rt,
+        console=_make_console(),
+        platform="discord",
+        external_id="111",
+        internal_role=["222", "333"],
+        team_role=["333"],
+    )
+    console = _make_console()
+    await tenants_access_policy_get(
+        rt=rt, console=console, platform="discord", external_id="111", as_json=False
+    )
+    assert "team_role_ids: 333" in _output(console)
+    await set_policy(
+        rt=rt, console=_make_console(), platform="discord", external_id="111", clear_team_roles=True
+    )
+    assert (await _policy(db_session_factory, workspace_id="111")).team_role_ids == ()
+    with pytest.raises(typer.BadParameter, match="--team-role"):
+        await set_policy(
+            rt=rt,
+            console=_make_console(),
+            platform="discord",
+            external_id="111",
+            team_role=["333"],
+            clear_team_roles=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_audience_report_counts_rooms_and_calls_a_lapsed_server_unknown(  # type: ignore[no-untyped-def]
+    db_session_factory, stub_anthropic
+):
+    from datetime import timedelta
+
+    from daimon.adapters.cli.commands.tenants import tenants_audience_report
+    from daimon.core.audience_facts import RoomFacts
+    from daimon.core.stores import audience_facts as facts_store
+
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    await provision_tenant(db_session_factory, platform="discord", workspace_id="111")
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id="111")
+    now = datetime(2026, 5, 1, tzinfo=UTC)
+
+    async def report(at: datetime, *, as_json: bool = True) -> str:
+        console = _make_console()
+        await tenants_audience_report(
+            rt=rt,
+            console=console,
+            platform="discord",
+            external_id="111",
+            as_json=as_json,
+            now=at,
+        )
+        return _output(console)
+
+    assert json.loads(await report(now))["unknown"] is True, "no facts yet"
+    rooms = {
+        "1": facts_store.StoredRoom(RoomFacts(False, False, 0, 0)),
+        "2": facts_store.StoredRoom(RoomFacts(True, False, 3, 0)),
+        "3": facts_store.StoredRoom(RoomFacts(True, True, 1, 5)),
+        "4": facts_store.StoredRoom(RoomFacts(False, True, 0, 4)),
+        "5": facts_store.StoredRoom(RoomFacts(False, False, 0, 0)),
+    }
+    async with db_session_factory.begin() as session:
+        await facts_store.publish_facts(
+            session,
+            tenant_id=tenant_id,
+            rooms=rooms,
+            now=now,
+            fresh_until=now + timedelta(seconds=180),
+        )
+
+    data = json.loads(await report(now))
+    assert (data["contained"], data["narrow_only"], data["open"], data["unknown"]) == (
+        2,
+        1,
+        2,
+        False,
+    )
+    assert [room["channel_id"] for room in data["rooms"]] == ["1", "2", "3", "4", "5"]
+    text_report = await report(now, as_json=False)
+    assert "contained: 2" in text_report and "narrow only: 1" in text_report
+    lapsed = await report(now + timedelta(seconds=181), as_json=False)
+    assert "every room is unknown: contained and narrow" in lapsed

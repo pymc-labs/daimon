@@ -32,6 +32,7 @@ from daimon.core.permissions import (
     ChannelWriters,
     agent_permissions,
 )
+from daimon.core.stores import audience_facts as audience_store
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -590,11 +591,107 @@ def _print_policy(
         return
     console.print(f"{label} access policy:")
     console.print(f"  internal_role_ids: {', '.join(policy.internal_role_ids) or '-'}")
+    console.print(f"  team_role_ids: {', '.join(policy.team_role_ids) or '-'}")
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
+
+
+@tenants_app.command("audience-report")
+def tenants_audience_report_command(
+    platform: str,
+    external_id: str,
+    as_json: Annotated[bool, JSON_OPTION] = False,
+) -> None:
+    """Show a Discord server's stored room facts: counts and a table of rooms.
+
+    Contained rooms are ones a person with no internal role can see (or "client" is in
+    the name); narrow rooms shut out three team members or more. Facts that are missing,
+    incomplete or past their freshness are unknown, and unknown counts as both.
+    """
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _with_runtime() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_audience_report(
+                rt=rt, console=console, platform=platform, external_id=external_id, as_json=as_json
+            )
+
+    run_cli(_with_runtime(), console=console)
+
+
+async def tenants_audience_report(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    external_id: str,
+    as_json: bool,
+    now: datetime | None = None,
+) -> None:
+    if _validate_platform(platform) != "discord":
+        raise typer.BadParameter("room facts exist only for Discord")
+    tenant_id = await _existing_tenant_id(rt, platform=platform, external_id=external_id)
+    async with rt.sessionmaker() as session:
+        status = await audience_store.read_status(
+            session, tenant_id=tenant_id, now=now or datetime.now(UTC)
+        )
+        rooms = (
+            await audience_store.list_channel_facts(session, tenant_id=tenant_id)
+            if status is not None and status.usable
+            else []
+        )
+    counts = {
+        "contained": sum(room.contained for room in rooms),
+        "narrow_only": sum(room.narrow and not room.contained for room in rooms),
+        "open": sum(not room.contained and not room.narrow for room in rooms),
+    }
+    state = (
+        "no facts"
+        if status is None
+        else "unknown (reload in progress, gateway lost or expired)"
+        if not status.usable
+        else "complete"
+    )
+    if as_json:
+        console.print_json(
+            data={
+                "state": state,
+                "generation": None if status is None else status.generation,
+                **counts,
+                "unknown": not (status and status.usable),
+                "rooms": [
+                    {
+                        "channel_id": room.channel_id,
+                        "parent_id": room.parent_id,
+                        "contained": room.contained,
+                        "narrow": room.narrow,
+                    }
+                    for room in rooms
+                ],
+            }
+        )
+        return
+    console.print(f"{platform}:{external_id} room facts: {state}")
+    if status is None or not status.usable:
+        console.print("  every room is unknown: contained and narrow")
+        return
+    console.print(f"  generation: {status.generation}, fresh until {status.fresh_until}")
+    console.print(f"  contained: {counts['contained']}")
+    console.print(f"  narrow only: {counts['narrow_only']}")
+    console.print(f"  open: {counts['open']}")
+    table = Table("channel", "parent", "contained", "narrow")
+    for room in rooms:
+        table.add_row(
+            room.channel_id,
+            room.parent_id or "-",
+            "yes" if room.contained else "no",
+            "yes" if room.narrow else "no",
+        )
+    console.print(table)
 
 
 @access_policy_app.command("get")
@@ -761,6 +858,18 @@ def tenants_access_policy_set_command(
             help="Operator-only: clear internal roles; outsider checks then ask you to name them."
         ),
     ] = False,
+    team_role: Annotated[
+        list[str] | None,
+        typer.Option(
+            help=(
+                "Operator-only: team Discord role id (repeatable), each also an internal role. "
+                "Replaces team roles. A room that shuts out three team members is narrow."
+            )
+        ),
+    ] = None,
+    clear_team_roles: Annotated[
+        bool, typer.Option(help="Operator-only: clear team roles.")
+    ] = False,
     clear_invoker_roles: Annotated[
         bool, typer.Option("--clear-invoker-roles", help="Clear the Discord invoker role list.")
     ] = False,
@@ -812,6 +921,8 @@ def tenants_access_policy_set_command(
                 invoker_role=invoker_role,
                 internal_role=internal_role,
                 clear_internal_roles=clear_internal_roles,
+                team_role=team_role,
+                clear_team_roles=clear_team_roles,
                 clear_invoker_roles=clear_invoker_roles,
                 invoker_admin_bypass=invoker_admin_bypass,
                 drop_agent_rules=drop_agent_rules,
@@ -842,6 +953,8 @@ async def tenants_access_policy_set(
     clear_invoker_roles: bool = False,
     internal_role: list[str] | None = None,
     clear_internal_roles: bool = False,
+    team_role: list[str] | None = None,
+    clear_team_roles: bool = False,
     invoker_admin_bypass: bool | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
@@ -860,6 +973,17 @@ async def tenants_access_policy_set(
                 "internal_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
             )
         changes["internal_role_ids"] = tuple(dict.fromkeys(roles))
+    if team_role is not None and clear_team_roles:
+        raise typer.BadParameter("--team-role cannot be combined with --clear-team-roles")
+    if team_role is not None or clear_team_roles:
+        if validated_platform != "discord":
+            raise typer.BadParameter("team_role_ids are supported only for Discord")
+        team = tuple(value.strip() for value in (team_role or []))
+        if any(not is_discord_snowflake(value) or value == external_id for value in team):
+            raise typer.BadParameter(
+                "team_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
+            )
+        changes["team_role_ids"] = tuple(dict.fromkeys(team))
     if invoker_role is not None and clear_invoker_roles:
         raise typer.BadParameter("--invoker-role cannot be combined with --clear-invoker-roles")
     if invoker_role is not None:

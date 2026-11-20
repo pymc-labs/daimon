@@ -181,3 +181,40 @@ async def test_agent_invoker_roles_writer_rejects_platform_and_everyone(
     policy = TenantAccessPolicy(agent_rules={"restricted": AgentRule(invoker_role_ids=("111",))})
     with pytest.raises(ValueError, match="Discord"):
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+
+
+async def test_team_roles_roundtrip_are_pruned_when_empty_and_discord_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, workspace_id="111")
+    policy = TenantAccessPolicy(internal_role_ids=("222", "333"), team_role_ids=("222",))
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
+    db_session.expire_all()
+    assert await load_access_policy(db_session, tenant_id=tenant.id) == policy
+
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=policy.model_copy(update={"team_role_ids": ()}),
+    )
+    stored = (
+        await db_session.execute(
+            text("SELECT policy FROM tenant_access_policies WHERE tenant_id = :t"),
+            {"t": tenant.id},
+        )
+    ).scalar_one()
+    assert "team_role_ids" not in stored, "an empty list is left out, for older readers"
+
+    with pytest.raises(ValueError, match="@everyone"):
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(internal_role_ids=("222", "111"), team_role_ids=("111",)),
+        )
+    slack = await make_tenant(db_session, platform="slack")
+    with pytest.raises(ValueError, match="Discord"):
+        await set_access_policy(
+            db_session,
+            tenant_id=slack.id,
+            policy=policy,
+        )

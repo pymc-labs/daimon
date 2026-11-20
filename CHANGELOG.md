@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that saved a list keeps it, and with an Anthropic key the default stays
   Anthropic only.
 
+- **The outsider warning checks each person.** On Discord, `/here` and the
+  Permissions screen now warn only when a person with none of your internal
+  roles can view the channel. Bots no longer count, and a role nobody holds no
+  longer triggers it. Admins can also name team roles there, or with
+  `--team-role`. `daimon tenants audience-report` lists the stored room facts.
+
 - **A conversation moved to GPT keeps replying.** After `/model` picked a GPT
   model in a thread, every turn there failed with "Something went wrong on our
   side". Agents saved on a self-hosted model failed the same way. Threads that
