@@ -19,6 +19,7 @@ from daimon.adapters.discord.routines_panel.state import (
     state_label,
 )
 from daimon.core.cron_words import schedule_words
+from daimon.core.routines import MOVED_TO_WORKFLOWS
 
 import discord
 
@@ -132,6 +133,9 @@ def build_panel_container(
         timeline_body += "\n\nSandbox tools: on (admin opt-in)"
     else:
         timeline_body += "\n\nSandbox tools: off"
+
+    if selected.workflow_id is not None:
+        timeline_body += f"\n\n{MOVED_TO_WORKFLOWS}"
 
     # Accent: only non-blurple states carry the color bar
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None

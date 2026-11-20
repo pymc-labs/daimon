@@ -161,7 +161,7 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 discord.SelectOption(label="Direct message to me", value="dm"),
                 discord.SelectOption(label="No automatic delivery", value="none"),
             ],
-            disabled=state.selected is None,
+            disabled=state.locked,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -220,7 +220,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         super().__init__(
             label=label,
             style=style,
-            disabled=(state.selected is None),
+            disabled=state.locked,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -404,10 +404,13 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(picker_row)
         container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
         container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
+        selected = state.selected
         web_url = (
             None
             if state.links is None
-            else state.links.routine(None if state.selected is None else state.selected.routine.id)
+            else state.links.workflow(selected.workflow_id)
+            if selected is not None and selected.workflow_id is not None
+            else state.links.routine(None if selected is None else selected.routine.id)
         )
         if web_url is not None:
             buttons_row.add_item(

@@ -65,6 +65,8 @@ class RoutineEntry:
     label: str
     #: The opt-in that turns sandbox tools on for its runs, if any.
     sandbox_by: Literal["agent", "routine"] | None = None
+    #: The workflow it runs as since an admin moved it; it changes there.
+    workflow_id: uuid.UUID | None = None
 
 
 @dataclasses.dataclass
@@ -91,6 +93,11 @@ class RoutinesPanelState:
             agent_name_map=agent_name_map,
             links=links,
         )
+
+    @property
+    def locked(self) -> bool:
+        """No routine picked, or the picked one moved to Workflows: nothing here changes it."""
+        return self.selected is None or self.selected.workflow_id is not None
 
     def select(self, routine_id: uuid.UUID) -> None:
         for entry in self.rows:

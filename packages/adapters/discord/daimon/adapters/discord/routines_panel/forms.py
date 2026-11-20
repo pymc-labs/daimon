@@ -198,9 +198,7 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
 
 class DeleteButton(discord.ui.Button["RoutinesPanelView"]):
     def __init__(self, state: RoutinesPanelState) -> None:
-        super().__init__(
-            label="Delete", style=discord.ButtonStyle.danger, disabled=state.selected is None
-        )
+        super().__init__(label="Delete", style=discord.ButtonStyle.danger, disabled=state.locked)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         from daimon.adapters.discord.routines_panel.panel import _send_callback_error
