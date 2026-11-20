@@ -386,6 +386,14 @@ Settings for the self-hosted harness in a harness arm's pod, as a JSON object of
 environment variables: its model endpoint and credentials. Add the endpoint's host to
 DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none).
 
+### `DAIMON_EVALS__CODEX_CONFIG`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its
+environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable inside
+the pod, so it carries no credential. Default: {} (none).
+
 ### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
 
 `Decimal` · optional · default `0`

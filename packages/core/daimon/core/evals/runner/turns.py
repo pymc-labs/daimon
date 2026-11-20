@@ -9,8 +9,9 @@ id, so the world answers their calls.
 Anthropic environment keys come only from its console, so the worker has one Anthropic eval
 environment. Its executor takes whichever session the environment hands out, so items on it
 run one at a time: each holds the environment from its first turn to its close. A Gemini item
-makes an environment of its own (`runner.gemini`), and a harness item's harness runs in its pod
-(`runner.harness`), so those run side by side."""
+makes an environment of its own (`runner.gemini`), a harness item's harness runs in its pod
+(`runner.harness`), and an OpenAI item's session gets an environment of its own that its pod
+serves (`runner.openai`), so those run side by side."""
 
 from __future__ import annotations
 
@@ -47,6 +48,7 @@ from daimon.core.evals.format import Case, Usage
 from daimon.core.evals.runner.gemini import GeminiArms
 from daimon.core.evals.runner.harness import HarnessArms
 from daimon.core.evals.runner.item import TurnRequest
+from daimon.core.evals.runner.openai import OpenAIArms
 from daimon.core.evals.runner.tools import (
     Caller,
     JsonObject,
@@ -70,7 +72,7 @@ from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import current_eval_item
 from daimon.core.memory_resource import ensure_memory_store_and_mount
-from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_backend import TurnRuntime, resource_scope
 from daimon.core.mux_compat import (
     archive_agent,
     create_agent,
@@ -91,7 +93,7 @@ from daimon.core.turn.admission import admit, backend_facts
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.gemini import PROFILE as GEMINI_PROFILE
 from daimon.core.turn.host_tools import host_tools
-from daimon.core.turn.hosted_codec import SELFHOSTED
+from daimon.core.turn.hosted_codec import OPENAI, SELFHOSTED
 from daimon.core.turn.outcomes import observe_turn
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
@@ -117,7 +119,7 @@ _SHARED: Final = "anthropic"
 _GEMINI: Final = get_profile(GEMINI_PROFILE).provider
 _HARNESS: Final = "harness"
 """The arm backend of Daimon's own harness, whose provider is `selfhosted`."""
-_BACKENDS: Final = frozenset({_SHARED, _GEMINI, _HARNESS})
+_BACKENDS: Final = frozenset({_SHARED, _GEMINI, _HARNESS, OPENAI.provider})
 """Backends whose live arms run here: their executors serve self-hosted sessions."""
 
 
@@ -135,6 +137,8 @@ class PodSettings:
     passthrough: frozenset[str] = frozenset()
     #: The harness's own settings in a harness item's pod: its model endpoint and credentials.
     harness_config: Mapping[str, str] = field(default_factory=dict[str, str])
+    #: `codex exec-server`'s settings in an OpenAI item's pod: its remote URL and key.
+    codex_config: Mapping[str, str] = field(default_factory=dict[str, str])
     registries: Literal["passthrough", "deny"] = "deny"
     limits: PodLimits = PodLimits()
 
@@ -155,8 +159,11 @@ class _Item:
     cleanup: list[Callable[[], Awaitable[None]]] = field(
         default_factory=list[Callable[[], Awaitable[None]]]
     )
-    #: The item's own turn runtime (`runtimes.RuntimeFactory`); None: the deployment's.
-    runtime: RuntimeFactory | None = None
+    #: The item's own turn runtime, or its factory (`runtimes.RuntimeFactory`); None: the
+    #: deployment's.
+    runtime: RuntimeFactory | TurnRuntime | None = None
+    #: Held while its pod starts on its session's request (`_connect`).
+    connecting: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class PodOutputs:
@@ -206,11 +213,13 @@ class EvalTurns:
 
     def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings,
                  mcp: McpService | None = None, gemini: GeminiArms | None = None,
-                 harness: HarnessArms | None = None) -> None:  # fmt: skip
+                 harness: HarnessArms | None = None,
+                 openai: OpenAIArms | None = None) -> None:  # fmt: skip
         self.context = CaseContext()
         self.deps = replace(deps, context_providers=ContextProviders(provider=self.context))
         self.gemini = gemini or GeminiArms(deps.sessionmaker)
         self.harness = harness or HarnessArms()
+        self.openai = openai or OpenAIArms()
         self.world, self.pods = world, pods
         url, secret = deps.mcp.public_url, deps.mcp.jwt_secret
         self.mcp = mcp or (McpService(str(url), secret.get_secret_value().encode())
@@ -352,14 +361,14 @@ class EvalTurns:
     async def _own(self, request: TurnRequest, name: str, metadata: Mapping[str, str],
                    system: str | None, tools: list[JsonObject],
                    requester: uuid.UUID) -> _Item:  # fmt: skip
-        """A hosted or harness arm's item: Daimon-owned fork and environment records (the
-        provider holds neither), the channel on the arm's backend, and the item's pod: polling
-        a self-hosted environment of its own, or running the harness the worker drives."""
+        """A hosted or harness arm's item: Daimon-owned fork and environment records, the
+        channel on the arm's backend, and the item's pod: polling a self-hosted environment of
+        its own, running the harness the worker drives, or serving its OpenAI session."""
         deps, live = self.deps, request.arm.live
         assert live is not None
-        harness = live.backend == _HARNESS
-        provider, profile = (SELFHOSTED.provider, SELFHOSTED.profile) if harness else (
-            _GEMINI, GEMINI_PROFILE)  # fmt: skip
+        harness, openai = live.backend == _HARNESS, live.backend == OPENAI.provider
+        codec = SELFHOSTED if harness else OPENAI if openai else None
+        provider, profile = (codec.provider, codec.profile) if codec else (_GEMINI, GEMINI_PROFILE)
         tenant_id = await eval_tenant(deps.sessionmaker)
         # Owned records belong to an account: the requester's, whose turns run them.
         scope = resource_scope(tenant_id=str(tenant_id), account_id=str(requester))
@@ -397,6 +406,12 @@ class EvalTurns:
             item.runtime = self.harness.runtime(revision, name, system, specs,
                                                 address=item.pod.address, token=token)  # fmt: skip
             return item
+        if openai:
+            agent = await self.openai.agent(scope, name, live.model, system, specs)
+            item.cleanup.append(partial(self.openai.delete, scope, agent))
+            item.runtime = self.openai.runtime(revision, agent, partial(self._connect, request,
+                                                                        item))  # fmt: skip
+            return item
         environment, key = await self.gemini.environment(scope, name)
         item.cleanup.append(partial(self.gemini.delete, environment))
         item.runtime = self.gemini.runtime(revision, name, system, specs, environment)
@@ -404,6 +419,14 @@ class EvalTurns:
             "GEMINI_ENVIRONMENT_ID": self_hosted_id(environment), "GEMINI_ENVIRONMENT_KEY": key,
         })  # fmt: skip
         return item
+
+    async def _connect(self, request: TurnRequest, item: _Item, environment_id: str) -> None:
+        """An OpenAI item's pod, once its session asks for its environment: `codex
+        exec-server` serves it. Started once, however often the session asks."""
+        async with item.connecting:
+            if item.pod is None:
+                item.pod = await self._pod(request, OPENAI.provider, {
+                    **self.pods.codex_config, "CODEX_ENVIRONMENT_ID": environment_id})  # fmt: skip
 
     async def _source(self, request: TurnRequest) -> BetaManagedAgentsAgent:
         """The arm's agent in the run's workspace; an arm naming none runs the default one."""
@@ -454,7 +477,11 @@ class EvalTurns:
 
     async def _turn(self, item: _Item, request: TurnRequest) -> Usage:
         deps, case = self.deps, item.case
-        if item.runtime is not None:
+        if isinstance(item.runtime, TurnRuntime):
+            # Given, not built, so no deployment setup runs for it (a tenant's environment).
+            deps = replace(deps, channel_backends=True, turn_runtime_factory=None,
+                           turn_runtimes={OPENAI.profile: item.runtime})  # fmt: skip
+        elif item.runtime is not None:
             # The channel names the arm's backend; the item's runtime serves its fork.
             deps = replace(deps, channel_backends=True, turn_runtime_factory=item.runtime)
         platform = case.surface.platform

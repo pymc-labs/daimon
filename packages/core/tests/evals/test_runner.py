@@ -3,11 +3,13 @@ end, a spending cap that stops a run between items, and the production turn port
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import re
 import tarfile
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -30,6 +32,7 @@ from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Us
 from daimon.core.evals.runner.gemini import GeminiArms
 from daimon.core.evals.runner.harness import HarnessArms
 from daimon.core.evals.runner.item import ItemDeps, TurnRequest
+from daimon.core.evals.runner.openai import OpenAIArms
 from daimon.core.evals.runner.tools import McpService
 from daimon.core.evals.runner.turns import EvalTurns, PodSettings
 from daimon.core.evals.runner.worker import run_next
@@ -50,6 +53,7 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.settings_mock import bare_settings
 from mux.drivers.gemini.flash import FLASH_PRIMARY
+from mux.profiles.openai import LUNA_MODEL
 from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
@@ -626,5 +630,175 @@ async def test_production_port_when_harness_item_runs_then_its_pod_harness_and_t
     assert [(c.origin, c.tool) for c in item.world_calls or []] == [("recorded", "issue_write")]
     assert "Opened issue 42." in json.dumps([e.model_dump(mode="json") for e in item.chat or []])
     assert pods.stopped == ["pod-1"], "the pod stops when the item ends"
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status == "done", run.status
+
+
+class FakeOpenAI:
+    """The OpenAI agents API over its transport: a turn waits for its self-hosted environment,
+    calls `issue_write` once the item's pod serves it, then replies with the result."""
+
+    def __init__(self) -> None:
+        self.agents: dict[str, JsonObject] = {}
+        self.deleted: list[str] = []
+        self.session: JsonObject = {}
+        self.sent: list[JsonObject] = []
+        self.turn: JsonObject = {}
+        self.items: list[JsonObject] = []
+        self.events: list[JsonObject] = []
+        self._pulse = asyncio.Event()
+
+    def _emit(self, kind: str, **fields: object) -> None:
+        self.events.append({"type": "agent.session." + kind, "event_id": f"e{len(self.events)}",
+                            "session_id": "session-1", **fields})  # fmt: skip
+        self._pulse.set()
+
+    def _wait(self, actions: list[JsonObject], status: str = "waiting") -> None:
+        self.session.update(status="requires_action", required_actions=actions)
+        self.turn["status"] = status
+        self._emit("requires_action", session={"id": "session-1", "required_actions": actions})
+
+    def _item(self, item: JsonObject) -> None:
+        self.items.append({"turn_id": "turn-1", "status": "completed", **item})
+        self._emit("turn.item.done", turn_id="turn-1", item=self.items[-1])
+
+    def connected(self) -> None:
+        """The pod's exec-server dialled in: the model calls the host tool."""
+        call = {"call_id": "call-1", "name": "issue_write", "arguments": ISSUE}
+        self._item({"id": "fc-1", "type": "function_call", **call})
+        self._wait([{"type": "function_call", "turn_id": "turn-1", **call}])
+
+    def _page(self, values: list[JsonObject]) -> JsonObject:
+        return {"data": values, "has_more": False, "last_id": values[-1]["id"] if values else None}
+
+    async def request(self, method: str, path: str, *, body: JsonObject | None = None,
+                      query: Any = None, key: str | None = None) -> JsonObject:  # fmt: skip
+        sessions = "/agents/sessions/session-1"
+        if (method, path) == ("POST", "/agents"):
+            agent = {**(body or {}), "id": f"agent-{len(self.agents) + 1}", "created_at": 0,
+                     "multi_agent": {"enabled": False}}  # fmt: skip
+            self.agents[agent["id"]] = agent
+            return agent
+        if path.startswith("/agents/agent-"):
+            if method == "DELETE":
+                self.deleted.append(path.split("/")[2])
+                return {}
+            return self.agents[path.split("/")[2]]
+        if (method, path) == ("POST", "/agents/sessions"):
+            assert body is not None and "input" not in body, "the turn's input is an event"
+            agent = self.agents[cast(str, body["agent_id"])]
+            self.session = {"id": "session-1", "created_at": 0, "status": "idle",
+                            "required_actions": [], "metadata": body["metadata"],
+                            "environment": {**cast(JsonObject, body["environment"]),
+                                            "id": "env-1"},
+                            "agent": {**agent, **cast(JsonObject, body.get("agent") or {})}}  # fmt: skip
+            return self.session
+        if path == sessions:
+            return self.session
+        if (method, path) == ("POST", sessions + "/events"):
+            assert body is not None
+            (event,) = cast(list[JsonObject], body["events"])
+            self.sent.append(event)
+            if event["type"] == "agent.session.input.message":
+                self.turn = {"id": "turn-1", "session_id": "session-1", "agent_id": "agent-1",
+                             "subagent_id": None, "status": "in_progress", "created_at": 0,
+                             "usage": {"input_tokens": 10, "output_tokens": 5}}  # fmt: skip
+                self._emit("turn.in_progress", turn=dict(self.turn))
+                self._wait([{"type": "environment_connection", "environment_id": "env-1"}])
+            elif event["type"] == "agent.session.input.tool_result":
+                self.session.update(status="in_progress", required_actions=[])
+                self.turn["status"] = "in_progress"
+                self._item({"id": "fco-1", "type": "function_call_output", "call_id": "call-1",
+                            "output": json.dumps(event["output"])})  # fmt: skip
+                self._item({"id": "m-1", "type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Opened issue 42."}]})  # fmt: skip
+                self.turn["status"] = "completed"
+                self.session["status"] = "idle"
+                self._emit("turn.completed", turn=dict(self.turn))
+            return {}
+        if path == sessions + "/turns":
+            return self._page([self.turn] if self.turn else [])
+        if path == sessions + "/turns/turn-1":
+            return self.turn
+        if path in (sessions + "/items", sessions + "/turns/turn-1/items"):
+            return self._page(self.items)
+        raise AssertionError(f"unscripted OpenAI request {method} {path}")
+
+    async def open_stream(self, path: str) -> AsyncIterator[JsonObject]:
+        assert path == "/agents/sessions/session-1/events", path
+
+        async def events() -> AsyncIterator[JsonObject]:
+            sent = 0
+            while True:
+                while sent < len(self.events):
+                    sent += 1
+                    yield self.events[sent - 1]
+                self._pulse.clear()
+                await self._pulse.wait()
+
+        return events()
+
+    async def multipart(self, *args: Any, **kwargs: Any) -> JsonObject:
+        raise AssertionError("an eval arm uploads nothing")
+
+    async def download(self, path: str) -> AsyncIterator[bytes]:
+        raise AssertionError("an eval arm downloads nothing")
+
+
+class ConnectingPods(FakePods):
+    """Pods whose exec-server dials the provider as soon as it starts."""
+
+    def __init__(self, provider: FakeOpenAI) -> None:
+        super().__init__()
+        self.provider = provider
+
+    async def start(self, spec: PodSpec) -> PodHandle:
+        pod = await super().start(spec)
+        self.provider.connected()
+        return pod
+
+
+async def test_production_port_when_openai_item_runs_then_its_pod_starts_on_connection_and_tools_answer(
+    db_committing_engine: AsyncEngine, db_clean: None, tmp_path: Path
+) -> None:
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        runs, alex, run_id, _ = await _start(
+            db_session, db_session_factory, repeats=1, commit=True,
+            live=LiveArm(backend="openai", model=LUNA_MODEL),
+        )  # fmt: skip
+    created: list[dict[str, Any]] = []
+    anthropic = build_fake_anthropic(_provider(alex.tenant_id, created).dispatch)
+    turn_deps = plain_turn_deps(anthropic, db_session_factory, defaults_root=tmp_path)
+    openai = FakeOpenAI()
+    world, pods = FakeWorld(db_session_factory, None, tmp_path), ConnectingPods(openai)
+    codex = {"CODEX_REMOTE_URL": "https://remote.example.com", "CODEX_API_KEY": "k"}
+    settings = PodSettings(runtime=pods, image="sandbox@sha256:0", ca=fixture_ca(),
+                           world_url="http://world", environment_id="env_eval",
+                           codex_config=codex)  # fmt: skip
+    turns = EvalTurns(turn_deps, world, settings, _mcp_service(world),
+                      openai=OpenAIArms(cast(Any, openai)))  # fmt: skip
+    item = await run_next(ItemDeps(db_session_factory, turns, world))
+    assert item and not isinstance(item, bool), "the queued item runs"
+    assert item.status == "done", item.error
+    assert not any(c["kind"] in ("agents", "environments") for c in created), (
+        "an OpenAI item makes nothing on Managed Agents"
+    )
+    (agent,) = openai.agents.values()
+    assert [(t["type"], t["name"]) for t in cast(list[JsonObject], agent["tools"])] == [
+        ("function", "issue_write")], "the fork's MCP tool is a function the worker answers"  # fmt: skip
+    assert cast(JsonObject, openai.session["environment"])["type"] == "self_hosted"
+    (spec,) = pods.started
+    assert (spec.executor, spec.executor_config) == ("openai", {
+        **codex, "CODEX_ENVIRONMENT_ID": "env-1",
+    }), "the pod starts once the session asks for its environment"  # fmt: skip
+    message, result = openai.sent
+    assert message["type"] == "agent.session.input.message"
+    assert result["type"] == "agent.session.input.tool_result" and "42" in json.dumps(result)
+    assert [(c.origin, c.tool) for c in item.world_calls or []] == [("recorded", "issue_write")]
+    assert "Opened issue 42." in json.dumps([e.model_dump(mode="json") for e in item.chat or []])
+    assert pods.stopped == ["pod-1"] and openai.deleted == ["agent-1"], (
+        "the pod stops and the provider agent goes when the item ends"
+    )
     run = await runs.status(alex, run_id)
     assert isinstance(run, Run) and run.status == "done", run.status

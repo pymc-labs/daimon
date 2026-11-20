@@ -147,7 +147,15 @@ def _approval_request(action: RequiredAction, event: Event, codec: HostedCodec) 
     return BetaManagedAgentsAgentToolUseEvent.model_validate(raw)
 
 
-def _tool_use(payload: ToolUsePayload, raw: dict[str, object], codec: HostedCodec) -> DisplayEvent:
+def _tool_use(
+    payload: ToolUsePayload, raw: dict[str, object], codec: HostedCodec, host_calls: bool
+) -> DisplayEvent:
+    if payload.executor == "host" and host_calls:
+        # A host tool's call: the turn answers it (`host_tools`), as on Managed Agents.
+        raw.pop("evaluated_permission")
+        return BetaManagedAgentsAgentCustomToolUseEvent.model_validate(
+            {**raw, "type": "agent.custom_tool_use"}
+        )
     if codec is OPENAI:
         if payload.executor == "mcp":
             if payload.mcp_server is None:
@@ -156,12 +164,6 @@ def _tool_use(payload: ToolUsePayload, raw: dict[str, object], codec: HostedCode
                 {**raw, "type": "agent.mcp_tool_use", "mcp_server_name": payload.mcp_server}
             )
         return BetaManagedAgentsAgentToolUseEvent.model_validate(raw)
-    if payload.executor == "host":
-        # A host tool's call: the turn answers it (`host_tools`), as on Managed Agents.
-        raw.pop("evaluated_permission")
-        return BetaManagedAgentsAgentCustomToolUseEvent.model_validate(
-            {**raw, "type": "agent.custom_tool_use"}
-        )
     server, separator, name = payload.tool_name.partition("/")
     if payload.mcp_server is not None or (payload.executor == "mcp" and separator):
         raw.update(
@@ -173,13 +175,17 @@ def _tool_use(payload: ToolUsePayload, raw: dict[str, object], codec: HostedCode
     return BetaManagedAgentsAgentToolUseEvent.model_validate(raw)
 
 
-def display_event(event: Event, *, session_id: str, codec: HostedCodec) -> DisplayEvent | None:
+def display_event(
+    event: Event, *, session_id: str, codec: HostedCodec, host_calls: bool = False
+) -> DisplayEvent | None:
     """Decode authoritative root display work without inspecting SDK/native JSON.
 
-    An OpenAI function result request is not an approval. Until its host executor
-    is bound, refuse that action instead of letting AutoApprove answer it. Usage
-    travels on the separate UsageObservation seam, never as a model span.
+    An OpenAI function result request is not an approval. Unless the turn answers host
+    calls (`host_calls`: eval sessions; always on self-hosted), refuse that action instead
+    of letting AutoApprove answer it. Usage travels on the separate UsageObservation seam,
+    never as a model span.
     """
+    host_calls = host_calls or codec is SELFHOSTED
     if event.session_id != session_id or event.native.provider != codec.provider:
         raise ScopeViolation(session_id, f"foreign event in {codec.codec_label} host codec")
     if event.authority not in ("record", "reconciled") or event.thread_id is not None:
@@ -253,7 +259,7 @@ def display_event(event: Event, *, session_id: str, codec: HostedCodec) -> Displ
             "input": dict(payload.input),
             "evaluated_permission": "ask" if payload.permission == "ask" else "allow",
         }
-        return _tool_use(payload, raw, codec)
+        return _tool_use(payload, raw, codec, host_calls)
     if isinstance(payload, ToolResultPayload):
         return BetaManagedAgentsAgentToolResultEvent.model_validate(
             {
@@ -279,13 +285,14 @@ def display_event(event: Event, *, session_id: str, codec: HostedCodec) -> Displ
             }
         )
     if isinstance(payload, RequiresActionPayload):
-        # Self-hosted pauses on host tools' calls too; their results come from the turn.
-        allowed = ("tool_confirmation",) + (("function_result",) if codec is SELFHOSTED else ())
+        # A pause on host tools' calls: their results come from the turn.
+        allowed = ("tool_confirmation",) + (("function_result",) if host_calls else ())
         if not payload.actions or any(action.kind not in allowed for action in payload.actions):
             raise UnsupportedCapability(("host_required_action_executor",), codec.profile)
         if codec is OPENAI:
             for action in payload.actions:
-                _origin_input(action, event.turn_id)
+                if action.kind == "tool_confirmation":
+                    _origin_input(action, event.turn_id)
         return BetaManagedAgentsSessionStatusIdleEvent.model_validate(
             {
                 "id": event.id,
@@ -311,13 +318,15 @@ def display_event(event: Event, *, session_id: str, codec: HostedCodec) -> Displ
     return None
 
 
-def display_batch(event: Event, *, session_id: str, codec: HostedCodec) -> tuple[DisplayEvent, ...]:
+def display_batch(
+    event: Event, *, session_id: str, codec: HostedCodec, host_calls: bool = False
+) -> tuple[DisplayEvent, ...]:
     """Show what an approval asks for before its pause.
 
     These are display records for the observed request, not a claim that a
     command executed. Authentication fields are never rendered as a tool call.
     """
-    displayed = display_event(event, session_id=session_id, codec=codec)
+    displayed = display_event(event, session_id=session_id, codec=codec, host_calls=host_calls)
     if displayed is None:
         return ()
     payload = event.typed_payload()

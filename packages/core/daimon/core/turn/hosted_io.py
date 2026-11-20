@@ -42,6 +42,7 @@ from mux.contracts.events import (
     Event,
     ImagePart,
     NativeProvenance,
+    RequiredAction,
     RequiresActionPayload,
     StatusRunningPayload,
     TextPart,
@@ -112,7 +113,7 @@ async def _edge[T](work: Awaitable[T], codec: HostedCodec) -> T:
 
 
 def _inputs(
-    events: Sequence[BetaManagedAgentsEventParams], codec: HostedCodec
+    events: Sequence[BetaManagedAgentsEventParams], codec: HostedCodec, *, host_calls: bool
 ) -> tuple[InputEvent, ...]:
     profile, prefix = codec.profile, codec.tool_display_id("")
     result: list[InputEvent] = []
@@ -155,7 +156,7 @@ def _inputs(
                     }
                 )
             )
-        elif event.get("type") == "user.custom_tool_result" and codec is SELFHOSTED:
+        elif event.get("type") == "user.custom_tool_result" and host_calls:
             # A host tool's result (`host_tools`), for the call it names.
             identity, content = event.get("custom_tool_use_id"), event.get("content")
             if not isinstance(identity, str) or not identity.startswith(prefix):
@@ -239,6 +240,8 @@ class HostedTurnIO:
     """The turn transport both hosted backends share; subclasses fill the hooks."""
 
     codec: ClassVar[HostedCodec]
+    #: Whether the turn answers host tools' calls (`host_tools`) on this session.
+    host_calls: bool = False
     #: The driver asks for the session status whenever the stream yields nothing for
     #: this long; None never asks.
     idle_check_s: float | None = None
@@ -287,7 +290,9 @@ class HostedTurnIO:
         raise NotImplementedError
 
     def _display(self, event: Event) -> tuple[DisplayEvent, ...]:
-        return display_batch(event, session_id=self._session.id, codec=self.codec)
+        return display_batch(
+            event, session_id=self._session.id, codec=self.codec, host_calls=self.host_calls
+        )
 
     def _journal_source(self, event: Event) -> str:
         raise NotImplementedError
@@ -428,7 +433,8 @@ class HostedTurnIO:
         return None
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
-        resolved = await self._resolve_inputs(events, _inputs(events, self.codec))
+        inputs = _inputs(events, self.codec, host_calls=self.host_calls)
+        resolved = await self._resolve_inputs(events, inputs)
         if resolved is None:
             return
         inputs = resolved
@@ -735,12 +741,53 @@ class OpenAITurnIO(HostedTurnIO):
         root_turn_id: str | None = None,
         baseline_loader: OpenAIBaselineLoader | None = None,
         spend_guard: SpendGuard | None = None,
+        connect: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__(
             backend, scope, session, persistence=persistence, root_turn_id=root_turn_id
         )
         self._baseline_loader = baseline_loader
         self._spend_guard = spend_guard
+        # An eval session's: its executor starts when the session asks for it, and the
+        # turn answers its function calls.
+        self._connect = connect
+        self.host_calls = connect is not None
+
+    async def _connect_pending(self, actions: Sequence[RequiredAction]) -> bool:
+        """Start the executor each environment connection asks for; whether any did."""
+        asks = [a.id for a in actions if a.kind == "environment_connection"]
+        if asks and self._connect is not None:
+            for environment_id in asks:
+                await self._connect(environment_id)
+            return True
+        return False
+
+    async def accept_record(self, event: Event) -> list[TurnEvent]:
+        frames = await super().accept_record(event)
+        payload = event.typed_payload()
+        if isinstance(payload, RequiresActionPayload):
+            await self._connect_pending(payload.actions)
+        return frames
+
+    def _display(self, event: Event) -> tuple[DisplayEvent, ...]:
+        payload = event.typed_payload() if self._connect is not None else None
+        if isinstance(payload, RequiresActionPayload):
+            # A connection request is the executor's to answer, not a pause to show.
+            kept = tuple(a for a in payload.actions if a.kind != "environment_connection")
+            if not kept:
+                return ()
+            event = event.model_copy(
+                update={"payload": RequiresActionPayload(actions=kept).model_dump(mode="json")}
+            )
+        return super()._display(event)
+
+    async def status(self) -> str:
+        if self._connect is not None:
+            # A session waiting on its executor is still running once that starts.
+            current = await self._edge(self._backend.sessions.retrieve(self._scope, self._session))
+            if await self._connect_pending(current.required_actions):
+                return "running"
+        return await super().status()
 
     async def _history(self) -> list[Event]:
         return await self._paged_history(None, bound=_PAGE_BOUND, limit=_HISTORY_PAGE)
@@ -812,6 +859,7 @@ SelfHostedBaselineLoader = Callable[
 
 class SelfHostedTurnIO(HostedTurnIO):
     codec = SELFHOSTED
+    host_calls = True
     _usage_pages, _usage_page_size = 5, 100
 
     def __init__(

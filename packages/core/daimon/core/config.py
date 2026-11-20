@@ -3078,6 +3078,14 @@ class EvalsSettings(BaseModel):
             "host to DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none)."
         ),
     )
+    codex_config: dict[str, SecretStr] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            "Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its "
+            "environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable "
+            "inside the pod, so it carries no credential. Default: {} (none)."
+        ),
+    )
     sandbox_rate_usd_per_hour: Decimal = Field(
         default=Decimal("0"),
         ge=0,

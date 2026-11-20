@@ -18,7 +18,7 @@ from mux.drivers.openai.deployment import (
     configured_completions,
     configured_transport,
 )
-from mux.drivers.openai.environments import OpenAIEnvironments
+from mux.drivers.openai.environments import SELF_HOSTED, OpenAIEnvironments
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, fits_shared_credential
 from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
@@ -146,6 +146,7 @@ __all__ = [
     "OpenAIVaults",
     "RecoveryJournal",
     "SCHEMA_DATE",
+    "SELF_HOSTED",
     "SecretResolver",
     "SessionControls",
     "Method",
