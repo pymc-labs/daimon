@@ -102,7 +102,7 @@ export function ItemColumn({ label, title, item, scores, blind, diff, platform, 
         <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-accent px-1.5 text-xs font-semibold">{blind ? label : label.slice(0, 1)}</span>
         {title && !blind && <span className="truncate text-sm font-medium">{title}</span>}
         <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground tabular">
-          {item.status !== "done" && (blind ? <span>no answer</span> : <span className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>)}
+          {item.status !== "done" && (blind ? <span>no answer</span> : <span title={item.error?.message} className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>)}
           {!blind && item.usage?.duration_ms != null && <span>{duration(item.usage.duration_ms)}</span>}
           {!blind && item.usage?.cost_usd != null && <Money usd={item.usage.cost_usd} />}
         </span>

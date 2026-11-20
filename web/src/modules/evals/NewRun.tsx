@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { shortDate } from "@/lib/format"
 import { cn } from "@/lib/utils"
-import { E, useArms, useCases, useIsAdmin, useSuite, useSuites } from "./api"
+import { E, useArms, useCases, useSuite, useSuites } from "./api"
 import { ApproveBar, EstimateView } from "./Approve"
 import { canEdit } from "./bits"
 import type { Run, RunDraft, RunEstimate } from "./types"
@@ -38,7 +38,6 @@ export function NewRun() {
   const suites = useSuites().data
   const role = suites?.find((x) => x.id === suite)?.role
   const arms = useArms(!!role && canEdit(role))
-  const admin = useIsAdmin()
   const [chosen, setChosen] = useState<string[]>([])
   const [judges, setJudges] = useState<string[] | null>(null)
   const [repeats, setRepeats] = useState("1")
@@ -93,7 +92,7 @@ export function NewRun() {
           )}
         </Section>
         {start.error && <p role="alert" className="text-sm text-destructive">{start.error.message}</p>}
-        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} limit={estimate.data.admin_approval_usd} admin={admin} pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
+        {estimate.data && draft && <div className="border-t pt-4"><ApproveBar estimate={estimate.data} limit={estimate.data.admin_approval_usd} admin={false} above="the person who runs Daimon" pending={start.isPending} onApprove={(cap) => start.mutate(cap)} /></div>}
       </div>
     </Page>
   )

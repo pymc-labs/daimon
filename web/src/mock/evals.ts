@@ -168,14 +168,14 @@ const ref = (kind: string, variant: string, c: string, name: string, media: stri
 // The run routes (listing, estimating, creating, cancelling and approving) are the contract for the run service; the rest of this file follows the services that exist.
 //   GET  /runs?suite=       -> Run[]  newest first; reviewer-only suites are left out (reviewers reach runs through their queues).
 //   GET  /runs/{id}         -> Run, or BlindRun for reviewers (arms by neutral label, no name, spend or approver).
-//   POST /runs/estimate     {suite, case_ids?, arm_ids, repeats, judge_ids} -> Estimate + admin_approval_usd (editors; the spend limit above which an admin approves).
-//   POST /runs              the draft + cap_usd -> Run. Cap at or under the limit, or an admin asking: approved and running, `approval` set.
-//                           Above the limit from anyone else: status "estimated" (awaiting admin approval), `ext["daimon.requested_cap_usd"]` holds the cap asked for.
+//   POST /runs/estimate     {suite, case_ids?, arm_ids, repeats, judge_ids} -> Estimate + admin_approval_usd (editors; the per-run limit above which only the operator approves).
+//   POST /runs              the draft + cap_usd -> Run. Refused when an arm's model has no known price. A cap within the per-run limit and the workspace's open-runs total: approved and running, `approval` set.
+//                           Past either: status "estimated" (awaiting operator approval), `ext["daimon.requested_cap_usd"]` holds the cap asked for.
 //   POST /runs/{id}/cancel  -> Run (editors).
-//   POST /approvals/{id}    {cap_usd} -> Run, running (admins only; 403 "Ask an admin or an owner." otherwise).
-// Spend is reserved against the approved cap and stops at it, as judging does.
+//   POST /approvals/{id}    {cap_usd} -> Run, running (admins, within the same limits; 403 "Ask the person who runs Daimon to approve this cap." past them).
+// Spend is reserved against the approved cap (`ext.reserved`, item id to USD). A cap refusal lets running items finish, skips the pending ones (error kind `cap`), and the run ends `partial`.
 const MS_PER_ITEM = 1800
-type Sim = { id: string; created: number; cancelled?: boolean; fixed?: Run["status"]; cap?: number }
+type Sim = { id: string; created: number; cancelled?: boolean; fixed?: Run["status"]; cap?: number; capAt?: number }
 const runs: (Run & { sim: Sim })[] = []
 const mkRun = (id: string, name: string, suite: string, arms: string[], over: Partial<Run> & { sim: Sim }): Run & { sim: Sim } => ({
   id, name, suite: { id: suite, version: suiteDoc(suite)!.version }, arms: arms.map((a) => ARMS.find((x) => x.id === a)!), repeats: 1, judges: JUDGES, origin: { kind: "local" }, status: "done", ...over,
@@ -189,6 +189,7 @@ runs.push(
   mkRun("run-1", "Replica against baseline", "weekly-reports", ["baseline-a", "replica"], { started_at: iso(-300), finished_at: iso(-270), spend: { total_usd: 2.31, by_category: { agent: 1.4, judge: 0.7, simulator: 0.21 } }, approval: { by: { display_name: "Sam Reed" }, at: iso(-305), cap_usd: 5 }, estimate: est(2, 8, 1), sim: { id: "run-1", created: NOW - 300 * 60_000, fixed: "done" } }),
   mkRun("run-2", "Fast variant check", "weekly-reports", ["replica", "replica-fast"], { started_at: iso(-1), spend: { total_usd: 0.44 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-2), cap_usd: 3 }, estimate: est(2, 8, 1), status: "running", sim: { id: "run-2", created: NOW - 40_000, cap: 3 } }),
   mkRun("run-3", "Pricing replay", "pricing-questions", ["baseline-a", "replica"], { status: "estimated", estimate: est(2, 3, 1), ext: { "daimon.requested_cap_usd": 40 }, sim: { id: "run-3", created: NOW, fixed: "estimated" } }),
+  mkRun("run-5", "Cap check", "weekly-reports", ["replica", "replica-fast"], { started_at: iso(-90), finished_at: iso(-85), spend: { total_usd: 4.92 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-95), cap_usd: 5 }, estimate: est(2, 8, 1), status: "partial", sim: { id: "run-5", created: NOW - 90 * 60_000, fixed: "partial", capAt: 5 } }),
   mkRun("run-4", "Triage replay", "support-triage", ["baseline-a", "replica"], { started_at: iso(-600), finished_at: iso(-580), spend: { total_usd: 0.9 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-605), cap_usd: 2 }, estimate: est(2, 3, 1), sim: { id: "run-4", created: NOW - 600 * 60_000, fixed: "done" } }),
 )
 const runOf = (id: string) => runs.find((r) => r.id === id)
@@ -199,7 +200,7 @@ const itemList = (r: Run & { sim: Sim }): RunItemSummary[] => {
   const list: RunItemSummary[] = []
   ids.forEach((c) => r.arms.forEach((a) => { for (let k = 0; k < r.repeats; k++) list.push({ id: `${r.id}:${c}:${a.id}:${k}`, key: `${c}:${a.id}:${k}`, case_id: c, case_revision: 2, arm_id: a.id, repeat: k, status: "pending" }) }))
   return list.map((it, i): RunItemSummary => {
-    const status: ItemStatus = r.status === "estimated" ? "pending" : r.sim.cancelled && i >= done ? "cancelled" : i < done ? (it.case_id === "c-chart" && it.arm_id === "replica-fast" ? "error" : "done") : i === done ? "running" : "pending"
+    const status: ItemStatus = r.sim.capAt != null && i >= r.sim.capAt ? "skipped" : r.status === "estimated" ? "pending" : r.sim.cancelled && i >= done ? "cancelled" : i < done ? (it.case_id === "c-chart" && it.arm_id === "replica-fast" ? "error" : "done") : i === done ? "running" : "pending"
     return { ...it, status }
   })
 }
@@ -386,7 +387,12 @@ const bundles: string[] = []
 
 const json = (b: unknown, status = 200) => HttpResponse.json(b as never, { status })
 const LIMIT = 25
+const WORKSPACE_CAP = 100
 const needsAdmin = () => forbidden("Ask an admin or an owner.")
+const needsOperator = () => forbidden("Ask the person who runs Daimon to approve this cap.")
+/** The caps of the runs still spending. */
+const openCaps = () => runs.filter((r) => ["approved", "running"].includes(statusOf(r))).reduce((n, r) => n + (r.approval?.cap_usd ?? 0), 0)
+const pastLimits = (cap: number) => cap > LIMIT || openCaps() + cap > WORKSPACE_CAP
 const canEditSuite = (suite: string) => ["owner", "editor"].includes(callerRole(suite) ?? "")
 const draftCases = (d: { suite: { id: string }; case_ids?: string[] }) => d.case_ids?.length ?? SUITE_CASES[d.suite.id]?.length ?? 0
 export const evalsHandlers: HttpHandler[] = [
@@ -435,8 +441,8 @@ export const evalsHandlers: HttpHandler[] = [
     if (!(d.cap_usd > 0)) return json({ detail: "Set a spend cap first." }, 400)
     const id = `run-${runs.length + 1}`
     const base = { suite: d.suite, case_ids: d.case_ids, repeats: d.repeats, estimate: est(d.arm_ids.length, draftCases(d), d.repeats) }
-    // Above the admin limit an admin's approval is needed: the run waits, with the cap its creator asked for.
-    const waiting = d.cap_usd > LIMIT && !isAdmin()
+    // Past the operator's limits the run waits for the operator, with the cap its creator asked for.
+    const waiting = pastLimits(d.cap_usd)
     const r = waiting
       ? mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "estimated", ext: { "daimon.requested_cap_usd": d.cap_usd }, sim: { id, created: Date.now(), fixed: "estimated" } })
       : mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "running", started_at: iso(0), approval: { by: { display_name: me()?.name ?? "You" }, at: iso(0), cap_usd: d.cap_usd }, sim: { id, created: Date.now(), cap: d.cap_usd } })
@@ -455,6 +461,7 @@ export const evalsHandlers: HttpHandler[] = [
     const r = runOf(String(params.id)); const b = (await request.json()) as { cap_usd: number }
     if (!r || !(b.cap_usd > 0)) return notFound()
     if (!isAdmin()) return needsAdmin()
+    if (pastLimits(b.cap_usd)) return needsOperator()
     r.sim = { id: r.id, created: Date.now(), cap: b.cap_usd }; r.status = "running"; r.started_at = iso(0); r.approval = { by: { display_name: me()?.name ?? "You" }, at: iso(0), cap_usd: b.cap_usd }
     return json(view(r))
   }),

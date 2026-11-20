@@ -13,6 +13,7 @@ import { sidebarFor } from "../registry"
 import { Compare } from "./Compare"
 import { NewRun } from "./NewRun"
 import { Review } from "./Review"
+import { Run } from "./Run"
 
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), post: vi.fn() } }))
 
@@ -67,6 +68,30 @@ describe("evals module", () => {
     expect(go).toBeEnabled()
     await userEvent.click(go)
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/evals/runs", expect.objectContaining({ cap_usd: 5, arm_ids: ["arm-x"] })))
+  })
+})
+
+describe("spend approval", () => {
+  const estimate = { low_usd: 1, expected_usd: 2, high_usd: 4, at: "", lines: [{ category: "agent", items: 1, expected_usd: 1 }], admin_approval_usd: 25 }
+
+  it("asks the operator for a cap past the limit and shows the start refusal", async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? me(["evals"]) : path.endsWith("/suites") ? [{ id: "s", name: "Suite", version: 1, role: "owner", scrub_status: "scrubbed" }] : path.includes("/arms") ? arms : path.includes("/cases") ? cases : suite) as never)
+    vi.mocked(api.post).mockImplementation(async (path: string) => { if (path.includes("/estimate")) return estimate as never; throw new Error("An arm's model has no known price, so a cap can't hold it. Pick another model.") })
+    renderAt("/evals/suites/s/run", "/evals/suites/:suite/run", <NewRun />)
+    await userEvent.click(await screen.findByRole("checkbox", { name: /Arm X/ }))
+    await userEvent.type(await screen.findByLabelText(/cap/i), "40")
+    expect(screen.getByText(/need the person who runs Daimon to approve/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Ask for approval" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("has no known price")
+  })
+
+  it.each([["member", false], ["admin", true]])("shows a run awaiting the operator to a %s, and a cap box only to admins", async (role, cap) => {
+    const waiting = { ...run, status: "estimated", estimate, ext: { "daimon.requested_cap_usd": 40 } }
+    vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? { ...me(["evals"]), role } : path.endsWith("/suites") ? [] : path.endsWith("/items?limit=500") ? [] : waiting) as never)
+    renderAt("/evals/runs/r", "/evals/runs/:run", <TooltipProvider><Run /></TooltipProvider>)
+    expect(await screen.findByText(/of up to \$40.00\. Ask the person who runs Daimon to approve this cap\./)).toBeInTheDocument()
+    expect(screen.getByText("Awaiting operator approval", { selector: "span, div" })).toBeInTheDocument()
+    await waitFor(() => expect(!!screen.queryByLabelText(/cap/i)).toBe(cap))
   })
 })
 

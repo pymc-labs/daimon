@@ -165,12 +165,13 @@ export function Run() {
               <section className="space-y-3">
                 <h2 className="text-sm font-medium">Estimate</h2>
                 <EstimateView estimate={r.estimate} arms={r.arms} />
-                {admin ? (
+                <p role="status" className="text-right text-sm text-muted-foreground">Awaiting operator approval{asked ? ` of up to ${usd(asked)}` : ""}. Ask the person who runs Daimon to approve this cap.</p>
+                {admin && (
                   <>
-                    {approve.error && <p role="alert" className="text-sm text-destructive">{approve.error.message}</p>}
+                    {approve.error && <p role="alert" className="text-right text-sm text-destructive">{approve.error.message}</p>}
                     <ApproveBar estimate={r.estimate} initial={asked} pending={approve.isPending} onApprove={(c) => approve.mutate(c)} />
                   </>
-                ) : <p role="status" className="text-right text-sm text-muted-foreground">Awaiting admin approval{asked ? ` of up to ${usd(asked)}` : ""}. Ask an admin.</p>}
+                )}
               </section>
             )}
             {list.length > 0 && <section><h2 className="mb-2 text-sm font-medium">Progress</h2><Grid run={r} items={list} /></section>}

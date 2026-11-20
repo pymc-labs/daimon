@@ -2,7 +2,7 @@ import { Pill } from "../agents/bits"
 import type { BlindRun, Case, CaseView, Run, RunStatus, ScrubStatus, SuiteRole } from "./types"
 
 const RUN: Record<RunStatus, { label: string; cls?: string }> = {
-  draft: { label: "Draft" }, estimated: { label: "Awaiting admin approval", cls: "text-warning" }, approved: { label: "Queued" }, running: { label: "Running", cls: "text-link" },
+  draft: { label: "Draft" }, estimated: { label: "Awaiting operator approval", cls: "text-warning" }, approved: { label: "Queued" }, running: { label: "Running", cls: "text-link" },
   done: { label: "Done", cls: "text-success" }, partial: { label: "Partial", cls: "text-warning" }, cancelled: { label: "Cancelled" }, failed: { label: "Failed", cls: "text-destructive" },
 }
 export const RunPill = ({ status }: { status: RunStatus }) => <Pill className={RUN[status].cls}>{RUN[status].label}</Pill>
