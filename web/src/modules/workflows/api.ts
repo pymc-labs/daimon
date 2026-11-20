@@ -14,6 +14,7 @@ const base = (id: string) => `/api/workflows/${id}`
 export const useWorkflows = () => useQuery({ queryKey: ["workflows"], queryFn: () => api.get<WorkflowSummary[]>("/api/workflows") })
 export const useWorkflow = (id: string) => useQuery({ queryKey: ["workflows", id], queryFn: () => api.get<Workflow>(base(id)), enabled: !!id })
 export const useDraft = (id: string, enabled = true) => useQuery({ queryKey: ["workflows", id, "draft"], queryFn: () => api.get<Draft>(`${base(id)}/draft`), enabled })
+export const getDraft = (id: string) => api.get<Draft>(`${base(id)}/draft`)
 export const useVersions = (id: string) => useQuery({ queryKey: ["workflows", id, "versions"], queryFn: () => api.get<Version[]>(`${base(id)}/versions`) })
 export const useRuns = (id: string) => useQuery({ queryKey: ["workflows", id, "runs"], queryFn: () => api.get<RunSummary[]>(`${base(id)}/runs`) })
 export const useCatalog = () => useQuery({ queryKey: ["workflows", "catalog"], queryFn: () => api.get<Catalog>("/api/workflows/catalog"), staleTime: Infinity })
@@ -162,6 +163,7 @@ export function useDebounced<T>(value: T, ms: number) {
  * The draft as the canvas edits it. Edits apply at once (validated locally), then save in order;
  * each PUT carries the revision the last one returned, so a stale one gets a 409 and the draft reloads.
  */
+export type DraftEditor = ReturnType<typeof useDraftEditor>
 export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefined) {
   const qc = useQueryClient()
   const key = ["workflows", wf?.id, "draft"]

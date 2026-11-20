@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useState } from "react"
-import { useLocation, useSearchParams } from "react-router"
+import { useEffect, useMemo, useRef } from "react"
+import { useLocation, useNavigate, useSearchParams } from "react-router"
 
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { askDaimon, useCatalog, useDraft, useDraftEditor } from "./api"
-import { AskDaimon, type AskTurn } from "./AskDaimon"
+import { useCatalog, useDraft, useDraftEditor, useWorkflowChat } from "./api"
+import { AskDaimon } from "./AskDaimon"
 import { Canvas, type InsertAt } from "./Canvas"
 import { DraftBar, DraftTools } from "./DraftBar"
 import { useTestRun } from "./run/lib"
 import { SplitRun } from "./run/TestRun"
 import { Inspector } from "./inspector/Inspector"
+import { useLiveDraft } from "./live"
 import { clone, duplicateNode, insertNode, removeNode, validate } from "./spec"
 import { SpecView } from "./SpecView"
-import type { AskMessage, Kind, Node, Spec, Workflow } from "./types"
+import type { Kind, Node, Spec, Workflow } from "./types"
 
 export function Design({ wf }: { wf: Workflow }) {
   const ro = !wf.can_edit
@@ -26,16 +27,23 @@ export function Design({ wf }: { wf: Workflow }) {
     for (const [k, v] of Object.entries(next)) if (v) p.set(k, v); else p.delete(k)
     return p
   }, { replace: true })
-  const state = useLocation().state as { ask?: AskMessage[] } | null
-  const [turns, setTurns] = useState<AskTurn[]>(() => state?.ask ?? [{ role: "assistant", text: "What should change?" }])
-  const [pending, setPending] = useState(false)
-  const [flash, setFlash] = useState<Set<string>>(new Set())
-  useEffect(() => { if (!flash.size) return; const t = setTimeout(() => setFlash(new Set()), 1600); return () => clearTimeout(t) }, [flash])
+  const chat = useWorkflowChat(wf.id, !ro && !!ask).data
+  const loc = useLocation()
+  const first = useRef((loc.state as { first?: string } | null)?.first)
+  const navigate = useNavigate()
 
   const spec = draft?.spec ?? wf.spec
   const validation = useMemo(() => draft?.validation ?? validate(spec), [draft, spec])
   const changed = useMemo(() => new Set((draft?.changes ?? []).map((c) => c.node).filter((n): n is string => !!n)), [draft])
   const n = node ? spec.nodes[node] : undefined
+  const live = useLiveDraft(wf.id, editor, spec, chat?.session_id, node || null)
+  // "Describe it" arrives with the first message: send it once the thread exists.
+  useEffect(() => {
+    if (!first.current || !chat || !draft) return
+    live.ask(first.current)
+    first.current = undefined
+    navigate({ pathname: loc.pathname, search: loc.search }, { replace: true, state: null })
+  }, [chat, draft])   // eslint-disable-line react-hooks/exhaustive-deps
 
   const select = (id: string | null) => put(id ? { node: id, ask: null } : { node: null })
   const add = (at: InsertAt, kind: Kind) => { const r = insertNode(spec, at, kind); editor.save(r.spec, 0); select(r.id) }
@@ -46,21 +54,6 @@ export function Design({ wf }: { wf: Workflow }) {
     const s = clone(spec)
     fn(s.nodes[node]!, s)
     editor.save(s, delay)
-  }
-  const send = async (text: string) => {
-    const before = spec
-    setTurns((t) => [...t, { role: "user", text }])
-    setPending(true)
-    try {
-      const r = await askDaimon(wf.id, text)
-      editor.adopt(r.draft)
-      const turn: AskTurn = { role: "assistant", text: r.reply, changed: r.changed }
-      if (r.changed.length) turn.undo = () => { editor.save(before, 0); setTurns((t) => t.map((x) => (x === turn ? { ...x, undo: undefined } : x))) }
-      setTurns((t) => [...t, turn])
-      if (r.changed.length) setFlash(new Set(r.changed))
-    } catch (e) {
-      setTurns((t) => [...t, { role: "assistant", text: (e as Error).message }])
-    } finally { setPending(false) }
   }
   const panel = !!n || !!ask
   const tools = draft && !ro && !draft.changes.length ? <DraftTools wf={wf} draft={draft} ask={() => put({ node: null, ask: "1" })} /> : null
@@ -80,12 +73,12 @@ export function Design({ wf }: { wf: Workflow }) {
           </>
         ) : (ro || !isPending) && (
           // Wait for the draft, so the canvas frames the graph it will show.
-          <Canvas spec={spec} validation={validation} catalog={catalog} changed={changed} flash={flash} selected={node || null} ro={ro}
+          <Canvas spec={spec} validation={validation} catalog={catalog} changed={changed} flash={live.flash} selected={node || null} ro={ro}
             select={select} add={add} remove={remove} duplicate={duplicate} panel={panel} tools={tools} run={test.overlay} />
         )}
         {n && node && <Inspector key={node} id={node} n={n} spec={spec} catalog={catalog} ro={ro} set={set} validation={validation} close={() => select(null)} />}
         {!n && ask && !ro && (
-          <AskDaimon spec={spec} messages={turns} pending={pending} send={(t) => void send(t)} select={select} close={() => put({ ask: null })} />
+          <AskDaimon spec={spec} sid={chat?.session_id} agent={chat?.agent} edits={live.edits} send={live.opts} select={select} close={() => put({ ask: null })} />
         )}
         {draft && !ro && <DraftBar wf={wf} draft={draft} shift={panel} select={(id) => put({ view: null, node: id, ask: null })} ask={() => put({ node: null, ask: "1" })} adopt={editor.adopt} />}
       </div>
