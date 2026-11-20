@@ -16,6 +16,7 @@ import hashlib
 import html
 import multiprocessing
 import re
+from array import array
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
@@ -48,6 +49,13 @@ _ESCAPES: Final = re.compile(
 
 
 def _decode(escape: str) -> str:
+    """The text an escape stands for; one that decodes to a control character (`%10` in
+    "%10.1.2.3%") stays as written, so it cannot swallow what follows."""
+    out = _decoded(escape)
+    return escape if any(c < " " and c not in "\t\n\r" for c in out) else out
+
+
+def _decoded(escape: str) -> str:
     if escape.startswith("\\u"):
         point = int(escape[2:], 16)
         return escape if 0xD800 <= point < 0xE000 else fold_char(chr(point))
@@ -68,8 +76,8 @@ class View:
     """`text` folded for matching; `starts`/`ends` map each folded char to the source span."""
 
     text: str
-    starts: list[int] | None = None
-    ends: list[int] | None = None
+    starts: array[int] | None = None
+    ends: array[int] | None = None
 
     def span(self, start: int, end: int) -> tuple[int, int]:
         if self.starts is None or self.ends is None:
@@ -81,8 +89,8 @@ def fold(text: str) -> View:
     if text.isascii() and "\\" not in text and "%" not in text and "&" not in text:
         return View(text)
     chars: list[str] = []
-    starts: list[int] = []
-    ends: list[int] = []
+    starts = array("i")  # arrays, not lists: a long text has a million of each
+    ends = array("i")
 
     def emit(out: str, start: int, end: int) -> None:
         chars.extend(out)
@@ -301,7 +309,7 @@ _EMAIL: Final = re.compile(
     r"(?<![\w.%+-])(?!git@github\.com:)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"
 )
 _IDS: Final = re.compile(
-    r"(?<![0-9A-Za-z])\d{15,20}(?![0-9A-Za-z])"  # Discord snowflakes and other long ids
+    r"(?<!\d)\d{15,20}(?!\d)"  # Discord snowflakes and other long ids
     r"|\b[UWCDGT](?=[A-Z0-9]*\d)[A-Z0-9]{8,12}\b"  # Slack ids
     r"|(?<![0-9A-Za-z])[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"  # UUIDs
     r"|(?<![0-9A-Za-z])(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{32}(?![0-9A-Za-z])"  # page and doc ids
@@ -316,12 +324,13 @@ _PHONE: Final = re.compile(
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
-# Any other host name, unless it is a public service's (subdomains included); the TLDs leave
-# out file extensions ("notes.md", "app.py").
+# Any other host name, unless it is a public service's (only generic subdomains: `docs.google.com`
+# stays, `zq-backups.s3.amazonaws.com` names a customer); the TLDs leave
+# out file extensions ("notes.md", "app.py"), and a country may follow one ("shop.com.pk").
 _PUBLIC_HOST: Final = re.compile(
     r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ai|dev|app|so|me|us"
     r"|uk|de|fr|nl|eu|ca|au|in|jp|ch|se|no|fi|dk|es|it|pl|be|at|br|nz|sg|ie|il|xyz|info|biz"
-    r"|cloud|tech|site|online|gg|ly|tv|fm)(?![\w-]|\.[a-z])",
+    r"|cloud|tech|site|online|gg|ly|tv|fm)(?:\.[a-z]{2})?(?!\w|\.[a-z])",
     re.IGNORECASE,
 )
 _PUBLIC_SERVICES: Final = frozenset(
@@ -329,10 +338,14 @@ _PUBLIC_SERVICES: Final = frozenset(
      "googleapis.com", "youtube.com", "notion.so", "notion.site", "slack.com", "discord.com",
      "discord.gg", "microsoft.com", "office.com", "sharepoint.com", "atlassian.net", "zoom.us",
      "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
-     "pypi.org", "npmjs.com", "amazonaws.com", "cloudflare.com", "example.com", "example.org",
-     "example.net"}
+     "pypi.org", "npmjs.com", "cloudflare.com"}
 )  # fmt: skip
-_SCHEME: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://", re.IGNORECASE)
+# Only a standard scheme is no name; a custom one ("acme-app://") may hold one.
+_SCHEME: Final = re.compile(
+    r"\b(?:https?|ftps?|sftp|ssh|git|file|wss?|s3|gs|jdbc|postgres(?:ql)?|mysql|redis|mongodb"
+    r"|amqp|ldaps?)(?:\+[a-z0-9]+)?://",
+    re.IGNORECASE,
+)
 # The tenant part of a hosted service's address names the customer.
 _TENANT_HOST: Final = re.compile(
     r"\b([a-z0-9][a-z0-9-]{1,62})\.(?:atlassian\.net|zoom\.us|slack\.com|sharepoint\.com"
@@ -345,7 +358,8 @@ _TENANT_HOST: Final = re.compile(
 )
 _SHARED_HOSTS: Final = frozenset(
     {"www", "app", "api", "files", "hooks", "status", "support", "help", "docs", "login",
-     "auth", "id", "my", "account", "accounts", "developer", "developers", "community"}
+     "auth", "id", "my", "account", "accounts", "developer", "developers", "community", "drive",
+     "mail", "raw", "gist", "s3", "en"}
 )  # fmt: skip
 _IP: Final = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
@@ -357,15 +371,29 @@ _REPOS: Final = [
     for p in (
         r"(?:github|gitlab|bitbucket)\.(?:com|org)[/:]([\w.-]+/[\w-][\w.-]*?)"
         r"(?=\.git\b|[/\s?#\"')\]]|$)",
+        r"(?:raw\.githubusercontent\.com|api\.github\.com/repos)/([\w.-]+/[\w-][\w.-]*?)"
+        r"(?=\.git\b|[/\s?#\"')\]]|$)",
         r"(?:^|\s)(?:-R|--repo)[\s=]+([\w.-]+/[\w.-]+)",
+    )
+]
+# The account in a social profile address (`/in/<slug>`, `/<handle>`, `/@<name>`).
+_PROFILES: Final = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\blinkedin\.com/(?:in|company|school|pub)/(?P<v>[\w%.-]+)",
+        r"(?<![\w-])(?:twitter|x)\.com/@?(?!(?:i|home|search|intent|share|hashtag|explore|settings"
+        r"|login|messages|notifications|compose|status)\b)(?P<v>\w+)",
+        r"\byoutube\.com/(?:@|(?:c|user|channel)/)(?P<v>[\w%.-]+)",
     )
 ]
 _NER_KINDS: Final = {
     "PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place", "PHONE_NUMBER": "phone",
 }  # fmt: skip
 _NER_CHUNK: Final = 50_000
-_NER_CACHE: Final = 1_000_000
+_NER_CACHE: Final = 100_000
 _NER_BATCH: Final = 64
+# spaCy holds a whole batch at once (25 chunks of 50k characters took 1.4 GB): one chunk each.
+_NER_BATCH_CHARS: Final = 50_000
 # spaCy labels Presidio has no entity for: ignored instead of warned about on every call.
 _NER_IGNORED: Final = (
     "CARDINAL", "ORDINAL", "QUANTITY", "PERCENT", "MONEY", "DATE", "TIME", "LANGUAGE", "LAW",
@@ -398,6 +426,7 @@ def _engine(model: str) -> object | None:
         from presidio_analyzer.nlp_engine.ner_model_configuration import (
             MODEL_TO_PRESIDIO_ENTITY_MAPPING,
         )
+        from spacy.language import Language
 
         provider = NlpEngineProvider(
             nlp_configuration={
@@ -412,7 +441,16 @@ def _engine(model: str) -> object | None:
                 },
             }
         )
-        return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
+        nlp_engine = provider.create_engine()
+        nlp = getattr(nlp_engine, "nlp", {}).get("en")
+        assert isinstance(nlp, Language)
+        # Only names are read: every other pipe (parser, tagger...) unless NER reads its output.
+        for name in nlp.pipe_names:
+            if name != "ner" and "ner" not in getattr(
+                nlp.get_pipe(name), "listening_components", ()
+            ):
+                nlp.disable_pipe(name)
+        return AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
     except (ImportError, OSError, ValueError):
         return None
 
@@ -424,13 +462,28 @@ def _analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]
     assert isinstance(engine, AnalyzerEngine)
     out: list[list[tuple[int, int, str]]] = []
     batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-    for text, artifacts in batches(texts, "en", batch_size=_NER_BATCH):
-        found = engine.analyze(
-            text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
-            nlp_artifacts=artifacts,
-        )  # fmt: skip
-        out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
+    for group in _groups(texts, _NER_BATCH):
+        for text, artifacts in batches(group, "en", batch_size=len(group)):
+            found = engine.analyze(
+                text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
+                nlp_artifacts=artifacts,
+            )  # fmt: skip
+            out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
     return out
+
+
+def _groups(texts: list[str], count: int) -> list[list[str]]:
+    """`texts` in order, in groups of at most `count` texts and `_NER_BATCH_CHARS` characters
+    (a text over the limit is a group of its own)."""
+    groups: list[list[str]] = []
+    size = 0
+    for text in texts:
+        if not groups or len(groups[-1]) >= count or size + len(text) > _NER_BATCH_CHARS:
+            groups.append([])
+            size = 0
+        groups[-1].append(text)
+        size += len(text)
+    return groups
 
 
 _WORKER: dict[str, object] = {}
@@ -483,9 +536,8 @@ class Ner:
             return [[] for _ in texts]
         if self._pool is None:
             return _analyze(self._engine, texts)
-        size = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
-        chunks = [texts[i : i + size] for i in range(0, len(texts), size)]
-        return [r for part in self._pool.map(_worker_analyze, chunks) for r in part]
+        count = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
+        return [r for part in self._pool.map(_worker_analyze, _groups(texts, count)) for r in part]
 
     def prefetch(self, texts: Iterable[str]) -> None:
         """Run the model over the `texts` not seen yet, in batches."""
@@ -522,6 +574,7 @@ class Detector:
         self._terms: dict[str, Term] = {}
         self._index = TermIndex(strict=True)
         self._ner = ner
+        self._found: dict[tuple[bytes, bool, bool], tuple[Hit, ...]] = {}
         self.add(terms)
 
     @property
@@ -542,11 +595,22 @@ class Detector:
                 self._terms[norm] = term
                 self._index.add(term)
                 added.append(term)
+        if added:
+            self._found.clear()
         return added
 
     def find(self, text: str, *, names: bool = True, words: bool = True) -> list[Hit]:
         """Non-overlapping hits in `text`, in order. `names` adds the NER pass; without `words`,
-        one-word terms are left out (for JSON keys, which share words with names)."""
+        one-word terms are left out (for JSON keys, which share words with names). Kept per
+        text until the dictionary grows: a scrub and its sweep look at most texts twice."""
+        key = (_digest(text), names, words)
+        if (done := self._found.get(key)) is None:
+            if len(self._found) >= _NER_CACHE:
+                self._found.clear()
+            done = self._found[key] = tuple(self._find(text, names=names, words=words))
+        return list(done)
+
+    def _find(self, text: str, *, names: bool, words: bool) -> list[Hit]:
         view = fold(text)
         hits = list(self._patterns(view.text))
         found = [
@@ -555,8 +619,9 @@ class Detector:
         ]
         if names and self._ner is not None and namey(view.text):
             found += self._ner.find(view.text)
-        schemes = [m.span() for m in _SCHEME.finditer(view.text)]
-        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in schemes)]
+        # A scheme or a public service's address is never a name ("github" in github.com).
+        fixed = [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text)
+        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in fixed)]
         out: list[Hit] = []
         for hit in _resolve(hits):
             start, end = view.span(hit.start, hit.end)
@@ -589,15 +654,36 @@ class Detector:
         yield from (Hit(m.start(), m.end(), "phone", _P_ID) for m in _PHONE.finditer(text))
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
+        for p in _PROFILES:
+            yield from (_group(m, "handle", _P_HOST) for m in p.finditer(text))
         yield from (Hit(m.start(), m.end(), "host", _P_HOST) for m in _HOST.finditer(text))
         for m in _PUBLIC_HOST.finditer(text):
-            labels = m.group().casefold().split(".")
-            if not any(".".join(labels[i:]) in _PUBLIC_SERVICES for i in range(len(labels) - 1)):
+            if _public_suffix(m.group()) is None:
                 yield Hit(m.start(), m.end(), "host", _P_HOST)
         for m in _TENANT_HOST.finditer(text):
             if m.group(1).casefold() not in _SHARED_HOSTS:
                 yield _group(m, "company", _P_HOST)
         yield from (Hit(m.start(), m.end(), "ip", _P_HOST) for m in _IP.finditer(text))
+
+
+def _public_suffix(host: str) -> int | None:
+    """Where the public service's own name starts in `host` (`docs.google.com`: 5), or None.
+    Only generic labels (or a tenant's, replaced on its own) may come before it."""
+    labels = host.casefold().split(".")
+    for i in range(len(labels) - 1):
+        if ".".join(labels[i:]) in _PUBLIC_SERVICES:
+            if all(label in _SHARED_HOSTS for label in labels[:i]) or _TENANT_HOST.fullmatch(host):
+                return sum(len(label) + 1 for label in labels[:i])
+            return None
+    return None
+
+
+def _public_suffixes(text: str) -> list[tuple[int, int]]:
+    return [
+        (m.start() + at, m.end())
+        for m in _PUBLIC_HOST.finditer(text)
+        if (at := _public_suffix(m.group())) is not None
+    ]
 
 
 def _merge(a: Hit, b: Hit) -> Hit:
