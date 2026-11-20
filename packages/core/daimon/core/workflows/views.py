@@ -11,7 +11,7 @@ from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from daimon.core.stores import platform_names, web_people
+from daimon.core.stores import platform_names, web_people, workflow_triggers
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflows as workflows_store
@@ -243,6 +243,7 @@ def _summary(
     runs: Sequence[RunRow],
     spend: float,
     who: Who,
+    next_run: datetime | None = None,
 ) -> WorkflowSummary:
     spec = live.spec if live is not None else workflow.draft_spec
     changes = len(diff(live.spec if live else None, workflow.draft_spec)) if live else 0
@@ -263,7 +264,7 @@ def _summary(
             Tick(number=r.number, status=r.status, at=iso(r.started_at or r.created_at) or "")
             for r in reversed(runs[:TICKS])
         ],
-        next_run=None,
+        next_run=iso(next_run) if workflow.status == "active" else None,
         spend_usd=spend,
         visibility=workflow.visibility,
         mine=mine,
@@ -302,6 +303,7 @@ async def list_summaries(
         )
     }
     names = await people_of(session, who.tenant_id, runners)
+    fires = await workflow_triggers.next_fires(session, workflow_ids=ids)
     return [
         _summary(
             w,
@@ -313,6 +315,7 @@ async def list_summaries(
             runs=runs.get(w.id, []),
             spend=float(spend.get(w.id, 0)),
             who=who,
+            next_run=fires.get(w.id),
         )
         for w in seen
     ]
@@ -385,8 +388,16 @@ async def workflow_view(
         if live is not None and workflow.status != "needs_owner"
         else None
     )
+    fires = await workflow_triggers.next_fires(session, workflow_ids=[workflow.id])
     base = _summary(
-        workflow, live=live, owner=owner, run_as=run_as, runs=runs, spend=float(spend), who=who
+        workflow,
+        live=live,
+        owner=owner,
+        run_as=run_as,
+        runs=runs,
+        spend=float(spend),
+        who=who,
+        next_run=fires.get(workflow.id),
     )
     spec = _live_spec(workflow, versions)
     home = str(obj(spec.get("home")).get("channel") or workflow.home_channel_id or "")

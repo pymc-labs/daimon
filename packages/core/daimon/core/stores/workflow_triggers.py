@@ -572,3 +572,22 @@ async def last_with_inputs(session: AsyncSession, *, workflow_id: uuid.UUID) -> 
         .limit(1)
     )
     return None if orm is None else EventRow.model_validate(orm)
+
+
+async def next_fires(
+    session: AsyncSession, *, workflow_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, datetime]:
+    """Each workflow's next schedule slot."""
+    if not workflow_ids:
+        return {}
+    rows = await session.execute(
+        select(WorkflowTrigger.workflow_id, func.min(WorkflowTrigger.next_fire_at))
+        .where(
+            WorkflowTrigger.workflow_id.in_(workflow_ids),
+            WorkflowTrigger.kind == "schedule",
+            WorkflowTrigger.enabled.is_(True),
+            WorkflowTrigger.next_fire_at.is_not(None),
+        )
+        .group_by(WorkflowTrigger.workflow_id)
+    )
+    return {w: at for w, at in rows.tuples() if at is not None}

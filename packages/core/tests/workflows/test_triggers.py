@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from daimon.core._models import Tenant, WorkflowRun, WorkflowTrigger, WorkflowTriggerEvent
-from daimon.core.stores import workflows
+from daimon.core.stores import workflow_triggers, workflows
 from daimon.core.workflows import runs, triggers
 from daimon.core.workflows.preflight import Refusal
 from daimon.testing.factories import make_account, make_tenant
@@ -55,7 +55,8 @@ async def test_a_schedule_fires_its_slot_once_and_starts_a_run(db_session: Async
     await db_session.commit()
     sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
     slot = NOW + timedelta(hours=1)
-    assert await db_session.scalar(select(WorkflowTrigger.next_fire_at)) == slot, "seeded"
+    async with sm() as s:
+        assert await workflow_triggers.next_fires(s, workflow_ids=[flow]) == {flow: slot}, "seeded"
     assert await triggers.fire_schedules(sm, now=slot - timedelta(seconds=1)) == 0, "not yet"
     assert await triggers.fire_schedules(sm, now=slot + timedelta(seconds=5)) == 1, "the slot"
     assert await triggers.fire_schedules(sm, now=slot + timedelta(seconds=9)) == 0, "only once"
