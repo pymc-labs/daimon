@@ -9,10 +9,16 @@ from daimon.core.audience_facts import (
     RoomFacts,
     compute_room_facts,
 )
-from daimon.core.channel_visibility import DISCORD_VIEW_CHANNEL, DiscordOverwrite
+from daimon.core.channel_visibility import (
+    DISCORD_ADMINISTRATOR,
+    DISCORD_READ_HISTORY,
+    DISCORD_VIEW_CHANNEL,
+    DiscordOverwrite,
+)
 
 GUILD, CORE, FRIEND = "1000", "2001", "2002"
 VIEW = DISCORD_VIEW_CHANNEL
+HISTORY = DISCORD_READ_HISTORY
 
 
 def _role(role_id: str, *, allow: int = 0, deny: int = 0) -> DiscordOverwrite:
@@ -31,7 +37,7 @@ MEMBERS = [
     AudienceMember("quiet", frozenset(), timed_out=True),
     AudienceMember("bot", frozenset(), is_bot=True),
 ]
-ROLE_PERMISSIONS = {GUILD: 0, CORE: VIEW, FRIEND: VIEW}
+ROLE_PERMISSIONS = {GUILD: 0, CORE: VIEW | HISTORY, FRIEND: VIEW | HISTORY}
 # @everyone's own overwrite strips the base view, so each internal role is allowed back in.
 INTERNAL_ONLY = (_role(GUILD, deny=VIEW), _role(CORE, allow=VIEW), _role(FRIEND, allow=VIEW))
 CLOSED = (_role(GUILD, deny=VIEW),)
@@ -168,3 +174,52 @@ def test_people_with_the_same_roles_are_counted_one_by_one() -> None:
 
     assert facts.outsiders_count == 2 + 49, "a person's own deny is not shared with their group"
     assert facts.contained
+
+
+def test_narrow_counts_readers_and_contained_counts_viewers() -> None:
+    def no_history_for(*users: str) -> tuple[DiscordOverwrite, ...]:
+        return (*INTERNAL_ONLY, *(_person(user, deny=HISTORY) for user in users))
+
+    facts = _facts(
+        _room("120", "three-no-history", *no_history_for("u1", "u2", "u3")),
+        _room("121", "two-no-history", *no_history_for("u1", "u2")),
+        # Nobody holds history for outsiders either: they still view, so the room is contained.
+        _room(
+            "122",
+            "guest-no-history",
+            *INTERNAL_ONLY,
+            _person("outsider", allow=VIEW, deny=HISTORY),
+        ),
+    )
+
+    assert facts["120"].team_shut_out_count == 3 and facts["120"].narrow
+    assert facts["121"].team_shut_out_count == 2 and not facts["121"].narrow
+    assert facts["122"].contained and facts["122"].outsiders_count == 1, "Q1 is View Channel only"
+    assert not facts["120"].contained, "a history deny does not change who views the room"
+
+
+def test_an_administrator_or_owner_reads_a_room_whatever_its_overwrites() -> None:
+    admin = AudienceMember("boss", frozenset({CORE, "admins"}))
+    owner = AudienceMember("founder", frozenset({CORE}), is_owner=True)
+    permissions = {**ROLE_PERMISSIONS, "admins": DISCORD_ADMINISTRATOR}
+    blocked = (*CLOSED, _role(CORE, deny=VIEW | HISTORY))
+
+    facts = compute_room_facts(
+        guild_id=GUILD,
+        members=[admin, owner],
+        role_permissions=permissions,
+        channels=[_room("123", "vault", *blocked)],
+        internal_role_ids=[CORE],
+        team_role_ids=[CORE],
+    )
+
+    assert facts["123"].team_shut_out_count == 0
+
+
+def test_a_thread_takes_the_reading_standard_from_its_parent() -> None:
+    parent = _room(
+        "124", "parent", *INTERNAL_ONLY, *(_person(f"u{n}", deny=HISTORY) for n in (1, 2, 3))
+    )
+    thread = AudienceChannel("125", 11, "thread", parent_id="124")
+
+    assert _facts(parent, thread)["125"].narrow

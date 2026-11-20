@@ -89,7 +89,7 @@ class MemberSync:
                     session, tenant_id=tenant_id, changes=late, now=self._clock()
                 )
         if loaded and self._audience is not None:
-            await self._audience.publish(guild)
+            await self._audience.publish(guild, reconciled=True)
 
     async def _replace(self, guild: discord.Guild, tenant_id: uuid.UUID) -> bool:
         """Whether the server is installed, and so its list written."""

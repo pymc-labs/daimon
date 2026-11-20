@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 
@@ -15,7 +15,7 @@ VIEW = discord.Permissions(view_channel=True)
 def role(role_id: int, *, view: bool = False) -> Any:
     fake = MagicMock(spec=discord.Role)
     fake.id = role_id
-    fake.permissions = discord.Permissions(view_channel=view)
+    fake.permissions = discord.Permissions(view_channel=view, read_message_history=view)
     fake.is_default.return_value = role_id == GUILD
     return fake
 
@@ -74,6 +74,15 @@ def guild(*, channels: list[Any], threads: list[Any] | None = None, chunked: boo
     ]
     fake.channels = channels
     fake.threads = threads or []
+    # REST reads a reconcile makes; a test changes what they return to model a missed event.
+    fake.fetch_roles = AsyncMock(side_effect=lambda: list(fake.roles))
+    fake.fetch_channels = AsyncMock(side_effect=lambda: list(fake.channels))
+
+    async def chunk(**_kw: Any) -> list[Any]:
+        fake.chunked = True
+        return list(fake.members)
+
+    fake.chunk = AsyncMock(side_effect=chunk)
     for each in (*channels, *fake.threads):
         each.guild = fake
     return fake

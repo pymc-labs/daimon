@@ -6,13 +6,15 @@ For each room:
 
 - **contained**: a person who is not internal can view it, or "client" is in its name,
   or the facts are unknown.
-- **narrow**: three or more team members cannot view it, or it is a private thread, or
-  the facts are unknown.
+- **narrow**: three or more team members cannot read it (view it and read its history),
+  or it is a private thread, or the facts are unknown.
 
 A private thread takes "contained" from its parent room and is always narrow. A public
 thread and a forum post take both facts from their parent. A voice or stage room, and
-its text, use its own permissions. Viewing is Discord's own rule
-(`daimon.core.channel_visibility`), one person at a time. Pure: adapters supply the facts.
+its text, use its own permissions. Permissions are Discord's own rule
+(`daimon.core.channel_visibility`), one person at a time; an owner or administrator
+holds every permission. "Contained" counts viewers (View Channel), "narrow" counts
+readers (View Channel and Read Message History). Pure: adapters supply the facts.
 """
 
 from __future__ import annotations
@@ -22,10 +24,13 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from daimon.core.channel_visibility import (
+    DISCORD_ADMINISTRATOR,
+    DISCORD_READ_HISTORY,
+    DISCORD_VIEW_CHANNEL,
     DiscordMember,
     DiscordOverwrite,
     discord_base_permissions,
-    discord_can_view,
+    discord_channel_permissions,
 )
 
 #: A room that shuts out this many team members or more is narrow.
@@ -63,20 +68,18 @@ class AudienceChannel:
 
 @dataclass(frozen=True)
 class RoomFacts:
-    """A room's audience facts; the two counts are None when the room is unknown."""
+    """A room's audience facts. `known` is explicit: a room read back from the database
+    is known and has no counts; the counts exist only on freshly computed facts."""
 
     contained: bool
     narrow: bool
     outsiders_count: int | None = None
     team_shut_out_count: int | None = None
-
-    @property
-    def known(self) -> bool:
-        return self.outsiders_count is not None
+    known: bool = True
 
 
 #: What an unknown room reports: contained and narrow.
-UNKNOWN_FACTS = RoomFacts(contained=True, narrow=True)
+UNKNOWN_FACTS = RoomFacts(contained=True, narrow=True, known=False)
 
 
 def is_client_name(name: str) -> bool:
@@ -113,9 +116,9 @@ def compute_room_facts(
 
     def room_facts(channel: AudienceChannel) -> RoomFacts:
         overwrites = channel.overwrites
-        outside = _viewers(guild_id, role_permissions, outsiders, overwrites)
-        shut_out = len(team_members) - _viewers(
-            guild_id, role_permissions, team_members, overwrites
+        outside = _count(guild_id, role_permissions, outsiders, overwrites, _VIEW)
+        shut_out = len(team_members) - _count(
+            guild_id, role_permissions, team_members, overwrites, _READ
         )
         return RoomFacts(
             contained=outside > 0 or is_client_name(channel.name),
@@ -151,13 +154,19 @@ def compute_room_facts(
     return facts
 
 
-def _viewers(
+_VIEW = DISCORD_VIEW_CHANNEL
+_READ = DISCORD_VIEW_CHANNEL | DISCORD_READ_HISTORY
+"""Permission bits a person must hold: to view a room, and to read it."""
+
+
+def _count(
     guild_id: str,
     role_permissions: Mapping[str, int],
     people: Sequence[DiscordMember],
     overwrites: Sequence[DiscordOverwrite],
+    needed: int,
 ) -> int:
-    """How many of `people` can view a channel with these overwrites.
+    """How many of `people` hold every bit of `needed` in a channel with these overwrites.
 
     People who share roles, owner and timeout standing and have no overwrite of their
     own get one answer between them, so a large server costs one check per role set.
@@ -167,22 +176,23 @@ def _viewers(
     count = 0
     for person in people:
         if person.user_id in named:
-            count += _can_view(person, guild_id, role_permissions, overwrites)
+            count += _holds(person, guild_id, role_permissions, overwrites, needed)
         else:
             groups[(person.role_ids, person.is_owner, person.timed_out)].append(person)
     for members in groups.values():
-        if _can_view(members[0], guild_id, role_permissions, overwrites):
+        if _holds(members[0], guild_id, role_permissions, overwrites, needed):
             count += len(members)
     return count
 
 
-def _can_view(
+def _holds(
     person: DiscordMember,
     guild_id: str,
     role_permissions: Mapping[str, int],
     overwrites: Sequence[DiscordOverwrite],
+    needed: int,
 ) -> bool:
-    return discord_can_view(
+    permissions = discord_channel_permissions(
         person,
         guild_id=guild_id,
         base_permissions=discord_base_permissions(
@@ -190,3 +200,4 @@ def _can_view(
         ),
         overwrites=overwrites,
     )
+    return bool(permissions & DISCORD_ADMINISTRATOR) or permissions & needed == needed

@@ -5,8 +5,15 @@ processes read them. They are published only after a full member reload, and a s
 becomes unknown again when the cache can no longer be trusted: a reload starts or fails,
 the members intent is missing, or the gateway disconnects. Events that change who can see
 a room (members, roles, channels, threads) recompute the server's facts after a short
-wait, in one transaction. The process that holds the gateway renews `fresh_until`, so a
-crashed bot cannot leave facts that look current.
+wait, in one transaction.
+
+The process that holds the gateway renews `fresh_until` so a crashed bot cannot leave
+facts that look current. A renewal asks Discord nothing, so it never pushes validity past
+the last full reconcile plus `RECONCILE_LIMIT_S`. A reconcile reads roles and channels by
+REST and re-chunks the members, then recomputes and publishes; it runs every
+`RECONCILE_EVERY_S` for each server with internal roles, live or not. That also recovers
+a server whose publish failed and picks up a policy change. A missed gateway event can
+therefore mislead for at most the limit, and one failed reconcile does not expire facts.
 
 A server with no internal roles gets no facts.
 """
@@ -15,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -38,6 +45,12 @@ FRESH_FOR_S = 180.0
 RENEW_EVERY_S = 60.0
 #: Events within this wait share one recompute.
 DEBOUNCE_S = 2.0
+#: How often each server is reconciled with Discord: half the limit, so one failure is safe.
+RECONCILE_EVERY_S = 300.0
+#: Facts stay trusted at most this long after the last successful reconcile.
+RECONCILE_LIMIT_S = 600.0
+#: A server's member chunks must arrive within this.
+CHUNK_TIMEOUT_S = 300.0
 
 
 def _utcnow() -> datetime:
@@ -55,12 +68,20 @@ class AudienceSync:
         fresh_for_s: float = FRESH_FOR_S,
         renew_every_s: float = RENEW_EVERY_S,
         debounce_s: float = DEBOUNCE_S,
+        reconcile_every_s: float = RECONCILE_EVERY_S,
+        reconcile_limit_s: float = RECONCILE_LIMIT_S,
+        chunk_timeout_s: float = CHUNK_TIMEOUT_S,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._clock = clock
         self._fresh_for = timedelta(seconds=fresh_for_s)
         self._renew_every_s = renew_every_s
         self._debounce_s = debounce_s
+        self._reconcile_every = timedelta(seconds=reconcile_every_s)
+        self._reconcile_limit = timedelta(seconds=reconcile_limit_s)
+        self._chunk_timeout_s = chunk_timeout_s
+        # When each server was last reconciled with Discord; renewals never outlive it.
+        self._reconciled: dict[uuid.UUID, datetime] = {}
         # Servers whose published facts follow events; events recompute only these.
         self._live: set[uuid.UUID] = set()
         # Bumped at each disconnect, so a publish that began before it never lands after.
@@ -73,16 +94,40 @@ class AudienceSync:
     def _lock(self, tenant_id: uuid.UUID) -> asyncio.Lock:
         return self._locks.setdefault(tenant_id, asyncio.Lock())
 
-    async def publish(self, guild: discord.Guild) -> None:
+    async def publish(self, guild: discord.Guild, *, reconciled: bool = False) -> None:
         """Compute the server's facts from the cache and write them; unknown if the cache is
-        partial, and nothing if the server names no internal roles."""
+        partial, and nothing if the server names no internal roles.
+
+        `reconciled` says Discord was just read in full (a member reload, a reconcile):
+        it starts the server's reconcile limit. Without it the limit of the last
+        reconcile stays, and a server never reconciled lasts `fresh_for_s` and is reconciled
+        at the next tick."""
+        await self._publish_guarded(guild, reconciled=reconciled, epoch=self._epoch)
+
+    async def _publish_guarded(
+        self,
+        guild: discord.Guild,
+        *,
+        reconciled: bool,
+        epoch: int,
+        roles: Sequence[discord.Role] | None = None,
+        channels: Sequence[discord.abc.GuildChannel] | None = None,
+        members: Sequence[discord.Member] | None = None,
+    ) -> bool:
+        """Whether a full set of facts was written."""
         tenant_id = tenant_of(guild.id)
-        epoch = self._epoch
         async with self._lock(tenant_id):
             if epoch != self._epoch:
-                return
+                return False
             try:
-                await self._publish(guild, tenant_id)
+                return await self._publish(
+                    guild,
+                    tenant_id,
+                    reconciled=reconciled,
+                    roles=roles,
+                    channels=channels,
+                    members=members,
+                )
             except (SQLAlchemyError, AccessPolicyUnreadable) as err:
                 self._live.discard(tenant_id)
                 log.warning(
@@ -91,39 +136,88 @@ class AudienceSync:
                     err_type=type(err).__name__,
                 )
                 await self._try_mark_unknown(tenant_id)
+                return False
 
-    async def _publish(self, guild: discord.Guild, tenant_id: uuid.UUID) -> None:
+    async def _publish(
+        self,
+        guild: discord.Guild,
+        tenant_id: uuid.UUID,
+        *,
+        reconciled: bool,
+        roles: Sequence[discord.Role] | None,
+        channels: Sequence[discord.abc.GuildChannel] | None,
+        members: Sequence[discord.Member] | None,
+    ) -> bool:
         now = self._clock()
         async with self._sessionmaker.begin() as session:
             tenant = await get_tenant(session, tenant_id)
             if tenant is None or tenant.archived_at is not None:
-                return
+                return False
             policy = await load_access_policy(session, tenant_id=tenant_id)
-            roles = (policy.internal_role_ids, policy.team_role_ids)
+            policy_roles = (policy.internal_role_ids, policy.team_role_ids)
             if not policy.internal_role_ids:
                 self._live.discard(tenant_id)
                 self._roles.pop(tenant_id, None)
+                self._reconciled.pop(tenant_id, None)
                 await facts_store.retire_facts(session, tenant_id=tenant_id, now=now)
-                return
-            rooms = guild_rooms(guild, internal_role_ids=roles[0], team_role_ids=roles[1])
+                return False
+            rooms = guild_rooms(
+                guild,
+                internal_role_ids=policy_roles[0],
+                team_role_ids=policy_roles[1],
+                roles=roles,
+                guild_channels=channels,
+                members=members,
+            )
             if rooms is None:
                 self._live.discard(tenant_id)
                 await facts_store.mark_unknown(session, tenant_id=tenant_id, now=now)
-                return
+                return False
+            reconciled_at = now if reconciled else self._reconciled.get(tenant_id)
+            fresh_until = now + self._fresh_for
+            if reconciled_at is not None:
+                fresh_until = min(fresh_until, reconciled_at + self._reconcile_limit)
             generation = await facts_store.publish_facts(
                 session,
                 tenant_id=tenant_id,
                 rooms=rooms,
                 now=now,
-                fresh_until=now + self._fresh_for,
+                fresh_until=fresh_until,
             )
         self._live.add(tenant_id)
-        self._roles[tenant_id] = roles
+        self._roles[tenant_id] = policy_roles
+        if reconciled:
+            self._reconciled[tenant_id] = now
         log.info(
             "discord.audience.published",
             guild_id=str(guild.id),
             rooms=len(rooms),
             generation=generation,
+            reconciled=reconciled,
+        )
+        return True
+
+    async def reconcile(self, guild: discord.Guild) -> bool:
+        """Read the server's roles and channels by REST and re-chunk its members, then
+        recompute and publish. Returns whether it published from a full read.
+
+        A failed read changes nothing: the facts stay until their limit and then lapse."""
+        epoch = self._epoch
+        try:
+            roles = await guild.fetch_roles()
+            channels = await guild.fetch_channels()
+            # The chunk is the full member list: a member whose leave event was missed
+            # is not in it, while the cache would keep them.
+            members = await asyncio.wait_for(guild.chunk(cache=True), self._chunk_timeout_s)
+        except (discord.ClientException, discord.HTTPException, TimeoutError) as err:
+            log.warning(
+                "discord.audience.reconcile_failed",
+                guild_id=str(guild.id),
+                err_type=type(err).__name__,
+            )
+            return False
+        return await self._publish_guarded(
+            guild, reconciled=True, epoch=epoch, roles=roles, channels=channels, members=members
         )
 
     async def mark_unknown(self, guild: discord.Guild) -> None:
@@ -149,6 +243,7 @@ class AudienceSync:
         """The gateway closed: events are lost until it resumes, so every room is unknown."""
         self._epoch += 1
         self._live.clear()
+        self._reconciled.clear()
         for task in self._pending.values():
             task.cancel()
         self._pending.clear()
@@ -156,9 +251,10 @@ class AudienceSync:
             await self.mark_unknown(guild)
 
     async def resumed(self, guilds: Iterable[discord.Guild]) -> None:
-        """The gateway resumed and replayed what was missed: the cache is current again."""
+        """The gateway resumed and replayed what was missed: reconcile each server, since
+        the replay can have fallen short. One that fails is retried at each tick."""
         for guild in guilds:
-            await self.publish(guild)
+            await self.reconcile(guild)
 
     def schedule(self, guild: discord.Guild) -> None:
         """An event may have changed who sees a room: recompute after a short wait.
@@ -188,33 +284,63 @@ class AudienceSync:
         while self._pending:
             await asyncio.gather(*self._pending.values(), return_exceptions=True)
 
-    async def renew(self, guilds: Iterable[discord.Guild]) -> None:
-        """One renewal: push `fresh_until` out for the servers whose facts are live, publish
-        again for one that lapsed or whose roles changed in the policy."""
+    async def tick(self, guilds: Iterable[discord.Guild]) -> None:
+        """One maintenance pass. Reconcile each server with internal roles that is not live,
+        was never reconciled, was last reconciled a full interval ago or whose policy roles
+        changed; then renew the live ones, each to its last reconcile plus the limit."""
         by_tenant = {tenant_of(guild.id): guild for guild in guilds}
-        live = [tenant_id for tenant_id in self._live if tenant_id in by_tenant]
-        now = self._clock()
         try:
             async with self._sessionmaker.begin() as session:
-                renewed = await facts_store.renew_fresh_until(
-                    session, tenant_ids=live, now=now, fresh_until=now + self._fresh_for
-                )
-                changed = {
-                    tenant_id
-                    for tenant_id in renewed
-                    if self._roles.get(tenant_id) != await _policy_roles(session, tenant_id)
+                policy = {
+                    tenant_id: await _policy_roles(session, tenant_id) for tenant_id in by_tenant
                 }
         except (SQLAlchemyError, AccessPolicyUnreadable) as err:
             log.warning("discord.audience.renew_failed", err_type=type(err).__name__)
             return
-        for tenant_id in {*live} - renewed | changed:
-            await self.publish(by_tenant[tenant_id])
+        reconciled_now: set[uuid.UUID] = set()
+        for tenant_id, guild in by_tenant.items():
+            roles = policy[tenant_id]
+            if not roles[0]:
+                if tenant_id in self._live or tenant_id in self._roles:
+                    await self.publish(guild)  # retires the facts
+                continue
+            last = self._reconciled.get(tenant_id)
+            now = self._clock()
+            if (
+                tenant_id not in self._live
+                or last is None
+                or now - last >= self._reconcile_every
+                or self._roles.get(tenant_id) != roles
+            ) and await self.reconcile(guild):
+                reconciled_now.add(tenant_id)
+        await self._renew(by_tenant, reconciled_now)
+
+    async def _renew(
+        self, by_tenant: Mapping[uuid.UUID, discord.Guild], skip: set[uuid.UUID]
+    ) -> None:
+        now = self._clock()
+        limits = {
+            tenant_id: min(now + self._fresh_for, last + self._reconcile_limit)
+            for tenant_id in self._live
+            if tenant_id in by_tenant
+            and tenant_id not in skip
+            and (last := self._reconciled.get(tenant_id)) is not None
+        }
+        limits = {t: limit for t, limit in limits.items() if limit > now}
+        try:
+            async with self._sessionmaker.begin() as session:
+                renewed = await facts_store.renew_fresh_until(session, fresh_until=limits, now=now)
+        except SQLAlchemyError as err:
+            log.warning("discord.audience.renew_failed", err_type=type(err).__name__)
+            return
+        for tenant_id in limits.keys() - renewed:
+            self._live.discard(tenant_id)  # lapsed: the next tick reconciles it
 
     async def run(self, guilds: Callable[[], Iterable[discord.Guild]]) -> None:
-        """Renew until cancelled. Started by the process that holds the gateway."""
+        """Tick until cancelled. Started by the process that holds the gateway."""
         while True:
             await asyncio.sleep(self._renew_every_s)
-            await self.renew(guilds())
+            await self.tick(guilds())
 
 
 async def _policy_roles(

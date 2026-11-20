@@ -114,28 +114,29 @@ async def _bump(
 async def renew_fresh_until(
     session: AsyncSession,
     *,
-    tenant_ids: Collection[uuid.UUID],
+    fresh_until: Mapping[uuid.UUID, datetime],
     now: datetime,
-    fresh_until: datetime,
 ) -> set[uuid.UUID]:
-    """Push `fresh_until` out for each complete, still fresh server among `tenant_ids`.
+    """Push `fresh_until` out to each server's own limit, for each complete, still fresh
+    server among the keys.
 
-    A lapsed server is not revived: it stays unknown until the next full publish.
-    Returns the servers renewed.
+    The caller bounds each limit by the server's last full reconcile. A lapsed server is
+    not revived: it stays unknown until the next full publish. Returns the servers renewed.
     """
-    if not tenant_ids:
-        return set()
-    renewed = await session.execute(
-        update(DiscordAudienceState)
-        .where(
-            DiscordAudienceState.tenant_id.in_(tenant_ids),
-            DiscordAudienceState.complete.is_(True),
-            DiscordAudienceState.fresh_until > now,
+    renewed: set[uuid.UUID] = set()
+    for tenant_id, limit in fresh_until.items():
+        done = await session.execute(
+            update(DiscordAudienceState)
+            .where(
+                DiscordAudienceState.tenant_id == tenant_id,
+                DiscordAudienceState.complete.is_(True),
+                DiscordAudienceState.fresh_until > now,
+            )
+            .values(fresh_until=limit)
+            .returning(DiscordAudienceState.tenant_id)
         )
-        .values(fresh_until=fresh_until)
-        .returning(DiscordAudienceState.tenant_id)
-    )
-    return set(renewed.scalars())
+        renewed.update(done.scalars())
+    return renewed
 
 
 async def retire_facts(session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime) -> None:

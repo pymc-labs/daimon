@@ -4,12 +4,14 @@ cannot be trusted. Nothing here waits real time."""
 from __future__ import annotations
 
 import asyncio
-import inspect
+import types
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.member_sync import MemberSync, tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
@@ -17,6 +19,7 @@ from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from . import audience_fakes as fake
@@ -75,7 +78,14 @@ def _server(*, chunked: bool = True) -> object:
 def _sync(
     factory: async_sessionmaker[AsyncSession], clock: Clock
 ) -> tuple[AudienceSync, MemberSync]:
-    audience = AudienceSync(factory, clock=clock, fresh_for_s=180, debounce_s=0)
+    audience = AudienceSync(
+        factory,
+        clock=clock,
+        fresh_for_s=180,
+        debounce_s=0,
+        reconcile_every_s=300,
+        reconcile_limit_s=600,
+    )
     return audience, MemberSync(factory, clock=clock, audience=audience)
 
 
@@ -97,7 +107,7 @@ async def test_a_full_reload_publishes_and_every_unknown_signal_withdraws(
     await audience.disconnected([server])  # type: ignore[list-item]
     assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "gateway lost"
     await audience.resumed([server])  # type: ignore[list-item]
-    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "recomputed"
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "reconciled"
 
 
 async def test_a_partial_chunk_and_a_chunk_failure_leave_every_room_unknown(
@@ -170,34 +180,132 @@ async def test_events_recompute_after_a_wait_in_one_write(
     assert status is not None and status.generation == 2, "one new generation for the burst"
 
 
-async def test_the_gateway_owner_renews_and_a_stalled_one_lapses(
+async def test_renewal_is_bounded_by_the_last_reconcile_and_a_stalled_owner_lapses(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
     audience, _ = _sync(db_session_factory, clock)
     server = _server()
-    await audience.publish(server)  # type: ignore[arg-type]
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
 
     for _ in range(4):
         clock.now += timedelta(seconds=60)
-        await audience.renew([server])  # type: ignore[list-item]
+        await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "2")).contained, "renewed past 180 s"
-    assert clock.now - START == timedelta(seconds=240)
+    assert server.fetch_roles.await_count == 1, "renewal asks Discord nothing"  # type: ignore[attr-defined]
 
-    clock.now += timedelta(seconds=181)  # no renewal: the process stalled or died
-    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS
+    # Discord stops answering at the 300 s reconcile: renewals continue to the limit only.
+    server.chunk = AsyncMock(side_effect=TimeoutError)  # type: ignore[attr-defined]
+    for _ in range(5):
+        clock.now += timedelta(seconds=60)
+        await audience.tick([server])  # type: ignore[list-item]
+    assert clock.now - START == timedelta(seconds=540)
+    assert (await _fact(db_session_factory, clock, "2")).contained, "one failed reconcile is safe"
+
+    clock.now += timedelta(seconds=60)  # 600 s after the last reconcile
+    await audience.tick([server])  # type: ignore[list-item]
+    clock.now += timedelta(seconds=1)
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "limit reached"
+
+    server.chunk = AsyncMock(side_effect=lambda **_: setattr(server, "chunked", True))  # type: ignore[attr-defined]
+    await audience.tick([server])  # type: ignore[list-item]
+    assert (await _fact(db_session_factory, clock, "2")).contained, "the next reconcile recovers"
 
 
-async def test_a_policy_change_in_another_process_is_picked_up_at_renewal(
+async def test_a_reconcile_reads_discord_and_corrects_a_missed_event(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
     clock = Clock()
     audience, _ = _sync(db_session_factory, clock)
     server = _server()
-    await audience.publish(server)  # type: ignore[arg-type]
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert not (await _fact(db_session_factory, clock, "1")).contained
+
+    # Discord opens the room to the outsider; the gateway event never arrived, so the
+    # cache still shows it closed. Only the REST read sees the change.
+    opened = fake.channel(1, "planning", fake.internal_only())
+    opened.overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(
+        view_channel=True
+    )
+    opened.guild = server
+    server.fetch_channels = AsyncMock(return_value=[opened, server.channels[1]])  # type: ignore[attr-defined]
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])  # type: ignore[list-item]
+
+    assert (await _fact(db_session_factory, clock, "1")).contained
+    server.fetch_roles.assert_awaited()  # type: ignore[attr-defined]
+    server.chunk.assert_awaited_with(cache=True)  # type: ignore[attr-defined]
+
+
+async def test_a_reconcile_counts_the_chunked_members_so_a_missed_leave_does_not_linger(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
     assert (await _fact(db_session_factory, clock, "2")).contained
+
+    # The outsider left and the leave event was missed: the cache still holds them, the
+    # fresh member list does not.
+    present = [m for m in server.members if m.id != 30]  # type: ignore[attr-defined]
+    server.chunk = AsyncMock(return_value=present)  # type: ignore[attr-defined]
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])  # type: ignore[list-item]
+
+    assert not (await _fact(db_session_factory, clock, "2")).contained
+
+
+async def test_a_failed_publish_on_reconnect_recovers_at_the_next_tick(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    await audience.publish(server, reconciled=True)  # type: ignore[arg-type]
+    await audience.disconnected([server])  # type: ignore[list-item]
+
+    real = store.publish_facts
+    monkeypatch.setattr(
+        "daimon.adapters.discord.audience_sync.facts_store.publish_facts",
+        AsyncMock(side_effect=SQLAlchemyError("down")),
+    )
+    await audience.resumed([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS
+    assert TENANT not in audience._live  # type: ignore[reportPrivateUsage]
+
+    monkeypatch.setattr("daimon.adapters.discord.audience_sync.facts_store.publish_facts", real)
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "1") == RoomFacts(False, False)
+
+
+async def test_a_policy_set_or_changed_after_startup_is_picked_up_within_one_tick(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory, internal=(), team=())
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    await audience.tick([server])  # type: ignore[list-item]
+    server.fetch_roles.assert_not_awaited()  # type: ignore[attr-defined]
+    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "no internal roles"
+
+    await set_access_policy(
+        db_session,
+        tenant_id=TENANT,
+        policy=TenantAccessPolicy(internal_role_ids=ROLES, team_role_ids=(str(fake.CORE),)),
+    )
+    await db_session.commit()
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "2") == RoomFacts(True, False), "set"
 
     # The friend role stops being internal: the friend now counts as an outsider.
     await set_access_policy(
@@ -207,9 +315,16 @@ async def test_a_policy_change_in_another_process_is_picked_up_at_renewal(
     )
     await db_session.commit()
     clock.now += timedelta(seconds=60)
-    await audience.renew([server])  # type: ignore[list-item]
-
+    await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "1")).contained, "the friend is an outsider"
+
+    await set_access_policy(
+        db_session, tenant_id=TENANT, policy=TenantAccessPolicy(internal_role_ids=())
+    )
+    await db_session.commit()
+    clock.now += timedelta(seconds=60)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "retired"
 
 
 async def test_a_server_without_internal_roles_gets_no_facts(
@@ -238,60 +353,228 @@ async def test_losing_the_members_intent_marks_every_server_unknown(
     assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS
 
 
-def test_the_unknown_signals_are_wired_in_the_bot() -> None:
+class _Recorder:
+    """Stands in for AudienceSync or MemberSync on a bot stub and records each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        async def call(*args: Any) -> None:
+            self.calls.append((name, args))
+
+        def sync_call(*args: Any) -> None:
+            self.calls.append((name, args))
+
+        return sync_call if name == "schedule" else call
+
+    def names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+
+def _bot_class() -> Any:
     from daimon.adapters.discord.bot import DaimonBot
 
-    handlers: list[Callable[..., object]] = [
-        DaimonBot.on_disconnect,
-        DaimonBot.on_resumed,
-        DaimonBot.on_guild_role_create,
-        DaimonBot.on_guild_channel_create,
-        DaimonBot.on_guild_channel_delete,
-        DaimonBot.on_thread_create,
-    ]
-    assert all(inspect.iscoroutinefunction(handler) for handler in handlers)
+    return DaimonBot
 
 
-async def test_a_resume_starts_the_renewal_again_and_a_returning_server_reloads() -> None:
-    """on_disconnect stops the renewal and a resume fires no on_ready: without a restart
-    here the facts lapse and every room stays unknown until the next full connect."""
-    import types
-
-    from daimon.adapters.discord.bot import DaimonBot
-
-    renewed = asyncio.Event()
-    reloaded: list[object] = []
-
-    class _Audience:
-        async def resumed(self, guilds: object) -> None:
-            return None
-
-        async def run(self, guilds: object) -> None:
-            renewed.set()
-
-    class _Members:
-        async def reload_all(self, guilds: list[object]) -> None:
-            reloaded.extend(guilds)
-
-    guild = types.SimpleNamespace(id=1)
-    stopped: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-    await stopped
+def _bot(
+    *, allowed: bool = True, ready: bool = True, members_intent: bool = True
+) -> types.SimpleNamespace:
+    """The few attributes the audience handlers of DaimonBot read."""
+    DaimonBot = _bot_class()
+    guild = types.SimpleNamespace(id=1, members=[], channels=[])
     bot = types.SimpleNamespace(
-        intents=types.SimpleNamespace(members=True),
+        intents=types.SimpleNamespace(members=members_intent),
         guilds=[guild],
-        _allows_guild=lambda _id: True,
-        _audience_sync=_Audience(),
-        _audience_renewal=stopped,
-        _member_sync=_Members(),
-        is_ready=lambda: True,
+        user=None,
+        _allows_guild=MagicMock(return_value=allowed),
+        _audience_sync=_Recorder(),
+        _member_sync=_Recorder(),
+        _audience_renewal=None,
+        membership_resolver=MagicMock(),
+        runtime=types.SimpleNamespace(sessionmaker=None),
+        is_ready=lambda: ready,
         _spawn=asyncio.create_task,
+        get_guild=MagicMock(return_value=guild),
+        guild=guild,
     )
     bot._start_audience_renewal = types.MethodType(DaimonBot._start_audience_renewal, bot)
+    return bot
 
-    await DaimonBot.on_resumed(bot)  # type: ignore[arg-type]
+
+@pytest.fixture(autouse=True)
+def quiet_discord_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daimon.adapters.discord.bot.remember_guild_channels", MagicMock())
+    monkeypatch.setattr("daimon.adapters.discord.bot.clear_webhook_backoff", MagicMock())
+    monkeypatch.setattr("daimon.adapters.discord.bot.member_facts", MagicMock())
+
+
+async def test_a_disconnect_stops_the_renewal_and_marks_every_server_unknown() -> None:
+    DaimonBot = _bot_class()
+
+    bot = _bot()
+    bot._audience_renewal = asyncio.create_task(asyncio.sleep(3600))
+    renewal = bot._audience_renewal
+
+    await DaimonBot.on_disconnect(bot)
+    await asyncio.sleep(0)
+
+    assert renewal.cancelled()
+    assert bot._audience_sync.calls == [("disconnected", ([bot.guild],))]
+
+
+async def test_a_resume_reconciles_and_restarts_the_renewal_only_with_the_members_intent() -> None:
+    DaimonBot = _bot_class()
+
+    bot = _bot()
+    renewed = asyncio.Event()
+
+    async def run(_guilds: object) -> None:
+        renewed.set()
+
+    bot._audience_sync.run = run
+    bot._audience_renewal = stopped = asyncio.create_task(asyncio.sleep(0))
+    await stopped
+    await DaimonBot.on_resumed(bot)
     await asyncio.wait_for(renewed.wait(), timeout=1)
     assert bot._audience_renewal is not stopped
+    assert bot._audience_sync.calls == [("resumed", ([bot.guild],))]
 
-    await DaimonBot.on_guild_available(bot, guild)  # type: ignore[arg-type]
+    no_intent = _bot(members_intent=False)
+    no_intent._audience_sync.run = run
+    await DaimonBot.on_resumed(no_intent)
+    assert no_intent._audience_sync.calls == [], "no member cache, no facts"
+
+
+async def test_a_returning_server_reloads_and_an_unavailable_one_becomes_unknown() -> None:
+    DaimonBot = _bot_class()
+
+    bot = _bot()
+    await DaimonBot.on_guild_available(bot, bot.guild)
     await asyncio.sleep(0)
-    assert reloaded == [guild]
+    assert bot._member_sync.calls == [("reload_all", ([bot.guild],))]
+
+    for each in (_bot(ready=False), _bot(allowed=False), _bot(members_intent=False)):
+        await DaimonBot.on_guild_available(each, each.guild)
+        await asyncio.sleep(0)
+        assert each._member_sync.calls == [], "startup reload or no members intent covers it"
+
+    await DaimonBot.on_guild_unavailable(bot, bot.guild)
+    assert bot._audience_sync.calls == [("mark_unknown", (bot.guild,))]
+    bot.membership_resolver.invalidate_guild.assert_called_once_with("1")
+
+
+async def test_member_role_channel_and_thread_events_schedule_a_recompute() -> None:
+    DaimonBot = _bot_class()
+
+    def roles(count: int) -> list[object]:
+        return [object() for _ in range(count)]
+
+    def member(bot: types.SimpleNamespace, role_list: list[object]) -> Any:
+        return types.SimpleNamespace(guild=bot.guild, id=5, roles=role_list)
+
+    def channel(bot: types.SimpleNamespace, **kw: Any) -> Any:
+        base: dict[str, Any] = {"guild": bot.guild, "overwrites": {}, "name": "a", "type": 0}
+        return types.SimpleNamespace(**{**base, **kw})
+
+    def role(bot: types.SimpleNamespace, permissions: int = 0) -> Any:
+        return types.SimpleNamespace(guild=bot.guild, members=[], permissions=permissions)
+
+    bot = _bot()
+    r1 = roles(1)
+    cases: list[tuple[str, Callable[[], Any]]] = [
+        ("role create", lambda: DaimonBot.on_guild_role_create(bot, role(bot))),
+        ("role update", lambda: DaimonBot.on_guild_role_update(bot, role(bot, 0), role(bot, 8))),
+        ("role delete", lambda: DaimonBot.on_guild_role_delete(bot, role(bot))),
+        ("member join", lambda: DaimonBot.on_member_join(bot, member(bot, r1))),
+        (
+            "member roles",
+            lambda: DaimonBot.on_member_update(bot, member(bot, r1), member(bot, roles(2))),
+        ),
+        (
+            "member leaves",
+            lambda: DaimonBot.on_raw_member_remove(
+                bot, types.SimpleNamespace(guild_id=1, user=types.SimpleNamespace(id=5))
+            ),
+        ),
+        ("channel create", lambda: DaimonBot.on_guild_channel_create(bot, channel(bot))),
+        ("channel delete", lambda: DaimonBot.on_guild_channel_delete(bot, channel(bot))),
+        (
+            "channel overwrites",
+            lambda: DaimonBot.on_guild_channel_update(
+                bot, channel(bot), channel(bot, overwrites={1: 1})
+            ),
+        ),
+        (
+            "channel renamed",
+            lambda: DaimonBot.on_guild_channel_update(bot, channel(bot), channel(bot, name="b")),
+        ),
+        (
+            "thread create",
+            lambda: DaimonBot.on_thread_create(bot, types.SimpleNamespace(guild=bot.guild)),
+        ),
+    ]
+    for label, event in cases:
+        before = len(bot._audience_sync.calls)
+        await event()
+        assert bot._audience_sync.calls[before:] == [("schedule", (bot.guild,))], label
+
+    # An event that changes no one's access schedules nothing.
+    for label, quiet in [
+        (
+            "same roles",
+            lambda: DaimonBot.on_member_update(bot, member(bot, r1), member(bot, r1)),
+        ),
+        (
+            "same channel",
+            lambda: DaimonBot.on_guild_channel_update(bot, channel(bot), channel(bot)),
+        ),
+        ("same permissions", lambda: DaimonBot.on_guild_role_update(bot, role(bot), role(bot))),
+    ]:
+        before = len(bot._audience_sync.calls)
+        await quiet()
+        assert bot._audience_sync.calls[before:] == [], label
+
+    # Role and member events also reload the admin flags in the member list.
+    assert {"admins_changed", "joined", "left"} <= set(bot._member_sync.names())
+
+
+async def test_events_of_a_server_the_bot_does_not_serve_are_ignored() -> None:
+    DaimonBot = _bot_class()
+
+    bot = _bot(allowed=False)
+    guild = bot.guild
+    await DaimonBot.on_guild_channel_create(bot, types.SimpleNamespace(guild=guild))
+    await DaimonBot.on_thread_create(bot, types.SimpleNamespace(guild=guild))
+    await DaimonBot.on_guild_role_create(bot, types.SimpleNamespace(guild=guild))
+    await DaimonBot.on_guild_unavailable(bot, guild)
+    assert bot._audience_sync.calls == []
+
+
+async def test_a_channel_event_on_the_bot_recomputes_the_real_facts(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A real AudienceSync behind the handlers: an event changes a room's facts, and a
+    disconnect withdraws them."""
+    DaimonBot = _bot_class()
+
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _server()
+    await audience.publish(server, reconciled=True)  # type: ignore[arg-type]
+    bot = _bot()
+    bot._audience_sync = audience
+    bot.guilds = [server]
+    server.channels[0].overwrites[fake.target(discord.User, 30)] = discord.PermissionOverwrite(  # type: ignore[attr-defined]
+        view_channel=True
+    )
+
+    await DaimonBot.on_guild_channel_create(bot, types.SimpleNamespace(guild=server))
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+    bot._audience_renewal = None
+    await DaimonBot.on_disconnect(bot)
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS

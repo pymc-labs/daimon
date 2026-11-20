@@ -117,9 +117,8 @@ async def test_renewal_extends_fresh_servers_and_never_revives_a_lapsed_or_unkno
 
     renewed = await store.renew_fresh_until(
         db_session,
-        tenant_ids=[fresh.id, lapsed.id, unknown.id],
+        fresh_until={t.id: LATER + timedelta(seconds=180) for t in (fresh, lapsed, unknown)},
         now=LATER,
-        fresh_until=LATER + timedelta(seconds=180),
     )
 
     assert renewed == {fresh.id}
@@ -149,3 +148,20 @@ async def test_retiring_writes_nothing_for_a_server_without_facts(
     await _publish(db_session, tenant.id)
     await store.mark_all_unknown(db_session, now=LATER)
     assert await _read(db_session, tenant.id, "1") == UNKNOWN_FACTS
+
+
+async def test_known_survives_a_database_round_trip_for_every_kind_of_row(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3010")
+    await _publish(db_session, tenant.id)
+
+    open_, contained, narrow, unknown = [
+        await _read(db_session, tenant.id, channel) for channel in ("1", "2", "3", "9")
+    ]
+
+    assert [f.known for f in (open_, contained, narrow, unknown)] == [True, True, True, False]
+    assert (open_.contained, open_.narrow) == (False, False), "a stored open row is known"
+    assert (narrow.contained, narrow.narrow) == (False, True)
+    assert not (await _read(db_session, tenant.id, "404")).known
+    assert (await _read(db_session, tenant.id, "70", parent_id="1")).known, "from the parent"

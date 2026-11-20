@@ -7,7 +7,7 @@ cached (`guild.chunked`); until then every room is unknown.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from daimon.core.audience_facts import (
     AudienceChannel,
@@ -66,22 +66,34 @@ def guild_rooms(
     internal_role_ids: tuple[str, ...],
     team_role_ids: tuple[str, ...],
     extra: Iterable[discord.abc.GuildChannel | discord.Thread] = (),
+    roles: Sequence[discord.Role] | None = None,
+    guild_channels: Sequence[discord.abc.GuildChannel] | None = None,
+    members: Sequence[discord.Member] | None = None,
 ) -> dict[str, StoredRoom] | None:
     """Each room's facts with its parent, from the cache; None while the cache is partial.
 
-    `extra` names channels the cache may lack, such as an archived thread.
+    `extra` names channels the cache may lack, such as an archived thread. `roles` and
+    `guild_channels` replace the cached roles and channels (not threads) with a fresh
+    REST read, and `members` the cached members with a fresh chunk, for a reconcile.
     """
     if not guild.chunked:
         return None
-    seen = {c.id for c in (*guild.channels, *guild.threads)}
+    cached_channels = guild.channels if guild_channels is None else guild_channels
+    seen = {c.id for c in (*cached_channels, *guild.threads)}
     channels = [
         audience_channel(c)
-        for c in (*guild.channels, *guild.threads, *(e for e in extra if e.id not in seen))
+        for c in (*cached_channels, *guild.threads, *(e for e in extra if e.id not in seen))
     ]
     facts = compute_room_facts(
         guild_id=str(guild.id),
-        members=[audience_member(guild, member) for member in guild.members],
-        role_permissions={str(role.id): role.permissions.value for role in guild.roles},
+        members=[
+            audience_member(guild, member)
+            for member in (guild.members if members is None else members)
+        ],
+        role_permissions={
+            str(role.id): role.permissions.value
+            for role in (guild.roles if roles is None else roles)
+        },
         channels=channels,
         internal_role_ids=internal_role_ids,
         team_role_ids=team_role_ids,
@@ -114,6 +126,8 @@ def channel_outsiders(
 
 
 def _has_outsiders(facts: RoomFacts | None) -> bool:
-    if facts is None or facts.outsiders_count is None:
+    if facts is None or not facts.known:
         return True
+    if facts.outsiders_count is None:
+        return facts.contained
     return facts.outsiders_count > 0
