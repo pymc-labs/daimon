@@ -1,8 +1,8 @@
 """Finding what to replace in a string: secrets, ids, emails, hosts, known names, then names by NER.
 
 Matching runs on a folded view of the text (`fold`): accents and invisible marks dropped,
-`\\n`, `\\u00e9` and `%20` escapes decoded. Known names match by word, so `alice_smith`,
-`AliceSmith` and `Alice%20Smith` all match "Alice Smith". Hits are mapped back to the
+`\\n`, `\\u00e9`, `%20` and HTML entity escapes decoded. Known names match by word, so
+`alice_smith`, `AliceSmith` and `Alice%20Smith` all match "Alice Smith". Hits are mapped back to the
 original text. Overlapping hits merge into one covering both, so a longer name found by NER
 is never cut short by a shorter known part. Name detection (Presidio with a spaCy model) is
 optional: without it `Ner.available` is False and only the dictionary and patterns apply.
@@ -10,8 +10,14 @@ optional: without it `Ner.available` is False and only the dictionary and patter
 
 from __future__ import annotations
 
+import base64
+import functools
+import hashlib
+import html
+import multiprocessing
 import re
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -36,7 +42,9 @@ class Hit:
 
 # ---------- folding ----------
 
-_ESCAPES: Final = re.compile(r"\\u[0-9a-fA-F]{4}|\\[nrt]|(?:%[0-9A-Fa-f]{2})+")
+_ESCAPES: Final = re.compile(
+    r"\\u[0-9a-fA-F]{4}|\\[nrt]|(?:%[0-9A-Fa-f]{2})+|&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[a-z]{2,8});"
+)
 
 
 def _decode(escape: str) -> str:
@@ -45,6 +53,9 @@ def _decode(escape: str) -> str:
         return escape if 0xD800 <= point < 0xE000 else fold_char(chr(point))
     if escape.startswith("\\"):
         return " "
+    if escape.startswith("&"):
+        decoded = html.unescape(escape)
+        return " " if decoded.isspace() else "".join(fold_char(c) for c in decoded)
     try:
         decoded = bytes.fromhex(escape.replace("%", "")).decode("utf-8")
     except UnicodeDecodeError:
@@ -67,7 +78,7 @@ class View:
 
 
 def fold(text: str) -> View:
-    if text.isascii() and "\\" not in text and "%" not in text:
+    if text.isascii() and "\\" not in text and "%" not in text and "&" not in text:
         return View(text)
     chars: list[str] = []
     starts: list[int] = []
@@ -108,16 +119,59 @@ def _words(view: str) -> list[tuple[int, int, str]]:
     return [(m.start(), m.end(), m.group().casefold()) for m in _TOKEN.finditer(view)]
 
 
+# Function words, never a name on their own; with `common_words` they guard one-word terms.
+_STOP: Final = frozenset(
+    {"a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "for", "from", "has",
+     "have", "he", "her", "his", "how", "i", "if", "in", "is", "it", "its", "me", "my", "no",
+     "not", "of", "on", "or", "our", "she", "so", "than", "that", "the", "their", "them", "then",
+     "there", "they", "this", "to", "up", "us", "was", "we", "what", "when", "where", "which",
+     "who", "why", "will", "with", "you", "your"}
+)  # fmt: skip
+
+
+@functools.cache
+def common_words() -> frozenset[str]:
+    """Everyday English words (Faker's and spaCy's lists when installed): no one-word term
+    matches them alone, and no fake is one."""
+    words = set(_STOP)
+    try:
+        from faker.providers.lorem.en_US import Provider
+
+        listed: list[str] = list(Provider.word_list)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        words.update(w.casefold() for w in listed)
+        from spacy.lang.en.stop_words import STOP_WORDS
+
+        words.update(w.casefold() for w in STOP_WORDS)
+    except ImportError:
+        pass
+    return frozenset(words)
+
+
 @dataclass(frozen=True)
 class _Entry:
     words: tuple[str, ...]
     gaps: tuple[str, ...]
     term: Term
+    alone: bool = False
+    """A one-word term: matched as a whole word only."""
+    exact: str | None = None
+    """A common word that is a name: matched only written this way."""
 
 
-class _Index:
-    def __init__(self) -> None:
+def _whole(view: str, start: int, end: int) -> bool:
+    """Whether `view[start:end]` is a word of its own, not part of one ("PrimRose")."""
+    before = view[start - 1] if start else ""
+    after = view[end] if end < len(view) else ""
+    return not before.isalpha() and not after.isalpha()
+
+
+class TermIndex:
+    """Terms matched by word. `strict` guards one-word terms: whole words only, and a common word
+    only when capitalized and written as in the dictionary."""
+
+    def __init__(self, *, strict: bool = False) -> None:
         self._first: dict[str, list[_Entry]] = {}
+        self._strict = strict
 
     def add(self, term: Term) -> None:
         view = fold(term.text).text
@@ -126,7 +180,13 @@ class _Index:
             return
         words = tuple(w for _, _, w in found)
         gaps = tuple(view[a[1] : b[0]] for a, b in zip(found, found[1:], strict=False))
-        entries = [_Entry(words, gaps, term)]
+        alone = len(words) == 1
+        exact = None
+        if self._strict and alone and words[0] in common_words():
+            if not view.strip()[:1].isupper():
+                return  # "test", "status": a lowercase common word is never matched alone
+            exact = view.strip()
+        entries = [_Entry(words, gaps, term, alone and self._strict, exact)]
         joined = "".join(words)
         if len(words) > 1 and all(_joins(g) for g in gaps) and len(joined) >= _MIN_JOINED:
             entries.append(_Entry((joined,), (), term))  # ALICESMITH, alicesmith
@@ -135,17 +195,27 @@ class _Index:
             bucket.append(entry)
             bucket.sort(key=lambda e: len(e.words), reverse=True)
 
-    def find(self, view: str) -> Iterator[tuple[int, int, Term]]:
+    def find(self, view: str, *, alone: bool = True) -> Iterator[tuple[int, int, Term]]:
+        """Matches in `view`; without `alone`, one-word terms are left out."""
         found = _words(view)
         for i, (start, _, word) in enumerate(found):
             for entry in self._first.get(word, ()):
                 n = len(entry.words)
-                if i + n <= len(found) and all(
-                    found[i + j][2] == entry.words[j]
-                    and _same_gap(view[found[i + j - 1][1] : found[i + j][0]], entry.gaps[j - 1])
-                    for j in range(1, n)
+                end = found[i + n - 1][1] if i + n <= len(found) else 0
+                if (
+                    i + n <= len(found)
+                    and all(
+                        found[i + j][2] == entry.words[j]
+                        and _same_gap(
+                            view[found[i + j - 1][1] : found[i + j][0]], entry.gaps[j - 1]
+                        )
+                        for j in range(1, n)
+                    )
+                    and not (entry.alone and not alone)
+                    and (entry.exact is None or view[start:end] == entry.exact)
+                    and not (entry.alone and not _whole(view, start, end))
                 ):
-                    yield start, found[i + n - 1][1], entry.term
+                    yield start, end, entry.term
                     break
 
 
@@ -175,31 +245,56 @@ _SECRETS: Final = [
         r"\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}\b",
         r"hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]+",
         r"\bdata:[\w/+.-]+;base64,[A-Za-z0-9+/=]{16,}",
+        r"\b(?:SK|AC)[0-9a-f]{32}\b",
     )
 ]
-# Key names that hold secrets, in `KEY=value` text and as JSON keys. `auth` but not `author`.
+# Key names that hold secrets, in `KEY=value` text and as JSON keys. `auth` and `authorization`
+# but not `author`.
+_PW_LABEL: Final = r"(?:pass(?:word|wd|phrase|code)?|(?<![a-z])(?:pwd|pin(?:_?code)?))"
+_KEY_LABEL: Final = (
+    r"(?:secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential|auth(?!or(?!i[sz]))"
+    r"|(?:encryption|signing|account|master|client|license|shared[_-]?access)[_-]?key"
+    r"|session[_-]?(?:id|key))"
+)
 SECRET_NAME: Final = re.compile(
-    r"pass(?:word|wd|phrase|code)?(?![a-z])|secret|token|api.?key|private.?key|access.?key"
-    r"|credential|(?<![a-z])auth(?!or)|cookie|session.?id",
+    rf"pass(?:word|wd|phrase|code)?(?![a-z])|(?<![a-z])(?:pwd|pin(?:_?code)?)(?![a-z])"
+    rf"|{_KEY_LABEL}|cookie",
     re.IGNORECASE,
 )
-# The secret is group 1 of each: the label before it stays readable.
+# The secret is group `v` of each: the label before it stays readable. A quoted value is taken
+# whole, a password's to the end of the line, any other labelled value as one word. Quantifiers
+# are bounded: a long run of word characters must not make matching quadratic.
+_LABEL: Final = rf"(?:{_PW_LABEL}|{_KEY_LABEL})[\w.-]{{0,40}}[\"']?[ \t]*[:=][ \t]*"
 _SECRET_VALUES: Final = [
     re.compile(p, re.IGNORECASE | re.MULTILINE)
     for p in (
-        r"\bBearer\s+([A-Za-z0-9._~+/=-]{16,})",
-        r"^\s*(?:proxy-)?authorization\s*:\s*(?!bearer\b)(.+?)\s*$",
-        r"^\s*(?:set-)?cookie\s*:\s*(.+?)\s*$",
-        r"[\w.-]*?(?:pass(?:word|wd|phrase|code)?|secret|token|api[_-]?key|private[_-]?key"
-        r"|access[_-]?key|credential|auth(?!or))[\w.-]*[\"']?\s*[:=]\s*[\"']?([^\s\"',;&]{8,})",
+        r"\bBearer\s+(?P<v>[A-Za-z0-9._~+/=-]{16,})",
+        r"\bToken\s+(?P<v>[A-Za-z0-9_.-]{20,})",
+        r"^\s*(?:proxy-)?authorization\s*:\s*(?:bearer\s+)?(?P<v>.+?)\s*$",
+        r"^\s*(?:set-)?cookie\s*:\s*(?P<v>.+?)\s*$",
+        rf"{_LABEL}([\"'])(?P<v>(?:(?!\1)[^\n])+)\1",
+        rf"{_PW_LABEL}[\w.-]{{0,40}}[\"']?[ \t]*[:=][ \t]*"
+        r"(?P<v>[^\s\"'][^\n\"',;&]*?)[ \t]*(?=[\"',;&\n]|$)",
+        rf"{_LABEL}(?:(?:bearer|basic|token)\s+)?(?P<v>[^\s\"',;&]{{6,}})",
     )
 ]
+# `Basic` and a base64 `user:password`.
+_BASIC: Final = re.compile(r"\bBasic\s+(?P<v>[A-Za-z0-9+/]{8,}={0,2})(?![\w+/=])")
+# A login in a home folder path.
+_HOME: Final = re.compile(
+    r"(?:\b[A-Za-z]:[\\/]+(?:Users|Documents and Settings)|(?<![\w.])/(?:home|Users))[\\/]+"
+    r"(?P<v>[^\\/\s\"'<>:*?|]+)"
+)
+_GENERIC_LOGINS: Final = frozenset(
+    {"public", "default", "shared", "all users", "default user", "guest", "user", "runner",
+     "ubuntu", "root", "admin", "administrator", "vscode", "node", "app", "me", "you"}
+)  # fmt: skip
 _URL: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://[^\s<>\"'`)\]}]+", re.IGNORECASE)
-_URL_USERINFO: Final = re.compile(r"//([^/@\s:]+:[^/@\s]+)@")
+_URL_USERINFO: Final = re.compile(r"//(?P<v>[^/@\s:?#]+:[^@\s?#]+)@")
 _URL_SECRET_PARAM: Final = re.compile(
-    r"[?&;#](?:[\w.-]*(?:token|secret|signature|credential|pass(?:word|wd)?|api[_-]?key"
-    r"|private[_-]?key|auth(?!or))[\w.-]*|x-amz-[\w-]+|x-goog-[\w-]+|sig|key|apikey|code|t|pwd"
-    r"|hm|session|sessionid|sid|jwt)=([^&#;\s]+)",
+    r"[?&;#](?:[\w.-]{0,40}?(?:token|secret|signature|credential|pass(?:word|wd)?|api[_-]?key"
+    r"|private[_-]?key|auth(?!or(?!i[sz])))[\w.-]{0,40}|x-amz-[\w-]+|x-goog-[\w-]+|sig|key|apikey|code"
+    r"|t|pwd|hm|session|sessionid|sid|jwt|k|pw|pin)=([^&#;\s]+)",
     re.IGNORECASE,
 )
 _EMAIL: Final = re.compile(
@@ -208,6 +303,8 @@ _EMAIL: Final = re.compile(
 _IDS: Final = re.compile(
     r"(?<![0-9A-Za-z])\d{15,20}(?![0-9A-Za-z])"  # Discord snowflakes and other long ids
     r"|\b[UWCDGT](?=[A-Z0-9]*\d)[A-Z0-9]{8,12}\b"  # Slack ids
+    r"|(?<![0-9A-Za-z])[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}(?![0-9A-Za-z])"  # UUIDs
+    r"|(?<![0-9A-Za-z])(?=[a-f]*\d)(?=\d*[a-f])[0-9a-f]{32}(?![0-9A-Za-z])"  # page and doc ids
     r"|\b(?:19|28|29):[0-9A-Za-z_-]{8,}(?:@thread\.[A-Za-z0-9]+|@unq\.gbl\.spaces)?"  # Teams ids
 )
 _DOC_IDS: Final = re.compile(
@@ -219,6 +316,23 @@ _PHONE: Final = re.compile(
 _HOST: Final = re.compile(
     r"\b(?:[a-z0-9-]+\.)+(?:internal|local|corp|lan|intranet|home\.arpa)\b", re.IGNORECASE
 )
+# Any other host name, unless it is a public service's (subdomains included); the TLDs leave
+# out file extensions ("notes.md", "app.py").
+_PUBLIC_HOST: Final = re.compile(
+    r"(?<![\w.@-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|co|ai|dev|app|so|me|us"
+    r"|uk|de|fr|nl|eu|ca|au|in|jp|ch|se|no|fi|dk|es|it|pl|be|at|br|nz|sg|ie|il|xyz|info|biz"
+    r"|cloud|tech|site|online|gg|ly|tv|fm)(?![\w-]|\.[a-z])",
+    re.IGNORECASE,
+)
+_PUBLIC_SERVICES: Final = frozenset(
+    {"github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org", "google.com",
+     "googleapis.com", "youtube.com", "notion.so", "notion.site", "slack.com", "discord.com",
+     "discord.gg", "microsoft.com", "office.com", "sharepoint.com", "atlassian.net", "zoom.us",
+     "linkedin.com", "x.com", "twitter.com", "wikipedia.org", "stackoverflow.com", "python.org",
+     "pypi.org", "npmjs.com", "amazonaws.com", "cloudflare.com", "example.com", "example.org",
+     "example.net"}
+)  # fmt: skip
+_SCHEME: Final = re.compile(r"\b[a-z][a-z0-9+.-]{1,15}://", re.IGNORECASE)
 # The tenant part of a hosted service's address names the customer.
 _TENANT_HOST: Final = re.compile(
     r"\b([a-z0-9][a-z0-9-]{1,62})\.(?:atlassian\.net|zoom\.us|slack\.com|sharepoint\.com"
@@ -235,7 +349,8 @@ _SHARED_HOSTS: Final = frozenset(
 )  # fmt: skip
 _IP: Final = re.compile(
     r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}"
-    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"
+    r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3})\b"  # CGNAT, tailnets
 )
 _REPOS: Final = [
     re.compile(p, re.IGNORECASE)
@@ -249,7 +364,13 @@ _NER_KINDS: Final = {
     "PERSON": "person", "ORGANIZATION": "company", "LOCATION": "place", "PHONE_NUMBER": "phone",
 }  # fmt: skip
 _NER_CHUNK: Final = 50_000
-_NER_CACHE: Final = 100_000
+_NER_CACHE: Final = 1_000_000
+_NER_BATCH: Final = 64
+# spaCy labels Presidio has no entity for: ignored instead of warned about on every call.
+_NER_IGNORED: Final = (
+    "CARDINAL", "ORDINAL", "QUANTITY", "PERCENT", "MONEY", "DATE", "TIME", "LANGUAGE", "LAW",
+    "EVENT", "PRODUCT", "WORK_OF_ART", "NORP",
+)  # fmt: skip
 
 
 def namey(text: str) -> bool:
@@ -258,76 +379,159 @@ def namey(text: str) -> bool:
 
 
 def _group(m: re.Match[str], kind: str, priority: int, base: int = 0) -> Hit:
-    return Hit(base + m.start(1), base + m.end(1), kind, priority)
+    group = "v" if "v" in m.re.groupindex else 1
+    return Hit(base + m.start(group), base + m.end(group), kind, priority)
+
+
+def _basic(value: str) -> bool:
+    try:
+        return b":" in base64.b64decode(value + "=" * (-len(value) % 4), validate=True)
+    except ValueError:
+        return False
+
+
+def _engine(model: str) -> object | None:
+    """Presidio over `model`, or None when it or the library is missing."""
+    try:
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
+        from presidio_analyzer.nlp_engine.ner_model_configuration import (
+            MODEL_TO_PRESIDIO_ENTITY_MAPPING,
+        )
+
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": model}],
+                "ner_model_configuration": {
+                    "labels_to_ignore": list(_NER_IGNORED),
+                    "model_to_presidio_entity_mapping": {
+                        **MODEL_TO_PRESIDIO_ENTITY_MAPPING,
+                        "FAC": "LOCATION",
+                    },
+                },
+            }
+        )
+        return AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _analyze(engine: object, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+    """Names in each of `texts` (each at most `_NER_CHUNK` long), run through spaCy in batches."""
+    from presidio_analyzer import AnalyzerEngine
+
+    assert isinstance(engine, AnalyzerEngine)
+    out: list[list[tuple[int, int, str]]] = []
+    batches = engine.nlp_engine.process_batch  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    for text, artifacts in batches(texts, "en", batch_size=_NER_BATCH):
+        found = engine.analyze(
+            text, language="en", entities=list(_NER_KINDS), score_threshold=0.4,
+            nlp_artifacts=artifacts,
+        )  # fmt: skip
+        out.append([(f.start, f.end, _NER_KINDS[f.entity_type]) for f in found])
+    return out
+
+
+_WORKER: dict[str, object] = {}
+
+
+def _worker_init(model: str) -> None:
+    _WORKER["engine"] = _engine(model)
+
+
+def _worker_ready() -> bool:
+    return _WORKER["engine"] is not None
+
+
+def _worker_analyze(texts: list[str]) -> list[list[tuple[int, int, str]]]:
+    return _analyze(_WORKER["engine"], texts)
 
 
 class Ner:
-    """Presidio over a spaCy model, built on first use. `available` tells whether it loaded."""
+    """Presidio over a spaCy model, built on first use. `available` tells whether it loaded.
 
-    def __init__(self, model: str) -> None:
+    Results are cached per text, so a scrub, its sweep and the learning pass run the model once.
+    `prefetch` runs many texts in batches. With `jobs` above 1 the model runs only in that many
+    worker processes.
+    """
+
+    def __init__(self, model: str, *, jobs: int = 1) -> None:
         self._model = model
+        self._jobs = jobs
         self._engine: object | None = None
-        self._tried = False
-        self._cache: dict[str, list[Hit]] = {}
+        self._ready: bool | None = None
+        self._cache: dict[bytes, tuple[Hit, ...]] = {}
+        self._pool: ProcessPoolExecutor | None = None
 
     @property
     def available(self) -> bool:
-        return self._load() is not None
+        if self._ready is None:
+            if self._jobs > 1:
+                self._pool = ProcessPoolExecutor(
+                    self._jobs, mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_worker_init, initargs=(self._model,),
+                )  # fmt: skip
+                self._ready = self._pool.submit(_worker_ready).result()
+            else:
+                self._engine = _engine(self._model)
+                self._ready = self._engine is not None
+        return self._ready
 
-    def _load(self) -> object | None:
-        if not self._tried:
-            self._tried = True
-            try:
-                from presidio_analyzer import AnalyzerEngine
-                from presidio_analyzer.nlp_engine import NlpEngineProvider
+    def _run(self, texts: list[str]) -> list[list[tuple[int, int, str]]]:
+        if not self.available:
+            return [[] for _ in texts]
+        if self._pool is None:
+            return _analyze(self._engine, texts)
+        size = max(1, min(_NER_BATCH, -(-len(texts) // self._jobs)))
+        chunks = [texts[i : i + size] for i in range(0, len(texts), size)]
+        return [r for part in self._pool.map(_worker_analyze, chunks) for r in part]
 
-                provider = NlpEngineProvider(
-                    nlp_configuration={
-                        "nlp_engine_name": "spacy",
-                        "models": [{"lang_code": "en", "model_name": self._model}],
-                    }
-                )
-                self._engine = AnalyzerEngine(
-                    nlp_engine=provider.create_engine(), supported_languages=["en"]
-                )
-            except (ImportError, OSError, ValueError):
-                self._engine = None
-        return self._engine
+    def prefetch(self, texts: Iterable[str]) -> None:
+        """Run the model over the `texts` not seen yet, in batches."""
+        todo = [t for t in dict.fromkeys(texts) if _digest(t) not in self._cache]
+        short = [t for t in todo if len(t) <= _NER_CHUNK]
+        for text, found in zip(short, self._run(short) if short else [], strict=True):
+            self._store(text, [Hit(a, b, k, _P_NER) for a, b, k in found])
 
     def find(self, text: str) -> list[Hit]:
-        """Names in `text`; a scrub, its sweep and the learning pass ask about the same text."""
-        if (cached := self._cache.get(text)) is not None:
-            return cached
-        from presidio_analyzer import AnalyzerEngine
+        """Names in `text`."""
+        if (cached := self._cache.get(_digest(text))) is not None:
+            return list(cached)
+        chunks = [text[base : base + _NER_CHUNK] for base in range(0, len(text), _NER_CHUNK)]
+        hits = [
+            Hit(n * _NER_CHUNK + a, n * _NER_CHUNK + b, k, _P_NER)
+            for n, found in enumerate(self._run(chunks) if chunks else [])
+            for a, b, k in found
+        ]
+        self._store(text, hits)
+        return hits
 
-        engine = self._load()
-        if not isinstance(engine, AnalyzerEngine):
-            return []
-        hits: list[Hit] = []
-        for base in range(0, len(text), _NER_CHUNK):
-            chunk = text[base : base + _NER_CHUNK]
-            for found in engine.analyze(
-                chunk, language="en", entities=list(_NER_KINDS), score_threshold=0.4
-            ):
-                hits.append(
-                    Hit(base + found.start, base + found.end, _NER_KINDS[found.entity_type], _P_NER)
-                )
+    def _store(self, text: str, hits: list[Hit]) -> None:
         if len(self._cache) >= _NER_CACHE:
             self._cache.clear()
-        self._cache[text] = hits
-        return hits
+        self._cache[_digest(text)] = tuple(hits)
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=16).digest()
 
 
 class Detector:
     def __init__(self, terms: Iterable[Term], ner: Ner | None = None) -> None:
         self._terms: dict[str, Term] = {}
-        self._index = _Index()
+        self._index = TermIndex(strict=True)
         self._ner = ner
         self.add(terms)
 
     @property
     def ner_available(self) -> bool:
         return self._ner is not None and self._ner.available
+
+    def prefetch(self, texts: Iterable[str]) -> None:
+        """Run NER ahead over `texts`, in batches, for `find` to reuse."""
+        if self._ner is not None:
+            self._ner.prefetch(v for t in texts if namey(v := fold(t).text))
 
     def add(self, terms: Iterable[Term]) -> list[Term]:
         """Add `terms` not known yet (by normalized text); returns the ones added."""
@@ -340,14 +544,19 @@ class Detector:
                 added.append(term)
         return added
 
-    def find(self, text: str, *, names: bool = True) -> list[Hit]:
-        """Non-overlapping hits in `text`, in order. `names` adds the NER pass."""
+    def find(self, text: str, *, names: bool = True, words: bool = True) -> list[Hit]:
+        """Non-overlapping hits in `text`, in order. `names` adds the NER pass; without `words`,
+        one-word terms are left out (for JSON keys, which share words with names)."""
         view = fold(text)
         hits = list(self._patterns(view.text))
-        for start, end, term in self._index.find(view.text):
-            hits.append(Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text))
+        found = [
+            Hit(start, end, term.kind, _P_KNOWN, term.of, canon=term.text)
+            for start, end, term in self._index.find(view.text, alone=words)
+        ]
         if names and self._ner is not None and namey(view.text):
-            hits += self._ner.find(view.text)
+            found += self._ner.find(view.text)
+        schemes = [m.span() for m in _SCHEME.finditer(view.text)]
+        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in schemes)]
         out: list[Hit] = []
         for hit in _resolve(hits):
             start, end = view.span(hit.start, hit.end)
@@ -362,6 +571,12 @@ class Detector:
             yield from (Hit(m.start(), m.end(), SECRET, _P_SECRET) for m in p.finditer(text))
         for p in _SECRET_VALUES:
             yield from (_group(m, SECRET, _P_SECRET) for m in p.finditer(text))
+        for m in _BASIC.finditer(text):
+            if _basic(m.group("v")):
+                yield _group(m, SECRET, _P_SECRET)
+        for m in _HOME.finditer(text):
+            if m.group("v").casefold() not in _GENERIC_LOGINS:
+                yield _group(m, "handle", _P_ID)
         for url in _URL.finditer(text):
             for p in (_URL_USERINFO, _URL_SECRET_PARAM):
                 for m in p.finditer(url.group()):
@@ -375,6 +590,10 @@ class Detector:
         for p in _REPOS:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
         yield from (Hit(m.start(), m.end(), "host", _P_HOST) for m in _HOST.finditer(text))
+        for m in _PUBLIC_HOST.finditer(text):
+            labels = m.group().casefold().split(".")
+            if not any(".".join(labels[i:]) in _PUBLIC_SERVICES for i in range(len(labels) - 1)):
+                yield Hit(m.start(), m.end(), "host", _P_HOST)
         for m in _TENANT_HOST.finditer(text):
             if m.group(1).casefold() not in _SHARED_HOSTS:
                 yield _group(m, "company", _P_HOST)

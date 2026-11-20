@@ -14,12 +14,22 @@ import json
 import re
 import urllib.parse
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Final
 
-from daimon.core.evals.scrub.detect import SECRET, SECRET_NAME, Detector, Hit, Ner, namey
+from daimon.core.evals.scrub.detect import (
+    SECRET,
+    SECRET_NAME,
+    Detector,
+    Hit,
+    Ner,
+    TermIndex,
+    fold,
+    namey,
+)
 from daimon.core.evals.scrub.entities import MIN_PART, KnownEntities, Term, normalize, terms_of
 from daimon.core.evals.scrub.fakes import FakeMap, adapt, key_check, scrub_key
+from daimon.core.evals.scrub.shape import KEEP, Shape, field_shape, shape_of
 from pydantic import JsonValue
 
 REDACTED = "[REDACTED]"
@@ -34,7 +44,32 @@ _HEX: Final = re.compile(r"(?:sha256:)?[0-9a-f]{32,128}")
 _SCHEMA_ID: Final = re.compile(r"daimon\.eval\.[a-z_]+/\d+")
 _HASH_KEYS: Final = frozenset({"sha256", "hash"})
 # Schema fields whose names look secret but hold settings.
-_SETTING_KEYS: Final = frozenset({"token_env", "token_shape", "credential_request"})
+_SETTING_KEYS: Final = frozenset({"token_env", "token_shape", "credential_request", "pass_rule"})
+# `*_key` names that hold no secret.
+_PLAIN_KEYS: Final = frozenset(
+    {"sim_key", "sort_key", "primary_key", "partition_key", "foreign_key", "cache_key",
+     "dedupe_key", "idempotency_key", "issue_key", "project_key", "group_key", "routing_key"}
+)  # fmt: skip
+_GENERIC_KEY: Final = re.compile(r"[a-z0-9]_keys?$")
+# Secret keys whose numbers are secret too (a token count is not).
+_NUMERIC_SECRET: Final = re.compile(
+    r"pass(?:word|wd|code)?|(?<![a-z])(?:pwd|pin|otp|cvv|cvc)(?![a-z])"
+)
+_PHONE_KEY: Final = re.compile(r"(?<![a-z])(?:phone|mobile|tel|telephone|fax|cell|msisdn)(?![a-z])")
+_PHONE_VALUE: Final = re.compile(r"\+?[\d\s().-]{7,20}")
+# `{"name": "Authorization", "value": ...}` (HAR, header lists): the name says the value is secret.
+_NAME_KEYS: Final = ("name", "key", "header", "field")
+_VALUE_KEYS: Final = frozenset({"value", "values", "val"})
+# Fakes of these kinds are random digits, reserved addresses or random word slugs, so a real value
+# equal to one is vanishingly rare: a second scrub leaves them as they are. A name fake is never
+# skipped, since real names share the small pool fakes come from.
+_STABLE_FAKES: Final = frozenset({"id", "phone", "email", "repo", "host", "ip"})
+# Words that may stand next to a fake inside a name the sweep finds ("CruzPartners Team").
+_BESIDE_FAKE: Final = frozenset(
+    {"the", "of", "and", "team", "group", "inc", "llc", "ltd", "corp", "co", "company", "labs",
+     "mr", "mrs", "ms", "dr", "prof", "sir", "jr", "sr"}
+)  # fmt: skip
+_INLINE_B64: Final = re.compile(r"(?<![\w+/-])[A-Za-z0-9+/_-]{12,}={0,2}(?![\w+/=-])")
 # Keys whose short values name a person, an account, a company or a project.
 _IDENTITY: Final = {
     **dict.fromkeys(
@@ -85,7 +120,32 @@ def _snake(key: str) -> str:
 
 
 def secret_key(key: str) -> bool:
-    return bool(key) and key not in _SETTING_KEYS and bool(SECRET_NAME.search(key))
+    snake = _snake(key)
+    if not key or snake in _SETTING_KEYS or snake in _PLAIN_KEYS:
+        return False
+    return bool(SECRET_NAME.search(key) or SECRET_NAME.search(snake) or _GENERIC_KEY.search(snake))
+
+
+def _short_name(value: JsonValue) -> bool:
+    return isinstance(value, str) and len(value) <= 64 and " " not in value.strip()
+
+
+def _named_secret(node: Mapping[str, JsonValue]) -> bool:
+    """Whether a sibling name field says this dict's value is a secret."""
+    return any(_short_name(v := node.get(k)) and secret_key(str(v)) for k in _NAME_KEYS)
+
+
+def _secret_pair(node: list[JsonValue]) -> bool:
+    """`["Authorization", "Basic ..."]`, a header as a pair."""
+    return len(node) == 2 and _short_name(node[0]) and secret_key(str(node[0]))
+
+
+def _phone_like(key: str, node: str) -> bool:
+    return (
+        bool(_PHONE_KEY.search(_snake(key)))
+        and bool(_PHONE_VALUE.fullmatch(node.strip()))
+        and (sum(c.isdigit() for c in node) >= 7)
+    )
 
 
 def _plain(key: str, value: str) -> bool:
@@ -155,6 +215,31 @@ def _fake_key(text: str) -> str:
     return " ".join(re.split(r"[\s_.+\-]+", normalize(text))).strip()
 
 
+def _inline_b64(word: str) -> tuple[str, bool] | None:
+    """The text a base64 word in free text holds and whether it is URL-safe, else None."""
+    urlsafe = "-" in word or "_" in word
+    body = word.rstrip("=")
+    if body.isalpha() or body.isdigit() or _HEX.fullmatch(body) or (urlsafe and "/" in body):
+        return None
+    try:
+        data = (base64.urlsafe_b64decode if urlsafe else base64.b64decode)(
+            body + "=" * (-len(body) % 4)
+        )
+    except (binascii.Error, ValueError):
+        return None
+    text = _as_text(data)
+    return (text, urlsafe) if text and len(text.strip()) >= 4 else None
+
+
+def _strings(node: JsonValue) -> Iterator[str]:
+    if isinstance(node, str):
+        inner = _json_in(node)
+        yield from (node,) if inner is None else _strings(inner)
+    elif isinstance(node, list | dict):
+        for item in node.values() if isinstance(node, dict) else node:
+            yield from _strings(item)
+
+
 class Scrubber:
     def __init__(
         self,
@@ -164,13 +249,16 @@ class Scrubber:
         salt: str,
         ner_model: str | None = "en_core_web_sm",
         known: Mapping[tuple[str, str], str] | None = None,
+        jobs: int = 1,
     ) -> None:
         terms = terms_of(entities)
         self.key = scrub_key(key, salt)
-        self.detector = Detector(terms, Ner(ner_model) if ner_model else None)
+        self.detector = Detector(terms, Ner(ner_model, jobs=jobs) if ner_model else None)
         self.fakes = FakeMap(self.key, known=known, forbidden=[t.text for t in terms])
         self.counts: Counter[str] = Counter()
-        self._fake_cache: tuple[int, set[str]] = (-1, set())
+        self._fake_cache: tuple[int, set[str]] = (0, set())
+        self._fake_index = TermIndex()
+        self._indexed = 0
 
     @property
     def names_checked(self) -> bool:
@@ -187,34 +275,41 @@ class Scrubber:
         added = self.detector.add(t for t in terms if len(t.text.strip()) >= MIN_PART)
         self.fakes.forbid(t.text for t in added)
 
+    def prefetch(self, node: JsonValue) -> None:
+        """Run NER ahead, in batches, over the strings in `node`."""
+        self.detector.prefetch(_strings(node))
+
     def learn(self, node: JsonValue, *, key: str = "") -> None:
         """Add what `node` names to the dictionary: replaced everywhere from now on."""
+        self.prefetch(node)
         terms: list[Term] = []
-        self._learn(node, key, terms)
+        self._learn(node, key, terms, shape_of(node))
         self.add_terms(terms)
 
-    def _learn(self, node: JsonValue, key: str, terms: list[Term]) -> None:
+    def _learn(self, node: JsonValue, key: str, terms: list[Term], shape: Shape = None) -> None:
+        if shape == KEEP:
+            return
         if isinstance(node, list):
             for item in node:
-                self._learn(item, key, terms)
+                self._learn(item, key, terms, shape)
         elif isinstance(node, dict):
             for k, v in node.items():
-                self._learn(v, k, terms)
+                self._learn(v, k, terms, field_shape(shape, k))
         elif isinstance(node, str) and node != REDACTED:
             if (inner := _json_in(node)) is not None:
                 self._learn(inner, "", terms)
                 return
             kind = _IDENTITY.get(_snake(key))
             short = len(node) <= 80 and len(node.split()) <= 4 and "://" not in node
-            if kind and short and not node.isdigit() and not self._is_fake(node):
+            if kind and short and not node.isdigit():
                 terms.append(Term("repo" if "/" in node else kind, node))  # type: ignore[arg-type]
             for hit in self.detector.find(node, names=namey(node)):
                 terms += self._from_hit(hit)
 
     def _from_hit(self, hit: Hit) -> list[Term]:
-        if hit.canon is not None or self._is_fake(hit.text):
+        if hit.canon is not None or self._stable_fake(hit):
             return []
-        if hit.kind in _LEARNED:
+        if hit.kind in _LEARNED or hit.kind == "handle":
             return [Term(hit.kind, hit.text)]  # type: ignore[arg-type]
         if hit.kind == "repo":
             owner, _, name = hit.text.partition("/")
@@ -228,23 +323,58 @@ class Scrubber:
             return found
         return []
 
-    # ---------- text ----------
+    # ---------- fakes ----------
 
     def _fake_keys(self) -> set[str]:
-        values = self.fakes.values()
-        if self._fake_cache[0] != len(values):
-            self._fake_cache = (len(values), {_fake_key(v) for v in values})
-        return self._fake_cache[1]
+        values, (seen, keys) = self.fakes.values(), self._fake_cache
+        keys.update(_fake_key(v) for v in values[seen:])
+        self._fake_cache = (len(values), keys)
+        return keys
 
     def _is_fake(self, text: str) -> bool:
-        """Whether `text` is exactly one of our fakes. Never word by word: real names share
-        words with fakes."""
+        """Whether `text` is exactly one of our fakes."""
         return _fake_key(text) in self._fake_keys()
 
-    def _own(self, text: str, hit: Hit) -> bool:
-        if text == REDACTED:
+    def _stable_fake(self, hit: Hit) -> bool:
+        return hit.kind in _STABLE_FAKES and hit.canon is None and self._is_fake(hit.text)
+
+    def _keep(self, matched: str, hit: Hit) -> bool:
+        """Whether a hit in raw text stays: our marker, or a fake no real value has. A real name
+        equal to a fake is still replaced."""
+        return matched == REDACTED or self._stable_fake(hit)
+
+    def _fake_spans(self, text: str) -> list[tuple[int, int]]:
+        """Where `text` holds our fakes, written any way (`CruzPartners`, `cruz-partners`)."""
+        values = self.fakes.values()
+        for value in values[self._indexed :]:
+            self._fake_index.add(Term("phrase", value))
+        self._indexed = len(values)
+        view = fold(text)
+        return [view.span(s, e) for s, e, _ in self._fake_index.find(view.text)]
+
+    def _own(self, text: str, hit: Hit, fakes: list[tuple[int, int]]) -> bool:
+        """Whether a hit in scrubbed text is ours: a fake, or a name the NER widened from one by
+        a title or a word like "Team"."""
+        matched = text[hit.start : hit.end]
+        if matched == REDACTED:
             return True
-        return hit.kind != SECRET and hit.canon is None and self._is_fake(hit.text)
+        if hit.kind == SECRET:
+            return False
+        rest = list(matched)
+        overlap = False
+        for start, end in fakes:
+            lo, hi = max(start, hit.start), min(end, hit.end)
+            if lo < hi:
+                overlap = True
+                rest[lo - hit.start : hi - hit.start] = " " * (hi - lo)
+        if not overlap:
+            return False
+        left = "".join(rest)
+        if hit.kind not in _SHAPED:
+            return not re.search(r"[^\W_]", left)
+        return all(w.casefold() in _BESIDE_FAKE for w in re.findall(r"[^\W\d_]{2,}", left))
+
+    # ---------- text ----------
 
     def _replacement(self, matched: str, hit: Hit) -> str:
         if hit.kind == SECRET:
@@ -254,12 +384,24 @@ class Scrubber:
         encoded = matched != hit.text and "%" in matched
         return urllib.parse.quote(out, safe="@.-_/") if encoded else out
 
-    def text(self, text: str, *, names: bool = True) -> str:
+    def _b64_word(self, m: re.Match[str]) -> str:
+        found = _inline_b64(m.group())
+        if found is None:
+            return m.group()
+        decoded, urlsafe = found
+        done = self.text(decoded)
+        if done == decoded:
+            return m.group()
+        out = (base64.urlsafe_b64encode if urlsafe else base64.b64encode)(done.encode()).decode()
+        return out if m.group().endswith("=") else out.rstrip("=")
+
+    def text(self, text: str, *, names: bool = True, words: bool = True) -> str:
+        text = _INLINE_B64.sub(self._b64_word, text)
         out: list[str] = []
         pos = 0
-        for hit in self.detector.find(text, names=names):
+        for hit in self.detector.find(text, names=names, words=words):
             matched = text[hit.start : hit.end]
-            if self._own(matched, hit):
+            if self._keep(matched, hit):
                 continue
             out += [text[pos : hit.start], self._replacement(matched, hit)]
             self.counts[hit.kind] += 1
@@ -272,51 +414,88 @@ class Scrubber:
         return [
             (h.start, h.end)
             for h in self.detector.find(text)
-            if not self._own(text[h.start : h.end], h)
+            if not self._keep(text[h.start : h.end], h)
         ]
 
-    def residue(self, text: str, *, names: bool = True) -> Counter[str]:
+    def residue(self, text: str, *, names: bool = True, words: bool = True) -> Counter[str]:
         """What a scrub would still replace in already-scrubbed `text`, by kind."""
-        return Counter(
-            hit.kind
-            for hit in self.detector.find(text, names=names)
-            if not self._own(text[hit.start : hit.end], hit)
-        )
+        found: Counter[str] = Counter()
+        for m in _INLINE_B64.finditer(text):
+            if (inline := _inline_b64(m.group())) is not None:
+                found += self.residue(inline[0])
+        fakes = self._fake_spans(text)
+        for hit in self.detector.find(text, names=names, words=words):
+            if not self._own(text, hit, fakes):
+                found[hit.kind] += 1
+        return found
 
     # ---------- documents ----------
 
     def value(self, node: JsonValue, *, key: str = "") -> JsonValue:
-        """A copy of `node` with every string scrubbed; secret-named keys lose their values,
-        long ids in numbers and base64 inside strings are handled too."""
+        """A copy of `node` with every string scrubbed; values under secret-named keys (and in
+        their lists and dicts) are dropped, long ids in numbers and base64 in strings handled.
+        A bundle document keeps its keys and the fields its schema fixes (`shape`)."""
         self.learn(node, key=key)
-        return self._value(node, key)
+        return self._value(node, key, secret=False, shape=shape_of(node))
 
-    def _value(self, node: JsonValue, key: str) -> JsonValue:
-        if isinstance(node, bool) or node is None or isinstance(node, float):
+    def _int(self, node: int, key: str, secret: bool) -> tuple[str, JsonValue] | None:
+        """What to do with a number: (kind, replacement), or None to keep it."""
+        snake = _snake(key)
+        if secret and _NUMERIC_SECRET.search(snake):
+            return SECRET, REDACTED
+        phone = bool(_PHONE_KEY.search(snake)) and abs(node) >= 10**6
+        if (abs(node) < _MIN_ID_INT and not phone) or self._is_fake(str(node)):
+            return None
+        kind = "phone" if phone else "id"
+        return kind, int(self.fakes.fake(kind, str(node)))
+
+    def _value(self, node: JsonValue, key: str, *, secret: bool, shape: Shape = None) -> JsonValue:
+        secret = secret or secret_key(key)
+        if isinstance(node, bool) or node is None or isinstance(node, float) or shape == KEEP:
             return node
         if isinstance(node, int):
-            if abs(node) < _MIN_ID_INT or self._is_fake(str(node)):
+            if (done := self._int(node, key, secret)) is None:
                 return node
-            self.counts["id"] += 1
-            return int(self.fakes.fake("id", str(node)))
+            self.counts[done[0]] += 1
+            return done[1]
         if isinstance(node, str):
-            return self._string(node, key)
+            return self._string(node, key, secret)
         if isinstance(node, list):
-            return [self._value(v, "") for v in node]
+            if _secret_pair(node):
+                return [
+                    self._value(node[0], key, secret=secret),
+                    self._value(node[1], str(node[0]), secret=True),
+                ]
+            return [self._value(v, key, secret=secret, shape=shape) for v in node]
         payload = _payload_key(node)
+        named = _named_secret(node)
         return {
-            self.text(k, names=False): self._payload(v) if k == payload else self._value(v, k)
+            self._key(k, shape): self._payload(v)
+            if k == payload
+            else self._value(
+                v, k, secret=secret or (named and k in _VALUE_KEYS), shape=field_shape(shape, k)
+            )
             for k, v in node.items()
         }
 
-    def _string(self, node: str, key: str) -> str:
+    def _key(self, key: str, shape: Shape) -> str:
+        """A JSON key: a schema field stays; any other loses only what patterns and names of more
+        than one word find, since keys share their words with names ("status", "weight")."""
+        if isinstance(shape, dict) and key in shape:
+            return key
+        return self.text(key, names=False, words=False)
+
+    def _string(self, node: str, key: str, secret: bool) -> str:
         if _plain(key, node) or node == REDACTED:
             return node
-        if node and secret_key(key):
+        if node and secret:
             self.counts[SECRET] += 1
             return REDACTED
+        if _phone_like(key, node) and not self._is_fake(node):
+            self.counts["phone"] += 1
+            return self.fakes.fake("phone", node)
         if (inner := _json_in(node)) is not None:
-            return _dump_like(node, self._value(inner, ""))
+            return _dump_like(node, self._value(inner, "", secret=False))
         if (data := _b64(node)) is not None:
             if (decoded := _as_text(data)) is not None:
                 done = self.text(decoded)
@@ -337,36 +516,57 @@ class Scrubber:
             self.counts[PAYLOAD] += 1
         return REDACTED if node else node
 
-    def residue_of(self, node: JsonValue, *, key: str = "") -> Counter[str]:
+    def residue_of(
+        self, node: JsonValue, *, key: str = "", secret: bool = False, shape: Shape = None
+    ) -> Counter[str]:
         """`residue` over a document, keyed by `kind` only (never text)."""
+        secret = secret or secret_key(key)
+        shape = shape if shape is not None else shape_of(node)
         found: Counter[str] = Counter()
-        if isinstance(node, bool) or node is None or isinstance(node, float):
+        if isinstance(node, bool) or node is None or isinstance(node, float) or shape == KEEP:
             return found
         if isinstance(node, int):
-            if abs(node) >= _MIN_ID_INT and not self._is_fake(str(node)):
-                found["id"] += 1
+            if (done := self._int(node, key, secret)) is not None:
+                found[done[0]] += 1
         elif isinstance(node, str):
-            found += self._string_residue(node, key)
+            found += self._string_residue(node, key, secret)
         elif isinstance(node, list):
-            for v in node:
-                found += self.residue_of(v)
+            pair = _secret_pair(node)
+            for n, v in enumerate(node):
+                last = pair and n == 1
+                found += self.residue_of(
+                    v, key=str(node[0]) if last else key, secret=secret or last, shape=shape
+                )
         else:
             payload = _payload_key(node)
+            named = _named_secret(node)
             for k, v in node.items():
-                found += self.residue(k, names=False)
+                found += self._key_residue(k, shape)
                 if k == payload and isinstance(v, str) and v not in ("", REDACTED):
                     data = _b64(v)
                     decoded = _as_text(data) if data is not None else None
                     found += self.residue(decoded) if decoded is not None else Counter([PAYLOAD])
                 else:
-                    found += self.residue_of(v, key=k)
+                    found += self.residue_of(
+                        v,
+                        key=k,
+                        secret=secret or (named and k in _VALUE_KEYS),
+                        shape=field_shape(shape, k),
+                    )
         return found
 
-    def _string_residue(self, node: str, key: str) -> Counter[str]:
+    def _key_residue(self, key: str, shape: Shape) -> Counter[str]:
+        if isinstance(shape, dict) and key in shape:
+            return Counter()
+        return self.residue(key, names=False, words=False)
+
+    def _string_residue(self, node: str, key: str, secret: bool) -> Counter[str]:
         if _plain(key, node) or node == REDACTED:
             return Counter()
-        if node and secret_key(key):
+        if node and secret:
             return Counter([SECRET])
+        if _phone_like(key, node) and not self._is_fake(node):
+            return Counter(["phone"])
         if (inner := _json_in(node)) is not None:
             return self.residue_of(inner)
         if (data := _b64(node)) is not None:

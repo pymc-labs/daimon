@@ -43,6 +43,7 @@ class Probe:
 
 
 def sweep_document(scrubber: Scrubber, document: JsonValue, where: str) -> list[Leftover]:
+    scrubber.prefetch(document)
     return [Leftover(where, kind, n) for kind, n in sorted(scrubber.residue_of(document).items())]
 
 

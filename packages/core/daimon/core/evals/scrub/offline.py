@@ -23,7 +23,7 @@ from daimon.core.evals.bundle import (
     write_dir,
 )
 from daimon.core.evals.format import JsonObject
-from daimon.core.evals.scrub.bundle import ScrubReport, scrub_bundle
+from daimon.core.evals.scrub.bundle import ScrubReport, pseudonymous, scrub_bundle
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import load_entities
 from daimon.core.evals.scrub.fakes import key_check, scrub_key
@@ -43,7 +43,13 @@ def _read_map(path: Path, check: str) -> dict[tuple[str, str], str]:
 
 
 def load_scrubber(
-    entities: Path, key: str, *, salt: str, map_path: Path | None = None, ner_model: str | None
+    entities: Path,
+    key: str,
+    *,
+    salt: str,
+    map_path: Path | None = None,
+    ner_model: str | None,
+    jobs: int = 1,
 ) -> Scrubber:
     if len(key) < MIN_KEY:
         raise InvalidDocument([f"the scrub key must be at least {MIN_KEY} characters"])
@@ -52,8 +58,9 @@ def load_scrubber(
     check = key_check(scrub_key(key.encode(), salt))
     known = _read_map(map_path, check) if map_path is not None else {}
     return Scrubber(
-        load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known
-    )
+        load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known,
+        jobs=jobs,
+    )  # fmt: skip
 
 
 def save_map(scrubber: Scrubber, path: Path) -> None:
@@ -124,11 +131,10 @@ def leftovers_of(
             "title": manifest.title,
             "label": manifest.source.label,
             "instance": manifest.source.instance,
-            "by": manifest.created_by.display_name if manifest.created_by else None,
         },
         "bundle",
     )
-    if manifest.created_by and manifest.created_by.kind != "label":
+    if not pseudonymous(manifest.created_by):
         found.append(Leftover("bundle", "person", 1))
     for where, document in documents:
         found += sweep_document(scrubber, document, where)
