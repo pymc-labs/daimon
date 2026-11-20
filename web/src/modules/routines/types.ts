@@ -28,6 +28,8 @@ export type Routine = {
   /** Made by the signed-in person; admins also see everyone else's. */
   mine: boolean
   owner: string | null
+  /** The workflow it runs as since an admin moved it; it changes there. */
+  workflow: Choice | null
 }
 
 /** What the editor may pick from. */

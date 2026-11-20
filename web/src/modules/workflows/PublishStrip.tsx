@@ -38,7 +38,7 @@ export function MigrationStrip({ wf }: { wf: Workflow }) {
     <div className="shrink-0 border-b bg-popover px-4 py-3 lg:px-6">
       <dl className="grid max-w-3xl grid-cols-[160px_1fr] gap-x-3 gap-y-1.5 text-sm max-sm:grid-cols-1 max-sm:gap-y-0.5 [&>dt]:text-muted-foreground max-sm:[&>dd:not(:last-child)]:mb-1.5">
         <dt>Migrated from routine</dt>
-        <dd className="flex flex-wrap items-center gap-x-2"><Link to="/routines" className="text-link hover:underline">{m.routine.name}</Link><span className="text-muted-foreground"><Ago iso={m.migrated_at} /></span></dd>
+        <dd className="flex flex-wrap items-center gap-x-2"><Link to={`/routines?routine=${m.routine.id}`} className="text-link hover:underline">{m.routine.name}</Link><span className="text-muted-foreground"><Ago iso={m.migrated_at} /></span></dd>
         {m.last && (
           <>
             <dt>Before migration</dt>

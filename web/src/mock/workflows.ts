@@ -14,7 +14,8 @@ import { me } from "./world"
 import {
   cancel, chain, decideUnknown, detailOf, redrive, start, stepDetail, summaryOf, verify, visible as released, type Decision, type Run, type Script,
 } from "./workflows-runs"
-import { SPECS, TEMPLATE_SPECS } from "./workflows-specs"
+import { routineOf } from "./routines"
+import { oneStep, SPECS, TEMPLATE_SPECS } from "./workflows-specs"
 
 export const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 export const P: Record<string, Person> = {
@@ -403,6 +404,32 @@ export const workflowsHandlers: HttpHandler[] = [
     const r = create((await request.json()) as NewWorkflow)
     if ("error" in r) return HttpResponse.json({ detail: r.error }, { status: 422 })
     return HttpResponse.json(detail(r.w), { status: 201 })
+  }),
+  http.post("/api/workflows/from-routine/:id", async ({ params }) => {
+    await wait(400)
+    const m = me()
+    const r = routineOf(params.id)
+    if (!m || !(m.role === "owner" || m.role === "admin")) return HttpResponse.json({ detail: "Only admins move routines." }, { status: 403 })
+    if (!r) return notFound()
+    if (r.workflow) return HttpResponse.json({ detail: "This routine already runs as a workflow." }, { status: 409 })
+    const name = r.name ?? r.message.split("\n")[0]!.slice(0, 60)
+    const live = fromYaml(oneStep(name, r.agent.name, r.cron, r.timezone, r.message, "C0MMM")).spec!
+    const owner = Object.values(P).find((p) => p.id === r.owner_id) ?? { id: r.owner_id, name: r.owner ?? "" }
+    const w: Stored = { id: `wf_${++seq}`, status: r.enabled ? "live" : "paused", owner, live, version: 1, draft: null, ticks: "", spend: 0, next_h: r.enabled ? 16 : null,
+      editors: [], runners: [], source_routine: { id: r.id, name },
+      before: r.last_run ? { at: r.last_run, status: r.failed ? "failed" : "succeeded", text: r.dm ? "" : r.last_output ?? "" } : undefined }
+    W.unshift(w)
+    Object.assign(r, { workflow: { id: w.id, name }, enabled: false, next_run: null })
+    return HttpResponse.json(detail(w), { status: 201 })
+  }),
+  http.post("/api/workflows/:id/to-routine", async ({ params }) => {
+    await wait(300)
+    const w = find(params.id)
+    const r = w?.source_routine && routineOf(w.source_routine.id)
+    if (!w || !r) return notFound()
+    Object.assign(r, { workflow: null, enabled: w.status === "live", next_run: w.status === "live" ? ago(-16) : null })
+    Object.assign(w, { source_routine: undefined, status: "paused" })
+    return HttpResponse.json({ routine_id: r.id })
   }),
   http.get("/api/workflows/:id", async ({ params }) => {
     await wait()

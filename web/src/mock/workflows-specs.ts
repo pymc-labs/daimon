@@ -500,7 +500,7 @@ nodes:
     deliver: {to: "#oncall", message: "\${{ steps.investigate.output.cause }}"}
 `
 
-const oneStep = (name: string, agent: string, cron: string, tz: string, text: string, channel: string) => `schema: daimon.workflow/v1
+export const oneStep = (name: string, agent: string, cron: string, tz: string, text: string, channel: string) => `schema: daimon.workflow/v1
 name: ${name}
 visibility: private
 home: {channel: ${channel}}

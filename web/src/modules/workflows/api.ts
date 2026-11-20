@@ -46,6 +46,16 @@ export function useDelete() {
   return useMutation({ mutationFn: (id: string) => api.del(base(id)), onSuccess: () => void qc.invalidateQueries({ queryKey: ["workflows"], exact: true }) })
 }
 
+/** An admin gives a moved routine its schedule back; the workflow stays, paused. */
+export function useToRoutine(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<{ routine_id: string }>(`${base(id)}/to-routine`),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["workflows"] }); void qc.invalidateQueries({ queryKey: ["routines"] }) },
+    onError: (e) => toast.error(e.message),
+  })
+}
+
 export function useStartRun(id: string) {
   const qc = useQueryClient()
   return useMutation({

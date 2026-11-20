@@ -1,5 +1,5 @@
 import { ReactFlowProvider } from "@xyflow/react"
-import { Copy, Download, Pause, Play, Trash2 } from "lucide-react"
+import { CalendarClock, Copy, Download, Pause, Play, Trash2 } from "lucide-react"
 import { useState } from "react"
 import { Route, Routes, useNavigate, useParams } from "react-router"
 import { toast } from "sonner"
@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { NotFound } from "@/pages/Status"
-import { exportWorkflow, useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
+import { exportWorkflow, useCreate, useDelete, useDraft, usePatch, useToRoutine, useWorkflow } from "./api"
 import { Design } from "./Design"
 import { MigrationStrip, PublishStrip } from "./PublishStrip"
 import { RunDialog } from "./RunDialog"
@@ -32,6 +32,7 @@ export function WorkflowPage() {
   const patch = usePatch(id)
   const create = useCreate()
   const del = useDelete()
+  const back = useToRoutine(id)
   const confirm = useConfirm()
   const navigate = useNavigate()
   const [run, setRun] = useState(false)
@@ -46,6 +47,11 @@ export function WorkflowPage() {
     del.mutate(id, { onSuccess: () => { toast(`Deleted ${wf.name}`); navigate("/workflows") } })
   }
   const paused = wf.status === "paused"
+  const routine = wf.source_routine
+  const moveBack = async () => {
+    if (!routine || !(await confirm({ title: `Move back to ${routine.name}?`, action: "Move back" }))) return
+    back.mutate(undefined, { onSuccess: () => navigate(`/routines?routine=${routine.id}`) })
+  }
   return (
     <Page
       crumbs={crumbs}
@@ -66,6 +72,7 @@ export function WorkflowPage() {
           )}
           <PanelMenu items={[
             { label: "Export YAML", icon: <Download />, onSelect: exportYaml },
+            ...(routine && wf.is_admin ? [{ label: "Move back to routine", icon: <CalendarClock />, disabled: back.isPending, onSelect: () => void moveBack() }] : []),
             ...(wf.can_edit ? [
               { label: "Duplicate", icon: <Copy />, onSelect: () => create.mutate({ from: "import", yaml: toYaml({ ...wf.spec, name: `${wf.name} copy` }) }, { onSuccess: (w) => navigate(`/workflows/${w.id}`) }) },
               { label: "Delete", icon: <Trash2 />, destructive: true, onSelect: () => void remove() },
