@@ -64,4 +64,5 @@ def test_every_trigger_path_starts_runs_through_start_run_and_ingress_starts_non
         "triggers.py:_start_one",  # schedule slots, webhook deliveries, finished runs
         "triggers.py:start_called",  # call triggers
         "webhooks.py:replay",
+        "workflows.py:run",  # the test helper in daimon.testing
     }, f"a new path that starts runs joins this list: {sorted(callers)}"
