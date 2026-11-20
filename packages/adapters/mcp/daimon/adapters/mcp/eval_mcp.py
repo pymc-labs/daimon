@@ -16,6 +16,7 @@ from typing import Final
 from daimon.adapters.mcp.auth.verifier import EVAL_ITEM_CLAIM
 from daimon.core.evals.format import ExchangeResponse, McpTool
 from daimon.core.evals.world.dispatch import FakeWorld, ItemNotRunningError
+from daimon.core.evals.world.http_app import capped_body
 from daimon.core.evals.world.model import ItemRef
 from pydantic import JsonValue
 from starlette.requests import Request
@@ -134,8 +135,10 @@ def build_eval_mcp_route(world: FakeWorld) -> Callable[[Request], Awaitable[Resp
             return Response(status_code=401)
         if request.method != "POST":
             return Response(status_code=405)
+        if (raw := await capped_body(request)) is None:
+            return Response(status_code=413)
         try:
-            message: JsonValue = json.loads(await request.body())
+            message: JsonValue = json.loads(raw)
         except ValueError:
             return JSONResponse(_envelope(None, error="Parse error"))
         if not isinstance(message, dict):

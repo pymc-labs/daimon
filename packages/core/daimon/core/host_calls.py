@@ -178,10 +178,10 @@ async def post_call_card(
 
     try:
         message_id = await post(requested_call_card(row))
-    except Exception:
-        # Any post failure (permissions, size, network) leaves no pressable card,
-        # so the record must not wait on one.
-        log.exception("host_call.post_failed", card_id=str(row.id))
+    except Exception as exc:
+        # Any post failure (permissions, size, network, an eval caller) leaves no pressable
+        # card, so the record must not wait on one. One line: a refused ask is routine.
+        log.warning("host_call.post_failed", card_id=str(row.id), error=str(exc)[:200])
         async with sessionmaker.begin() as session:
             await cards.cancel(
                 session, tenant_id=row.tenant_id, card_id=row.id, outcome=NOT_RUN_TEXT

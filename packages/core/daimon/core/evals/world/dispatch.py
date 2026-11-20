@@ -7,15 +7,17 @@
 5. Denied: simulation off, over `simulator.max_calls`, over `limits.max_world_calls`, or an
    answer that failed its checks twice.
 
-The item's row lock orders its calls; each call, its overlay writes and new blobs commit
+The item's row lock orders its calls; each call, its overlay writes and new blob rows commit
 together, and every call is logged as a `WorldCall`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import uuid
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -23,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
 
+import structlog
 from daimon.core.evals.blobs import ObjectStore, object_key
 from daimon.core.evals.format import (
     BlobRef,
@@ -86,6 +89,7 @@ _EARLIER: Final = 20
 _CACHED_ITEMS: Final = 256
 _TRIES: Final = 4
 DAIMON_SERVER: Final = "daimon"
+log = structlog.get_logger()
 
 
 class ItemNotRunningError(Exception):
@@ -142,9 +146,10 @@ class _Simulate:
 class _Work:
     """One call's model work so far, kept across its passes."""
 
-    calls: int = 0
+    calls: int = 0  # model calls made or reserved, counted against `simulator.max_calls`
     written: str | None = None  # the sim key this call's answer was cached under
     failed: tuple[str, str] | None = None  # sim key and reason of an answer that failed
+    error: bool = False  # the model API failed: the call is denied, not retried
 
 
 def _verdict_key(item: ItemRef, ref: str, live: JsonValue) -> str:
@@ -175,31 +180,34 @@ class FakeWorld:
     services: tuple[Service, ...] = (GithubService(), GoogleService(), WebService())
     objects: ObjectStore | None = None
     _items: OrderedDict[uuid.UUID, ItemRef] = field(default_factory=OrderedDict[uuid.UUID, ItemRef])
+    #: Model calls of in-flight dispatches, not yet in the call log.
+    _inflight: dict[uuid.UUID, int] = field(default_factory=dict[uuid.UUID, int])
+    _git_locks: weakref.WeakValueDictionary[uuid.UUID, asyncio.Lock] = field(
+        default_factory=weakref.WeakValueDictionary[uuid.UUID, asyncio.Lock]
+    )
 
     def __post_init__(self) -> None:
         self.git = GitService(self.git_root, self._load_blob)
 
-    async def _put_blob(
-        self, session: AsyncSession, tenant_id: uuid.UUID, row: BlobRow, content: bytes
-    ) -> None:
-        """As the eval service keeps blobs: in the artifact store when there is one."""
-        if self.objects is not None:
-            key = object_key(tenant_id, row.sha256)
-            await self.objects.put(key=key, content=content, content_type=row.media_type)
-        kept = None if self.objects is not None else content
-        await evals.put_blob(session, tenant_id=tenant_id, blob=row, content=kept)
+    async def _store(self, tenant_id: uuid.UUID, overlay: Overlay) -> None:
+        """Keep the call's new blobs in the artifact store when there is one; after the
+        locked transaction, so object I/O never holds the item's row lock."""
+        if self.objects is None:
+            return
+        for ref, content in overlay.blobs.values():
+            await self.objects.put(
+                key=object_key(tenant_id, ref.sha256), content=content, content_type=ref.media_type
+            )
 
-    async def _read_blob(
-        self, session: AsyncSession, tenant_id: uuid.UUID, sha256: str
-    ) -> bytes | None:
-        content = await evals.blob_content(session, tenant_id=tenant_id, sha256=sha256)
+    async def _read_blob(self, tenant_id: uuid.UUID, sha256: str) -> bytes | None:
+        async with self.sessions() as session:
+            content = await evals.blob_content(session, tenant_id=tenant_id, sha256=sha256)
         if content is None and self.objects is not None:
             content = await self.objects.read(key=object_key(tenant_id, sha256))
         return content
 
     async def _load_blob(self, item: ItemRef, sha256: str) -> bytes:
-        async with self.sessions() as session:
-            content = await self._read_blob(session, item.tenant_id, sha256)
+        content = await self._read_blob(item.tenant_id, sha256)
         if content is None:
             raise ItemNotRunningError(f"blob {sha256} of item {item.id} is missing")
         return content
@@ -271,10 +279,29 @@ class FakeWorld:
     async def _dispatch(
         self, item: ItemRef, service: Service, build: Callable[[Overlay], WorldRequest]
     ) -> WorldAnswer:
-        """Short locked passes over the item's state; model work runs between them, unlocked,
-        and leaves its result in the cache the next pass reads."""
         work = _Work()
+        try:
+            return await self._passes(item, service, build, work)
+        finally:
+            self._reserve(item.id, work, -work.calls)
+
+    def _reserve(self, item_id: uuid.UUID, work: _Work, calls: int) -> None:
+        work.calls += calls
+        left = self._inflight.get(item_id, 0) + calls
+        if left > 0:
+            self._inflight[item_id] = left
+        else:
+            self._inflight.pop(item_id, None)
+
+    async def _passes(
+        self, item: ItemRef, service: Service, build: Callable[[Overlay], WorldRequest], work: _Work
+    ) -> WorldAnswer:
+        """Short locked passes over the item's state; model work runs between them, unlocked,
+        and leaves its result in the cache the next pass reads. A pass reserves the model
+        calls it asks for, so concurrent calls cannot overspend `simulator.max_calls`."""
         for attempt in range(_TRIES):
+            answered: tuple[_Outcome, Overlay, int, tuple[Effect, ...]] | None = None
+            need: _Simulate | tuple[_Judge, ...] | None = None
             async with self.sessions() as session, session.begin():
                 if not await eval_world.lock_running_item(session, item_id=item.id):
                     raise ItemNotRunningError(str(item.id))
@@ -282,45 +309,74 @@ class FakeWorld:
                 rows = await eval_world.list_overlay(session, item_id=item.id)
                 overlay = Overlay(item.case.world.resources or (), rows)
                 request = build(overlay)
-                found = await self._answer(session, item, service, request, overlay, stats, work)
+                if work.error:
+                    found = _Outcome(_denied(request), "denied", "simulator_error")
+                else:
+                    found = await self._answer(
+                        session, item, service, request, overlay, stats, work,
+                        self._inflight.get(item.id, 0),
+                    )  # fmt: skip
                 if not isinstance(found, _Outcome) and attempt == _TRIES - 1:
                     found = _Outcome(_denied(request), "denied", "busy")
                 if isinstance(found, _Outcome):
                     effects = self._effects(service, request, found)
                     await self._record(session, item, stats.next_seq, request, found, effects,
                                        overlay, model_calls=work.calls)  # fmt: skip
-                    raw = await self._bytes(session, item, found.response, overlay)
-                    return WorldAnswer(found.response, found.origin, effects, stats.next_seq,
-                                       found.reason, raw)  # fmt: skip
-            await self._think(item, found, work)
+                    answered = (found, overlay, stats.next_seq, effects)
+                else:
+                    need = found
+                    self._reserve(item.id, work, found.attempts if isinstance(found, _Simulate)
+                                  else len(found))  # fmt: skip
+            if answered is not None:
+                outcome, overlay, seq, effects = answered
+                await self._store(item.tenant_id, overlay)
+                raw = await self._bytes(item, outcome.response, overlay)
+                return WorldAnswer(outcome.response, outcome.origin, effects, seq,
+                                   outcome.reason, raw)  # fmt: skip
+            assert need is not None
+            await self._think(item, need, work)
         raise AssertionError("the last pass always answers")
 
     async def _think(
         self, item: ItemRef, need: _Simulate | tuple[_Judge, ...], work: _Work
     ) -> None:
-        """Model work outside any transaction; its result goes to the cache."""
+        """Model work outside any transaction; its result goes to the cache. A model API
+        failure counts one attempt and denies the call."""
         assert self.simulator is not None
+        reserved = need.attempts if isinstance(need, _Simulate) else len(need)
         entries: list[tuple[str, str, eval_world.Document]] = []
-        if isinstance(need, _Simulate):
-            answer, made = await simulate(self.simulator, need.context, need.check, need.attempts)
-            work.calls += made
-            if isinstance(answer, str):
-                work.failed = (need.key, f"invalid: {answer}"[:500])
-                return
-            entry = SimEntry(
-                key=need.key, surface=need.context.request.surface,
-                request=need.context.request.request, response=answer.response,
-                model=answer.model, created_at=datetime.now(UTC),
-            )  # fmt: skip
-            entries.append((need.key, answer.model, to_document(entry)))
-            work.written = need.key
-        else:
-            for judge in need:
-                same = await self.simulator.same(item.id, judge.service, judge.recorded, judge.live)
-                work.calls += 1
-                entries.append((judge.key, "judge", {"same": same}))
-                if same:
-                    break
+        made = 0
+        try:
+            if isinstance(need, _Simulate):
+                answer, made = await simulate(self.simulator, need.context, need.check,
+                                              need.attempts)  # fmt: skip
+                if isinstance(answer, str):
+                    work.failed = (need.key, f"invalid: {answer}"[:500])
+                else:
+                    entry = SimEntry(
+                        key=need.key, surface=need.context.request.surface,
+                        request=need.context.request.request, response=answer.response,
+                        model=answer.model, created_at=datetime.now(UTC),
+                    )  # fmt: skip
+                    entries.append((need.key, answer.model, to_document(entry)))
+                    work.written = need.key
+            else:
+                for judge in need:
+                    same = await self.simulator.same(
+                        item.id, judge.service, judge.recorded, judge.live
+                    )
+                    made += 1
+                    entries.append((judge.key, "judge", {"same": same}))
+                    if same:
+                        break
+        except Exception as exc:  # any model API failure denies the call
+            made += 1
+            work.error = True
+            log.warning("eval_world.simulator_failed", item_id=str(item.id),
+                        error=type(exc).__name__)  # fmt: skip
+        self._reserve(item.id, work, made - reserved)
+        if not entries:
+            return
         async with self.sessions() as session, session.begin():
             for key, model, document in entries:
                 await eval_world.put_sim(
@@ -350,7 +406,8 @@ class FakeWorld:
         for ref, content in overlay.blobs.values() if overlay else ():
             row = BlobRow(sha256=ref.sha256, size=ref.size, media_type=ref.media_type,
                           scrub="generated", needs_human_check=False)  # fmt: skip
-            await self._put_blob(session, item.tenant_id, row, content)
+            kept = None if self.objects is not None else content
+            await evals.put_blob(session, tenant_id=item.tenant_id, blob=row, content=kept)
         record = WorldCall(
             seq=seq, surface=surface or request.surface, service=request.service,
             server=request.server, tool=request.tool, request=request.request,
@@ -374,9 +431,7 @@ class FakeWorld:
             return (Effect(verb=f"daimon.{request.tool}.call"),)
         return found
 
-    async def _bytes(
-        self, session: AsyncSession, item: ItemRef, response: ExchangeResponse, overlay: Overlay
-    ) -> bytes:
+    async def _bytes(self, item: ItemRef, response: ExchangeResponse, overlay: Overlay) -> bytes:
         body = response.http.body if response.http else None
         raw = body_bytes(body)
         if raw is not None or body is None or body.blob is None:
@@ -384,7 +439,7 @@ class FakeWorld:
         sha = body.blob.sha256
         if sha in overlay.blobs:
             return overlay.blobs[sha][1]
-        return await self._read_blob(session, item.tenant_id, sha) or b""
+        return await self._read_blob(item.tenant_id, sha) or b""
 
     @staticmethod
     async def _verdict(session: AsyncSession, item: ItemRef, judge: _Judge) -> bool | None:
@@ -403,8 +458,10 @@ class FakeWorld:
         overlay: Overlay,
         stats: eval_world.CallStats,
         work: _Work,
+        inflight: int,
     ) -> _Outcome | _Simulate | tuple[_Judge, ...]:
-        """The answer, or the model work it waits on: semantic verdicts, then a simulation."""
+        """The answer, or the model work it waits on: semantic verdicts, then a simulation.
+        `inflight` is the model calls started but not yet logged, this call's included."""
         world = item.case.world
         if stats.total >= (item.case.limits or Limits()).max_world_calls:
             return _Outcome(_denied(request), "denied", "max_world_calls")
@@ -412,7 +469,7 @@ class FakeWorld:
             return _Outcome(_denied(request), "denied", "network_deny")
         settings = world.simulator or SimulatorSettings()
         thinking = self.simulator is not None and settings.enabled
-        budget = settings.max_calls - stats.model_calls - work.calls if thinking else 0
+        budget = settings.max_calls - stats.model_calls - inflight if thinking else 0
         judges: list[_Judge] = []
         written = (res := service.resource(request)) is not None and overlay.written(
             service.name, *res
@@ -480,8 +537,19 @@ class FakeWorld:
     async def _git(
         self, item: ItemRef, call: HttpCall, index: int, repo: Repo, service_path: str
     ) -> WorldAnswer:
-        """Smart HTTP against the item's own copy of the repo, served unlocked; logged without
-        pack data. A push's new state is kept in the overlay."""
+        """Smart HTTP against the item's own copy of the repo, logged without pack data. A
+        push's new state is kept in the overlay. One call at a time per item, from reading its
+        bundle to recording the new one, so no push is lost; the row lock is not held while
+        git runs."""
+        lock = self._git_locks.get(item.id)
+        if lock is None:
+            lock = self._git_locks[item.id] = asyncio.Lock()
+        async with lock:
+            return await self._git_locked(item, call, index, repo, service_path)
+
+    async def _git_locked(
+        self, item: ItemRef, call: HttpCall, index: int, repo: Repo, service_path: str
+    ) -> WorldAnswer:
         http = HttpRequest(method=call.method.upper(), url=call.url)
         request = WorldRequest("http", "git", ExchangeRequest(http=http), raw=call)
         async with self.sessions() as session, session.begin():
@@ -518,6 +586,7 @@ class FakeWorld:
             await self._record(
                 session, item, seq, request, outcome, reply.effects, overlay, surface="git"
             )
+        await self._store(item.tenant_id, overlay)
         return WorldAnswer(response, "overlay", reply.effects, seq, None, reply.body)
 
     def forget(self, item_id: uuid.UUID) -> None:
