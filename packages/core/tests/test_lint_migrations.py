@@ -328,7 +328,9 @@ _VERSIONS = _REPO_ROOT / "packages" / "core" / "alembic" / "versions"
     ("stem", "expected"),
     [
         ("0221_routine_delivery_hold", "expand"),
-        ("0217_monitored_events", "expand"),
+        ("0220_discord_audience_facts", "expand"),
+        # Replaces a trigger function 0142 created, which changes what old code runs.
+        ("0217_monitored_events", "contract"),
         ("0216_usage_obs_observed_at", "contract"),
     ],
 )
@@ -336,6 +338,7 @@ def test_classify_reads_the_shape_of_real_migrations(stem: str, expected: str) -
     assert lint_migrations.classify_file(_VERSIONS / f"{stem}.py") == expected, stem
 
 
+_LOCKED = "    op.execute(\"SET LOCAL lock_timeout = '5s'\")\n"
 EXPAND_HEADER = '''"""a migration.
 
 downgrade: destructive
@@ -373,6 +376,35 @@ def _expand(body: str, schema: str = "expand") -> str:
         ("    op.execute('UPDATE t SET c = 1')\n", "UPDATE"),
         ("    op.execute(f'SELECT {1}')\n", "not a literal"),
         ("    op.create_index('ix', 't', ['c'])\n", "without concurrently"),
+        (_LOCKED + "    op.execute('CREATE INDEX ix ON t (c)')\n", "without CONCURRENTLY"),
+        (
+            "    op.create_index('ix', 't', ['c'], unique=True, postgresql_concurrently=True)\n",
+            "unique index",
+        ),
+        (
+            _LOCKED
+            + "    op.execute('CREATE TRIGGER g BEFORE INSERT ON t EXECUTE FUNCTION f()')\n",
+            "trigger or policy",
+        ),
+        (_LOCKED + "    op.execute('CREATE POLICY p ON t AS RESTRICTIVE')\n", "trigger or policy"),
+        ("    op.execute('CREATE OR REPLACE FUNCTION f() RETURNS int')\n", "OR REPLACE"),
+        (
+            "    op.create_table('w', sa.Column('t_id', sa.Integer(), sa.ForeignKey('t.id')))\n",
+            "foreign key to an existing table",
+        ),
+        (
+            "    op.create_table('w')\n    op.create_foreign_key('fk', 'w', 't', ['t_id'], ['id'])\n",
+            "foreign key to an existing table",
+        ),
+        (
+            _LOCKED + "    op.add_column('t', sa.Column('c', sa.Integer(), primary_key=True))\n",
+            "NOT NULL",
+        ),
+        (
+            "    session = sa.orm.Session(bind=op.get_bind())\n    session.delete(1)\n",
+            "may write",
+        ),
+        ("    op.execute(\"COMMENT ON TABLE t IS 'a -- b'; DROP TABLE x\")\n", "DROP TABLE x"),
     ],
 )
 def test_expand_declared_but_not_expand_is_reported_with_its_line(
@@ -397,6 +429,8 @@ def test_additive_upgrade_declared_expand_passes_and_contract_may_be_declared_lo
         "    op.execute(\"SET LOCAL lock_timeout = '5s'\")\n"
         "    op.add_column('t', sa.Column('c', sa.Text(), server_default='x', nullable=False))\n"
         "    op.create_index('ix', 't', ['c'], postgresql_concurrently=True)\n"
+        "    op.create_table('w', sa.Column('t_id', sa.Integer(), sa.ForeignKey('t.id')))\n"
+        "    op.execute('CREATE TRIGGER g BEFORE INSERT ON w EXECUTE FUNCTION f()')\n"
     )
     expand, contract = tmp_path / "0222_a.py", tmp_path / "0223_b.py"
     expand.write_text(_expand(body), encoding="utf-8")
@@ -404,6 +438,14 @@ def test_additive_upgrade_declared_expand_passes_and_contract_may_be_declared_lo
 
     assert lint_migrations.lint_file(expand) == [], "additive upgrade passes as expand"
     assert lint_migrations.lint_file(contract) == [], "declaring contract is always allowed"
+
+
+def test_a_call_through_an_aliased_op_is_classified(tmp_path: Path) -> None:
+    path = tmp_path / "0222_x.py"
+    source = _expand("    o.drop_column('t', 'c')\n")
+    path.write_text(source.replace("from alembic import op\n", "from alembic import op as o\n"))
+
+    assert lint_migrations.classify_file(path) == "contract", "o is alembic's op"
 
 
 def test_schema_marker_is_required_from_the_first_new_number_only(tmp_path: Path) -> None:

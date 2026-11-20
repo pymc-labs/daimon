@@ -152,9 +152,10 @@ Each file under `packages/core/alembic/versions/` declares two docstring lines:
 - `downgrade: safe | destructive | unsupported`: `downgrade()` reverses
   cleanly, loses data, or raises `NotImplementedError`.
 - `schema: expand | contract`: `expand` only adds new tables, nullable or
-  defaulted columns, indexes (concurrently on existing tables), functions or
-  policies, and sets `lock_timeout` before touching an existing table.
-  Everything else, backfills included, is `contract`.
+  defaulted columns, non-unique indexes (concurrently on existing tables), new
+  functions, or triggers and policies on new tables, and sets `lock_timeout`
+  before touching or referencing an existing table. Everything else, backfills
+  and replaced functions included, is `contract`.
 
 `alembic revision` writes `TODO-declare` placeholders that fail
 `scripts/lint_migrations.py` (pre-commit and CI) until replaced; the lint

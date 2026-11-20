@@ -115,15 +115,18 @@ def _classify_downgrade_body(func: ast.FunctionDef) -> str:
 
 
 _DOLLAR_QUOTED = re.compile(r"\$(\w*)\$.*?\$\1\$", re.DOTALL)
-_COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
-_STRING = re.compile(r"'(?:[^']|'')*'")
+# One pass, so a quote inside a comment and `--` inside a string are both read right.
+_STRING_OR_COMMENT = re.compile(r"'(?:[^']|'')*'|--[^\n]*|/\*.*?\*/", re.DOTALL)
 _LOCK_TIMEOUT = re.compile(r"SET\s+LOCAL\s+lock_timeout\b", re.IGNORECASE)
+# Replacing a function changes what old code calls, so only a new one is expand.
 _PLAIN_EXPAND_SQL = re.compile(
-    r"(CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|VIEW)|GRANT|COMMENT\s+ON)\b", re.IGNORECASE
+    r"(CREATE\s+(FUNCTION|(OR\s+REPLACE\s+)?VIEW)|GRANT|COMMENT\s+ON)\b", re.IGNORECASE
 )
-_TABLE_EXPAND_SQL = re.compile(
-    r"CREATE\s+(OR\s+REPLACE\s+)?(TRIGGER|POLICY)\b|CREATE\s+(UNIQUE\s+)?INDEX\b", re.IGNORECASE
+_INDEX_SQL = re.compile(r"CREATE\s+(?P<unique>UNIQUE\s+)?INDEX\b", re.IGNORECASE)
+_BEHAVIOUR_SQL = re.compile(
+    r"CREATE\s+(OR\s+REPLACE\s+)?(CONSTRAINT\s+)?TRIGGER\b|CREATE\s+POLICY\b", re.IGNORECASE
 )
+_ON_TABLE = re.compile(r"\bON\s+(?:ONLY\s+)?(?:\w+\.)?\"?(?P<table>\w+)\"?", re.IGNORECASE)
 _ENABLE_RLS = re.compile(
     r"ALTER\s+TABLE\s+(ONLY\s+)?\"?(?P<table>\w+)\"?\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY\b",
     re.IGNORECASE,
@@ -139,12 +142,21 @@ _CONSTRAINT_OPS = {
     "create_primary_key": 1,
 }
 _NEUTRAL_OPS = {"get_bind", "get_context", "f", "inline_literal"}
+_FOREIGN_KEYS = {"ForeignKey", "ForeignKeyConstraint"}
+# Methods that only read or build values; any other call on a local object (an ORM
+# session, a table) may write, so it makes the migration contract.
+_READ_METHODS = {
+    "all", "append", "bindparams", "first", "fetchall", "fetchone", "format", "get", "items",
+    "join", "keys", "lower", "mappings", "one", "scalar", "scalar_one", "scalar_one_or_none",
+    "scalars", "split", "strip", "upper", "values",
+}  # fmt: skip
 
 
 def _sql_statements(sql: str) -> list[str]:
     """Split a SQL literal into statements, ignoring quoted bodies and comments."""
-    stripped = _COMMENTS.sub(" ", _DOLLAR_QUOTED.sub("$$ $$", sql))
-    stripped = _STRING.sub("''", stripped)
+    stripped = _STRING_OR_COMMENT.sub(
+        lambda m: "''" if m.group(0).startswith("'") else " ", _DOLLAR_QUOTED.sub("$$ $$", sql)
+    )
     return [part.strip() for part in stripped.split(";") if part.strip()]
 
 
@@ -155,6 +167,8 @@ class _Classifier:
         self.funcs: dict[str, ast.FunctionDef] = {}
         self.consts: dict[str, list[str]] = {}
         self.foreign: set[str] = set()
+        self.modules: set[str] = set()  # names bound by a trusted import
+        self.ops: set[str] = {"op"}  # alembic's op, under any alias
         for node in tree.body:
             if isinstance(node, ast.FunctionDef):
                 self.funcs[node.name] = node
@@ -162,10 +176,15 @@ class _Classifier:
                 module = getattr(node, "module", None)
                 for alias in node.names:
                     root = (module or alias.name).split(".")[0]
+                    bound = (alias.asname or alias.name).split(".")[0]
                     if root not in _TRUSTED_ROOTS or (
                         isinstance(node, ast.ImportFrom) and node.level
                     ):
-                        self.foreign.add((alias.asname or alias.name).split(".")[0])
+                        self.foreign.add(bound)
+                    elif module == "alembic" and alias.name == "op":
+                        self.ops.add(bound)
+                    else:
+                        self.modules.add(bound)
             elif isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None:
                 target = node.targets[0] if isinstance(node, ast.Assign) else node.target
                 values = self._literal_strings(node.value)
@@ -248,7 +267,7 @@ class _Classifier:
         if isinstance(func, ast.Attribute):
             if func.attr in _EXECUTE_ATTRS:
                 self._execute(node, env)
-            elif isinstance(func.value, ast.Name) and func.value.id == "op":
+            elif isinstance(func.value, ast.Name) and func.value.id in self.ops:
                 self._op(func.attr, node, env)
             elif func.attr in _OBJECT_DDL_ATTRS:
                 self._bad(node, f"`.{func.attr}()` changes the schema")
@@ -258,6 +277,12 @@ class _Classifier:
                     root = root.value  # pyright: ignore[reportAssignmentType]
                 if isinstance(root, ast.Name) and root.id in self.foreign:
                     self._bad(node, f"calls into `{root.id}`, which this file does not define")
+                elif not (
+                    func.attr in _READ_METHODS
+                    or (isinstance(root, ast.Name) and root.id in self.modules)
+                    or (isinstance(root, ast.Constant) and isinstance(root.value, str))
+                ):
+                    self._bad(node, f"calls `.{func.attr}()`, which may write")
         elif isinstance(func, ast.Name):
             if func.id in self.funcs and func.id not in self.active:
                 self._inline(self.funcs[func.id], node, env)
@@ -291,27 +316,54 @@ class _Classifier:
         if name == "create_table":
             if (created := self._table(node, 0, "table_name", env)) is not None:
                 self.new_tables.add(created)
+            self._foreign_keys(node, env)
         elif name == "add_column":
             self._add_column(node, env)
         elif name == "create_index":
             table = self._table(node, 1, "table_name", env)
-            concurrently = any(
-                k.arg == "postgresql_concurrently"
-                and isinstance(k.value, ast.Constant)
-                and k.value.value is True
-                for k in node.keywords
-            )
-            if table not in self.new_tables and not concurrently:
-                self._bad(node, "op.create_index on an existing table without concurrently")
+            if table not in self.new_tables:
+                if not self._true(node, "postgresql_concurrently"):
+                    self._bad(node, "op.create_index on an existing table without concurrently")
+                if self._true(node, "unique"):
+                    self._bad(node, "a unique index on an existing table rejects old writes")
         elif name in _CONSTRAINT_OPS:
             table = self._table(node, _CONSTRAINT_OPS[name], "source_table", env)
             if table not in self.new_tables:
                 self._bad(node, f"op.{name} on a table this file did not create")
+            if name == "create_foreign_key":
+                referent = self._table(node, 2, "referent_table", env)
+                self._lock_referent(node, referent)
         else:
             self._bad(node, f"op.{name} is not an additive change")
 
+    @staticmethod
+    def _true(node: ast.Call, keyword: str) -> bool:
+        return any(
+            k.arg == keyword and isinstance(k.value, ast.Constant) and k.value.value is True
+            for k in node.keywords
+        )
+
+    def _lock_referent(self, node: ast.AST, referent: str | None) -> None:
+        """A foreign key locks the table it references (SHARE ROW EXCLUSIVE)."""
+        if referent not in self.new_tables and not self.locked:
+            self._bad(node, "a foreign key to an existing table before SET LOCAL lock_timeout")
+
+    def _foreign_keys(self, node: ast.Call, env: dict[str, list[str]]) -> None:
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name not in _FOREIGN_KEYS:
+                continue
+            index, keyword = (0, "column") if name == "ForeignKey" else (1, "refcolumns")
+            targets = self._resolve(self._arg(call, index, keyword), env) or [""]
+            for target in targets:
+                self._lock_referent(call, target.split(".")[-2] if "." in target else None)
+
     def _add_column(self, node: ast.Call, env: dict[str, list[str]]) -> None:
         table = self._table(node, 0, "table_name", env)
+        self._foreign_keys(node, env)
         if table in self.new_tables:
             return
         column = self._arg(node, 1, "column")
@@ -324,6 +376,10 @@ class _Classifier:
         nullable = keywords.get("nullable")
         not_null = nullable is not None and not (
             isinstance(nullable, ast.Constant) and nullable.value is True
+        )
+        primary = keywords.get("primary_key")
+        not_null = not_null or (
+            nullable is None and isinstance(primary, ast.Constant) and primary.value is True
         )
         if not_null and "server_default" not in keywords:
             self._bad(node, "op.add_column adds a NOT NULL column without a server_default")
@@ -342,12 +398,16 @@ class _Classifier:
             self.locked = True
         elif _PLAIN_EXPAND_SQL.match(statement):
             pass
-        elif _TABLE_EXPAND_SQL.match(statement):
-            on_new_table = any(
-                re.search(rf"\b{re.escape(t)}\b", statement) for t in self.new_tables
-            )
-            if not (on_new_table or self.locked or "CONCURRENTLY" in statement.upper()):
-                self._bad(node, "SQL touches an existing table before SET LOCAL lock_timeout")
+        elif (index := _INDEX_SQL.match(statement)) or _BEHAVIOUR_SQL.match(statement):
+            on = _ON_TABLE.search(statement)
+            if on is not None and on.group("table") in self.new_tables:
+                return
+            if index is None:
+                self._bad(node, "a trigger or policy on an existing table changes old code")
+            elif index.group("unique"):
+                self._bad(node, "a unique index on an existing table rejects old writes")
+            elif "CONCURRENTLY" not in statement.upper():
+                self._bad(node, "CREATE INDEX on an existing table without CONCURRENTLY")
         elif not ((m := _ENABLE_RLS.match(statement)) and m.group("table") in self.new_tables):
             self._bad(node, f"execute runs `{statement[:40]}`, which is not additive")
 

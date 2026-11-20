@@ -76,8 +76,8 @@ migration conflict there instead of breaking `main`.
 1. Put a schema change in its own small PR, merged before the code that uses
    it. Reverting a feature then leaves the schema alone; never revert a migration.
 2. Declare `downgrade:` and `schema: expand|contract`. `expand` only adds
-   (tables, nullable or defaulted columns, indexes, functions, policies), so old
-   and new code both run on it. Anything else is `contract`: it ships alone,
+   (tables, nullable or defaulted columns, non-unique indexes, new functions),
+   so old and new code both run on it. Anything else is `contract`: it ships alone,
    after the release that stopped using the old shape.
 3. After merging or rebasing `main`, run `scripts/rechain_migrations.py`. It
    renumbers only your new migrations and rewrites `head.txt`. If `head.txt`
