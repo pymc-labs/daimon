@@ -16,6 +16,7 @@ Self-hosted backends are operator-registered hosts, not a key.
 from __future__ import annotations
 
 import os
+from functools import cache
 
 from mux.contracts.ids import Provider
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
@@ -45,8 +46,13 @@ def deployment_keyed_providers() -> frozenset[Provider]:
     return frozenset({MANAGED_AGENTS.provider, *keyed})
 
 
+@cache
 def anthropic_key_present() -> bool:
-    """Whether the deployment's Anthropic key is set: the check its client is built by."""
+    """Whether the deployment's Anthropic key is set: the check its client is built by.
+
+    Read once per process: the settings re-read `.env` on each build, and the key
+    only changes with a restart. Tests reset it (`daimon.testing.pytest_plugin`).
+    """
     from daimon.core.anthropic_guard import anthropic_key_configured
     from daimon.core.config import AnthropicEnvSettings
 
