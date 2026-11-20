@@ -58,7 +58,7 @@ export type TriggerKind = "manual" | "schedule" | "webhook" | "event" | "call"
 export type Trigger = {
   id: string; kind: TriggerKind
   cron?: string; timezone?: string; catch_up?: "skip" | "run-once"
-  verify?: string; inputs?: string; respond?: "accepted" | "result"
+  verify?: string; start_when?: string; inputs?: string; respond?: "accepted" | "result"
   source?: string; match?: string
 }
 

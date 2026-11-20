@@ -462,7 +462,7 @@ inputs:
     alert_key: {type: string, title: Alert}
     summary: {type: string, title: Summary}
 triggers:
-  - {id: grafana, kind: webhook, verify: standard-webhooks, inputs: "\${{ payload.alert }}", respond: accepted}
+  - {id: grafana, kind: webhook, verify: standard-webhooks, start_when: "\${{ payload.status == 'firing' }}", inputs: "\${{ payload.alert }}", respond: accepted}
 concurrency: {key: "\${{ inputs.alert_key }}", on_conflict: debounce, debounce: 5m}
 defaults: {agent: reviewer, budget_usd: 2}
 start: investigate
@@ -488,7 +488,7 @@ nodes:
   watch:
     kind: wait
     title: Wait for resolve
-    event: {source: "workflow:7c1d0b5e-3a44-4f0e-9a52-6b8e2d9f1a03", match: "\${{ event.run.status == 'succeeded' }}"}
+    event: {source: "trigger:grafana", match: "\${{ event.payload.status == 'resolved' }}", key: "\${{ inputs.alert_key }}"}
     timeout: 2h
     routes: {arrived: quiet, timed_out: escalate}
   quiet:

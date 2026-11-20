@@ -170,6 +170,9 @@ export function upstreamRefs(spec: Spec, id: string): RefGroup[] {
 // The only event source that fires: a finished run of that workflow.
 const EVENT_SOURCE = /^workflow:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
 const BAD_EVENT_SOURCE = "An event source is a workflow, as `workflow:<id>`; other events never arrive. Use a webhook trigger for outside events"
+const BAD_WAIT_SOURCE = "A wait's event is another workflow's run (`workflow:<id>`), a delivery to one of this workflow's webhook triggers (`trigger:<id>`) or `callback`"
+const waitSource = (spec: Spec, source: string) =>
+  EVENT_SOURCE.test(source) || source === "callback" || (source.startsWith("trigger:") && !!spec.triggers?.some((t) => t.kind === "webhook" && `trigger:${t.id}` === source))
 
 const WRITE_TOOL = /send|tag|create|update|post|delete|comment|note|page|issue|folder|project/
 export const toolWrites = (tool?: string) => !!tool && WRITE_TOOL.test(tool.split("/")[1] ?? tool)
@@ -189,7 +192,7 @@ export function validate(spec: Spec): Validation {
   if (spec.triggers?.some((t) => t.kind === "event" && !EVENT_SOURCE.test(t.source ?? ""))) err("bad_event_source", BAD_EVENT_SOURCE)
   const seen = reachable(spec)
   for (const [id, n] of Object.entries(nodes)) {
-    if (n.kind === "wait" && n.event && !EVENT_SOURCE.test(n.event.source)) err("bad_event_source", BAD_EVENT_SOURCE, id)
+    if (n.kind === "wait" && n.event && !waitSource(spec, n.event.source)) err("bad_event_source", BAD_WAIT_SOURCE, id)
     const out = edgesOf(id, n)
     for (const e of out) if (!nodes[e.to]) err("unknown_target", `Unknown step: ${e.to}`, id)
     if (n.kind !== "finish" && !out.length) err("dead_end", "No next step", id)
