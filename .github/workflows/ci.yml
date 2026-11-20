@@ -89,6 +89,9 @@ jobs:
       - name: changelog fragments
         run: uv run python scripts/changelog.py check
 
+      - name: check migration chain
+        run: uv run python scripts/rechain_migrations.py --check
+
       - name: lint private material leakage
         run: bash scripts/lint_designators.sh
 

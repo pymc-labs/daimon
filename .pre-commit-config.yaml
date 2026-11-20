@@ -91,6 +91,13 @@ repos:
         pass_filenames: false
         files: ^packages/core/alembic/versions/.*\.py$
 
+      - id: check-migration-chain
+        name: check migration chain
+        entry: uv run python scripts/rechain_migrations.py --check
+        language: system
+        pass_filenames: false
+        files: ^packages/core/alembic/(versions/.*\.py|head\.txt)$
+
       - id: lint-designators
         name: lint companion-repo leakage
         entry: bash scripts/lint_designators.sh
