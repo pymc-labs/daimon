@@ -511,7 +511,7 @@ def _disabled_builtins(tool: dict[str, Any], keep: frozenset[str] = frozenset())
     """Built-ins off, except the reviewed names in `keep`, each enabled alone."""
     off = {"enabled": False}
     configs = [{**config, "enabled": config.get("name") in keep} for config in _configs(tool)]
-    named = {config.get("name") for config in configs}
+    named = {str(config.get("name")) for config in configs}
     configs += [{"name": n, "enabled": True} for n in sorted(keep - named)]
     return {
         **tool,
