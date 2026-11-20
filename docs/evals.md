@@ -27,6 +27,60 @@ Check a case before you save it:
 daimon evals cases validate case.json
 ```
 
+## Cases from threads
+
+Make cases from a conversation you can read. Each turn the agent answered becomes
+one case: the messages before it are history, and the world holds only what that
+turn used. Send a Discord, Slack or Teams link to the `eval_case_from_thread` tool,
+a web chat link to `POST /api/evals/suites/{id}/cases/from-thread`, or a web chat
+link or a saved thread file to the command line:
+
+```bash
+daimon evals cases from-thread support-basics https://example.com/chat/<id>
+daimon evals cases from-thread support-basics --record thread.json
+```
+
+Chat platforms keep messages, not tool calls, so these cases have `text` fidelity
+and the simulator fills the gaps. A case starts with the recorded answer as its
+reference and an `expectations_unreviewed` flag.
+
+Draft the pass criteria with a model, then review them. The command shows a cost
+estimate first and drafts only with `--yes`:
+
+```bash
+daimon evals cases draft support-basics <case-id> --yes
+```
+
+Repeated requests are marked as near-duplicates with `daimon evals cases dedupe`.
+Add `--keep 2` to keep the two oldest of each group.
+
+## Scrubbing
+
+Every case made from a thread is scrubbed before it is saved. People, emails,
+companies, projects, channels, hosts and ids get the same fake everywhere: in
+messages, tool data, file names and file contents. Secrets and signed-URL tokens
+are removed. Word, Excel, PowerPoint and PDF files are rebuilt with fakes, and images
+are blanked where text is found and flagged for a person to check.
+
+Set [`DAIMON_EVALS__SCRUB_KEY`](configuration.md#daimon_evals__scrub_key) first.
+Install the scrub tools with `pip install "daimon-core[evals]"`, add the spaCy model
+named in [`DAIMON_EVALS__SCRUB_NER_MODEL`](configuration.md#daimon_evals__scrub_ner_model)
+and the `tesseract` program for images. Without the model only known names and patterns
+are found, and cases stay `partial`. Only a `scrubbed` case can be shared; a person
+should still read a case before it leaves the workspace.
+
+Scrub a bundle folder, zip or encrypted file offline, with a dictionary of the names
+your data holds (people, emails, companies, projects, hostnames, repos, channels, phrases):
+
+```bash
+export DAIMON_EVALS__SCRUB_KEY=<at least 16 characters>
+daimon evals bundle scrub bundle/ --entities names.yaml --map fakes.json --out clean/
+daimon evals bundle leftovers clean/ --entities names.yaml --map fakes.json
+```
+
+Both print counts and places, never the text they found, and exit 1 when something is
+left. Reuse the same key and `--map` for every bundle of a suite so fakes stay the same.
+The map holds only hashes and fakes, but keep it private.
 ## The world a case runs in
 
 A running case never reaches real services. Each call it makes, over HTTP, git

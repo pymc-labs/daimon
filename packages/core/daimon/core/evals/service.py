@@ -6,16 +6,19 @@ the JSON the bundle format defines.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterable, Iterable, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Final, Literal
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from daimon.core.config import Settings
 from daimon.core.evals import bundle as bundles
+from daimon.core.evals import dedupe
 from daimon.core.evals.access import (
     Action,
     Share,
@@ -26,6 +29,14 @@ from daimon.core.evals.access import (
     suite_role,
 )
 from daimon.core.evals.blobs import blob_path, blob_refs
+from daimon.core.evals.draft import (
+    Complete,
+    DraftError,
+    DraftEstimate,
+    draft_case,
+    draft_model,
+    estimate_draft,
+)
 from daimon.core.evals.format import (
     Arm,
     BlobEntry,
@@ -45,6 +56,11 @@ from daimon.core.evals.format import (
     sha256_hex,
     to_document,
 )
+from daimon.core.evals.from_thread import ThreadNotFound, ThreadSource, build_cases
+from daimon.core.evals.scrub.bundle import scrub_case
+from daimon.core.evals.scrub.engine import Scrubber
+from daimon.core.evals.scrub.entities import KnownEntities, load_entities, merge_entities
+from daimon.core.evals.scrub.offline import MIN_KEY
 from daimon.core.evals.validate import (
     InvalidDocument,
     LoadedRun,
@@ -55,6 +71,7 @@ from daimon.core.evals.validate import (
     validate_bundle,
 )
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.stores import eval_scrub
 from daimon.core.stores import evals as store
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -169,6 +186,29 @@ class ImportReport(_Out):
     blobs: int
     signature: bundles.SignatureState
     warnings: list[str]
+
+
+class Leftover(_Out):
+    where: str
+    kind: str
+    count: int
+
+
+class ScrubResult(_Out):
+    case: JsonObject
+    status: ScrubStatus
+    leftovers: list[Leftover]
+
+
+class DraftResult(_Out):
+    estimate: DraftEstimate
+    drafted: list[CaseRef]
+    """Empty until the estimate is confirmed."""
+
+
+class DedupeReport(_Out):
+    groups: list[list[str]]
+    dropped: list[str]
 
 
 def _worst(statuses: Iterable[str | None]) -> ScrubStatus:
@@ -497,6 +537,162 @@ class EvalService:
             statuses[(key, model.revision)] = scrub
             await self._store_version(session, suite, suite_doc, actor, statuses)
         return CaseRef(id=key, revision=model.revision, hash=str(document["hash"]))
+
+    # ---------- cases from threads ----------
+
+    async def _scrubber(self, tenant_id: uuid.UUID, known: KnownEntities) -> Scrubber:
+        settings = self._settings.evals
+        key = settings.scrub_key.get_secret_value() if settings.scrub_key else ""
+        if len(key) < MIN_KEY:
+            raise EvalRefused(
+                f"Scrubbing needs DAIMON_EVALS__SCRUB_KEY, at least {MIN_KEY} characters."
+            )
+        file = (
+            [load_entities(Path(settings.scrub_entities_file))]
+            if settings.scrub_entities_file
+            else []
+        )
+        async with self._sessions() as session:
+            fakes = await eval_scrub.load_map(session, tenant_id=tenant_id)
+        return Scrubber(
+            merge_entities(known, *file), key.encode(),
+            ner_model=settings.scrub_ner_model or None, known=fakes,
+        )  # fmt: skip
+
+    async def _keep_fakes(self, tenant_id: uuid.UUID, scrubber: Scrubber) -> None:
+        async with self._sessions() as session, session.begin():
+            await eval_scrub.save_map(session, tenant_id=tenant_id, rows=scrubber.fakes.added)
+
+    async def cases_from_thread(
+        self, actor: Subject, source: ThreadSource, ref: str, suite_id: str
+    ) -> list[CaseRef]:
+        """Scrubbed cases, one per answered turn of the thread, added to the suite."""
+        await self._check_on(actor)
+        async with self._sessions() as session:
+            await self._suite(session, actor, suite_id, "edit")
+        try:
+            record = await source.thread(ref)
+        except ThreadNotFound:
+            raise EvalNotFound("No such thread here, or you can't read it.") from None
+        scrubber = await self._scrubber(actor.tenant_id, record.entities())
+        built = await asyncio.to_thread(build_cases, record, scrubber)
+        if not built:
+            raise EvalRefused("That thread has no turn the agent answered.")
+        async with self._sessions() as session, session.begin():
+            await eval_scrub.save_map(session, tenant_id=actor.tenant_id, rows=scrubber.fakes.added)
+            for item in built:
+                for sha, blob in item.blobs.items():
+                    row = store.BlobRow(
+                        sha256=sha, size=len(blob.data), media_type=blob.media_type,
+                        scrub=blob.scrub, needs_human_check=blob.needs_human_check,
+                    )  # fmt: skip
+                    await store.put_blob(
+                        session, tenant_id=actor.tenant_id, blob=row, content=blob.data
+                    )
+        return [await self.put_case(actor, suite_id, item.case) for item in built]
+
+    async def scrub_case(self, actor: Subject, case: JsonObject) -> ScrubResult:
+        """`case` with fakes for who it names, and what a person should still check."""
+        await self._check_on(actor)
+        model = _case_model(case)
+        people = [*model.surface.participants, model.surface.bot]
+        scrubber = await self._scrubber(
+            actor.tenant_id,
+            KnownEntities.model_validate(
+                {
+                    "people": [
+                        {
+                            "name": p.display_name,
+                            "emails": [p.email] if p.email else [],
+                            "handles": [p.handle] if p.handle else [],
+                            "ids": [p.id],
+                        }
+                        for p in people
+                        if not p.is_bot
+                    ]
+                }
+            ),
+        )
+        done, leftovers = await asyncio.to_thread(scrub_case, scrubber, case)
+        await self._keep_fakes(actor.tenant_id, scrubber)
+        scrub = _case_model(done).provenance.scrub
+        return ScrubResult(
+            case=done,
+            status=scrub.status if scrub else "partial",
+            leftovers=[Leftover(where=x.where, kind=x.kind, count=x.count) for x in leftovers],
+        )
+
+    async def draft_expectations(
+        self,
+        actor: Subject,
+        suite_id: str,
+        case_ids: Sequence[str],
+        *,
+        complete: Complete | None,
+        confirm: bool,
+    ) -> DraftResult:
+        """Draft expectations for cases with a model. Without `confirm` only the cost estimate."""
+        await self._check_on(actor)
+        documents = [await self.case(actor, suite_id, key) for key in case_ids]
+        for document in documents:
+            scrub = _case_model(document).provenance.scrub
+            if scrub and scrub.status == "unscrubbed":
+                raise EvalRefused("Drafting sends a case to a model: scrub it first.")
+        try:
+            estimate = estimate_draft(documents, draft_model(self._settings.evals.draft_model))
+            if not confirm:
+                return DraftResult(estimate=estimate, drafted=[])
+            if complete is None:
+                raise EvalRefused("No model is available to draft with here.")
+            refs: list[CaseRef] = []
+            for document in documents:
+                drafted, _ = await draft_case(complete, document)
+                refs.append(await self.put_case(actor, suite_id, drafted))
+        except DraftError as exc:
+            raise EvalRefused(str(exc)) from None
+        return DraftResult(estimate=estimate, drafted=refs)
+
+    async def dedupe(
+        self,
+        actor: Subject,
+        suite_id: str,
+        *,
+        threshold: float = dedupe.THRESHOLD,
+        keep: int | None = None,
+    ) -> DedupeReport:
+        """Mark near-duplicate cases with a `dedupe_group`; with `keep`, drop all but that many
+        of each group from the suite's next version."""
+        await self._check_on(actor)
+        async with self._sessions() as session:
+            suite, _ = await self._suite(session, actor, suite_id, "edit")
+            rows = await store.version_cases(
+                session, suite_id=suite.id, version=suite.current_version
+            )
+        found = dedupe.groups([r.document for r in rows], threshold)
+        for ids in found:
+            name = dedupe.group_id(ids)
+            for key in ids:
+                document = next(r.document for r in rows if r.key == key)
+                if document.get("dedupe_group") != name:
+                    await self.put_case(actor, suite_id, {**document, "dedupe_group": name})
+        dropped = dedupe.thin(found, keep) if keep is not None else []
+        if dropped:
+            current = await self.suite(actor, suite_id)
+            await self.save_suite(
+                actor,
+                SuiteDraft(
+                    id=current.id, name=current.name, description=current.description,
+                    tags=current.tags, tool_aliases=current.tool_aliases,
+                    defaults=current.defaults,
+                    cases=[
+                        SuiteCasePick(id=c.id, weight=c.weight, split=c.split)
+                        for c in current.cases
+                        if c.id not in dropped
+                    ],
+                ),
+                new=False,
+            )  # fmt: skip
+        return DedupeReport(groups=found, dropped=dropped)
 
     async def share(self, actor: Subject, suite_id: str, shares: Sequence[Share]) -> None:
         """Replace who the suite is shared with."""

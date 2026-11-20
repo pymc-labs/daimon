@@ -13,11 +13,14 @@ from daimon.adapters.web.caller import WebCaller, groups_of, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.dm_access import member_roles
 from daimon.core.evals.access import Share, Subject, platform_groups
+from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.service import (
     CaseCheck,
     CaseRef,
     CaseSummary,
+    DedupeReport,
+    DraftResult,
     EvalForbidden,
     EvalNotFound,
     EvalRefused,
@@ -29,7 +32,24 @@ from daimon.core.evals.service import (
     SuiteDraft,
     SuiteSummary,
 )
+from daimon.core.evals.web_thread import WebChatSource
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+
+
+class FromThread(BaseModel):
+    link: str
+
+
+class DraftCases(BaseModel):
+    case_ids: list[str]
+    confirm: bool = False
+
+
+class DedupeCases(BaseModel):
+    keep: int | None = Field(default=None, ge=1)
+    threshold: float = Field(default=0.8, gt=0, le=1)
+
 
 Caller = Annotated[WebCaller, Depends(requires("evals.use"))]
 
@@ -112,6 +132,46 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
         if case.get("id") != case_id:
             raise HTTPException(status_code=400, detail="The case id does not match the address.")
         return await _call(service.put_case(await subject(caller), suite_id, case))
+
+    @router.post("/suites/{suite_id}/cases/from-thread")
+    async def cases_from_thread(  # pyright: ignore[reportUnusedFunction]
+        caller: Caller, suite_id: str, body: FromThread
+    ) -> list[CaseRef]:
+        source = WebChatSource(
+            runtime.sessionmaker, tenant_id=caller.person.tenant_id, person_id=caller.person.id
+        )
+        return await _call(
+            service.cases_from_thread(await subject(caller), source, body.link, suite_id)
+        )
+
+    @router.post("/suites/{suite_id}/cases/draft")
+    async def draft_cases(caller: Caller, suite_id: str, body: DraftCases) -> DraftResult:  # pyright: ignore[reportUnusedFunction]
+        """Without `confirm`, only the cost estimate; with it, drafts and bills the workspace."""
+        actor = await subject(caller)
+        complete = None
+        if body.confirm and runtime.anthropic is not None:
+            complete = auxiliary_completer(
+                runtime.anthropic,
+                runtime.sessionmaker,
+                tenant_id=actor.tenant_id,
+                platform=actor.platform,
+                user_id=next(iter(actor.person_ids), None),
+                model=runtime.settings.evals.draft_model,
+                markup=runtime.settings.billing.markup,
+            )
+        return await _call(
+            service.draft_expectations(
+                actor, suite_id, body.case_ids, complete=complete, confirm=body.confirm
+            )
+        )
+
+    @router.post("/suites/{suite_id}/dedupe")
+    async def dedupe_cases(caller: Caller, suite_id: str, body: DedupeCases) -> DedupeReport:  # pyright: ignore[reportUnusedFunction]
+        return await _call(
+            service.dedupe(
+                await subject(caller), suite_id, threshold=body.threshold, keep=body.keep
+            )
+        )
 
     @router.post("/cases/validate")
     async def validate_case(  # pyright: ignore[reportUnusedFunction]

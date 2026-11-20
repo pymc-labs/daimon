@@ -6112,6 +6112,18 @@ class EvalBundle(Base):
     created_at: Mapped[TsNow]
 
 
+class EvalScrubEntity(Base):
+    """A real value's keyed hash and the fake it became. Never holds the real value."""
+
+    __tablename__ = "eval_scrub_entities"
+
+    tenant_id: Mapped[TenantPk]
+    kind: Mapped[str] = mapped_column(primary_key=True)
+    key_hash: Mapped[str] = mapped_column(primary_key=True)
+    fake: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
 _EvalItemFK = Annotated[
     uuid.UUID, mapped_column(ForeignKey("eval_run_items.id", ondelete="CASCADE"), primary_key=True)
 ]

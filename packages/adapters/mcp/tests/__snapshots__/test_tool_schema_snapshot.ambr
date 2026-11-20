@@ -3889,6 +3889,28 @@
         'type': 'object',
       }),
     }),
+    'eval_case_from_thread': dict({
+      'description': '''
+        Make scrubbed eval cases from a thread you can read, given its link: one case per turn
+        the agent answered. People, places and secrets are replaced before anything is saved.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'link': dict({
+            'type': 'string',
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+          'link',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'eval_case_get': dict({
       'description': 'Read one eval case as JSON. No revision reads the latest.',
       'parameters': dict({
@@ -3966,6 +3988,64 @@
         }),
         'required': list([
           'case',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_cases_dedupe': dict({
+      'description': '''
+        Mark near-duplicate cases of a suite with a group. With `keep`, also drop all but that
+        many of each group from the suite's next version.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'keep': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+          'threshold': dict({
+            'default': 0.8,
+            'type': 'number',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_cases_draft_estimate': dict({
+      'description': '''
+        Estimate what it costs to draft expectations for cases with a model. Drafting itself
+        needs a confirmation of the cost, given in the app or on the command line.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'case_ids': dict({
+            'items': dict({
+              'type': 'string',
+            }),
+            'type': 'array',
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+          'case_ids',
         ]),
         'type': 'object',
       }),

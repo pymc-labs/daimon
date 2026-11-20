@@ -247,6 +247,31 @@ Label this deployment writes as the source of the bundles it exports.
 
 Largest eval bundle import accepts, unpacked, in MiB.
 
+### `DAIMON_EVALS__SCRUB_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret that keys the scrub map (at least 16 characters). Required to scrub real
+conversations into eval cases; changing it changes every fake made afterwards.
+
+### `DAIMON_EVALS__SCRUB_NER_MODEL`
+
+`str` · optional · default `en_core_web_sm`
+
+spaCy model that finds names, places and organizations while scrubbing. Not installed or
+empty: only known names and patterns are found and cases stay partial.
+
+### `DAIMON_EVALS__SCRUB_ENTITIES_FILE`
+
+`str | None` · optional · default unset
+
+JSON or YAML file of known private names added to every scrub.
+
+### `DAIMON_EVALS__DRAFT_MODEL`
+
+`str | None` · optional · default unset
+
+Model that drafts case expectations. Unset: the side-call model.
 ### `DAIMON_EVALS__SIMULATOR_MODEL`
 
 `str` · optional · default `claude-opus-5-5`

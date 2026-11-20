@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases, share them, and move them between deployments as signed or encrypted
   bundles. `daimon evals bundle validate` checks a bundle offline.
 
+- **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
+  draft their pass criteria after a cost estimate, and mark near-duplicates.
+  `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
 - **A fake world for eval cases.** A running case's web, GitHub, Google, git and
   MCP calls are answered from the case, its earlier writes or a checked
   simulation, and never reach real services.

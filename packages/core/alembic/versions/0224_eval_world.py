@@ -14,8 +14,8 @@ from alembic import op
 from sqlalchemy import Text
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0223_eval_world"
-down_revision: str | None = "0222_evals_foundation"
+revision: str = "0224_eval_world"
+down_revision: str | None = "0223_eval_scrub_entities"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

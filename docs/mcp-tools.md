@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 250 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 252 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,7 +17,6 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
-- **eval runs only** — carries the `eval-world` tag.
 - **OpenAI and Gemini agents** — carries the `host-memory` tag.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
@@ -273,14 +272,6 @@ Environment tools: list / get / create / update / archive.
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
 
-## `eval_world`
-
-The search tool eval agents get in place of a provider's own.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `web_search` | eval runs only | Search the public web and return the top results: title, link and a short extract. |
-
 ## `evals`
 
 Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service`.
@@ -291,9 +282,12 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_arms_list` | all callers | List the arms (agent setups to compare) in this workspace. |
 | `eval_bundle_export` | all callers | Export suites and runs as a bundle. |
 | `eval_bundle_import` | all callers | Import a bundle uploaded with create_file_upload_url. |
+| `eval_case_from_thread` | all callers | Make scrubbed eval cases from a thread you can read, given its link: one case per turn the agent answered. |
 | `eval_case_get` | all callers | Read one eval case as JSON. |
 | `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision. |
 | `eval_case_validate` | all callers | Check an eval case against the format without saving it: problems and warnings. |
+| `eval_cases_dedupe` | all callers | Mark near-duplicate cases of a suite with a group. |
+| `eval_cases_draft_estimate` | all callers | Estimate what it costs to draft expectations for cases with a model. |
 | `eval_cases_list` | all callers | List the cases of an eval suite version. |
 | `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
 | `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |

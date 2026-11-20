@@ -184,7 +184,8 @@ TAIL = (
     "0220_discord_audience_facts",
     "0221_routine_delivery_hold",
     "0222_evals_foundation",
-    "0223_eval_world",
+    "0223_eval_scrub_entities",
+    "0224_eval_world",
 )
 HEAD = TAIL[-1]
 

@@ -258,6 +258,15 @@
   "POST /api/evals/suites": {
    "tool": "eval_suite_create"
   },
+  "POST /api/evals/suites/{suite_id}/cases/draft": {
+   "tool": "eval_cases_draft_estimate"
+  },
+  "POST /api/evals/suites/{suite_id}/cases/from-thread": {
+   "tool": "eval_case_from_thread"
+  },
+  "POST /api/evals/suites/{suite_id}/dedupe": {
+   "tool": "eval_cases_dedupe"
+  },
   "POST /api/integrations/tokens": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",

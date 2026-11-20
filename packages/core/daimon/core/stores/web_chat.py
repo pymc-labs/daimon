@@ -64,6 +64,22 @@ async def get_thread(
     return None if orm is None else WebThreadRow.model_validate(orm)
 
 
+async def get_tenant_thread(
+    session: AsyncSession, *, tenant_id: uuid.UUID, thread_id: uuid.UUID
+) -> WebThreadRow | None:
+    """A live thread of the workspace whoever owns it, for an operator."""
+    orm = (
+        await session.execute(
+            select(WebThread).where(
+                WebThread.id == thread_id,
+                WebThread.tenant_id == tenant_id,
+                WebThread.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    return None if orm is None else WebThreadRow.model_validate(orm)
+
+
 async def list_threads(
     session: AsyncSession,
     *,

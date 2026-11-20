@@ -32,6 +32,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_use_event impo
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core.auxiliary_calls import AuxiliaryPurpose
 from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import (
     AGENT_WEB_SEARCH_USD,
@@ -62,6 +63,7 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "media_debit",
     "classifier_debit",
     "thread_naming_debit",
+    "eval_draft_debit",
     "eval_simulator_debit",
 )
 """Every debit reason this module writes: model spend, as opposed to clawbacks
@@ -556,13 +558,14 @@ async def record_thread_naming_usage(
 _AUXILIARY_PURPOSES = {
     "thread_naming": ("thread_naming_debit", "thread-naming"),
     "classifier": ("classifier_debit", "classifier"),
+    "eval_draft": ("eval_draft_debit", "eval-draft"),
     "eval_simulator": ("eval_simulator_debit", "eval-simulator"),
 }
 
 
 async def record_auxiliary_usage(
     *,
-    purpose: Literal["thread_naming", "classifier", "eval_simulator"],
+    purpose: AuxiliaryPurpose,
     provider: Provider,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
