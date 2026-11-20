@@ -38,6 +38,8 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
+from daimon.adapters.scheduler import workflows
+from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
@@ -204,28 +206,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-
-def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Awaitable[None]]:
-    """Mark a sweep or drain that `tick` awaits, and stop its transient failures.
-
-    `_run_loops` ends every loop when one loop raises. A database, Anthropic or
-    GitHub error in one step would stop routine dispatch until a restart. This
-    boundary logs such an error and returns; the next tick retries. A step may
-    keep a narrower catch for its own log event. A test requires every step
-    `tick` awaits to carry this decorator or sit in an allow-list.
-    """
-
-    @functools.wraps(step)
-    async def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
-        try:
-            await step(*args, **kwargs)
-        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError) as error:
-            log.exception(
-                "scheduler.step.failed", step=step.__name__, causes=backend_refusal_causes(error)
-            )
-
-    return guarded
 
 
 @scheduler_step
@@ -2002,6 +1982,19 @@ async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None
     await sweep()
 
 
+@scheduler_step
+async def _workflow_loops(
+    engine: workflows.WorkflowEngine, *, stop_event: asyncio.Event, db: AsyncEngine
+) -> None:
+    """The workflow engine's own loops (`scheduler.workflows`), each step guarded there."""
+    await workflows.run_loops(engine, stop_event=stop_event, db=db)
+
+
+@scheduler_step
+async def _workflows_once(engine: workflows.WorkflowEngine) -> None:
+    await workflows.run_once(engine)
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
@@ -2011,6 +2004,7 @@ async def _run_loops(
     compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
+    workflow_loops: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Run ticks and upstream sweeps on separate loops until stopped.
 
@@ -2025,6 +2019,7 @@ async def _run_loops(
     inline, routine claims waited for it. On stop the passes in flight are
     cancelled: each model call commits on its own and an unfinished session
     keeps its settle request. An uncaught error in any loop ends all loops.
+    `workflow_loops` runs until `stop_event` on its own intervals.
     """
     async with asyncio.TaskGroup() as loops:
         background = [
@@ -2040,6 +2035,13 @@ async def _run_loops(
                 )
             ),
         ]
+        if workflow_loops is not None:
+            run_workflows = workflow_loops
+
+            async def workflows_until_stopped() -> None:
+                await run_workflows()
+
+            background.append(loops.create_task(workflows_until_stopped()))
         if usage_sweep is not None:
             background.append(
                 loops.create_task(
@@ -2166,6 +2168,7 @@ async def run(
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()
+    workflow_engine = workflows.WorkflowEngine(sm, settings, {})
     loop = asyncio.get_running_loop()
 
     def on_signal() -> None:
@@ -2229,6 +2232,7 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _workflows_once(workflow_engine)
             return 0
 
         async def tick() -> None:
@@ -2290,6 +2294,9 @@ async def run(
                 compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
+                workflow_loops=lambda: _workflow_loops(
+                    workflow_engine, stop_event=stop_event, db=engine
+                ),
             )
 
         return 0
