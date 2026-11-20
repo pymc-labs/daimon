@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Sync an agent's repo skills now from their recorded repos; an unchanged skill is",
+    "skipped. Only an owner of the agent or an admin."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id"
+    ],
+    "type": "object"
+  }
+}

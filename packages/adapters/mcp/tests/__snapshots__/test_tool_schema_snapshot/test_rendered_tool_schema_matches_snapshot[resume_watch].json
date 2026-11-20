@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Resume your paused watch from an attended owner turn after fresh access checks.",
+    "Only the owner may resume; an admin cannot override the owner pause.",
+    "Server-side owner card proof is required, including with tool safety off.",
+    "Backends without tool confirmation refuse.",
+    "Imported watches require operator confirmation; source_unmapped never resumes."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

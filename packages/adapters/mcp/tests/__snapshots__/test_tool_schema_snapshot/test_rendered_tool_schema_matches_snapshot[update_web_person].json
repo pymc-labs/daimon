@@ -1,0 +1,52 @@
+{
+  "description": [
+    "Set a web person's role (web app admin or member, not Daimon admin) or suspend or",
+    "restore them."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "person_id": {
+        "type": "string"
+      },
+      "role": {
+        "anyOf": [
+          {
+            "enum": [
+              "admin",
+              "member"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "status": {
+        "anyOf": [
+          {
+            "enum": [
+              "active",
+              "suspended"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "person_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

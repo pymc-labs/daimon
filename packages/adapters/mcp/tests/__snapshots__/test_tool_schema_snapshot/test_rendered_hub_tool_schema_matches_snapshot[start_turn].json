@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Start a turn without waiting.",
+    "",
+    "Returns ``{\"handle\": ...}`` for polling with ``get_session``; show the person",
+    "``monitoring`` when it is set."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "message"
+    ],
+    "type": "object"
+  }
+}

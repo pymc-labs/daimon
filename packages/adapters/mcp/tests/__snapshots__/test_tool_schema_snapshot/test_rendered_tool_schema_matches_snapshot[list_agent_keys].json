@@ -1,0 +1,44 @@
+{
+  "description": [
+    "What keys does an agent have? List its stored API key names, never values.",
+    "",
+    "Use ``get_agent`` for skills and MCP access, ``request_agent_key`` to add",
+    "keys or ``remove_agent_key`` to remove them. Stored names on this target",
+    "are not proof that the answering agent can use those keys.",
+    "Pass this turn's ``origin_context_id`` so its channel counts."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_name"
+    ],
+    "type": "object"
+  }
+}

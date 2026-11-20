@@ -1,0 +1,98 @@
+{
+  "description": [
+    "Send an email or a calendar invite from the person's Microsoft account.",
+    "",
+    "Works only in their 1:1 chat with Daimon, and each call waits for them",
+    "to press Approve on a card that shows the recipients and subject. body",
+    "is plain text, at most 8,000 characters. For create_event pass start",
+    "and end as ISO 8601 local times in time_zone (an IANA or Windows zone",
+    "name); to are required attendees, cc optional ones. Draft wording with",
+    "them in chat first. Always pass origin_context_id from the current chat."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "send_mail",
+          "create_event"
+        ],
+        "type": "string"
+      },
+      "body": {
+        "type": "string"
+      },
+      "cc": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "end": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "location": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      },
+      "start": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "subject": {
+        "type": "string"
+      },
+      "time_zone": {
+        "default": "UTC",
+        "type": "string"
+      },
+      "to": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "action",
+      "to",
+      "subject",
+      "body"
+    ],
+    "type": "object"
+  }
+}

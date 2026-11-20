@@ -1,0 +1,51 @@
+{
+  "description": [
+    "Stop an agent using an attached skill, such as eda. Remove that one",
+    "attachment while preserving other skills; it applies from the agent's next",
+    "message, not the one running now.",
+    "",
+    "``delete_skill`` destroys the shared workspace skill instead;",
+    "``update_agent`` adds existing skills and ``add_skill`` new ones. Accept a skill",
+    "name or raw ``skill_id``. The resource and other agents stay intact. A built-in",
+    "agent is refused; changing a default agent needs admin.",
+    "Pass this turn's ``origin_context_id`` so its channel counts."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "skill_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_name",
+      "skill_id"
+    ],
+    "type": "object"
+  }
+}

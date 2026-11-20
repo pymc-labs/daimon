@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Give an agent the server skill update its model provider check held back."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id",
+      "skill_id"
+    ],
+    "type": "object"
+  }
+}

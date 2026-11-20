@@ -1,0 +1,48 @@
+{
+  "description": [
+    "Fetch the transcript of a public YouTube video for summarization or Q&A.",
+    "",
+    "Use this when the user shares a YouTube URL and asks about the video's",
+    "content — summaries, key points, quotes, \"what did they say at X\". Do",
+    "NOT use it for unrelated chat about a video the user mentions without",
+    "asking for content help.",
+    "",
+    "The returned transcript includes [HH:MM:SS] timestamps every ~30",
+    "seconds and bracketed visual notes (e.g. \"[shows chart]\") for moments",
+    "not captured by audio. Use timestamps when you cite specific moments",
+    "in your reply (\"around 12:30 they discuss...\").",
+    "",
+    "Limitations:",
+    "- Public videos only. Private and unlisted URLs will error out — tell",
+    "  the user the video must be public.",
+    "- Free-tier quota is 8 hours of YouTube video per day across the whole",
+    "  deployment. If you see a quota error, tell the user honestly.",
+    "- Returns English transcripts. For non-English content, the speakers'",
+    "  original words are preserved but section labels are English."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "This turn's origin_context_id, so the cost counts\ntoward the channel it was asked in."
+      },
+      "url": {
+        "description": "A public YouTube video URL. Accepts youtube.com/watch?v=,\nyoutu.be/, /embed/, /shorts/, /live/ shapes.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "type": "object"
+  }
+}

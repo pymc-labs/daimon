@@ -1,0 +1,17 @@
+{
+  "description": [
+    "List operator image profiles, fixed CPU/RAM and allowed regions."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

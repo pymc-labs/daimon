@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Get a routine by id. Raises if not found, cross-tenant, or someone else's and you",
+    "are not an admin."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "routine_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "routine_id"
+    ],
+    "type": "object"
+  }
+}

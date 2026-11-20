@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Check one of your background commands: state, exit code and output size.",
+    "",
+    "Running commands are checked on the machine once. A running command keeps",
+    "its session alive up to the maximum lifetime."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "task_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "task_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

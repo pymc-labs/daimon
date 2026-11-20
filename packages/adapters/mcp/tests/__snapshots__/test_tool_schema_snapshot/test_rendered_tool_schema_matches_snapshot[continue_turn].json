@@ -1,0 +1,53 @@
+{
+  "description": [
+    "Send a follow-up message on an existing session, or resume a paused one.",
+    "",
+    "Use this to continue a multi-turn conversation. Returns",
+    "``{\"handle\": \"<session_id>\", \"turn_event_id\": \"<event_id>\",",
+    "\"turn_started_at\": \"<iso8601>\"}`` — the same three-key shape as",
+    "``start_turn``, with the boundary taken from THIS message's send, not",
+    "the session's earlier turns. Poll ``list_events`` with",
+    "``created_at_gte=turn_started_at`` and discard events up to and",
+    "including ``turn_event_id`` to read only this turn's transcript.",
+    "``monitoring``, when present, is a notice to show the person.",
+    "",
+    "When ``get_my_session`` reports ``status`` ``paused`` with the hint",
+    "to call ``continue_turn``, a turn this tool started is waiting on tool",
+    "confirmations nobody is answering (the service restarted). This call",
+    "resumes it: the waiting calls are decided by the current tool policy",
+    "(reads run; writes are refused unless the operator allowed them in",
+    "unattended runs). ``message`` is then optional: without one, the",
+    "paused turn's boundary is returned; with one, it is sent once the",
+    "resumed turn ends, or the call is refused if that takes more than",
+    "about 90 seconds. A turn waiting on someone's approval card in chat",
+    "is refused: only that card answers it. Any other session needs a",
+    "``message``.",
+    "Use a handle opened through agent chat. Platform conversations and",
+    "older sessions without headless creation provenance cannot be driven here.",
+    "If the agent's model, prompt, skills, MCP servers or tools changed since",
+    "the session started, a message is refused: start a new one with ``start_turn``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "type": "string"
+      },
+      "message": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "type": "object"
+  }
+}

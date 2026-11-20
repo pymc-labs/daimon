@@ -1,0 +1,32 @@
+{
+  "description": [
+    "Read an owner/admin job; return source-restricted metadata when content is private.",
+    "",
+    "Supply origin_context_id from a turn inside a restricted source channel.",
+    "Admin authority permits management, never a bypass of source privacy."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "job_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "type": "object"
+  }
+}

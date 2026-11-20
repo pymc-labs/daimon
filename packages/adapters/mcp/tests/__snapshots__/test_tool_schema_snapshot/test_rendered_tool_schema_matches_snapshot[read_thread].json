@@ -1,0 +1,62 @@
+{
+  "description": [
+    "Read messages from a thread, oldest-first.",
+    "",
+    "Pass thread_id exactly as turn_controls, list_threads or parse_link gives",
+    "it. Returns the root and the newest replies, at most 200 messages per call",
+    "with the root included (fewer where a limit applies); a limit below 2 still",
+    "reads the root and one reply. To read older ones, pass the result's",
+    "next_cursor as cursor, or its next_before as before; the other parameter is",
+    "rejected. Threads under a sealed channel need origin_context_id, as",
+    "read_channel does."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "before": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "thread_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "thread_id"
+    ],
+    "type": "object"
+  }
+}

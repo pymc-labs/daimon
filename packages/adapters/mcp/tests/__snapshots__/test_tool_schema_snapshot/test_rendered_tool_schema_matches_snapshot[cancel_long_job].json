@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Request interrupt and archive as owner or current human tenant admin.",
+    "",
+    "Cancellation requires management authority only: source privacy never blocks",
+    "stopping a job. Reply and audit contain no command, summary or other content.",
+    "The scheduler makes cancellation terminal after interrupt and archive."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "job_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "type": "object"
+  }
+}

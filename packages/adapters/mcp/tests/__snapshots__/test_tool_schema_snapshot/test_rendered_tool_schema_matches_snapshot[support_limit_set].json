@@ -1,0 +1,128 @@
+{
+  "description": [
+    "Set a support limit for the workspace, an agent or a channel. Admin-only.",
+    "",
+    "``scope_id``: none for the workspace, an agent name or id, or a channel id",
+    "(a thread id resolves to its parent). The most specific place with a limit",
+    "governs a request; limits never stack. Arguments left out keep the limit's",
+    "values; ``\"none\"`` clears ``shared``, ``each_person`` or a date. ``shared``",
+    "is credits everyone there uses together, ``each_person`` each person may use,",
+    "decimal strings such as ``\"0.5\"``. ``window``: ``total`` or",
+    "``monthly`` (per UTC month). ``starts_at`` and ``ends_at`` (exclusive) are",
+    "set by hand; outside them, requests are refused. ``person`` is a",
+    "platform user id or ``<@id>``: it sets that person's own limit at the place",
+    "(``workspace`` means everywhere) with ``each_person`` only.",
+    "``expected_revision``: the ``revision`` last read, or 0 when you expect no",
+    "limit; a mismatch saves nothing. Example: ``scope=\"channel\"``,",
+    "``scope_id=\"222\"``, ``shared=\"5\"``, ``each_person=\"1\"``, ``window=\"monthly\"``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "each_person": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "ends_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_revision": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "person": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "scope": {
+        "enum": [
+          "workspace",
+          "agent",
+          "channel"
+        ],
+        "type": "string"
+      },
+      "scope_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "shared": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "starts_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "window": {
+        "anyOf": [
+          {
+            "enum": [
+              "total",
+              "monthly"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "type": "object"
+  }
+}

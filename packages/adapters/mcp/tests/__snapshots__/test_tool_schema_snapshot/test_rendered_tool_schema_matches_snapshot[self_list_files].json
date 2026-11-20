@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List all keys + metadata (no values) in your private agent_files namespace."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

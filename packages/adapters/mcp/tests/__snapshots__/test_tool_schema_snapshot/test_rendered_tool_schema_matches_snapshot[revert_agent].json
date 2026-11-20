@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Restore a recorded version of an agent's setup as its next version; name, avatar,",
+    "places and sign-ins stay."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "version": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "agent_id",
+      "version",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "description": [
+    "Add an MCP server that needs no token, such as Context7, to an agent.",
+    "",
+    "For Linear or other bearer-authenticated endpoints, use",
+    "``request_mcp_token`` instead;",
+    "``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before",
+    "directly changing its setup. Needs the agent's owner or an admin.",
+    "",
+    "Connects the server; its tools are available from the agent's next message,",
+    "not the one running now. Reusing a server name replaces the URL; the same",
+    "name and URL is a no-op. Other connections are preserved.",
+    "Pass this turn's ``origin_context_id`` so its channel counts."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "server_name": {
+        "type": "string"
+      },
+      "url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_name",
+      "server_name",
+      "url"
+    ],
+    "type": "object"
+  }
+}

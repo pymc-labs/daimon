@@ -1,0 +1,21 @@
+{
+  "description": [
+    "Remove an allowance or cap."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "allowance_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "allowance_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}
