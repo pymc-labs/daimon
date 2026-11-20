@@ -241,7 +241,7 @@ def _provider(source_tenant: uuid.UUID, created: list[dict[str, Any]]) -> MARout
         if request.method == "GET":
             if rest:
                 return httpx.Response(200, json=pool[rest.strip("/")])
-            return list_response([v for k, v in pool.items() if k.startswith(kind[:3])])
+            return list_response([v for k, v in pool.items() if k.startswith(kind[:2])])
         if rest:
             created.append({"kind": "archive", "id": rest.split("/")[1]})
             return httpx.Response(200, json=pool[rest.split("/")[1]])
@@ -286,7 +286,7 @@ async def test_production_port_when_item_runs_then_fork_pod_turn_and_files_reach
     assert item and not isinstance(item, bool), "the queued item runs"
     assert item.status == "done", item.error
     fork, environment = (
-        next(c for c in created if c["kind"] == k) for k in ("agent", "environment")
+        next(c for c in created if c["kind"] == k) for k in ("agents", "environments")
     )
     eval_id = str(await eval_tenant(db_session_factory))
     assert fork["metadata"]["daimon_tenant"] == eval_id, "the fork lives in the eval tenant"

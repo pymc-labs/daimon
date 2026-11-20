@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import shlex
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -79,6 +79,8 @@ OUTPUTS_DIR: Final = "/mnt/session/outputs"
 """Where the agent saves files for its reply (the platform prompt names it)."""
 _FORK_FIELDS: Final = ("description", "system", "tools", "skills")
 _EVAL_CONTEXT: Final = "eval://case-context"
+_BACKEND: Final = "anthropic"
+"""The one backend whose live arms run here: its executor serves self-hosted sessions."""
 
 
 @dataclass(frozen=True)
@@ -179,25 +181,23 @@ class EvalTurns:
             return
         self.context.by_channel.pop(item.name, None)
         scope = resource_scope(tenant_id=str(item.tenant_id))
-        steps = [
-            (item.pod is not None, lambda: self.pods.runtime.stop(item.pod)),  # pyright: ignore[reportArgumentType]
-            (True, lambda: archive_agent(self.deps.anthropic, item.agent_id, scope=scope)),
-            (
-                True,
-                lambda: archive_environment(self.deps.anthropic, item.environment_id, scope=scope),
-            ),  # fmt: skip
+        client, records = self.deps.anthropic, self.deps.sessionmaker
+        steps: list[Awaitable[None]] = [
+            archive_agent(client, item.agent_id, scope=scope, records=records),
+            archive_environment(client, item.environment_id, scope=scope, records=records),
         ]
-        for wanted, step in steps:
+        if item.pod is not None:
+            steps.insert(0, self.pods.runtime.stop(item.pod))
+        for step in steps:
             try:
-                if wanted:
-                    await step()
+                await step
             # Clean-up is best effort: `reap` removes pods left behind, archives can wait.
             except Exception:
                 log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
 
     async def _open(self, request: TurnRequest) -> _Item:
         deps, case, arm = self.deps, request.case, request.arm
-        if arm.live is None or arm.live.backend != "anthropic":
+        if arm.live is None or arm.live.backend != _BACKEND:
             raise NotImplementedError("the eval runner runs live arms on the anthropic backend")
         tenant_id = await eval_tenant(deps.sessionmaker)
         scope = resource_scope(tenant_id=str(tenant_id))
@@ -207,7 +207,7 @@ class EvalTurns:
         environment = await create_environment(deps.anthropic, {
             "name": name, "config": {"type": "self_hosted"}, "metadata": metadata,
             "purpose": "eval",
-        }, scope=scope)  # fmt: skip
+        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
         source = await self._source(request)
         params: dict[str, Any] = source.model_dump(mode="json", include=set(_FORK_FIELDS))
         tools: list[dict[str, Any]] = params.get("tools") or []
@@ -216,7 +216,7 @@ class EvalTurns:
             "model": arm.live.model, "mcp_servers": [],
             # Provider-dialed MCP servers reach past the enclosure, so the fork has none.
             "tools": [t for t in tools if t.get("type") != "mcp_toolset"],
-        }, scope=scope)  # fmt: skip
+        }, scope=scope, records=deps.sessionmaker)  # fmt: skip
         item = _Item(tenant_id, case, request.surface, name, agent.id, environment.id)
         self._items[request.item_id] = item
         item.pod = await self._pod(request, environment.id)
@@ -252,7 +252,8 @@ class EvalTurns:
         if found is None:
             raise LookupError(f"the arm's agent {ref!r} is not in the run's workspace")
         scope = resource_scope(tenant_id=str(request.tenant_id))
-        return await retrieve_agent(self.deps.anthropic, found, scope=scope)
+        return await retrieve_agent(self.deps.anthropic, found, scope=scope,
+                                    records=self.deps.sessionmaker)  # fmt: skip
 
     async def _pod(self, request: TurnRequest, environment_id: str) -> PodHandle:
         pods, case = self.pods, request.case
@@ -265,10 +266,10 @@ class EvalTurns:
         ]  # fmt: skip
         executor = {**pods.executor_config, "ANTHROPIC_ENVIRONMENT_ID": environment_id}
         spec = PodSpec(
-            item=world_item, image=pods.image, executor="anthropic", world_url=pods.world_url,
+            item=world_item, image=pods.image, executor=_BACKEND, world_url=pods.world_url,
             world_token=request.world_token, ca=pods.ca, executor_config=executor, files=files,
             env=(case.world.env and case.world.env.vars) or {},
-            control_plane=CONTROL_PLANE_HOSTS["anthropic"], passthrough=pods.passthrough,
+            control_plane=CONTROL_PLANE_HOSTS[_BACKEND], passthrough=pods.passthrough,
             registries=pods.registries,
             clock=case.clock.now, limits=pods.limits,
         )  # fmt: skip
