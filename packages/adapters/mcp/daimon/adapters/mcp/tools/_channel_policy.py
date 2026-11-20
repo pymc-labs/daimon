@@ -64,7 +64,11 @@ from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
-from daimon.core.stores.turn_origins import get_active_origin, list_active_origins
+from daimon.core.stores.turn_origins import (
+    get_active_origin,
+    get_session_origin,
+    list_active_origins,
+)
 from daimon.core.turn_hold import TurnHold
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -930,5 +934,30 @@ async def get_verified_origin(
         origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
     ):
         # A held credential's named origin can only narrow: one outside its channel is none.
+        return None
+    return origin
+
+
+async def get_session_turn_origin(runtime: McpRuntime, auth: AuthIdentity) -> TurnOriginRow | None:
+    """The chat turn the calling provider session runs, without the model naming it; None
+    outside a chat turn or when the origin belongs to another responder, as the call gate."""
+    if auth.platform is None or auth.chat_agent_id is None or auth.chat_session_id is None:
+        return None
+    async with runtime.session_factory() as session:
+        origin = await get_session_origin(
+            session,
+            tenant_id=auth.tenant_id,
+            account_id=auth.requester_account_id or auth.account_id,
+            platform=auth.platform,
+            chat_session_id=auth.chat_session_id,
+            now=datetime.now(UTC),
+        )
+    if origin is None or auth.chat_agent_id != derive_agent_uuid(
+        tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+    ):
+        return None
+    if auth.hold is not None and not auth.hold.contains(
+        origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+    ):
         return None
     return origin

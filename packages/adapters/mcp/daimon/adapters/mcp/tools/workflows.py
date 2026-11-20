@@ -3,7 +3,9 @@
 Every tool is the same service call the web app makes (`daimon.core.workflows.service`), as
 the person the chat belongs to. Drafts are edited against a revision, so a stale edit is
 refused with the revision to read again. An agent key or an unattended turn can draft and
-test but never publish; the service says so in words.
+test but never publish; the service says so in words. In a Discord, Slack or Teams turn the
+draft and run answer with cards (`daimon.core.workflows.chat_cards`): Publish and a live run
+wait for the person's press, and a run card follows the run.
 """
 
 from __future__ import annotations
@@ -16,10 +18,17 @@ from typing import Annotated, Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import get_session_turn_origin
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._own_card import post_own_card
+from daimon.core.access_policy import DM_SCOPE_PREFIX, place_thread_id
+from daimon.core.posted_controls import PostedCard
+from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.teams_threads import conversation_of
+from daimon.core.workflows import chat_cards, exchange, run_views, service, views
 from daimon.core.workflows import edits as edits_module
-from daimon.core.workflows import exchange, run_views, service, views
 from daimon.core.workflows.access import Who
+from daimon.core.workflows.chat_cards import ChatPlace
 from daimon.core.workflows.service import Env, NewWorkflow, Patch, WorkflowError
 from daimon.core.workflows.validate import Validation
 from fastmcp import Context, FastMCP
@@ -27,6 +36,10 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 Json = dict[str, Any]
+CARD_PLATFORMS = frozenset({"discord", "slack", "teams"})
+DRAFT_CARD = "The draft card is in the thread."
+PUBLISH_CARD = "The draft card is in the thread. It goes live when the person presses Publish."
+RUN_CARD = "The run card is in the thread. The run starts when the person presses Run."
 
 
 def _env(runtime: McpRuntime, auth: AuthIdentity) -> Env:
@@ -112,6 +125,35 @@ async def _workflow_view(env: Env, workflow_id: uuid.UUID) -> Json:
     }
 
 
+async def _chat_origin(runtime: McpRuntime, auth: AuthIdentity) -> TurnOriginRow | None:
+    """The chat turn whose thread takes this call's cards, or None outside one."""
+    if auth.platform not in CARD_PLATFORMS:
+        return None
+    return await get_session_turn_origin(runtime, auth)
+
+
+async def _post(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, card: PostedCard
+) -> ChatPlace:
+    """Post `card` in the turn's thread; where it is, as the run card follower edits it."""
+    message = await post_own_card(runtime, auth, origin=origin, card=card)
+    if origin.platform == "teams":
+        return ChatPlace("teams", conversation_of(origin.thread_id), message)
+    if origin.platform == "discord":
+        channel = place_thread_id(origin.thread_id) or origin.parent_channel_id
+        return ChatPlace("discord", channel, message)
+    thread = None if origin.thread_id.startswith(DM_SCOPE_PREFIX) else origin.thread_id
+    return ChatPlace(origin.platform, origin.parent_channel_id, message, thread)
+
+
+async def _post_draft(
+    runtime: McpRuntime, env: Env, auth: AuthIdentity, origin: TurnOriginRow, workflow_id: uuid.UUID
+) -> None:
+    draft = await service.get_draft(env, workflow_id)
+    web = chat_cards.web_root(runtime.settings, auth.tenant_id)
+    await _post(runtime, auth, origin, chat_cards.draft_card(workflow_id, draft, web))
+
+
 async def _list_workflows_impl(runtime: McpRuntime, auth: AuthIdentity) -> list[Json]:
     with _errors():
         return [_listed(w) for w in await service.list_workflows(_env(runtime, auth))]
@@ -175,16 +217,26 @@ async def _validate_workflow_impl(
 ) -> Json:
     env = _env(runtime, auth)
     with _errors():
+        origin = None if spec is not None else await _chat_origin(runtime, auth)
         if spec is None:
             spec = (await service.get_draft(env, workflow_id)).spec
-        return _problems(await service.validate(env, workflow_id, spec))
+        problems = _problems(await service.validate(env, workflow_id, spec))
+        if origin is None:
+            return problems
+        await _post_draft(runtime, env, auth, origin, workflow_id)
+    return {**problems, "card": DRAFT_CARD}
 
 
 async def _publish_workflow_impl(
     runtime: McpRuntime, auth: AuthIdentity, workflow_id: uuid.UUID, note: str
 ) -> Json:
+    env = _env(runtime, auth)
     with _errors():
-        published = await service.publish(_env(runtime, auth), workflow_id, note, source="chat")
+        if (origin := await _chat_origin(runtime, auth)) is not None:
+            # Publishing from chat is the person's press on the draft card.
+            await _post_draft(runtime, env, auth, origin, workflow_id)
+            return {"id": str(workflow_id), "status": "waiting", "message": PUBLISH_CARD}
+        published = await service.publish(env, workflow_id, note, source="chat")
     return {"id": published.id, "status": published.status, "live_version": published.live_version}
 
 
@@ -196,10 +248,27 @@ async def _run_workflow_impl(
     inputs: Json,
     test: bool,
 ) -> Json:
+    env = _env(runtime, auth)
     with _errors():
-        run = await service.start(
-            _env(runtime, auth), workflow_id, inputs, test={} if test else None
-        )
+        origin = await _chat_origin(runtime, auth)
+        if origin is not None and not test:
+            # A live run from chat starts on the person's press, with the inputs shown.
+            workflow = await service.get(env, workflow_id)
+            web = chat_cards.web_root(runtime.settings, auth.tenant_id)
+            card = chat_cards.confirm_card(
+                workflow_id, workflow.name, workflow.live_version, inputs, web
+            )
+            await _post(runtime, auth, origin, card)
+            return {"id": str(workflow_id), "status": "waiting", "message": RUN_CARD}
+        run = await service.start(env, workflow_id, inputs, test={} if test else None)
+    shown = (
+        None
+        if origin is None
+        else await chat_cards.run_card_of(env.sm, env.settings, uuid.UUID(run.id))
+    )
+    if origin is not None and shown is not None:
+        place = await _post(runtime, auth, origin, shown)
+        await chat_cards.show_on_card(env.sm, uuid.UUID(run.id), place)
     return _run_line(run)
 
 
