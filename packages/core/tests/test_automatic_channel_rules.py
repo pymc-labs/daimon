@@ -63,6 +63,7 @@ from mux.testing.drivers.anthropic.ma import (
     make_fake_ma_handler,
 )
 from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OPEN = "1" * 17
@@ -268,6 +269,32 @@ async def test_mode_shadow_computes_and_logs_without_enforcing(
     assert events[0]["kind"] == "narrow_rule" and events[0]["tenant_id"] == str(tenant.id)
     assert events[0]["reason"] == "narrow_rooms=1 facts_usable=True"
     assert {"channel_id", "agent"} <= events[0].keys()
+
+
+@pytest.mark.parametrize(("mode", "fails"), [("shadow", False), ("on", True)])
+async def test_a_failed_facts_read_stops_only_mode_on(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, mode: AudienceMode, fails: bool
+) -> None:
+    """Shadow enforces nothing, so a failing facts query is logged and the policy loads (the
+    session stays usable); mode on stays fail closed."""
+    _mode(monkeypatch, mode)
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="4190" + mode[:1])
+
+    async def broken(*_: object, **__: object) -> object:
+        await db_session.execute(text("select * from no_such_audience_table"))
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(store, "_stored_rooms", broken)
+    with structlog.testing.capture_logs() as logs:
+        if fails:
+            with pytest.raises(DBAPIError):
+                await store.load_access_policy(db_session, tenant_id=tenant.id)
+        else:
+            policy = await store.load_access_policy(db_session, tenant_id=tenant.id)
+            assert policy.automatic_channel_rules == {}
+            assert (await db_session.execute(text("select 1"))).scalar() == 1
+    failed = [e for e in logs if e["event"] == "audience.shadow_facts_failed"]
+    assert len(failed) == (0 if fails else 1)
 
 
 async def test_mode_on_fills_narrow_rooms_from_the_stored_facts(

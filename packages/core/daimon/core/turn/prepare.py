@@ -58,6 +58,7 @@ from daimon.core.mux_backend import (
 from daimon.core.mux_compat import legacy_call
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.relay_scope import identity_relay_server_names
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
 from daimon.core.session_seal import inherited_seal_ids, origin_stamp, seal_ids
 from daimon.core.session_snapshot import (
@@ -951,6 +952,15 @@ async def _decide_reuse_again(
     ):
         raise SessionBusyError(
             pending_reasons=("seal",), retry_after=now() + dt.timedelta(seconds=1)
+        )
+    # The reused session mounted the servers and the hold it was prepared with. A room that
+    # turned contained since keeps neither: the next turn rebuilds it (`mcp_servers`,
+    # `credential_hold`).
+    if current.hold != prepared.admission.hold or identity_relay_server_names(
+        current.agent, public_url=deps.public_url
+    ) != identity_relay_server_names(prepared.admission.agent, public_url=deps.public_url):
+        raise SessionBusyError(
+            pending_reasons=("audience",), retry_after=now() + dt.timedelta(seconds=1)
         )
     return replace(prepared, admission=current)
 

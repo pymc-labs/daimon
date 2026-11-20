@@ -5228,3 +5228,61 @@ async def test_a_handoff_carries_nothing_out_of_or_into_a_relay_agents_turn(
     else:
         assert calls == []
         assert handed.continuity.transfer_kind is None and handed.continuity.user_prefix == ""
+
+
+@pytest.mark.parametrize("change", ["servers", "hold"])
+async def test_a_reused_session_is_refused_when_the_room_turned_contained_after_admission(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The session was prepared with the identity server and no hold. If the decision made
+    again at reuse (`reauthorize`) strips the server or adds a hold, the turn waits so the
+    next one rebuilds the session; it never keeps the servers in a contained room."""
+    from daimon.core.relay_scope import without_identity_relays
+    from daimon.core.turn import prepare as prepare_module
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    payload = _agent_with_servers().model_dump(mode="json")
+    payload["mcp_servers"].append(
+        {"type": "url", "name": "grove", "url": "https://daimon.example/mcp-identity/grove"}
+    )
+    payload["tools"].append(_toolset("grove"))
+    agent = BetaManagedAgentsAgent.model_validate(payload)
+    _register(transport.state, agent)
+    deps = _gated_deps(db_session_factory, transport)
+    first = await _prepare(
+        deps, _admission(account=account, agent=agent), tenant=tenant, account=account
+    )
+    assert isinstance(first, PreparedTurn)
+    reused = replace(first, reused=True)
+
+    stripped = without_identity_relays(agent, public_url=_PUBLIC_URL)[0]
+    hold = TurnHold(platform="discord", channel_id="C-1", client=False)
+    now_contained = (
+        replace(reused.admission, agent=stripped)
+        if change == "servers"
+        else replace(reused.admission, hold=hold)
+    )
+
+    async def contained(_deps: object, _admission: object) -> object:
+        return now_contained
+
+    monkeypatch.setattr(prepare_module, "reauthorize", contained)
+    with pytest.raises(SessionBusyError):
+        await prepare_module._decide_reuse_again(  # pyright: ignore[reportPrivateUsage]
+            deps, reused, now=lambda: datetime.now(UTC)
+        )
+
+    async def unchanged(_deps: object, admission: object) -> object:
+        return admission
+
+    monkeypatch.setattr(prepare_module, "reauthorize", unchanged)
+    same = await prepare_module._decide_reuse_again(  # pyright: ignore[reportPrivateUsage]
+        deps, reused, now=lambda: datetime.now(UTC)
+    )
+    assert same is reused
