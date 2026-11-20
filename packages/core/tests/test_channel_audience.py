@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from daimon.core.channel_audience import (
@@ -18,6 +19,7 @@ from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.testing.factories import make_tenant
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -60,7 +62,21 @@ async def test_the_mode_is_off_until_a_server_sets_it_and_shadow_is_not_on(
         set_by=None,
         surface="chat",
     )
-    assert await audience_mode(db_session, place) == "shadow"
+    assert await audience_mode(db_session, place) == "shadow", "a write drops the stored read"
+
+    reads: list[str] = []
+
+    def record(conn: Any, cursor: Any, statement: str, *rest: Any) -> None:
+        reads.append(statement)
+
+    engine = db_session.bind.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        other_room = FeaturePlace(tenant_id=tenant.id, platform="discord", channel_id="C2")
+        assert await audience_mode(db_session, other_room) == "shadow"
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert reads == [], "a transaction reads a server's mode once, for every room"
 
 
 async def test_a_failed_mode_read_raises_instead_of_picking_a_mode(
