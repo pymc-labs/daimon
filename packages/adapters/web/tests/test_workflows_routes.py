@@ -39,6 +39,7 @@ _ANY_BODY: dict[str, object] = {
     "note": "",
     "inputs": {},
     "delivery": "x",
+    "route": "approve",
 }
 
 
@@ -131,7 +132,7 @@ async def test_every_workflows_route_refuses_when_the_feature_is_off(
         ]
         assert len(routes) > 30, f"the routes are found: {len(routes)}"
         for method, path in routes:
-            url = re.sub(r"\{(workflow_id|run_id)\}", str(uuid.uuid4()), path)
+            url = re.sub(r"\{(workflow_id|run_id|item_id)\}", str(uuid.uuid4()), path)
             url = re.sub(r"\{number\}", "1", url)
             url = re.sub(r"\{\w+\}", "x", url)
             res = await r.client.request(method, url, json=_ANY_BODY)
