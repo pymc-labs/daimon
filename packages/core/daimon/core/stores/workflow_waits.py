@@ -34,6 +34,8 @@ class Wait(_Row):
     deliver: str | None
     min_approvals: int
     shown: dict[str, Any] | None
+    #: What an approval with `binds` covers: the digest of `shown["binds"]` at approval.
+    shown_hash: str | None = None
     event_source: str | None
     event_key: str | None
     expires_at: datetime | None
@@ -142,12 +144,17 @@ async def decide(
     text: str | None = None,
     values: dict[str, Any] | None = None,
     files: list[Any] | None = None,
+    shown: dict[str, Any] | None = None,
+    shown_hash: str | None = None,
     now: datetime,
 ) -> None:
+    """Close the wait; `shown` and `shown_hash` replace what it showed when given."""
+    covered = {} if shown is None else {"shown": shown, "shown_hash": shown_hash}
     await session.execute(
         update(WorkflowWait)
         .where(WorkflowWait.id == wait_id)
         .values(
+            **covered,
             status=status,
             decision=decision,
             decided_by_account_id=by,

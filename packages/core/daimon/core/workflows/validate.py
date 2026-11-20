@@ -51,6 +51,7 @@ from daimon.core.workflows.spec import (
     parse_spec,
 )
 from daimon.core.workflows.taint import Catalog, node_writes, tainted_steps
+from daimon.core.workflows.unattended import bound_by
 from pydantic import BaseModel, JsonValue, ValidationError
 
 DEFAULT_RUN_BUDGET_USD: Final = 5.0
@@ -173,7 +174,7 @@ def validate_spec(
     for node_id, node in nodes.items():
         c = classes[node_id]
         waived = isinstance(node, AgentNode) and node.untrusted_waiver
-        if "U" in c and "W" in c and not _bound_by(spec, node_id) and not waived:
+        if "U" in c and "W" in c and not bound_by(spec, node_id) and not waived:
             report.error("rule_of_two", "Untrusted input reaches a write", node_id)
     return Validation(
         errors=report.errors, warnings=report.warnings, grants=grants, classes=classes
@@ -435,15 +436,6 @@ def _check_spec(spec: Spec, report: _Report) -> None:
         )
 
 
-def _bound_by(spec: Spec, node_id: str) -> str | None:
-    for approval_id, node in spec.nodes.items():
-        if isinstance(node, ApprovalNode):
-            binds = [node.binds] if isinstance(node.binds, str) else node.binds or []
-            if node_id in binds:
-                return approval_id
-    return None
-
-
 def _classes_and_grants(
     spec: Spec, catalog: Catalog | None, tainted: set[str], run_budget_usd: float
 ) -> tuple[dict[str, list[RuleClass]], list[Grant]]:
@@ -459,7 +451,7 @@ def _classes_and_grants(
         if writes:
             c.append("W")
         classes[node_id] = c
-        if writes and not _bound_by(spec, node_id):
+        if writes and not bound_by(spec, node_id):
             detail = node.tool if isinstance(node, ActionNode) else "Agent writes"
             if not isinstance(node, CodeNode):
                 grants.append(Grant(kind="unattended_write", node=node_id, detail=detail))

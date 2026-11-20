@@ -21,7 +21,7 @@ from typing import Final, Literal, Protocol, cast
 from daimon.core.capability_tools import WORKFLOW_AUTHORING_TOOLS
 from daimon.core.config import Settings
 from daimon.core.headless_runner import StepTurn
-from daimon.core.stores import workflow_runs
+from daimon.core.stores import workflow_proposals, workflow_runs
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_waits import Wait
 from daimon.core.tool_safety import (
@@ -30,7 +30,6 @@ from daimon.core.tool_safety import (
     SEARCH_TOOL_NAME,
     ToolCall,
     ToolSafetyPolicy,
-    classify_tool,
     unwrap_daimon_call,
 )
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
@@ -41,12 +40,20 @@ from daimon.core.turn.unattended_capabilities import (
     StepTools,
 )
 from daimon.core.workflows import engine, step_tools, waits
+from daimon.core.workflows.action_step import (
+    ToolClient,
+    exposed,
+    review_proposals,
+    reviewed,
+    send_proposals,
+)
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key
 from daimon.core.workflows.preflight import Refusal, check
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
 from daimon.core.workflows.spec import AgentNode
+from daimon.core.workflows.unattended import Call, decide_unattended_call
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,7 +88,8 @@ class LaneTurn(Protocol):
 
 
 #: The M8 seam: buffer a third-party write as a proposal and answer the paused call.
-Propose = Callable[[ToolCall], Awaitable[ToolConfirmationResult]]
+#: Records a write as a proposal; gets the call and why it needs review.
+Propose = Callable[[ToolCall, str | None], Awaitable[ToolConfirmationResult]]
 
 
 def step_policy(policy: ToolSafetyPolicy, writes: Writes) -> ToolSafetyPolicy:
@@ -119,8 +127,12 @@ def step_decider(
     policy: ToolSafetyPolicy,
     writes: Writes,
     propose: Propose | None,
+    exposed: bool = False,
+    test: bool = False,
 ) -> Callable[[PolicyApproval], PolicyApproval]:
-    """Wrap the unattended decider with the step's grant, its `tools` list and its `writes`."""
+    """Wrap the unattended decider with the step's grant, its `tools` list and its `writes`;
+    third-party calls go through `decide_unattended_call` (`exposed`: untrusted data can steer
+    this step in this run)."""
     listed = {k for k in node.tools} if isinstance(node.tools, list) else None
 
     def wrap(base: PolicyApproval) -> PolicyApproval:
@@ -141,15 +153,17 @@ def step_decider(
                     and inner.key not in listed
                 ):
                     return _deny(f"Refused {inner.key}: this step may only use its listed tools.")
-            elif (
-                inner.server_name is not None
-                and writes == "propose"
-                and classify_tool(policy, server_name=inner.server_name, tool_name=inner.tool_name)
-                == "write"
-            ):
-                if propose is None:
-                    return _deny(f"Refused {inner.key}: proposed writes are not available yet.")
-                return await propose(inner)
+            elif inner.server_name is not None:
+                decision = decide_unattended_call(
+                    policy,
+                    Call(inner.server_name, inner.tool_name, writes, test=test, exposed=exposed),
+                )
+                if decision.verdict == "refuse" and decision.reason != "writes_refused":
+                    return _deny(f"Refused {inner.key}: {decision.message}")
+                if decision.verdict == "propose":
+                    if propose is None:
+                        return _deny(f"Refused {inner.key}: proposed writes are not available.")
+                    return await propose(inner, decision.reason)
             return await base.decide(call)
 
         return PolicyApproval(decide=decide)
@@ -220,7 +234,8 @@ class AgentStepExecutor:
     sm: Sessions
     settings: Settings
     turn: LaneTurn
-    propose: Propose | None = None
+    #: Records proposed writes and sends them once approved; without it proposals are refused.
+    tools: ToolClient | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     async def __call__(self, work: StepWork) -> engine.Outcome | Park:
@@ -228,6 +243,10 @@ class AgentStepExecutor:
         assert isinstance(node, AgentNode), "the agent executor runs agent nodes"
         if node.session == OWNER_DM:
             return engine.Failed("fatal", "Owner DM steps are not available yet")
+        if (held := await reviewed(self.sm, work)) is not None:
+            return await send_proposals(
+                self.sm, self.settings, self.tools, work, held, self.clock()
+            )
         key = _key(work)
         async with self.sm.begin() as s:
             attempt = await workflow_runs.running_attempt(s, work.step.id)
@@ -291,7 +310,9 @@ class AgentStepExecutor:
                 attempt_id=attempt.id,
                 policy=step_policy(self.settings.tool_safety, writes),
                 writes=writes,
-                propose=self.propose,
+                propose=self._proposer(work),
+                exposed=exposed(work),
+                test=work.run.mode == "test",
             ),
             workflow_run_id=work.run.id,
             workflow_step_id=work.step.id,
@@ -334,7 +355,43 @@ class AgentStepExecutor:
                 "The agent stopped without calling complete_step or fail_step",
                 reason="no_result",
             )
-        return step_tools.outcome(result)
+        outcome = step_tools.outcome(result)
+        if isinstance(outcome, engine.Succeeded):
+            review = await review_proposals(
+                self.sm, self.settings, self.tools, work, outcome, self.clock()
+            )
+            if review is not None:
+                return review
+        return outcome
+
+    def _proposer(self, work: StepWork) -> Propose | None:
+        tools = self.tools
+        if tools is None:
+            return None
+
+        async def propose(call: ToolCall, reason: str | None) -> ToolConfirmationResult:
+            url = await tools.server_url(work, call.server_name or "")
+            if url is None:
+                return _deny(f"Refused {call.key}: the agent does not connect it.")
+            async with self.sm.begin() as s:
+                added = await workflow_proposals.add_proposal(
+                    s,
+                    tenant_id=work.run.tenant_id,
+                    step_id=work.step.id,
+                    server_url=url,
+                    tool=call.key,
+                    arguments=dict(call.input),
+                    reason=reason,
+                )
+            if added is None:
+                return _deny(f"Refused {call.key}: this step has proposed all it may.")
+            return ToolConfirmationResult(
+                allow=False,
+                deny_message=f"Recorded as proposal {added[0]}. Daimon sends it after review; "
+                "carry on as if it will be sent.",
+            )
+
+        return propose
 
     async def _drive(
         self,

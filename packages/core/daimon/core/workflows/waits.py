@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from daimon.core.config import Settings
-from daimon.core.stores import workflow_runs, workflow_waits, workflows
+from daimon.core.stores import workflow_proposals, workflow_runs, workflow_waits, workflows
 from daimon.core.stores.workflow_run_events import NewEvent, append_events, step_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
@@ -28,15 +28,24 @@ from daimon.core.workflows.access import Who, holders, rights_of
 from daimon.core.workflows.engine import Event, Outcome
 from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, account_actor
-from daimon.core.workflows.spec import AnyNode, ApprovalNode, WaitNode, parse_duration
+from daimon.core.workflows.spec import (
+    ActionNode,
+    AnyNode,
+    ApprovalNode,
+    Spec,
+    WaitNode,
+    parse_duration,
+)
 from daimon.core.workflows.step_tools import BRIEF_SENT, Grant, StepRefused
 from daimon.core.workflows.triggers import MappingError, passes
+from daimon.core.workflows.unattended import call_hash
 from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 APPROVE: Final = "approve"
 REJECT: Final = "reject"
 ANSWER: Final = "answer"
+PROPOSALS: Final = "proposals"
 MAX_QUESTIONS: Final = 3
 #: Approver tokens checked against the person answering, not resolved to accounts.
 _LIVE_TOKENS: Final = ("admins", "thread")
@@ -61,6 +70,8 @@ class Answer(BaseModel):
     comment: str | None = None
     values: dict[str, JsonValue] = {}
     files: list[dict[str, JsonValue]] = []
+    #: A proposals review: the proposals approved (all when None).
+    selected: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -88,8 +99,15 @@ def _triggered_by(run: RunRow) -> uuid.UUID | None:
         return None
 
 
+def kind_of(wait: Wait) -> str:
+    """A wait's kind for answering: `proposals` is an agent step's review of its writes."""
+    return PROPOSALS if (wait.shown or {}).get("kind") == PROPOSALS else wait.kind
+
+
 def routes_of(node: AnyNode | None, kind: str) -> list[str]:
     """The answers a wait takes, in button order (the primary last)."""
+    if kind == PROPOSALS:
+        return [REJECT, APPROVE]
     if kind == "question" or not isinstance(node, ApprovalNode):
         return [ANSWER]
     if node.answer in ("text", "form"):
@@ -135,10 +153,10 @@ async def answerable(session: AsyncSession, who: Who, wait: Wait, run: RunRow) -
 # ---------- opening ----------
 
 
-async def _approvers(
-    session: AsyncSession, work: StepWork, node: ApprovalNode, now: datetime
+async def approvers_of(
+    session: AsyncSession, work: StepWork, approvers: Sequence[str], now: datetime
 ) -> tuple[list[str], list[str]]:
-    """Accounts the node names, and the tokens checked at answer time."""
+    """Accounts the approver tokens name, and the tokens checked at answer time."""
     workflow = await workflows.get_workflow(
         session, tenant_id=work.run.tenant_id, workflow_id=work.run.workflow_id
     )
@@ -148,7 +166,7 @@ async def _approvers(
     )
     accounts: list[uuid.UUID | None] = []
     tokens: list[str] = []
-    for token in node.approvers or ["owner"]:
+    for token in approvers or ["owner"]:
         if token == "owner":
             accounts.append(workflow.owner_account_id)
         elif token == "editors":
@@ -187,8 +205,9 @@ class ApprovalExecutor:
         now = self.clock()
         try:
             async with self.sm() as session:
-                addressees, tokens = await _approvers(session, work, node, now)
+                addressees, tokens = await approvers_of(session, work, node.approvers or [], now)
             show = render(node.show, work.context, now=now) if node.show else None
+            binds = bound_preview(work.spec, node, work.context, now)
             values = {
                 k: render(f.default, work.context, now=now)
                 for k, f in (node.form or {}).items()
@@ -207,10 +226,70 @@ class ApprovalExecutor:
                 "approvers": tokens,
                 "show": show if isinstance(show, str) or show is None else json.dumps(show),
                 "values": values,
+                "preview": binds,
             },
             expires_at=now + parse_duration(node.timeout.after) if node.timeout else None,
             remind_at=now + parse_duration(node.remind_every) if node.remind_every else None,
         )
+
+
+def _binds(node: ApprovalNode) -> list[str]:
+    return [node.binds] if isinstance(node.binds, str) else list(node.binds or [])
+
+
+def bound_preview(
+    spec: Spec, node: ApprovalNode, context: dict[str, JsonValue], now: datetime
+) -> list[dict[str, JsonValue]]:
+    """The bound Actions as the approver sees them; arguments that read the answer show as
+    null until it is given."""
+    preview: list[dict[str, JsonValue]] = []
+    for bound in _binds(node):
+        action = spec.nodes.get(bound)
+        if isinstance(action, ActionNode):
+            try:
+                args = render(dict(action.args or {}), context, now=now)
+            except ExpressionError:
+                args = None
+            preview.append({"node": bound, "tool": action.tool, "args": args})
+    return preview
+
+
+async def _bound_calls(
+    session: AsyncSession,
+    settings: Settings,
+    run: RunRow,
+    step: StepRow,
+    spec: Spec,
+    outcome: Outcome,
+    now: datetime,
+) -> dict[str, JsonValue]:
+    """Each bound Action's call as it will run after this answer, with its digest."""
+    node = spec.nodes[step.node_id]
+    assert isinstance(node, ApprovalNode)
+    if not isinstance(outcome, engine.Succeeded):
+        return {}
+    context = await runs.context_of(session, settings, run, step.node_id, now)
+    steps = context.get("steps")
+    if isinstance(steps, dict):
+        steps[step.node_id] = {
+            "output": outcome.output,
+            "summary": outcome.summary,
+            "route": outcome.route,
+            "status": "succeeded",
+            "files": [],
+            "visits": step.visit,
+        }
+    calls: dict[str, JsonValue] = {}
+    for bound in _binds(node):
+        action = spec.nodes.get(bound)
+        if not isinstance(action, ActionNode):
+            continue
+        try:
+            args = render(dict(action.args or {}), context, now=now)
+        except ExpressionError:
+            continue  # the Action fails its check rather than send unapproved arguments
+        calls[bound] = {"tool": action.tool, "args": args, "hash": call_hash(action.tool, args)}
+    return calls
 
 
 def event_source(work: StepWork, source: str) -> str:
@@ -366,6 +445,15 @@ def _form_values(node: ApprovalNode | None, kind: str, answer: Answer) -> dict[s
     return values
 
 
+def _selected(wait: Wait, answer: Answer) -> list[uuid.UUID]:
+    """The reviewed proposals the answer approves: those picked, or all shown."""
+    shown = [str(i) for i in (wait.shown or {}).get("proposals", [])]
+    picked = shown if answer.selected is None else answer.selected
+    if not set(picked) <= set(shown):
+        raise BadAnswer("Pick from the proposed writes.")
+    return [uuid.UUID(i) for i in dict.fromkeys(picked)]
+
+
 def _output(
     route: str, values: dict[str, JsonValue], answer: Answer, by: uuid.UUID, via: str
 ) -> dict[str, JsonValue]:
@@ -423,8 +511,9 @@ async def decide_wait(
             raise WaitGone("This was already answered.")
         spec = await runs.spec_of(session, run)
         node = spec.nodes.get(step.node_id)
-        approval = node if isinstance(node, ApprovalNode) else None
-        if answer.route not in routes_of(node, wait.kind):
+        kind = kind_of(wait)
+        approval = node if isinstance(node, ApprovalNode) and kind != PROPOSALS else None
+        if answer.route not in routes_of(node, kind):
             raise BadAnswer(f"Unknown answer: {answer.route}")
         if (
             approval is not None
@@ -433,8 +522,9 @@ async def decide_wait(
         ):
             raise NotYours("You started this run, so someone else must approve it.")
         values = _form_values(approval, wait.kind, answer) if answer.route == ANSWER else {}
+        selected = _selected(wait, answer) if kind == PROPOSALS else None
         comment = (answer.comment or "").strip()[:2000] or None
-        if comment is None and needs_comment(node, wait.kind, answer.route):
+        if comment is None and needs_comment(node, kind, answer.route):
             raise BadAnswer("Add a comment.")
         counted = await workflow_waits.add_answer(
             session,
@@ -452,6 +542,23 @@ async def decide_wait(
         if await workflow_waits.count_answers(session, wait.id, answer.route) < needed:
             return Decided("counted", answer.route)
         text = values.get("text") if isinstance(values.get("text"), str) else None
+        outcome = (
+            None
+            if approval is None
+            else _outcome(
+                approval, answer.route, _output(answer.route, values, answer, who.account_id, via)
+            )
+        )
+        shown: dict[str, Any] | None = None
+        if approval is not None and approval.binds and outcome is not None:
+            calls = await _bound_calls(session, settings, run, step, spec, outcome, now)
+            shown = {**(wait.shown or {}), "binds": calls}
+        if selected is not None:
+            approved = selected if answer.route == APPROVE else []
+            shown = {**(wait.shown or {}), "selected": [str(i) for i in approved]}
+            await workflow_proposals.decide_proposals(
+                session, step.id, approved=approved, by=who.account_id, now=now
+            )
         await workflow_waits.decide(
             session,
             wait.id,
@@ -463,6 +570,8 @@ async def decide_wait(
             text=text if isinstance(text, str) else None,
             values={k: v for k, v in values.items() if k != "text"} or None,
             files=list(answer.files) or None,
+            shown=shown,
+            shown_hash=call_hash("binds", shown["binds"]) if shown and "binds" in shown else None,
             now=now,
         )
         key = runs.key_of(step)
@@ -492,13 +601,6 @@ async def decide_wait(
                 at=now,
             )
             return Decided("decided", answer.route)
-        outcome = (
-            None
-            if approval is None
-            else _outcome(
-                approval, answer.route, _output(answer.route, values, answer, who.account_id, via)
-            )
-        )
         await runs.resume(
             session,
             settings,

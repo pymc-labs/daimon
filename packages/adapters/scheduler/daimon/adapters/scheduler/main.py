@@ -197,10 +197,12 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from daimon.core.workflows import waits as workflow_waits
+from daimon.core.workflows.action_step import ActionStepExecutor
 from daimon.core.workflows.agent_step import AgentStepExecutor
 from daimon.core.workflows.call_step import WorkflowStepExecutor
 from daimon.core.workflows.code_step import CodeStepExecutor
 from daimon.core.workflows.code_worker import ManagedCodeWorker
+from daimon.core.workflows.tool_client import McpToolClient
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
@@ -2174,11 +2176,13 @@ async def run(
     )
     stop_event = asyncio.Event()
     lane_turn = workflows.HeadlessLaneTurn(client, sm, settings, deployment_default, resolver_cache)
+    tool_client = McpToolClient(client, sm, settings, lane_turn.targets)
     workflow_engine = workflows.WorkflowEngine(
         sm,
         settings,
         {
-            "agent": AgentStepExecutor(sm, settings, lane_turn),
+            "agent": AgentStepExecutor(sm, settings, lane_turn, tool_client),
+            "action": ActionStepExecutor(sm, settings, tool_client),
             "workflow": WorkflowStepExecutor(sm, settings),
             "code": CodeStepExecutor(
                 sm, ManagedCodeWorker(client, sm, settings, lane_turn.targets)
