@@ -29,8 +29,8 @@ export function Ledger({ run, events, fresh, select, open, setOpen, className, r
   const [family, setFamily] = useState("all")
   const shown = family === "all" ? events : events.filter((e) => e.type.startsWith(`${family}.`))
   const body = useRef<HTMLDivElement>(null)
-  // Stay pinned to the newest row unless the reader scrolled up.
-  const pinned = useRef(true)
+  // A live run stays pinned to the newest row unless the reader scrolled up; a finished one opens at its first.
+  const pinned = useRef(["queued", "running", "waiting"].includes(run.status))
   useEffect(() => { const b = body.current; if (b && pinned.current) b.scrollTop = b.scrollHeight }, [shown.length, mode, open])
   return (
     <section className={cn("flex shrink-0 flex-col border-t bg-background", open ? "h-64" : "h-11", className)}>

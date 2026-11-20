@@ -71,7 +71,7 @@ export function InboxPage() {
                     <span className="flex items-center gap-2"><K.icon className="size-4 shrink-0 text-muted-foreground" /><span className="truncate font-medium">{i.title}</span></span>
                     <span className="block truncate pl-6 text-xs text-muted-foreground">{i.workflow.name}</span>
                   </TableCell>
-                  <TableCell className="whitespace-nowrap text-muted-foreground max-md:hidden">{i.step ?? "–"}</TableCell>
+                  <TableCell className="whitespace-nowrap text-muted-foreground max-md:hidden">{i.step_title ?? i.step ?? "–"}</TableCell>
                   <TableCell className="tabular max-sm:hidden">{i.run?.number ?? "–"}</TableCell>
                   <TableCell className="whitespace-nowrap text-muted-foreground max-lg:hidden">{i.asked_by}</TableCell>
                   <TableCell className="whitespace-nowrap max-sm:hidden"><Ago iso={i.decision?.at ?? i.since} /></TableCell>
@@ -172,13 +172,14 @@ function Detail({ d }: { d: InboxDetail }) {
           </div>
         </PanelSection>
       )}
+      {d.question && <PanelSection title="Question"><p className="text-sm">{d.question}</p></PanelSection>}
       <PanelSection>
         <Facts rows={[
           ["Workflow", <Link key="w" to={`/workflows/${d.workflow.id}`} className="text-link hover:underline">{d.workflow.name}</Link>],
           ["Run", d.run && <Link key="r" to={`/workflows/${d.workflow.id}/runs/${d.run.number}${d.step ? `?step=${encodeURIComponent(d.step)}` : ""}`} className="text-link hover:underline tabular">{d.run.number}</Link>],
-          ["Step", d.step],
+          ["Step", d.step_title ?? d.step],
           ["Asked by", d.asked_by],
-          ["Waiting since", <Ago key="s" iso={d.since} />],
+          [done ? "Asked" : "Waiting since", <Ago key="s" iso={d.since} />],
           ["Expires", d.expires_at && !done && `In ${until(d.expires_at)}`],
           ...sentRows(d.sent),
           ["Attached", d.attachments.length > 0 && <div key="a" className="-my-1"><FileList files={d.attachments} /></div>],
@@ -195,7 +196,6 @@ function Detail({ d }: { d: InboxDetail }) {
           )}
         </PanelSection>
       )}
-      {d.question && <PanelSection title="Question"><p className="text-sm">{d.question}</p></PanelSection>}
       {d.show && <PanelSection title="Shown to you"><div className="rounded-lg border bg-muted/40 px-4 py-3"><Prose text={d.show} breaks /></div></PanelSection>}
       {d.proposals.length > 0 && (
         <PanelSection title={`Proposals, ${picked.size} of ${d.proposals.length} selected`}>

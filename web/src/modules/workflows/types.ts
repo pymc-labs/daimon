@@ -240,7 +240,8 @@ export type InboxKind = "approval" | "question" | "proposals" | "publish"
 export type Decision = { route: string; label: string; by: Person; at: string; comment: string | null; selected: string[] | null }
 export type InboxItem = {
   id: string; kind: InboxKind; title: string; workflow: { id: string; name: string }; run: { id: string; number: number } | null
-  step: string | null; asked_by: string; since: string; expires_at: string | null; decision: Decision | null
+  /** `step` is the run's step key; `step_title` its title, else the key. */
+  step: string | null; step_title?: string | null; asked_by: string; since: string; expires_at: string | null; decision: Decision | null
 }
 export type InboxRoute = { name: string; label: string; primary: boolean; comment: boolean }
 export type Bound = { tool: string; label: string; step: string; args: Record<string, unknown> }

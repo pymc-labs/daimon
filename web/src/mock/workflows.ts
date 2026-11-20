@@ -76,7 +76,7 @@ export const W: Stored[] = [
   { id: "wf_triage", status: "live", owner: P.priya!, live: SPECS.triage, version: 11, draft: null, ticks: "ssssssscss", spend: 24.65, next_h: null, editors: [P.jonas!], runners: [],
     labels: ["Adstock decay ignores lag", "Docs: install on Windows", "Support Python 3.14", "Prior predictive fails"] },
   { id: "wf_research", status: "needs_review", owner: P.maya!, live: SPECS.research, version: 2, draft: null, ticks: "sssr", spend: 6.3, next_h: null, editors: [], runners: [] },
-  { id: "wf_content", status: "live", owner: P.priya!, live: delivered(SPECS.content, "approve", { deliver: "thread", channel: "C0SALES", attach: "${{ steps.write.output.body }}" }), version: 4, draft: null, ticks: "ssfsssw", spend: 7.9, next_h: null, editors: [P.maya!], runners: [P.maya!],
+  { id: "wf_content", status: "live", owner: P.priya!, live: delivered(SPECS.content, "approve", { deliver: "thread", channel: "C0SALES", attach: "${{ steps.write.files }}" }), version: 4, draft: null, ticks: "ssfsssw", spend: 7.9, next_h: null, editors: [P.maya!], runners: [P.maya!],
     labels: ["Priors for media mix", "Why Bayesian pricing", "Adstock in practice"] },
   { id: "wf_onboard", status: "live", owner: P.jonas!, live: SPECS.onboard, version: 6, draft: null, ticks: "ssssu", spend: 4.4, next_h: null, editors: [P.maya!], runners: [P.priya!],
     labels: ["Brightwave Telecom", "Tidewater Foods", "Larkspur Retail"] },

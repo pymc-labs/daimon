@@ -40,15 +40,15 @@ const LEAD_BODY = "Hi Ana,\n\nThanks for reaching out. Forecasting promotions ac
 const ARTICLE = "Priors are where a media mix model says what you already know. A weak prior on adstock decay lets the data speak, but with 18 months of weekly spend it mostly speaks noise.\n\nWe set decay priors from channel type, then let the likelihood move them. Paid search decays fast, TV slowly, and the posterior shows how far each moved."
 
 const RECS: Rec[] = [
-  { id: "ib_lead", kind: "approval", title: "Approve reply", workflow: { id: "wf_lead", name: "Inbound lead" }, run: run("wf_lead", 128), step: "review", asked_by: "Sales Desk",
+  { id: "ib_lead", kind: "approval", title: "Approve reply", workflow: { id: "wf_lead", name: "Inbound lead" }, run: run("wf_lead", 128), step: "review", step_title: "Review reply", asked_by: "Sales Desk",
     since: ago(2.2), expires_at: ago(-46), to: ["p_maya"], decision: null, routes: approve,
     show: "**Brightwave Telecom** (strong fit)\n" + LEAD_BODY,
     bound: [{ tool: "gmail/send_message", label: "Send email", step: "Send", args: { to: "ana@brightwave.example", subject: "Forecasting promotions before Q1", body: LEAD_BODY } }],
     form: { type: "object", required: ["body"], properties: { body: { type: "string", title: "Reply" } } }, values: { body: LEAD_BODY } },
-  { id: "ib_content", kind: "approval", title: "Editor approval", workflow: { id: "wf_content", name: "Content pipeline" }, run: run("wf_content", 126), step: "approve", asked_by: "Content Writer",
+  { id: "ib_content", kind: "approval", title: "Editor approval", workflow: { id: "wf_content", name: "Content pipeline" }, run: run("wf_content", 126), step: "approve", step_title: "Editor approval", asked_by: "Content Writer",
     since: ago(7), expires_at: ago(-65), to: ["p_maya", "p_priya"], decision: null, routes: approve, show: "**Priors for media mix**\n" + ARTICLE,
     bound: [{ tool: "notion/create_page", label: "Create page", step: "Create Notion page", args: { title: "Priors for media mix", parent: "Blog drafts" } }] },
-  { id: "ib_triage", kind: "proposals", title: "Label issues", workflow: { id: "wf_triage", name: "Issue triage" }, run: run("wf_triage", 126), step: "label", asked_by: "Code Reviewer",
+  { id: "ib_triage", kind: "proposals", title: "Label issues", workflow: { id: "wf_triage", name: "Issue triage" }, run: run("wf_triage", 126), step: "label", step_title: "Label the ticket", asked_by: "Code Reviewer",
     since: ago(4.5), expires_at: ago(-19), to: ["p_jonas", "p_priya"], decision: null,
     routes: [{ name: "reject", label: "Reject all", primary: false, comment: true }, { name: "approve", label: "Send selected", primary: true, comment: false }],
     proposals: [
@@ -57,22 +57,22 @@ const RECS: Rec[] = [
       { id: "pr3", tool: "github/create_comment", title: "Support Python 3.14", detail: "Label enhancement and add: We test 3.13 today. A PR adding 3.14 to CI is welcome." },
       { id: "pr4", tool: "github/create_comment", title: "Prior predictive fails", detail: "Label question and add: Could you share the model and seed? It runs on our fixtures." },
     ] },
-  { id: "ib_onboard", kind: "question", title: "Which channel for the kickoff", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 124), step: "welcome", asked_by: "Sales Desk",
+  { id: "ib_onboard", kind: "question", title: "Which channel for the kickoff", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 124), step: "welcome", step_title: "Welcome call", asked_by: "Sales Desk",
     since: ago(1.4), expires_at: null, to: ["p_maya", "p_jonas"], decision: null,
     routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }], question: "Where should the Larkspur Retail kickoff notes go?",
     form: { type: "object", required: ["channel"], properties: { channel: { type: "string", title: "Channel", enum: ["#delivery", "#clients", "#leads"] }, note: { type: "string", title: "Note" } } },
     values: { channel: "#delivery" },
     sent: [{ platform: "discord", where: "Direct message to Maya Lindqvist", link: "https://discord.com/channels/745261709622771773/1/2", at: ago(1.4) }],
     attachments: [{ name: "kickoff-notes.md", size: 2140, url: "/api/workflows/runs/wf_onboard_run124/files/kickoff-notes.md" }] },
-  { id: "ib_alert", kind: "approval", title: "Page the on-call", workflow: { id: "wf_alert", name: "Alert triage" }, run: run("wf_alert", 128), step: "page", asked_by: "Daimon",
+  { id: "ib_alert", kind: "approval", title: "Page the on-call", workflow: { id: "wf_alert", name: "Alert triage" }, run: run("wf_alert", 128), step: "page", step_title: "Page on-call", asked_by: "Daimon",
     since: ago(0.4), expires_at: ago(-0.2), to: ["p_jonas"], decision: null, routes: approve,
     show: "**api-latency-p99** above 900 ms for 12 minutes.\nLikely cause: the new rate limiter on `/v1/score`. Paging the on-call with the graph and the deploy link.",
     bound: [{ tool: "slack/post_message", label: "Post message", step: "Page", args: { channel: "#oncall", text: "api-latency-p99 above 900 ms for 12 minutes. Likely the rate limiter deploy from 14:10." } }] },
-  { id: "ib_digest", kind: "approval", title: "Check the digest", workflow: { id: "wf_digest", name: "Weekly pipeline digest" }, run: run("wf_digest", 128), step: "review", asked_by: "Sales Desk",
+  { id: "ib_digest", kind: "approval", title: "Check the digest", workflow: { id: "wf_digest", name: "Weekly pipeline digest" }, run: run("wf_digest", 128), step: "review", step_title: "Review reply", asked_by: "Sales Desk",
     since: ago(30), expires_at: null, to: ["p_maya", "p_jonas"], routes: approve,
     decision: { route: "approve", label: "Approved", by: P.maya!, at: ago(29), comment: null, selected: null }, show: "**3 risky deals** this week, 2 with a slipped close date.\nNorthwind renewal has had no activity in 21 days.",
     bound: [{ tool: "slack/post_message", label: "Post message", step: "Post to sales", args: { channel: "#sales", text: "3 risky deals this week." } }] },
-  { id: "ib_kickoff", kind: "question", title: "Kickoff channel for Fernhill", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 123), step: "welcome", asked_by: "Sales Desk",
+  { id: "ib_kickoff", kind: "question", title: "Kickoff channel for Fernhill", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 123), step: "welcome", step_title: "Welcome call", asked_by: "Sales Desk",
     since: ago(52), expires_at: null, to: ["p_maya", "p_jonas"], routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }],
     question: "Which channel should the Fernhill kickoff notes go to, and who joins?",
     decision: { route: "answer", label: "Answered", by: P.jonas!, at: ago(50), comment: null, selected: null },
@@ -113,7 +113,7 @@ function fromWait(run: Run, s: StepRun): Rec | null {
     : n.answer === "choice" ? Object.keys(n.routes ?? {}).map((name, i, all) => ({ name, label: name[0]!.toUpperCase() + name.slice(1), primary: i === all.length - 1, comment: false }))
     : approve
   return {
-    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, asked_by: "Daimon",
+    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: n.title ?? s.key, asked_by: "Daimon",
     since: w.opened_at, expires_at: w.expires_at, to: w.addressees.map((p) => p.id), decision: null, routes, sent: w.sent, attachments: w.attachments,
     ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const, title: "Answer" } } } } : {}),
   }

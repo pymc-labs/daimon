@@ -49,6 +49,8 @@ class InboxItem(BaseModel):
     workflow: dict[str, str]
     run: dict[str, Any] | None
     step: str | None
+    #: The step's title, else its key.
+    step_title: str | None = None
     asked_by: str
     since: str
     expires_at: str | None
@@ -222,6 +224,7 @@ async def _wait_detail(
         workflow={"id": str(run.workflow_id), "name": workflow.name if workflow else ""},
         run={"id": str(run.id), "number": run.number},
         step=key,
+        step_title=node.title if node and node.title else key,
         asked_by=ASKED_BY,
         since=iso(wait.opened_at) or "",
         expires_at=iso(wait.expires_at),
@@ -233,7 +236,6 @@ async def _wait_detail(
         form=_form(node, wait),
         values=dict(shown.get("values") or {}),
         routes=routes(node, kind),
-        sent=await _sent(seen.session, wait),
         attachments=[
             run_views.file_view(run.id, f)
             for f in cast("list[object]", shown.get("attachments") or [])
@@ -321,7 +323,7 @@ async def _detail(session: AsyncSession, env: Env, item_id: uuid.UUID) -> InboxD
     if wait is not None and wait.kind in ("approval", "question"):
         names = await _names(session, env, [wait], [])
         if (detail := await _wait_detail(seen, env, wait, names)) is not None:
-            return detail
+            return detail.model_copy(update={"sent": await _sent(session, wait)})
     elif env.who.admin and (
         request := await publish_requests.get_request(
             session, tenant_id=env.who.tenant_id, request_id=item_id
