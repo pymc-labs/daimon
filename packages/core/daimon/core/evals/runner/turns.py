@@ -124,6 +124,8 @@ _SHARED: Final = "anthropic"
 _GEMINI: Final = get_profile(GEMINI_PROFILE).provider
 _HARNESS: Final = "harness"
 """The arm backend of Daimon's own harness, whose provider is `selfhosted`."""
+_LOCK_POLL_S: Final = 5.0
+"""How often a running shared item checks that its environment lock is still held."""
 _BACKENDS: Final = frozenset({_SHARED, _GEMINI, _HARNESS, OPENAI.provider})
 """Backends whose live arms run here: their executors serve self-hosted sessions."""
 
@@ -171,6 +173,9 @@ class _Item:
     runtime: RuntimeFactory | TurnRuntime | None = None
     #: Held while its pod starts on its session's request (`_connect`).
     connecting: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Held while a card of the item is pressed; `raised` holds the cards handled so far.
+    pressing: asyncio.Lock = field(default_factory=asyncio.Lock)
+    raised: set[str] = field(default_factory=set[str])
 
 
 class PodOutputs:
@@ -279,16 +284,19 @@ class EvalTurns:
         self._items: dict[uuid.UUID, _Item] = {}
         self._environment = asyncio.Lock()
         self._lock: AsyncConnection | None = None
-        #: A shared item's pod did not stop: the lock stays held until the worker restarts.
+        #: A shared item's pod did not stop: the lock stays held until a later sweep stops it.
         self._stuck = False
         self._tagged = False
-        self._raised: set[str] = set()
 
     async def raise_card(self, notice: EvalCardNotice) -> None:
         """A card a tool posted in an item's conversation: the script presses it."""
         item = self._items.get(notice.item_id)
-        if item is not None and notice.card_id not in self._raised:
-            self._raised.add(notice.card_id)
+        if item is None:
+            return
+        async with item.pressing:
+            if notice.card_id in item.raised:
+                return
+            item.raised.add(notice.card_id)
             requester = item.surface.script.requester
             admin = _role(item.case, requester) is Role.ADMIN
             await press_eval_card(self.deps, item.tenant_id, item.surface, notice, is_admin=admin,
@@ -300,13 +308,31 @@ class EvalTurns:
         tenant_id = await eval_tenant(self.deps.sessionmaker)
         return await pending_cards(self.deps.sessionmaker, tenant_id, threads)
 
+    async def _cards(self, item_id: uuid.UUID, item: _Item) -> None:
+        """Press the item's cards posted this turn before it ends, so an approved call's wake
+        is queued when the item decides its next turn: one being pressed is waited for, one
+        whose notice has not come is found."""
+        async with item.pressing:
+            pass
+        for notice in await pending_cards(self.deps.sessionmaker, item.tenant_id,
+                                          {item.name: item_id}):  # fmt: skip
+            await self.raise_card(notice)
+
     async def turn(self, request: TurnRequest) -> None:
         item = self._items.get(request.item_id) or await self._open(request)
         reset = current_eval_item.set(request.item_id)
+        if item.shared and not await self._alive():
+            raise SandboxError("the shared eval environment's lock was lost")
+        guard = asyncio.create_task(self._guard(request.cancel)) if item.shared else None
         try:
             await self._turn(item, request)
+            await self._cards(request.item_id, item)
         finally:
             current_eval_item.reset(reset)
+            if guard is not None:
+                guard.cancel()
+        if guard is not None and guard.done() and not guard.cancelled():
+            raise SandboxError("the shared eval environment's lock was lost")
 
     async def close(self, item_id: uuid.UUID) -> None:
         """Stop the item's pod and clean up; SandboxError when a shared item's pod did not
@@ -335,27 +361,66 @@ class EvalTurns:
         if item.shared and not stopped:
             raise SandboxError(f"the eval pod of item {item_id} did not stop")
 
-    async def _hold(self, cancel: asyncio.Event) -> None:
-        """Take the shared environment, then stop any pod still polling it."""
-        await self._environment.acquire()
+    async def _alive(self) -> bool:
+        """Whether the connection holding the environment's lock still works: if it dropped,
+        so did the lock, and another worker may be stopping this worker's pod."""
+        lock = self._lock
+        if lock is None:
+            return False
         try:
-            if self._stuck:
-                raise SandboxError("a shared eval pod did not stop; restart the eval worker")
-            self._lock = await environment_lock(_engine(self.deps), self.pods.environment_id,
-                                                cancel)  # fmt: skip
+            await lock.execute(text("select 1"))
+            await lock.commit()
+        except Exception:
+            log.warning("eval_environment.lock_lost", exc_info=True)
+            return False
+        return True
+
+    async def _guard(self, cancel: asyncio.Event) -> None:
+        """Stop the running turn when the environment's lock is lost."""
+        while await self._alive():
+            await asyncio.sleep(_LOCK_POLL_S)
+        cancel.set()
+
+    async def _acquire(self, cancel: asyncio.Event) -> None:
+        """Take this worker's turn at the shared environment; SandboxError when `cancel` is
+        set first (the item's run stopped, or its worker took it over)."""
+        acquiring = asyncio.ensure_future(self._environment.acquire())
+        stopped = asyncio.ensure_future(cancel.wait())
+        try:
+            await asyncio.wait({acquiring, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if not acquiring.done():
+                raise SandboxError("the shared eval environment stayed busy")
+        finally:
+            # No effect on an acquire that finished: the turn is this worker's.
+            stopped.cancel()
+            acquiring.cancel()
+
+    async def _hold(self, cancel: asyncio.Event) -> None:
+        """Take the shared environment, then stop any pod still polling it. A pod that did
+        not stop keeps the cross-worker lock with this worker (`_stuck`) until a later sweep
+        stops it."""
+        await self._acquire(cancel)
+        try:
+            if self._lock is not None and not await self._alive():
+                await release_environment(self._lock)
+                self._lock = None
+            if self._lock is None:
+                self._lock = await environment_lock(_engine(self.deps), self.pods.environment_id,
+                                                    cancel)  # fmt: skip
             await self.pods.runtime.stop_environment(self.pods.environment_id)
+            self._stuck = False
         except BaseException:
             await self._release(stuck=False)
             raise
 
     async def _release(self, *, stuck: bool) -> None:
-        lock, self._lock = self._lock, None
+        """Free the shared environment for this worker's next item. The cross-worker lock is
+        freed too, unless a pod did not stop (now or earlier)."""
         self._stuck |= stuck
         try:
-            if lock is not None and not stuck:
+            if self._lock is not None and not self._stuck:
+                lock, self._lock = self._lock, None
                 await release_environment(lock)
-            elif lock is not None:
-                self._lock = lock
         finally:
             self._environment.release()
 
@@ -367,7 +432,10 @@ class EvalTurns:
             )
         shared = arm.live.backend == _SHARED
         if shared:
+            # Waiting for the environment is not the item's time or sandbox cost.
+            request.meter.started_at = None
             await self._hold(request.cancel)
+            request.meter.started_at = datetime.now(UTC)
         try:
             return await self._opened(request, shared)
         except BaseException:

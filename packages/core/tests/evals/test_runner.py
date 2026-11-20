@@ -29,10 +29,19 @@ from daimon.core.evals.chat.events import ChatLog
 from daimon.core.evals.chat.script import ScriptPlayer
 from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
 from daimon.core.evals.eval_tenant import eval_tenant
-from daimon.core.evals.format import Arm, JsonObject, LiveArm, Run, SuitePin, Usage, to_document
+from daimon.core.evals.format import (
+    Arm,
+    JsonObject,
+    LiveArm,
+    Run,
+    SuitePin,
+    TranscriptEvent,
+    Usage,
+    to_document,
+)
 from daimon.core.evals.runner.gemini import GeminiArms
 from daimon.core.evals.runner.harness import HarnessArms
-from daimon.core.evals.runner.item import ItemDeps, TurnRequest
+from daimon.core.evals.runner.item import ItemDeps, TurnRequest, link_world_calls
 from daimon.core.evals.runner.openai import OpenAIArms
 from daimon.core.evals.runner.tools import McpService
 from daimon.core.evals.runner.turns import (
@@ -561,6 +570,83 @@ async def test_wakes_when_every_turn_leaves_one_then_the_item_stops_at_its_turn_
     item = await run_next(ItemDeps(db_session_factory, turns, world, max_turns=3))
     assert item and not isinstance(item, bool) and item.error is not None, item
     assert (len(turns.turns), item.error.kind) == (3, "cap"), "wake turns count to the limit"
+
+
+class SyncedTurns(WakingTurns):
+    """Turns that need no wake; `close` waits until `parties` items reach it together."""
+
+    def __init__(self, parties: int = 1) -> None:
+        super().__init__(waking=0)
+        self.barrier = asyncio.Barrier(parties)
+
+    async def close(self, item_id: uuid.UUID) -> None:
+        await self.barrier.wait()
+
+
+async def test_items_when_two_of_a_run_finish_together_then_neither_deadlocks_on_the_run_row(
+    db_committing_engine: AsyncEngine, db_clean: None, tmp_path: Path
+) -> None:
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        runs, alex, run_id, _ = await _start(db_session, sessions, repeats=2, commit=True)
+    deps = ItemDeps(sessions, SyncedTurns(parties=2), FakeWorld(sessions, None, tmp_path))
+    first, second = await asyncio.gather(run_next(deps), run_next(deps))
+    assert [getattr(i, "status", None) for i in (first, second)] == ["done", "done"], (
+        "both results are stored: neither lost a lock wait to the other"
+    )
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status == "done", run.status
+
+
+class GatedTurns(WakingTurns):
+    """Turns that start, then wait for `gate` before they end."""
+
+    def __init__(self) -> None:
+        super().__init__(waking=0)
+        self.started, self.gate = asyncio.Event(), asyncio.Event()
+
+    async def turn(self, request: TurnRequest) -> None:
+        self.started.set()
+        await self.gate.wait()
+        await super().turn(request)
+
+
+async def test_cap_when_the_next_item_is_refused_then_a_running_item_still_finishes(
+    db_committing_engine: AsyncEngine, db_clean: None, tmp_path: Path
+) -> None:
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with sessions() as db_session:
+        runs, alex, run_id, _ = await _start(db_session, sessions, repeats=3, cap_items=1.5,
+                                             commit=True)  # fmt: skip
+    world = FakeWorld(sessions, None, tmp_path)
+    turns = GatedTurns()
+    running = asyncio.create_task(run_next(ItemDeps(sessions, turns, world, poll_s=0.01)))
+    await asyncio.wait_for(turns.started.wait(), 10)
+    refused = await run_next(ItemDeps(sessions, WakingTurns(), world))
+    await asyncio.sleep(0.1)  # the running item's watcher looks at its run
+    turns.gate.set()
+    item = await running
+    assert refused is None, "the item that would pass the cap does not run"
+    assert item and not isinstance(item, bool) and item.status == "done", (
+        "the item already running finishes"
+    )
+    run = await runs.status(alex, run_id)
+    assert isinstance(run, Run) and run.status == "partial", "the run ends once it has"
+    assert await run_next(ItemDeps(sessions, WakingTurns(), world)) is False, (
+        "the pending items were skipped"
+    )
+
+
+def test_link_world_calls_when_a_call_has_a_result_then_its_transcript_holds_one_result() -> None:
+    events = [TranscriptEvent.model_validate(e) for e in (
+        {"seq": 1, "turn": 0, "kind": "tool_call", "call_id": "c1",
+         "tool": {"name": "issue_write", "server": "github", "surface": "mcp", "input": {}}},
+        {"seq": 2, "turn": 0, "kind": "tool_result", "call_id": "c1",
+         "result": {"content": [{"type": "text", "text": "ok"}], "is_error": False}},
+    )]  # fmt: skip
+    linked = link_world_calls(events, [])
+    assert [e.kind for e in linked] == ["tool_call", "tool_result"], "one result per call"
+    assert linked[1].result and linked[1].result.content, "it keeps the agent's content"
 
 
 async def test_environment_lock_when_another_worker_holds_it_then_the_item_waits_and_gives_up(
