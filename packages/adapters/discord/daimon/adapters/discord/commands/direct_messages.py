@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -36,6 +36,7 @@ from daimon.adapters.discord.context import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.private_answer import PrivateOffers
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -129,6 +130,10 @@ _DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
 _EMPTY_NOTICE = "Send a text message to continue this conversation."
 _SEEN_REACTION = "👀"
 
+PrivateAnswerStart = Literal["started", "busy", "dm_failed", "refused", "failed"]
+"""How a Private answer press went: the turn ran, the DM was busy, the DM could not be
+opened, access refused it, or it failed."""
+
 
 @dataclass(frozen=True)
 class _DmRequest:
@@ -207,6 +212,8 @@ class DirectMessageCog(commands.Cog):
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
         )
+        #: The Private answer offers shown in rooms (`private_answer`).
+        self.private_offers = PrivateOffers()
 
     async def cog_unload(self) -> None:
         self._unloaded = True
@@ -738,6 +745,133 @@ class DirectMessageCog(commands.Cog):
                     settings=self.bot.runtime.settings,
                 )
             await interaction.followup.send(text, ephemeral=True)
+
+    async def start_private_answer(
+        self,
+        user: discord.User | discord.Member,
+        *,
+        request_id: int,
+        tenant_id: uuid.UUID,
+        agent: str,
+        question: str,
+        started: Callable[[], Awaitable[None]],
+    ) -> PrivateAnswerStart:
+        """Ask `question` again as a new DM turn of `user`: a Private answer (C4).
+
+        The new conversation has no source and no room history, and replaces the
+        person's current DM conversation. Nothing is posted in the room. `started`
+        runs once the conversation exists, before the turn; the turn then runs here,
+        holding the conversation as a DM's own turn does. "dm_failed" when the DM
+        cannot be opened: then no conversation is made. `request_id` (the press) is
+        the turn's message id.
+        """
+        if self._unloaded or self.bot.draining:
+            return "failed"
+        try:
+            channel = await user.create_dm()
+        except discord.HTTPException:
+            return "dm_failed"
+        key = (user.id, channel.id)
+        if self._lock(key).locked() or self._open_pick(key) is not None:
+            return "busy"
+        runtime = self.bot.runtime
+        request = _DmRequest(id=request_id, author=user, channel=channel, content=question)
+        with runtime.turn_deps.running_turns.track():
+            async with self._lock(key):
+                try:
+                    async with runtime.sessionmaker() as session:
+                        tenant = await get_tenant(session, tenant_id)
+                        current = await get_conversation(
+                            session,
+                            platform="discord",
+                            route_key=str(channel.id),
+                            external_user_id=str(user.id),
+                        )
+                    if (
+                        tenant is None
+                        or not tenant_ready(tenant)
+                        or not self.bot.allows_tenant(tenant)
+                        or not env_dm_policy(
+                            runtime.settings.direct_message_policies, tenant.id
+                        ).allows(str(user.id))
+                    ):
+                        return "refused"
+                    async with runtime.sessionmaker() as session:
+                        policy = await load_dm_access_policy(session, tenant_id=tenant.id)
+                    # The same access a DM turn checks, so a start is never a silent turn.
+                    subject = await self._subject(tenant.id, user.id)
+                    if subject.verified_membership is not True or not authorize(
+                        policy, subject=subject, action=Action.START_TURN
+                    ):
+                        return "refused"
+                    async with runtime.sessionmaker() as session:
+                        standing = await requester_standing(
+                            session,
+                            tenant_id=tenant.id,
+                            user_id=str(user.id),
+                            is_dm=True,
+                            event_role_ids=subject.role_ids,
+                            resolver=runtime.turn_deps.membership_resolver,
+                        )
+                    admission = await admit_cold_dm(
+                        runtime.turn_deps,
+                        requester_org=standing,
+                        tenant_id=tenant.id,
+                        external_user_id=str(user.id),
+                        channel_id=str(channel.id),
+                        role=Role.ADMIN if subject.is_admin else Role.USER,
+                        role_ids=subject.role_ids,
+                        verified_membership=subject.verified_membership,
+                        agent_name=agent,
+                        dm_no_source=True,
+                    )
+                except AdmissionDenied as exc:
+                    self._suppress(request, exc.reason)
+                    return "refused"
+                except _DM_FAILURES as exc:
+                    log.warning(
+                        "discord.dm.private_answer_failed",
+                        causes=backend_refusal_causes(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    return "failed"
+                guild = self.bot.get_guild(int(tenant.external_id))
+                server_name = guild.name if guild else tenant.external_id
+                try:
+                    # First, so a closed DM makes no conversation.
+                    await channel.send(
+                        embed=build_notice_embed(
+                            f"Private answer from {admission.config.agent_name} in "
+                            f"{server_name}.\n\nReply here to follow up.",
+                            neutral=True,
+                        ),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.HTTPException:
+                    return "dm_failed"
+                try:
+                    conversation = await start_cold_dm(
+                        runtime.turn_deps,
+                        admission,
+                        tenant_id=tenant.id,
+                        workspace_id=tenant.external_id,
+                        route_key=str(channel.id),
+                        external_user_id=str(user.id),
+                        expected_scope_id=current.scope_id if current else None,
+                        private_answer=True,
+                    )
+                except _DM_FAILURES as exc:
+                    log.warning(
+                        "discord.dm.private_answer_failed",
+                        causes=backend_refusal_causes(exc),
+                        error_type=type(exc).__name__,
+                    )
+                    return "refused" if isinstance(exc, AdmissionDenied) else "failed"
+                if conversation is None:
+                    return "busy"  # another start replaced the conversation first
+                await started()
+                await self._turn(request, conversation, ())
+        return "started"
 
     @app_commands.command(name="new", description=DESCRIPTIONS["new"])
     # Contexts apply to the global registration production uses; a lane's
@@ -1307,9 +1441,10 @@ class DirectMessageCog(commands.Cog):
                 self._suppress(message, "active_access_revoked")
                 return
             role = Role.ADMIN if subject.is_admin else Role.USER
-            # The stand-in after a server pick has no content, files or snapshots.
+            # The stand-in after a server pick has no content, files or snapshots; a
+            # Private answer's stand-in carries the question it asks again.
             messages = batch or (() if isinstance(message, _DmRequest) else (message,))
-            text = compose_queued_content(list(messages))
+            text = compose_queued_content(list(messages)) if messages else message.content
             files = [a for held in messages for a in _attachments(held)]
             forwards = forwarded_names(messages)
             if not (text.strip() or files or forwarded_lines(messages)):

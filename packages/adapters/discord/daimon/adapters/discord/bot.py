@@ -110,6 +110,7 @@ from daimon.core.agent_identity import (
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
+from daimon.core.audience_refusal import AUDIENCE_CONTAINED
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import backend_refusal_causes
@@ -271,7 +272,7 @@ from discord.ext import commands
 from discord.http import HTTPClient
 
 if TYPE_CHECKING:
-    pass
+    from daimon.adapters.discord.private_answer import PrivateOffer
 
 log = structlog.get_logger()
 
@@ -622,6 +623,10 @@ class _TurnFailureSurface:
 
     thread: discord.Thread | None = None
     end_card: Callable[[str], Awaitable[None]] | None = None
+    #: The Private answer this turn may offer (`audience_hold` `on` or `shadow` only).
+    private_offer: PrivateOffer | None = None
+    #: Whether gate A refused an output of this turn (its audience latch failed).
+    audience_refused: Callable[[], bool] | None = None
 
 
 # Shared with every adapter that follows threads (see `daimon.core.participation_gates`).
@@ -1350,6 +1355,11 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.thread_handoff import HandOverButton
 
         self.add_dynamic_items(HandOverButton)
+        # A Private answer offer outlives no restart, but its press must still be told
+        # it expired, so it is a class-level registration too.
+        from daimon.adapters.discord.private_answer import PrivateAnswerButton
+
+        self.add_dynamic_items(PrivateAnswerButton)
         # Switch on a conversation model card from before picks applied at once.
         from daimon.adapters.discord.stale_thread_switch import StaleThreadSwitchButton
 
@@ -3737,6 +3747,8 @@ class DaimonBot(commands.Bot):
                 causes=backend_refusal_causes(exc),
             )
             await self._render_turn_error(message, tenant_id, guild_id, rid, exc, surface=surface)
+            if isinstance(exc, AdmissionDenied) and surface.private_offer is not None:
+                await self._offer_after_refusal(message, exc, surface)
         except Exception as exc:  # mention-turn adapter boundary
             log.exception(
                 "turn.failed.unexpected", error=str(exc), channel_id=str(message.channel.id)
@@ -3762,6 +3774,67 @@ class DaimonBot(commands.Bot):
             structlog.contextvars.unbind_contextvars("rid")
             if not unprompted and content_override is None:
                 await self._remove_mention_reaction(message, "👀")
+
+    async def _offer_after_refusal(
+        self, message: discord.Message, exc: AdmissionDenied, surface: _TurnFailureSurface
+    ) -> None:
+        """After gate A refused this turn's answer, the Private answer offer follows it."""
+        from daimon.adapters.discord.private_answer import show_private_offer
+
+        offer = surface.private_offer
+        refused = exc.detail == AUDIENCE_CONTAINED or (
+            surface.audience_refused is not None and surface.audience_refused()
+        )
+        if offer is None or not refused:
+            return
+        thread = surface.thread
+        if thread is not None and self._thread_stops.get(thread.id) is not None:
+            return
+        target: discord.abc.Messageable = thread if thread is not None else message.channel
+        transport = DiscordPostTransport(self, target, name="Daimon", avatar_url=None, builtin=True)
+
+        async def send(embed: discord.Embed, view: discord.ui.View) -> object:
+            if isinstance(target, discord.Thread):
+                return await safe_thread_send(target, embed=embed, view=view, transport=transport)
+            return await transport.send(embed=embed, view=view)
+
+        await show_private_offer(
+            self,
+            replace(offer, thread_id=str(thread.id) if thread is not None else None),
+            send=send,
+            refused=True,
+        )
+
+    async def _offer_after_answer(
+        self,
+        surface: _TurnFailureSurface,
+        *,
+        thread: discord.Thread,
+        answered: bool,
+        send: Callable[..., Awaitable[object]],
+    ) -> None:
+        """The Private answer offer under an answer in a contained room, or after a
+        refusal gate A kept from raising."""
+        from daimon.adapters.discord.private_answer import show_private_offer
+
+        offer = surface.private_offer
+        refused = surface.audience_refused is not None and surface.audience_refused()
+        if offer is None or not (answered or refused):
+            return
+        offer = replace(offer, thread_id=str(thread.id))
+        if refused:
+            transport = DiscordPostTransport(
+                self, thread, name="Daimon", avatar_url=None, builtin=True
+            )
+
+            async def post(embed: discord.Embed, view: discord.ui.View) -> object:
+                return await safe_thread_send(thread, embed=embed, view=view, transport=transport)
+        else:
+
+            async def post(embed: discord.Embed, view: discord.ui.View) -> object:
+                return await send(embed=embed, view=view)
+
+        await show_private_offer(self, offer, send=post, refused=refused and not answered)
 
     async def _render_turn_error(
         self,
@@ -5544,6 +5617,20 @@ class DaimonBot(commands.Bot):
         is_admin = admission.is_admin
 
         agent = admission.agent
+        if not unprompted and admission.audience_mode in ("on", "shadow"):
+            from daimon.adapters.discord.private_answer import PrivateOffer
+
+            surface.private_offer = PrivateOffer(
+                tenant_id=tenant_id,
+                asker_id=message.author.id,
+                channel_id=parent_channel_id,
+                agent=admission.config.agent_name or agent.name,
+                question=content_override if content_override is not None else message.content,
+                mode=admission.audience_mode,
+                role_ids=tuple(member_role_ids(author))
+                if isinstance(author, discord.Member)
+                else None,
+            )
 
         # --- Create thread + status embed BEFORE session create ---
         # MA sessions.create can hold its HTTP response for minutes while it
@@ -5778,6 +5865,13 @@ class DaimonBot(commands.Bot):
         # Whichever lifecycle renders the turn: dead-session recovery swaps in a
         # fresh one, and the watermark write and error card must read THAT one.
         lifecycle_holder: list[DiscordTurnLifecycle] = [lifecycle]
+        if surface.private_offer is not None:
+
+            def _audience_refused() -> bool:
+                latch = lifecycle_holder[0].audience_latch
+                return latch is not None and latch.failed
+
+            surface.audience_refused = _audience_refused
 
         async def _end_card_with_error(text: str) -> None:
             """Turn the still-pending card into the error; raises only if nothing showed."""
@@ -6477,6 +6571,10 @@ class DaimonBot(commands.Bot):
                         render_current_work_must_finish(agent.name, handoff=False),
                         neutral=True,
                     )
+                )
+            if surface.private_offer is not None:
+                await self._offer_after_answer(
+                    surface, thread=thread, answered=final_lifecycle.was_answered, send=turn_send
                 )
             # Any task handed to another agent in THIS thread, with work to
             # continue, gets its first turn dispatched now -- still inside this

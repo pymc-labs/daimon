@@ -24,6 +24,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 COLD_DM_ORIGIN = "Private conversation"
+#: A Private answer from a contained room (`audience_hold`): a cold conversation whose
+#: "no source" is a recorded fact, so the agent's budget channel never stands in for one.
+PRIVATE_ANSWER_ORIGIN = "Private answer"
 
 DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
@@ -100,7 +103,15 @@ class DirectMessageRow(BaseModel):
     @property
     def is_cold(self) -> bool:
         """Source-free provenance, distinct from legacy moves with missing source fields."""
-        return self.source_url == COLD_DM_ORIGIN and self.source_channel_id is None
+        return (
+            self.source_url in (COLD_DM_ORIGIN, PRIVATE_ANSWER_ORIGIN)
+            and self.source_channel_id is None
+        )
+
+    @property
+    def private_answer(self) -> bool:
+        """A Private answer's conversation: it has no source by design, on every turn."""
+        return self.source_url == PRIVATE_ANSWER_ORIGIN and self.source_channel_id is None
 
 
 class DmOrigin(BaseModel):
