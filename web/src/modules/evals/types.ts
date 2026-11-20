@@ -94,8 +94,8 @@ export type Run = {
   judges?: Judge[]; status: RunStatus; origin: { kind: "local" | "imported" | "recorded"; deployment?: string }
   estimate?: Estimate; approval?: { by: { display_name?: string }; at: string; cap_usd: number }
   spend?: { total_usd?: number; by_category?: Record<string, number> }; started_at?: string; finished_at?: string
-  /** A run awaiting an admin carries the cap its creator asked for as `requested_cap_usd`. */
-  ext?: { requested_cap_usd?: number }
+  /** A run awaiting an admin carries the cap its creator asked for as `daimon.requested_cap_usd`. */
+  ext?: { "daimon.requested_cap_usd"?: number }
 }
 /** What a reviewer gets for a run: arms only by neutral label, no name, cost or approver. */
 export type BlindRun = { id: string; suite: { id: string; version: number }; arms: string[]; case_ids: string[] | null; repeats: number; status: RunStatus; origin: string; started_at?: string; finished_at?: string }
@@ -103,7 +103,7 @@ export type RunDraft = { suite: { id: string; version: number }; case_ids?: stri
 /** The estimate of a draft run, with the spend above which an admin must approve. */
 export type RunEstimate = Estimate & { admin_approval_usd: number }
 export type JudgeRequest = { id: string; kind: Judge["kind"]; models?: ModelChoice[]; aggregate: "majority" | "mean" | "all"; batch: boolean; approve_cap_usd?: number }
-export type JudgeOutcome = { estimate: Estimate & { admin_approval_usd?: number }; ran: boolean; scores: number; spent_usd: number; skipped: number; failed: number }
+export type JudgeOutcome = { estimate: RunEstimate; ran: boolean; scores: number; spent_usd: number; skipped: number; failed: number }
 export type ItemStatus = "pending" | "running" | "done" | "error" | "skipped" | "cancelled"
 export type RunItemSummary = { id: string; key: string; case_id: string; case_revision: number; arm_id: string; repeat: number; status: ItemStatus }
 

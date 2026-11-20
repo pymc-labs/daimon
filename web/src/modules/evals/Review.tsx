@@ -116,7 +116,7 @@ function Form({ task }: { task: ReviewTask }) {
             </fieldset>
           ))}
           <Textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Note" aria-label="Note" className="min-h-0" />
-          <section className="space-y-2"><h3 className="text-xs font-medium text-muted-foreground">Comments</h3><Comments scope={{ task: task.id, initial: task.comments }} anchor={anchor} onClear={() => setAnchor(null)} anonymous={task.blind} /></section>
+          <section className="space-y-2"><h3 className="text-xs font-medium text-muted-foreground">Comments</h3><Comments scope={{ task: task.id, initial: task.comments }} anchor={anchor} onClear={() => setAnchor(null)} /></section>
         </div>
         {submit.error && <p role="alert" className="px-4 pb-2 text-sm text-destructive">{submit.error.message}</p>}
         <div className="flex justify-end gap-2 border-t p-3">

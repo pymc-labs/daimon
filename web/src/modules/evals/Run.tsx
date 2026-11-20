@@ -136,7 +136,7 @@ export function Run() {
   const list = items.data ?? []
   const done = list.filter((i) => !["pending", "running"].includes(i.status)).length
   const spend = r?.spend?.total_usd ?? 0
-  const cap = r?.approval?.cap_usd
+  const cap = r?.approval?.cap_usd, asked = r?.ext?.["daimon.requested_cap_usd"]
   const editor = canEdit(role)
   if (doc && !r) return <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: "Review" }]}><div className="py-16 text-center text-sm text-muted-foreground">Reviewers open their work from Evals.<br /><Link className="text-link hover:underline" to="/evals">Back to evals</Link></div></Page>
   return (
@@ -168,9 +168,9 @@ export function Run() {
                 {admin ? (
                   <>
                     {approve.error && <p role="alert" className="text-sm text-destructive">{approve.error.message}</p>}
-                    <ApproveBar estimate={r.estimate} initial={r.ext?.requested_cap_usd} pending={approve.isPending} onApprove={(c) => approve.mutate(c)} />
+                    <ApproveBar estimate={r.estimate} initial={asked} pending={approve.isPending} onApprove={(c) => approve.mutate(c)} />
                   </>
-                ) : <p role="status" className="text-right text-sm text-muted-foreground">Awaiting admin approval{r.ext?.requested_cap_usd ? ` of up to ${usd(r.ext.requested_cap_usd)}` : ""}. Ask an admin.</p>}
+                ) : <p role="status" className="text-right text-sm text-muted-foreground">Awaiting admin approval{asked ? ` of up to ${usd(asked)}` : ""}. Ask an admin.</p>}
               </section>
             )}
             {list.length > 0 && <section><h2 className="mb-2 text-sm font-medium">Progress</h2><Grid run={r} items={list} /></section>}

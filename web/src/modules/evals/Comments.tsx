@@ -33,7 +33,7 @@ export const AnchorChip = ({ a, onClear }: { a: Anchor; onClear?: () => void }) 
 export type Scope = { task: string; initial: Comment[] } | { run: string; case: string }
 
 /** Comments, newest last. The composer takes the anchor the reviewer pointed at; without one the comment is on the case. */
-export function Comments({ scope, anchor, onClear, anonymous }: { scope: Scope; anchor: Anchor | null; onClear: () => void; anonymous?: boolean }) {
+export function Comments({ scope, anchor, onClear }: { scope: Scope; anchor: Anchor | null; onClear: () => void }) {
   const qc = useQueryClient()
   const [text, setText] = useState("")
   const inTask = "task" in scope
@@ -56,7 +56,7 @@ export function Comments({ scope, anchor, onClear, anonymous }: { scope: Scope; 
     <div className="space-y-3">
       {shown?.map((c) => (
         <div key={c.id} className="space-y-1 rounded-lg border p-2.5 text-sm">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">{anonymous ? "Reviewer" : c.author.display_name ?? "Reviewer"}</span><Ago iso={c.at} /></div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">{c.author.display_name ?? "Reviewer"}</span><Ago iso={c.at} /></div>
           {c.anchors?.map((a, i) => <AnchorChip key={i} a={a} />)}
           <p className="whitespace-pre-wrap break-words">{c.text}</p>
         </div>

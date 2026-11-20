@@ -170,7 +170,7 @@ const ref = (kind: string, variant: string, c: string, name: string, media: stri
 //   GET  /runs/{id}         -> Run, or BlindRun for reviewers (arms by neutral label, no name, spend or approver).
 //   POST /runs/estimate     {suite, case_ids?, arm_ids, repeats, judge_ids} -> Estimate + admin_approval_usd (editors; the spend limit above which an admin approves).
 //   POST /runs              the draft + cap_usd -> Run. Cap at or under the limit, or an admin asking: approved and running, `approval` set.
-//                           Above the limit from anyone else: status "estimated" (awaiting admin approval), `ext.requested_cap_usd` holds the cap asked for.
+//                           Above the limit from anyone else: status "estimated" (awaiting admin approval), `ext["daimon.requested_cap_usd"]` holds the cap asked for.
 //   POST /runs/{id}/cancel  -> Run (editors).
 //   POST /approvals/{id}    {cap_usd} -> Run, running (admins only; 403 "Ask an admin or an owner." otherwise).
 // Spend is reserved against the approved cap and stops at it, as judging does.
@@ -188,7 +188,7 @@ const est = (arms: number, cases: number, repeats: number): Estimate => {
 runs.push(
   mkRun("run-1", "Replica against baseline", "weekly-reports", ["baseline-a", "replica"], { started_at: iso(-300), finished_at: iso(-270), spend: { total_usd: 2.31, by_category: { agent: 1.4, judge: 0.7, simulator: 0.21 } }, approval: { by: { display_name: "Sam Reed" }, at: iso(-305), cap_usd: 5 }, estimate: est(2, 8, 1), sim: { id: "run-1", created: NOW - 300 * 60_000, fixed: "done" } }),
   mkRun("run-2", "Fast variant check", "weekly-reports", ["replica", "replica-fast"], { started_at: iso(-1), spend: { total_usd: 0.44 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-2), cap_usd: 3 }, estimate: est(2, 8, 1), status: "running", sim: { id: "run-2", created: NOW - 40_000, cap: 3 } }),
-  mkRun("run-3", "Pricing replay", "pricing-questions", ["baseline-a", "replica"], { status: "estimated", estimate: est(2, 3, 1), ext: { requested_cap_usd: 40 }, sim: { id: "run-3", created: NOW, fixed: "estimated" } }),
+  mkRun("run-3", "Pricing replay", "pricing-questions", ["baseline-a", "replica"], { status: "estimated", estimate: est(2, 3, 1), ext: { "daimon.requested_cap_usd": 40 }, sim: { id: "run-3", created: NOW, fixed: "estimated" } }),
   mkRun("run-4", "Triage replay", "support-triage", ["baseline-a", "replica"], { started_at: iso(-600), finished_at: iso(-580), spend: { total_usd: 0.9 }, approval: { by: { display_name: "Sam Reed" }, at: iso(-605), cap_usd: 2 }, estimate: est(2, 3, 1), sim: { id: "run-4", created: NOW - 600 * 60_000, fixed: "done" } }),
 )
 const runOf = (id: string) => runs.find((r) => r.id === id)
@@ -379,8 +379,9 @@ const taskOf = (id: string) => { const [ref, c] = id.split("#"); const q = queue
 
 type Stored = Comment & { run: string; queue?: string }
 const comments: Stored[] = [{ id: "cm1", run: "run-1", case_id: "c-spend", item_id: "run-1:c-spend:replica:0", author: { display_name: "Riley Chen" }, text: "The second bullet is clearer here.", anchors: [{ target: "message", item_id: "run-1:c-spend:replica:0", ref: "m_reply", quote: "Search spend rose 4%" }], resolved: false, at: iso(-50) }]
-/** A blind reader gets no author names. */
-const shown = ({ run: _r, queue: _q, ...c }: Stored, blind = false): Comment => (blind ? { ...c, author: {} } : c)
+/** A blind reader sees a stand-in alias, stable per author, in place of the name. */
+const alias = (name?: string) => `Reviewer ${hash(name ?? "").slice(0, 4)}`
+const shown = ({ run: _r, queue: _q, ...c }: Stored, blind = false): Comment => (blind ? { ...c, author: { kind: "label", display_name: alias(c.author.display_name) } } : c)
 const bundles: string[] = []
 
 const json = (b: unknown, status = 200) => HttpResponse.json(b as never, { status })
@@ -437,7 +438,7 @@ export const evalsHandlers: HttpHandler[] = [
     // Above the admin limit an admin's approval is needed: the run waits, with the cap its creator asked for.
     const waiting = d.cap_usd > LIMIT && !isAdmin()
     const r = waiting
-      ? mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "estimated", ext: { requested_cap_usd: d.cap_usd }, sim: { id, created: Date.now(), fixed: "estimated" } })
+      ? mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "estimated", ext: { "daimon.requested_cap_usd": d.cap_usd }, sim: { id, created: Date.now(), fixed: "estimated" } })
       : mkRun(id, `Run ${runs.length + 1}`, d.suite.id, d.arm_ids, { ...base, status: "running", started_at: iso(0), approval: { by: { display_name: me()?.name ?? "You" }, at: iso(0), cap_usd: d.cap_usd }, sim: { id, created: Date.now(), cap: d.cap_usd } })
     runs.unshift(r); return json(view(r))
   }),
