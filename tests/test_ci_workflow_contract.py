@@ -356,6 +356,10 @@ def test_every_promote_ends_with_a_production_canary_judged_by_the_reply() -> No
         assert "steps.ready.outputs.ready == 'true'" in step["if"], (
             f"{step.get('name') or step['uses']}: a leg without its variables must skip, not page"
         )
+    ready = job["steps"][0]
+    assert ready["env"]["CALLED"] == "${{ inputs.environments && 'true' || '' }}"
+    assert 'if [ -n "$CALLED" ]' in ready["run"], "a promote's canary must fail, not skip"
+    assert ready["run"].index('if [ -n "$CALLED" ]') < ready["run"].index("::warning::")
     run = next(step for step in job["steps"] if step.get("name") == "One turn per backend")
     assert run["env"]["NO_OUTCOMES"] == (
         "${{ matrix.environment != 'staging' && '--no-outcomes' || '' }}"

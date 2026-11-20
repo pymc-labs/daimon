@@ -16,8 +16,9 @@ name: Canary
 # outside this repository.
 #
 # The production leg runs only once the repository variable PRODUCTION_CANARY is
-# `true`, so GitHub never creates `production-canary` unprotected. A leg whose
-# environment lacks any of those variables is skipped with a warning, not a page.
+# `true`, so GitHub never creates `production-canary` unprotected. A scheduled or
+# dispatched leg whose environment lacks any of those variables is skipped with
+# a warning, not a page; when promote.yml calls this, it fails instead.
 on:
   schedule:
     - cron: "17 * * * *"
@@ -65,8 +66,14 @@ jobs:
         id: ready
         env:
           SET_UP: ${{ vars.GCP_PROJECT_ID && vars.GCP_WIF_PROVIDER && vars.GCP_DEPLOY_SA && vars.CANARY_BOT_ID && vars.CANARY_CHANNELS && 'true' || '' }}
+          # Only a workflow_call passes `environments`; the promote must not go green unverified.
+          CALLED: ${{ inputs.environments && 'true' || '' }}
         run: |
           if [ -n "$SET_UP" ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ -n "$CALLED" ]; then
+            echo "::error::${{ matrix.environment }} lacks a GCP_* or CANARY_* variable; the promote is unverified."
+            exit 1
+          fi
           echo "::warning::${{ matrix.environment }} lacks a GCP_* or CANARY_* variable; canary skipped."
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
