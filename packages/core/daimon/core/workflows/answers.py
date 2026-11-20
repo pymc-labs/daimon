@@ -41,6 +41,7 @@ __all__ = [
     "buttons",
     "claim_reply",
     "form_answer",
+    "form_of",
     "parse_action",
     "press",
 ]
@@ -239,13 +240,8 @@ def buttons(ask: dict[str, Any]) -> list[Button]:
     return [Button(action_id(wait_id, waits.ANSWER), "Answer", True)]
 
 
-async def ask_form(sm: Sessions, *, platform: Chat, message_id: str, route: str) -> AskForm | None:
-    """The form a button opens before it answers, or None when the press answers at once."""
-    async with sm() as session:
-        found = await workflow_waits.post_by_message(
-            session, platform=platform, message_id=message_id
-        )
-        ask = {} if found is None else await _ask(session, found[1])
+def form_of(ask: dict[str, Any], route: str) -> AskForm | None:
+    """The form `route`'s button opens before it answers, or None when it answers at once."""
     title = str(ask.get("title") or "Answer")[:45]
     if ask.get("shape") == "approve" and route == waits.REJECT:
         return AskForm(title, (("comment", "Why are you rejecting it?"),))
@@ -256,6 +252,16 @@ async def ask_form(sm: Sessions, *, platform: Chat, message_id: str, route: str)
         fields = tuple((str(f["name"]), str(f["title"])) for f in named)
         return AskForm(title, fields)
     return AskForm(title, (("text", "Your answer"),))
+
+
+async def ask_form(sm: Sessions, *, platform: Chat, message_id: str, route: str) -> AskForm | None:
+    """`form_of` the ask posted as `message_id`."""
+    async with sm() as session:
+        found = await workflow_waits.post_by_message(
+            session, platform=platform, message_id=message_id
+        )
+        ask = {} if found is None else await _ask(session, found[1])
+    return form_of(ask, route)
 
 
 def form_answer(route: str, values: dict[str, str]) -> tuple[dict[str, JsonValue], str | None]:

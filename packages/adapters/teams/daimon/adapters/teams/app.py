@@ -30,6 +30,7 @@ import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams import workflow_asks
 from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.admissions import (
     HOLDING,
@@ -1111,9 +1112,25 @@ class TeamsApp:
                 )
 
     def _dispatch_inbound(self, parsed: TeamsInbound) -> None:
-        """Admit a verified message for the mention, typed-name or participation path."""
+        """Answer a workflow ask with a verified message, or admit it for the mention,
+        typed-name or participation path."""
+        self.spawn(self._answer_or_admit(parsed), name="teams.turn")
+
+    async def _answer_or_admit(self, parsed: TeamsInbound) -> None:
+        claimed = await workflow_asks.claim_inbound(self.runtime, parsed, self._tenant_id)
+        if claimed is not None:
+            if claimed.text is not None:
+                card = notice_card(claimed.text, error=claimed.status == "refused")
+                with contextlib.suppress(*TEAMS_SEND_ERRORS):
+                    await asyncio.wait_for(
+                        self._sender.send(
+                            parsed.conversation_id, card, service_url=parsed.service_url
+                        ),
+                        SEND_TIMEOUT_S,
+                    )
+            return
         if not self._ignored_unprompted(parsed):
-            self.spawn(self._admit(parsed), name="teams.turn")
+            await self._admit(parsed)
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""

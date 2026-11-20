@@ -26,6 +26,7 @@ from daimon.adapters.teams import (
     thread_handoff,
     tool_confirmation,
     wizard,
+    workflow_asks,
     workflow_cards,
 )
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
@@ -478,6 +479,9 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)
     teams_app.on_card_action_execute(own_cards.VERB, own_cards.TeamsOwnCards(runtime).on_action)
+    teams_app.on_card_action_execute(
+        workflow_asks.VERB, workflow_asks.AskActions(runtime).on_action
+    )
     handover = TeamsThreadHandoff(
         runtime,
         dispatch=turns._dispatch_inbound,  # pyright: ignore[reportPrivateUsage]  # verified message ingress
