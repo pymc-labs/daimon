@@ -64,7 +64,7 @@ class PodSpec:
     control_plane: frozenset[str] = frozenset()
     #: Hosts an admin allows the executor besides its control plane.
     passthrough: frozenset[str] = frozenset()
-    registries: Literal["passthrough", "deny"] = "passthrough"
+    registries: Literal["passthrough", "deny"] = "deny"
     clock: datetime | None = None
 
 
@@ -110,7 +110,7 @@ async def wait_ready(runtime: SandboxRuntime, pod: PodHandle, timeout_s: float =
 
 def registries(features: FeatureSnapshot) -> Literal["passthrough", "deny"]:
     """Whether the gateway lets package downloads reach the real registries."""
-    return "deny" if features.value("eval_package_registries") == "deny" else "passthrough"
+    return "passthrough" if features.value("eval_package_registries") == "passthrough" else "deny"
 
 
 def pod_name(spec: PodSpec) -> str:

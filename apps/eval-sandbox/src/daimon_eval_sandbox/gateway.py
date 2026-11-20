@@ -1,8 +1,9 @@
 """mitmproxy addon for an eval pod: every connection is answered by the eval world.
 
-Two exceptions, both fail closed: TLS to a control-plane host on the executor's port is
-tunnelled to the real host untouched, and package-registry reads go upstream when the
-`eval_package_registries` feature allows them. Anything else that is not HTTP is closed.
+The gateway dials out in two cases only, both checked in `server_connect`, which every
+upstream connection passes (raw TCP, failed hooks and tunnels included): TLS to a
+control-plane host on the executor's port, tunnelled untouched, and package-registry reads
+when the `eval_package_registries` feature allows them. Every other dial is refused.
 """
 
 from __future__ import annotations
@@ -17,8 +18,9 @@ from pathlib import Path
 from typing import Final, Literal
 
 import httpx
-from mitmproxy import dns, http, tcp, tls
+from mitmproxy import dns, http, tls
 from mitmproxy.net.dns import types as dns_types
+from mitmproxy.proxy.server_hooks import ServerConnectionHookData
 
 AGENT_PORT: Final = 8080
 EXEC_PORT: Final = 8081
@@ -26,10 +28,11 @@ DNS_PORT: Final = 5353
 EXEC_UID: Final = 10000
 AGENT_UID: Final = 10001
 GATEWAY_UID: Final = 61000
-#: Hosts an agent may read packages from when registries pass through.
+#: Hosts an agent may read packages from when registries pass through. No module proxy
+#: that fetches arbitrary hosts on request (the Go proxy does) belongs here.
 REGISTRY_HOSTS: Final = frozenset({
     "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com",
-    "index.crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org",
+    "index.crates.io", "static.crates.io",
 })  # fmt: skip
 _READS: Final = frozenset({"GET", "HEAD"})
 _FAKE_NET: Final = ipaddress.IPv4Network("198.18.0.0/15")
@@ -42,12 +45,12 @@ class GatewayConfig:
     world_token: str
     item: str
     control_plane: frozenset[str]
-    registries: Literal["passthrough", "deny"] = "passthrough"
+    registries: Literal["passthrough", "deny"] = "deny"
 
     @classmethod
     def load(cls, path: Path) -> GatewayConfig:
         raw = json.loads(path.read_text())
-        registries = raw.get("registries", "passthrough")
+        registries = raw.get("registries", "deny")
         if registries not in ("passthrough", "deny"):
             raise ValueError(f"unknown registries mode {registries!r}")
         return cls(
@@ -132,8 +135,25 @@ class Gateway:
         body = base64.b64decode(str(answer.get("body_b64") or ""))
         flow.response = http.Response.make(int(answer.get("status", 502)), body, headers)
 
-    def tcp_start(self, flow: tcp.TCPFlow) -> None:
-        flow.kill()
+    def may_dial(self, port: int, address: tuple[str, int] | None) -> bool:
+        """The only upstream connections the gateway opens; anything else stays in the world."""
+        if address is None:
+            return False
+        host, server_port = address[0].lower(), address[1]
+        if port == EXEC_PORT:
+            return server_port == 443 and host in self.config.control_plane
+        return (
+            port == AGENT_PORT
+            and self.config.registries == "passthrough"
+            and host in REGISTRY_HOSTS
+            and server_port in (80, 443)
+        )
+
+    def server_connect(self, data: ServerConnectionHookData) -> None:
+        # flow.kill() in a TCP or failed HTTP hook does not stop the dial; this does.
+        if not self.may_dial(data.client.sockname[1], data.server.address):
+            _log("gateway.dial_refused", address=str(data.server.address))
+            data.server.error = "the eval world answers every connection"
 
     def dns_request(self, flow: dns.DNSFlow) -> None:
         question = flow.request.question

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import socket
 from types import SimpleNamespace
 
 import httpx
@@ -18,7 +20,9 @@ from daimon_eval_sandbox.gateway import (
 )
 from mitmproxy import options, tls
 from mitmproxy.proxy.context import Context
+from mitmproxy.proxy.server_hooks import ServerConnectionHookData
 from mitmproxy.test import taddons, tflow
+from mitmproxy.tools.dump import DumpMaster
 
 CONFIG = GatewayConfig(
     world_url="http://world.test",
@@ -121,3 +125,71 @@ async def test_registry_reads_follow_the_feature(mode: str, method: str, upstrea
 def test_fake_addresses_are_stable_and_unroutable() -> None:
     assert fake_ip("api.github.com") == fake_ip("API.github.com."), "stable per name"
     assert str(fake_ip("x.test")).startswith("198.1"), "inside the benchmarking range"
+
+
+@pytest.mark.parametrize(("port", "address", "registries", "allowed"), [
+    (EXEC_PORT, ("api.anthropic.com", 443), "deny", True),
+    (EXEC_PORT, ("api.anthropic.com", 80), "deny", False),
+    (EXEC_PORT, ("198.18.0.9", 443), "deny", False),
+    (AGENT_PORT, ("api.anthropic.com", 443), "deny", False),
+    (AGENT_PORT, ("pypi.org", 443), "passthrough", True),
+    (AGENT_PORT, ("pypi.org", 443), "deny", False),
+    (AGENT_PORT, ("proxy.golang.org", 443), "passthrough", False),
+    (AGENT_PORT, ("169.254.169.254", 80), "passthrough", False),
+    (AGENT_PORT, None, "passthrough", False),
+])  # fmt: skip
+def test_gateway_dials_only_tunnels_and_allowed_registries(
+    port: int, address: tuple[str, int] | None, registries: str, allowed: bool
+) -> None:
+    gateway = Gateway(GatewayConfig(**{**CONFIG.__dict__, "registries": registries}))
+    client = tflow.tclient_conn()
+    client.sockname = ("127.0.0.1", port)
+    server = tflow.tserver_conn()
+    server.address = address
+    gateway.server_connect(ServerConnectionHookData(server=server, client=client))
+    assert (server.error is None) is allowed, f"{port} to {address} dials upstream: {allowed}"
+
+
+async def test_raw_tcp_never_reaches_the_original_destination() -> None:
+    """Bytes that are not HTTP once rode a raw TCP relay to the connection's real address."""
+    seen: list[bytes] = []
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        seen.append(await reader.read(100))
+        writer.write(b"REAL-WORLD")
+        await writer.drain()
+        writer.close()
+
+    real = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    listen = _free_port()
+    real_port = real.sockets[0].getsockname()[1]
+    opts = options.Options(mode=[f"reverse:tcp://127.0.0.1:{real_port}@127.0.0.1:{listen}"])
+    master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+    master.addons.add(Gateway(CONFIG))
+    running = asyncio.create_task(master.run())
+    try:
+        for _ in range(100):
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", listen)
+                break
+            except OSError:
+                await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("the gateway never listened")
+        writer.write(b"\x00exfil")
+        try:
+            await writer.drain()
+            got = await asyncio.wait_for(reader.read(100), 5)
+        except ConnectionResetError:
+            got = b""
+    finally:
+        master.shutdown()
+        await running
+        real.close()
+    assert not seen and b"REAL-WORLD" not in got, f"raw bytes reached the real host: {seen}"
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
