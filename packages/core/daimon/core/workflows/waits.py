@@ -315,7 +315,7 @@ async def pending_question(
     session: AsyncSession, *, run_id: uuid.UUID, step: StepRow, attempt_id: uuid.UUID
 ) -> Wait | None:
     """This attempt's question still to hand on: open, or answered and not yet sent."""
-    key = engine.step_key(step.node_id, step.visit)
+    key = runs.key_of(step)
     briefs = await step_events(session, run_id, step_key=key, types=[BRIEF_SENT])
     sent = {e.data.get("answer") for e in briefs}
     return next(
@@ -465,7 +465,7 @@ async def decide_wait(
             files=list(answer.files) or None,
             now=now,
         )
-        key = engine.step_key(step.node_id, step.visit)
+        key = runs.key_of(step)
         event = Event(
             "wait.decided",
             key,
@@ -539,7 +539,7 @@ async def on_due(
             return
         run, wait_, step = held
         node = (await runs.spec_of(session, run)).nodes.get(step.node_id)
-        key = engine.step_key(step.node_id, step.visit)
+        key = runs.key_of(step)
         if wait_.expires_at is None or wait_.expires_at > now:
             if isinstance(node, ApprovalNode) and node.remind_every:
                 nxt = now + parse_duration(node.remind_every)
@@ -634,7 +634,7 @@ async def _arrive(
                 via=None,
                 now=now,
             )
-            key = engine.step_key(step.node_id, step.visit)
+            key = runs.key_of(step)
             event = Event("wait.decided", key, {"id": str(wait_.id), "decision": "arrived"})
             outcome = engine.Succeeded(candidate.payload, _route(node, "arrived"))
             await runs.resume(

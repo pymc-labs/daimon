@@ -665,13 +665,23 @@ async def step_detail(
 ) -> StepDetail | None:
     steps = await runs_store.list_steps(session, run.id)
     node_id = node_of(key)
-    match = re.search(r"#(\d+)$", key)
+    match = re.search(r"#(\d+)", key)
     visit = int(match.group(1)) if match else 1
-    step = next((s for s in steps if s.node_id == node_id and s.visit == visit), None)
+    item = re.search(r"\[(\d+)\]$", key)
+    index = int(item.group(1)) if item else None
+    rows = steps if index is None else await runs_store.list_items(session, run_id=run.id)
+    step = next(
+        (s for s in rows if (s.node_id, s.visit, s.item_index) == (node_id, visit, index)), None
+    )
     if step is None:
         return None
     spec = await _spec_of(session, run, {})
     node = obj(obj(spec.get("nodes")).get(node_id))
+    own: dict[str, Any] = {}
+    if index is not None:
+        own = {"item": obj(step.inputs).get("item"), "index": index}
+        own |= {node["as"]: own["item"]} if isinstance(node.get("as"), str) else {}
+        node = obj(node.get("do"))
     attempts = await runs_store.list_attempts(session, step.id)
     chosen = next((a for a in attempts if a.number == attempt), attempts[-1] if attempts else None)
     exprs = _inputs_of(node)
@@ -685,6 +695,7 @@ async def step_detail(
     context: Any = None
     try:
         context = expression_context(parse_spec(spec), [_view(s) for s in steps], node_id, facts)
+        context |= own
     except ValueError:
         context = None
     shown: dict[str, Any] = {}

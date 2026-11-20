@@ -30,8 +30,13 @@ def _text(value: str) -> str:
 
 
 def step_inputs(node: AgentNode, context: Mapping[str, JsonValue], now: datetime) -> JsonValue:
-    """The node's declared inputs, resolved in full (`ExpressionError` when one cannot be)."""
-    return render(dict(node.inputs or {}), context, now=now)
+    """The node's declared inputs, resolved in full (`ExpressionError` when one cannot be).
+
+    A For each item's agent also gets its `item` and `index`.
+    """
+    rendered = render(dict(node.inputs or {}), context, now=now)
+    own: dict[str, JsonValue] = {k: context[k] for k in ("item", "index") if k in context}
+    return own | rendered if own and isinstance(rendered, dict) else rendered
 
 
 def _field(f: SchemaField) -> str:

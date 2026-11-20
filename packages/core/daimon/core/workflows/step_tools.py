@@ -22,7 +22,7 @@ from daimon.core.stores.workflow_runs import AttemptRow, RunRow, StepRow
 from daimon.core.workflows import engine
 from daimon.core.workflows.brief import check_output
 from daimon.core.workflows.graph import ancestors
-from daimon.core.workflows.runs import account_actor, spec_of
+from daimon.core.workflows.runs import account_actor, key_of, node_of, spec_of
 from daimon.core.workflows.spec import AgentNode, Spec
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +52,7 @@ class Grant:
 
     @property
     def key(self) -> str:
-        return engine.step_key(self.step.node_id, self.step.visit)
+        return key_of(self.step)
 
 
 @dataclass(frozen=True)
@@ -88,7 +88,7 @@ async def grant(
     ):
         raise StepRefused(_GONE)
     spec = await spec_of(session, run)
-    node = spec.nodes[step.node_id]
+    node = node_of(spec, step)
     if not isinstance(node, AgentNode):
         raise StepRefused(_GONE)
     return Grant(run, step, attempt, spec, node)

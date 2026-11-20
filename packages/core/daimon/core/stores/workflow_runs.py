@@ -62,6 +62,8 @@ class RunRow(_Row):
     label: str | None
     concurrency_key: str | None
     parent_run_id: uuid.UUID | None
+    #: The Workflow step (or For each item) this child run reports back to.
+    parent_step_id: uuid.UUID | None
     forked_from_run_id: uuid.UUID | None
     forked_from_step: str | None
     redrive_count: int
@@ -82,6 +84,10 @@ class StepRow(_Row):
     run_id: uuid.UUID
     node_id: str
     visit: int
+    #: A For each item: its index, its For each step, and `{"item": ..., "index": ...}`.
+    item_index: int | None
+    parent_step_id: uuid.UUID | None
+    inputs: Any
     status: StepStatus
     waiting_reason: str | None
     output: Any
@@ -179,6 +185,7 @@ async def create_run(
     label: str | None = None,
     concurrency_key: str | None = None,
     parent_run_id: uuid.UUID | None = None,
+    parent_step_id: uuid.UUID | None = None,
     forked_from_run_id: uuid.UUID | None = None,
     forked_from_step: str | None = None,
     test_options: dict[str, Any] | None = None,
@@ -207,6 +214,7 @@ async def create_run(
         label=label,
         concurrency_key=concurrency_key,
         parent_run_id=parent_run_id,
+        parent_step_id=parent_step_id,
         forked_from_run_id=forked_from_run_id,
         forked_from_step=forked_from_step,
         test_options=test_options,
@@ -298,13 +306,60 @@ async def attempt_of_session(
 
 
 async def list_steps(session: AsyncSession, run_id: uuid.UUID) -> list[StepRow]:
+    """The run's node visits; For each items are `list_items`."""
     rows = await session.scalars(
         select(WorkflowStep)
-        .where(WorkflowStep.run_id == run_id)
+        .where(WorkflowStep.run_id == run_id, WorkflowStep.item_index.is_(None))
         .order_by(WorkflowStep.created_at, WorkflowStep.node_id, WorkflowStep.visit)
         .execution_options(populate_existing=True)
     )
     return [StepRow.model_validate(orm) for orm in rows]
+
+
+async def list_items(
+    session: AsyncSession, *, run_id: uuid.UUID, parent_step_id: uuid.UUID | None = None
+) -> list[StepRow]:
+    """For each items of one For each step, or of the whole run, in item order."""
+    where = [WorkflowStep.run_id == run_id, WorkflowStep.item_index.is_not(None)]
+    if parent_step_id is not None:
+        where.append(WorkflowStep.parent_step_id == parent_step_id)
+    rows = await session.scalars(
+        select(WorkflowStep)
+        .where(*where)
+        .order_by(WorkflowStep.created_at, WorkflowStep.item_index)
+        .execution_options(populate_existing=True)
+    )
+    return [StepRow.model_validate(orm) for orm in rows]
+
+
+async def save_items(
+    session: AsyncSession,
+    *,
+    parent: StepRow,
+    items: Mapping[int, StepWrite],
+    inputs: Mapping[int, Any] | None = None,
+    bump_generation: bool = False,
+) -> None:
+    """Insert or update the items of a For each step by index; the caller holds the run lock."""
+    for index, write in items.items():
+        values: dict[str, Any] = dict(write)
+        if inputs is not None and index in inputs:
+            values["inputs"] = inputs[index]
+        stmt = insert(WorkflowStep).values(
+            tenant_id=parent.tenant_id,
+            run_id=parent.run_id,
+            node_id=parent.node_id,
+            visit=parent.visit,
+            item_index=index,
+            parent_step_id=parent.id,
+            **values,
+        )
+        changes = dict(values)
+        if bump_generation:
+            changes["generation"] = WorkflowStep.generation + 1
+        await session.execute(
+            stmt.on_conflict_do_update(constraint="uq_workflow_steps_visit", set_=changes)
+        )
 
 
 async def get_step(session: AsyncSession, step_id: uuid.UUID) -> StepRow | None:
@@ -755,6 +810,48 @@ async def active_run_ids(
     if concurrency_key is not None:
         stmt = stmt.where(WorkflowRun.concurrency_key == concurrency_key)
     return list(await session.scalars(stmt.order_by(WorkflowRun.created_at)))
+
+
+async def latest_child(session: AsyncSession, step_id: uuid.UUID) -> RunRow | None:
+    """The newest run a Workflow step (or item) started."""
+    orm = await session.scalar(
+        select(WorkflowRun)
+        .where(WorkflowRun.parent_step_id == step_id)
+        .order_by(WorkflowRun.created_at.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    )
+    return None if orm is None else RunRow.model_validate(orm)
+
+
+async def parents_of_ended_children(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
+    """Workflow steps waiting on a child run that has ended."""
+    rows = await session.scalars(
+        select(WorkflowStep.id)
+        .join(WorkflowRun, WorkflowRun.parent_step_id == WorkflowStep.id)
+        .where(
+            WorkflowStep.status == "waiting",
+            WorkflowStep.waiting_reason == "event",
+            WorkflowRun.status.not_in(ACTIVE_RUN_STATES),
+        )
+        .distinct()
+        .limit(limit)
+    )
+    return list(rows)
+
+
+async def orphaned_children(session: AsyncSession, *, limit: int) -> list[uuid.UUID]:
+    """Active child runs whose calling step has ended (its run was cancelled or moved on)."""
+    rows = await session.scalars(
+        select(WorkflowRun.id)
+        .join(WorkflowStep, WorkflowStep.id == WorkflowRun.parent_step_id)
+        .where(
+            WorkflowRun.status.in_(ACTIVE_RUN_STATES),
+            WorkflowStep.status.in_(("succeeded", "failed", "skipped", "cancelled")),
+        )
+        .limit(limit)
+    )
+    return list(rows)
 
 
 async def previous_end(

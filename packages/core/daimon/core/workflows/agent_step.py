@@ -45,7 +45,7 @@ from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key
 from daimon.core.workflows.preflight import Refusal, check
-from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork
+from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
 from daimon.core.workflows.spec import AgentNode
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,7 +105,7 @@ def tools_of(node: AgentNode) -> StepTools:
 
 
 def _key(work: StepWork) -> str:
-    return engine.step_key(work.step.node_id, work.step.visit)
+    return key_of(work.step)
 
 
 def _deny(message: str) -> ToolConfirmationResult:

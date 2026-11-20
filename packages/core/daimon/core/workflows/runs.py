@@ -30,6 +30,7 @@ from daimon.core.workflows import callbacks, delivery, engine
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
+from daimon.core.workflows.items import ItemState, item_label, items_next, items_problem
 from daimon.core.workflows.lanes import lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
 from daimon.core.workflows.spec import (
@@ -37,6 +38,7 @@ from daimon.core.workflows.spec import (
     AgentNode,
     AnyNode,
     FinishNode,
+    ForEachNode,
     Spec,
     parse_duration,
     parse_spec,
@@ -93,6 +95,10 @@ class Start:
     fork_of: tuple[uuid.UUID, str] | None = None
     rerun_of: uuid.UUID | None = None
     parent_run_id: uuid.UUID | None = None
+    #: The Workflow step that waits on this run, which settles from its result.
+    parent_step_id: uuid.UUID | None = None
+    #: A published version to run instead of the live one.
+    version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -126,8 +132,44 @@ class Park:
     remind_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class Parked:
+    """An executor's answer for a step that waits on a child run it started."""
+
+    child_run_id: uuid.UUID
+    number: int
+
+
 class StepExecutor(Protocol):
-    async def __call__(self, work: StepWork, /) -> Outcome | Park: ...
+    async def __call__(self, work: StepWork, /) -> Outcome | Park | Parked: ...
+
+
+def node_of(spec: Spec, step: StepRow) -> AnyNode:
+    """What a step runs: its node, or a For each item's inline node."""
+    node = spec.nodes[step.node_id]
+    return node.do if isinstance(node, ForEachNode) and step.item_index is not None else node
+
+
+def key_of(step: StepRow) -> str:
+    """The step's ledger key: `node`, `node#2`, or `node[3]` for an item."""
+    if step.item_index is None:
+        return engine.step_key(step.node_id, step.visit)
+    return engine.item_key(step.node_id, step.visit, step.item_index)
+
+
+def _item_of(step: StepRow) -> JsonValue:
+    inputs: dict[str, JsonValue] = step.inputs or {}
+    return inputs.get("item")
+
+
+def item_context(spec: Spec, step: StepRow) -> dict[str, JsonValue]:
+    """An item's own names: `item`, `index`, and the For each's `as` name for the item."""
+    node = spec.nodes[step.node_id]
+    if step.item_index is None or not isinstance(node, ForEachNode):
+        return {}
+    item = _item_of(step)
+    names: dict[str, JsonValue] = {"item": item, "index": step.item_index}
+    return names | ({node.as_: item} if node.as_ else {})
 
 
 @dataclass(frozen=True)
@@ -266,11 +308,13 @@ async def _apply(
             session, tenant_id=run.tenant_id, run_id=run.id, steps=batch, bump_generation=bump
         )
     rows = await workflow_runs.list_steps(session, run.id)
+    events = list(before) + list(transition.events)
     for r in rows:
         if (r.node_id, r.visit) in stale:
             # A cancelled attempt is over: a later claim never reattaches to it.
             await workflow_runs.finish_attempt(session, step_id=r.id, status="abandoned", now=now)
-    events = list(before) + list(transition.events)
+            if isinstance(loaded.spec.nodes.get(r.node_id), ForEachNode):
+                events += await _cancel_items(session, r, now=now, reason="parent_cancelled")
     end = transition.end
     if end is not None:
         await workflow_runs.update_run(
@@ -324,6 +368,240 @@ async def _apply(
     if any(r.status == "ready" for r in rows):
         await _notify(session, READY_CHANNEL, str(run.id))
     await _notify(session, run_channel(run.tenant_id), str(run.id))
+    for r in rows:
+        if r.status == "ready" and isinstance(loaded.spec.nodes.get(r.node_id), ForEachNode):
+            await _fan_out(session, loaded, r.id, now=now)
+
+
+# --- For each items ---
+
+
+async def _reload(session: AsyncSession, loaded: Loaded) -> Loaded:
+    run = await workflow_runs.get_run(session, loaded.run.id)
+    assert run is not None, "a locked run stays"
+    steps = await workflow_runs.list_steps(session, run.id)
+    return Loaded(run, loaded.workflow, loaded.spec, steps, loaded.facts)
+
+
+def _ended(status: str, now: datetime) -> StepWrite:
+    return {"status": status, "lease_owner": None, "lease_expires_at": None, "ended_at": now}
+
+
+async def _cancel_items(
+    session: AsyncSession, parent: StepRow, *, now: datetime, reason: str
+) -> list[Event]:
+    items = await workflow_runs.list_items(session, run_id=parent.run_id, parent_step_id=parent.id)
+    going = [i for i in items if i.status in engine.ACTIVE]
+    if not going:
+        return []
+    await workflow_runs.save_items(
+        session,
+        parent=parent,
+        items={i.item_index or 0: _ended("cancelled", now) for i in going},
+        bump_generation=True,
+    )
+    for i in going:
+        await workflow_runs.finish_attempt(session, step_id=i.id, status="abandoned", now=now)
+    return [Event("step.cancelled", key_of(i), {"reason": reason}) for i in going]
+
+
+async def _fan_out(
+    session: AsyncSession, loaded: Loaded, step_id: uuid.UUID, *, now: datetime
+) -> None:
+    """A ready For each step starts: its items become rows, the first `concurrency` ready.
+
+    Run again (redrive), items that succeeded keep their outputs and only the rest re-run.
+    """
+    parent = await workflow_runs.get_step(session, step_id)
+    if parent is None or parent.status != "ready":
+        return  # an earlier fan-out in this transaction already settled it
+    loaded = await _reload(session, loaded)
+    node = loaded.spec.nodes[parent.node_id]
+    assert isinstance(node, ForEachNode)
+    key = key_of(parent)
+    context = engine.expression_context(loaded.spec, loaded.views(), parent.node_id, loaded.facts)
+    try:
+        value: JsonValue = render(node.items, context, now=now)
+        problem = items_problem(value)
+    except ExpressionError as err:
+        value, problem = None, str(err)
+    await workflow_runs.save_steps(
+        session,
+        tenant_id=parent.tenant_id,
+        run_id=parent.run_id,
+        steps={(parent.node_id, parent.visit): {"status": "running", "started_at": now}},
+    )
+    total = len(value) if isinstance(value, list) else 0
+    attempt = loaded.run.redrive_count + 1
+    started = Event("step.started", key, {"attempt": attempt, "total": total})
+    if problem is not None or not isinstance(value, list):
+        transition = engine.resolve(
+            loaded.spec,
+            loaded.views(),
+            parent.node_id,
+            parent.visit,
+            engine.Failed("fatal", problem or "The items are not a list"),
+            loaded.facts,
+        )
+        await _apply(session, loaded, transition, now=now, before=[started])
+        return
+    kept = {
+        i.item_index
+        for i in await workflow_runs.list_items(
+            session, run_id=parent.run_id, parent_step_id=parent.id
+        )
+        if i.status == "succeeded"
+    }
+    again: dict[int, StepWrite] = {
+        i: {
+            "status": "pending",
+            "output": None,
+            "error_class": None,
+            "error_message": None,
+            "ended_at": None,
+            "lane": _item_lane(loaded.spec, node, parent, i),
+        }
+        for i in range(total)
+        if i not in kept
+    }
+    await workflow_runs.save_items(
+        session,
+        parent=parent,
+        items=again,
+        inputs={i: {"item": value[i], "index": i} for i in again},
+        bump_generation=True,
+    )
+    await _advance_items(session, await _reload(session, loaded), parent, now=now, before=[started])
+
+
+def _item_lane(spec: Spec, node: ForEachNode, parent: StepRow, index: int) -> str | None:
+    """Each agent item is a lane of its own (the `@` form a busy lane takes)."""
+    if not isinstance(node.do, AgentNode):
+        return None
+    lane = lane_key(spec, parent.node_id, node.do, parent.visit)
+    return f"{lane}@{engine.item_key(parent.node_id, parent.visit, index)}"
+
+
+async def _advance_items(
+    session: AsyncSession,
+    loaded: Loaded,
+    parent: StepRow,
+    *,
+    now: datetime,
+    before: Sequence[Event] = (),
+) -> None:
+    """Start the items there is room for, or settle the For each once its items are done."""
+    node = loaded.spec.nodes[parent.node_id]
+    assert isinstance(node, ForEachNode)
+    items = await workflow_runs.list_items(session, run_id=parent.run_id, parent_step_id=parent.id)
+    states = [
+        ItemState(i.item_index or 0, i.status, i.output, i.error_class, i.error_message)
+        for i in items
+    ]
+    nxt = items_next(node, states)
+    events = list(before)
+    by_index = {i.item_index: i for i in items}
+    if nxt.start:
+        ready: StepWrite = {"status": "ready", "ready_at": now}
+        await workflow_runs.save_items(
+            session, parent=parent, items=dict.fromkeys(nxt.start, ready)
+        )
+        for index in nxt.start:
+            item = _item_of(by_index[index])
+            events.append(
+                Event(
+                    "step.ready",
+                    engine.item_key(parent.node_id, parent.visit, index),
+                    {
+                        "node": parent.node_id,
+                        "visit": parent.visit,
+                        "item": {"index": index, "label": item_label(item)},
+                    },
+                )
+            )
+        await _notify(session, READY_CHANNEL, str(parent.run_id))
+    if nxt.cancel:
+        events += await _cancel_items(session, parent, now=now, reason="too_many_failures")
+    if nxt.outcome is None:
+        await _apply(session, loaded, Transition((), tuple(events), None), now=now)
+        return
+    transition = engine.resolve(
+        loaded.spec, loaded.views(), parent.node_id, parent.visit, nxt.outcome, loaded.facts
+    )
+    await _apply(session, loaded, transition, now=now, before=events)
+
+
+async def _settle_item(
+    session: AsyncSession,
+    loaded: Loaded,
+    item: StepRow,
+    outcome: Outcome,
+    *,
+    now: datetime,
+    before: Sequence[Event] = (),
+) -> None:
+    """An item's final outcome; an unknown outcome counts as a failed item."""
+    assert item.parent_step_id is not None and item.item_index is not None
+    key = key_of(item)
+    if isinstance(outcome, engine.Succeeded):
+        write = _ended("succeeded", now) | {"output": outcome.output, "summary": outcome.summary}
+        event = Event("step.succeeded", key, {})
+    else:
+        error_class = outcome.error_class if isinstance(outcome, engine.Failed) else "unknown"
+        message = _cut(outcome.message)
+        write = _ended("failed", now) | {"error_class": error_class, "error_message": message}
+        event = Event("step.failed", key, {"error_class": error_class, "message": message})
+    parent = await workflow_runs.get_step(session, item.parent_step_id)
+    assert parent is not None, "an item's For each outlives it"
+    await workflow_runs.save_items(session, parent=parent, items={item.item_index: write})
+    await _advance_items(session, loaded, parent, now=now, before=[*before, event])
+
+
+async def _resolve(
+    session: AsyncSession,
+    loaded: Loaded,
+    step: StepRow,
+    outcome: Outcome,
+    *,
+    now: datetime,
+    before: Sequence[Event] = (),
+) -> None:
+    """An executed step's final outcome: a node visit follows its edges, an item its For each."""
+    if step.item_index is not None:
+        await _settle_item(session, loaded, step, outcome, now=now, before=before)
+        return
+    transition = engine.resolve(
+        loaded.spec, loaded.views(), step.node_id, step.visit, outcome, loaded.facts
+    )
+    await _apply(session, loaded, transition, now=now, before=before)
+
+
+async def _write_step(
+    session: AsyncSession,
+    loaded: Loaded,
+    step: StepRow,
+    write: StepWrite,
+    events: Sequence[Event],
+    *,
+    now: datetime,
+) -> None:
+    """One step's new state outside the engine (retry, block, park), with its events."""
+    if step.item_index is None:
+        await _apply(
+            session,
+            loaded,
+            Transition((), tuple(events), None),
+            now=now,
+            writes={(step.node_id, step.visit): write},
+        )
+        return
+    assert step.parent_step_id is not None
+    parent = await workflow_runs.get_step(session, step.parent_step_id)
+    assert parent is not None, "an item's For each outlives it"
+    await workflow_runs.save_items(session, parent=parent, items={step.item_index: write})
+    if write.get("status") == "ready":
+        await _notify(session, READY_CHANNEL, str(step.run_id))
+    await _apply(session, loaded, Transition((), tuple(events), None), now=now)
 
 
 async def _queue_posts(
@@ -370,8 +648,7 @@ async def _offer_finished(
     listeners = await workflow_triggers.event_triggers_for(
         session, tenant_id=run.tenant_id, source=source
     )
-    finish = [r for r in rows if isinstance(loaded.spec.nodes.get(r.node_id), FinishNode)]
-    output = max(finish, key=lambda r: r.visit).output if finish else None
+    output = _finish_output(loaded.spec, rows)
     event: dict[str, Any] = {
         "workflow": {"id": str(run.workflow_id), "name": loaded.workflow.name},
         "run": {
@@ -418,6 +695,12 @@ async def offer_event(
         expires_at=now + EVENT_BUFFER,
     )
     await _notify(session, WAITS_CHANNEL, source)
+
+
+def _finish_output(spec: Spec, rows: Sequence[StepRow]) -> JsonValue:
+    """A run's output: what its last Finish visit produced."""
+    finish = [r for r in rows if isinstance(spec.nodes.get(r.node_id), FinishNode)]
+    return max(finish, key=lambda r: r.visit).output if finish else None
 
 
 async def _notify(session: AsyncSession, channel: str, payload: str) -> None:
@@ -497,7 +780,7 @@ async def start_run(
             source = await workflow_runs.get_run(session, source_id, tenant_id=tenant_id)
             if source is None or source.workflow_id != workflow.id:
                 return Refusal("not_found", "That run is gone.")
-        if start.mode == "test":
+        if start.mode == "test" and start.version is None:
             spec_document: dict[str, Any] = workflow.draft_spec
             version = workflow.live_version or 0
         elif workflow.status != "active":
@@ -505,11 +788,14 @@ async def start_run(
         elif workflow.live_version is None:
             return Refusal("not_published", "Publish this workflow before running it.")
         else:
-            version = source.version if source and start.fork_of else workflow.live_version
+            version = start.version or (
+                source.version if source and start.fork_of else workflow.live_version
+            )
             row = await workflows.get_version(
                 session, tenant_id=tenant_id, workflow_id=workflow.id, number=version
             )
-            assert row is not None, "the live version exists"
+            if row is None:
+                return Refusal("not_found", f"Version {version} of this workflow is gone.")
             spec_document = row.spec
         source_steps = await workflow_runs.list_steps(session, source.id) if source else []
     spec = parse_spec(spec_document)
@@ -562,6 +848,7 @@ async def start_run(
             budget_usd=_budget(spec, settings, start, cleared),
             deadline_at=_deadline(spec, settings, now),
             parent_run_id=start.parent_run_id,
+            parent_step_id=start.parent_step_id,
             forked_from_run_id=start.fork_of[0] if start.fork_of else None,
             forked_from_step=start.fork_of[1] if start.fork_of else None,
             test_options=(
@@ -701,16 +988,12 @@ async def claim(
         await append_events(
             session,
             run_id=run.id,
-            events=[NewEvent("step.started", _key(step), {"attempt": attempt})],
+            events=[NewEvent("step.started", key_of(step), {"attempt": attempt})],
             actor=ENGINE,
             at=now,
         )
         await _notify(session, run_channel(run.tenant_id), str(run.id))
     return Claimed(run, step, attempt)
-
-
-def _key(step: StepRow) -> str:
-    return engine.step_key(step.node_id, step.visit)
 
 
 async def execute(
@@ -724,7 +1007,7 @@ async def execute(
     """Run one claimed attempt: preflight, then the node kind's executor, then settle."""
     async with sm() as session:
         loaded = await _load(session, settings, claimed.run, clock())
-    node = loaded.spec.nodes[claimed.step.node_id]
+    node = node_of(loaded.spec, claimed.step)
     refusal = await check(
         sm,
         settings,
@@ -733,7 +1016,7 @@ async def execute(
         budget_usd=loaded.run.budget_usd,
         cost_usd=loaded.run.cost_usd,
     )
-    outcome: Outcome | Park
+    outcome: Outcome | Park | Parked
     if isinstance(refusal, Refusal):
         if refusal.gate:
             await _block(sm, settings, claimed, refusal, now=clock())
@@ -754,7 +1037,8 @@ async def execute(
             claimed.attempt,
             engine.expression_context(
                 loaded.spec, loaded.views(), node_id=claimed.step.node_id, facts=loaded.facts
-            ),
+            )
+            | item_context(loaded.spec, claimed.step),
             loaded.place(),
         )
         try:
@@ -763,6 +1047,8 @@ async def execute(
             outcome = engine.Failed("fatal", _cut(f"{type(err).__name__}: {err}") or "")
     if isinstance(outcome, Park):
         await _park(sm, settings, claimed, outcome, now=clock())
+    if isinstance(outcome, Parked):
+        await park(sm, settings, claimed, outcome, now=clock())
         return
     await settle(
         sm,
@@ -819,8 +1105,7 @@ async def settle(
             error_message=_cut(outcome.message) if isinstance(outcome, engine.Failed) else None,
         )
         loaded = await _load(session, settings, run, now)
-        node = loaded.spec.nodes[step.node_id]
-        delay = engine.retry_delay_s(node, number, outcome)
+        delay = engine.retry_delay_s(node_of(loaded.spec, step), number, outcome)
         if delay is not None and isinstance(outcome, engine.Failed):
             await _retry_later(
                 session,
@@ -831,10 +1116,7 @@ async def settle(
                 message=outcome.message,
             )
             return True
-        transition = engine.resolve(
-            loaded.spec, loaded.views(), step.node_id, step.visit, outcome, loaded.facts
-        )
-        await _apply(session, loaded, transition, now=now)
+        await _resolve(session, loaded, step, outcome, now=now)
         return True
 
 
@@ -856,16 +1138,10 @@ async def _retry_later(
     }
     event = Event(
         "step.retry_scheduled",
-        _key(step),
+        key_of(step),
         {"after_s": int(delay.total_seconds()), "message": _cut(message)},
     )
-    await _apply(
-        session,
-        loaded,
-        Transition((), (event,), None),
-        now=now,
-        writes={(step.node_id, step.visit): write},
-    )
+    await _write_step(session, loaded, step, write, [event], now=now)
 
 
 async def _block(
@@ -933,7 +1209,7 @@ async def _park(
             }
             if blocked:
                 data["reason"] = blocked.reason
-            events.append(Event("wait.opened", _key(step), data))
+            events.append(Event("wait.opened", key_of(step), data))
             if kind == "event":
                 await _notify(session, WAITS_CHANNEL, str(wait.id))  # a held event may match
         write: StepWrite = {
@@ -942,12 +1218,8 @@ async def _park(
             "lease_owner": None,
             "lease_expires_at": None,
         }
-        await _apply(
-            session,
-            await _load(session, settings, run, now),
-            Transition((), tuple(events), None),
-            now=now,
-            writes={(step.node_id, step.visit): write},
+        await _write_step(
+            session, await _load(session, settings, run, now), step, write, events, now=now
         )
 
 
@@ -967,6 +1239,9 @@ async def resume(
     loaded = await _load(session, settings, run, now)
     if outcome is None:
         write: StepWrite = {"status": "ready", "ready_at": now, "waiting_reason": None}
+        if step.item_index is not None:  # a For each item's answered question
+            await _write_step(session, loaded, step, write, before, now=now)
+            return
         await _apply(
             session,
             loaded,
@@ -986,6 +1261,9 @@ async def resume(
         error_class=outcome.error_class if isinstance(outcome, engine.Failed) else None,
         error_message=_cut(outcome.message) if isinstance(outcome, engine.Failed) else None,
     )
+    if step.item_index is not None:
+        await _settle_item(session, loaded, step, outcome, now=now, before=before)
+        return
     transition = engine.resolve(
         loaded.spec, loaded.views(), step.node_id, step.visit, outcome, loaded.facts
     )
@@ -1044,27 +1322,14 @@ async def recheck_blocked(
             message = (
                 refusal.message if isinstance(refusal, Refusal) else str(shown.get("message", ""))
             )
-            transition = engine.resolve(
-                loaded.spec,
-                loaded.views(),
-                step.node_id,
-                step.visit,
-                engine.Failed("gate", message, reason=reason),
-                loaded.facts,
-            )
-            event = Event("wait.timed_out", _key(step), {"wait": str(wait.id)})
-            await _apply(session, loaded, transition, now=now, before=[event])
+            event = Event("wait.timed_out", key_of(step), {"wait": str(wait.id)})
+            failed = engine.Failed("gate", message, reason=reason)
+            await _resolve(session, loaded, step, failed, now=now, before=[event])
             return
         await workflow_runs.close_waits(session, status="completed", now=now, step_id=step.id)
-        event = Event("wait.decided", _key(step), {"wait": str(wait.id), "decision": "cleared"})
+        event = Event("wait.decided", key_of(step), {"wait": str(wait.id), "decision": "cleared"})
         write: StepWrite = {"status": "ready", "ready_at": now, "waiting_reason": None}
-        await _apply(
-            session,
-            loaded,
-            Transition((), (event,), None),
-            now=now,
-            writes={(step.node_id, step.visit): write},
-        )
+        await _write_step(session, loaded, step, write, [event], now=now)
 
 
 async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: datetime) -> None:
@@ -1078,7 +1343,7 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
         run, step = held
         attempts = await workflow_runs.list_attempts(session, step_id)
         loaded = await _load(session, settings, run, now)
-        node = loaded.spec.nodes[step.node_id]
+        node = node_of(loaded.spec, step)
         if isinstance(node, AgentNode) and attempts and attempts[-1].session_id is not None:
             await _retry_later(
                 session, loaded, step, now=now, delay=timedelta(0), message="Reattaching"
@@ -1094,10 +1359,87 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
             )
             return
         outcome = engine.Unknown("The worker stopped after it may have written something")
-        transition = engine.resolve(
-            loaded.spec, loaded.views(), step.node_id, step.visit, outcome, loaded.facts
+        await _resolve(session, loaded, step, outcome, now=now)
+
+
+async def park(
+    sm: Sessions, settings: Settings, claimed: Claimed, parked: Parked, *, now: datetime
+) -> None:
+    """A Workflow step waits as `event` on the child run it started; its attempt stays open."""
+    async with sm.begin() as session:
+        held = await _locked_step(session, claimed.step.id, claimed.step.generation, "running")
+        if held is None:
+            return
+        run, step = held
+        write: StepWrite = {
+            "status": "waiting",
+            "waiting_reason": "event",
+            "lease_owner": None,
+            "lease_expires_at": None,
+        }
+        child: dict[str, JsonValue] = {"id": str(parked.child_run_id), "number": parked.number}
+        data: dict[str, JsonValue] = {
+            "id": str(parked.child_run_id),
+            "kind": "event",
+            "addressees": [],
+            "run": child,
+        }
+        event = Event("wait.opened", key_of(step), data)
+        await _write_step(
+            session, await _load(session, settings, run, now), step, write, [event], now=now
         )
-        await _apply(session, loaded, transition, now=now)
+    await settle_from_child(sm, settings, step_id=claimed.step.id, now=now)
+
+
+async def settle_from_child(
+    sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: datetime
+) -> bool:
+    """A waiting Workflow step settles once its child run ended: the child's output, or its
+    failure. False while the child is still going."""
+    async with sm.begin() as session:
+        held = await _locked_step(session, step_id, None, "waiting")
+        child = None if held is None else await workflow_runs.latest_child(session, step_id)
+        if held is None or child is None or child.status in workflow_runs.ACTIVE_RUN_STATES:
+            return False
+        run, step = held
+        ran = f"Run {child.number} {child.status.replace('_', ' ')}"
+        outcome: Outcome
+        if child.status == "succeeded":
+            rows = await workflow_runs.list_steps(session, child.id)
+            output = _finish_output(await spec_of(session, child), rows)
+            outcome = engine.Succeeded(output, summary=ran)
+        else:
+            outcome = engine.Failed("agent", child.failure_message or ran)
+        await workflow_runs.finish_attempt(
+            session,
+            step_id=step_id,
+            status="succeeded" if child.status == "succeeded" else "failed",
+            now=now,
+            error_class=None if child.status == "succeeded" else "agent",
+            error_message=None if child.status == "succeeded" else _cut(ran),
+        )
+        data: dict[str, JsonValue] = {
+            "decision": child.status,
+            "run": {"id": str(child.id), "number": child.number},
+        }
+        event = Event("wait.decided", key_of(step), data)
+        loaded = await _load(session, settings, run, now)
+        await _resolve(session, loaded, step, outcome, now=now, before=[event])
+        return True
+
+
+async def sync_children(sm: Sessions, settings: Settings, *, now: datetime, limit: int = 50) -> int:
+    """Workflow steps settle from child runs that ended; children of a step that ended (its
+    run was cancelled or stopped) are cancelled. Returns how many it handled."""
+    async with sm() as session:
+        parents = await workflow_runs.parents_of_ended_children(session, limit=limit)
+        orphans = await workflow_runs.orphaned_children(session, limit=limit)
+    for step_id in parents:
+        await settle_from_child(sm, settings, step_id=step_id, now=now)
+    end = RunEnd("cancelled", reason="parent_stopped", message="The calling run stopped")
+    for run_id in orphans:
+        await stop_run(sm, settings, run_id=run_id, end=end, now=now)
+    return len(parents) + len(orphans)
 
 
 async def stop_run(
@@ -1223,7 +1565,7 @@ async def decide_unknown(
                 failed = engine.Failed("unknown", "Marked failed by its owner")
                 transition = engine.resolve(*args, failed, loaded.facts)
         event = Event(
-            "step.resolved_by", _key(step), {"decision": decision, "account": str(account_id)}
+            "step.resolved_by", key_of(step), {"decision": decision, "account": str(account_id)}
         )
         await _apply(
             session, loaded, transition, now=now, actor=account_actor(account_id), before=[event]

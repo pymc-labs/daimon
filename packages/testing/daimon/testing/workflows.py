@@ -70,8 +70,13 @@ class World:
                 for r in await workflow_runs.list_steps(s, run_id)
             }
 
+    async def items(self, run_id: uuid.UUID) -> dict[str, workflow_runs.StepRow]:
+        """For each items by key, `each[0]` and on."""
+        async with self.sm() as s:
+            return {runs.key_of(r): r for r in await workflow_runs.list_items(s, run_id=run_id)}
+
     async def claim(self, run_id: uuid.UUID, key: str, now: datetime = NOW) -> runs.Claimed:
-        step = (await self.steps(run_id))[key]
+        step = ((await self.steps(run_id)) | (await self.items(run_id)))[key]
         claimed = await runs.claim(
             self.sm, step_id=step.id, owner="w1", lease=timedelta(minutes=5), now=now
         )
@@ -81,13 +86,23 @@ class World:
     async def execute(
         self, claimed: runs.Claimed, *outcomes: engine.Outcome, now: datetime = NOW
     ) -> None:
+        """Run the claimed step with a fake executor that answers `outcomes` in turn."""
         queue = list(outcomes)
 
         async def fake(work: StepWork) -> engine.Outcome:
             assert work.attempt == claimed.attempt, "the executor sees its attempt"
             return queue.pop(0)
 
-        await runs.execute(self.sm, self.settings, {"agent": fake}, claimed, clock=lambda: now)
+        fakes: dict[str, runs.StepExecutor] = dict.fromkeys(
+            ("agent", "action", "approval", "code"), fake
+        )
+        await runs.execute(self.sm, self.settings, fakes, claimed, clock=lambda: now)
+
+    async def add_workflow(self, nodes: dict[str, Any], start: str) -> uuid.UUID:
+        """Another published workflow of the owner's, with a call trigger."""
+        spec = _spec(nodes, start) | {"triggers": [{"id": "call", "kind": "call"}]}
+        async with self.sm.begin() as s:
+            return await _publish(s, self.tenant_id, self.owner, spec, None)
 
     async def verified(self, run_id: uuid.UUID) -> list[str]:
         async with self.sm() as s:
@@ -113,25 +128,39 @@ async def make_world(
     await db_session.execute(
         update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
     )
-    spec: dict[str, Any] = {"schema": "daimon.workflow/v1", "name": "T", "start": start}
-    spec |= {"nodes": nodes} | ({"home": {"channel": home}} if home else {})
+    spec = _spec(nodes, start) | ({"home": {"channel": home}} if home else {})
+    flow_id = await _publish(db_session, tenant.id, owner.id, spec, home)
+    await db_session.commit()
+    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    return World(sm, make_settings(**settings), tenant.id, owner.id, flow_id)
+
+
+def _spec(nodes: dict[str, Any], start: str) -> dict[str, Any]:
+    return {"schema": "daimon.workflow/v1", "name": "T", "start": start, "nodes": nodes}
+
+
+async def _publish(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    owner: uuid.UUID,
+    spec: dict[str, Any],
+    home: str | None,
+) -> uuid.UUID:
     flow = await workflows.create_workflow(
-        db_session,
-        tenant_id=tenant.id,
-        owner_account_id=owner.id,
-        name="T",
+        session,
+        tenant_id=tenant_id,
+        owner_account_id=owner,
+        name=spec["name"],
         spec=spec,
         home_channel_id=home,
     )
     await workflows.publish_version(
-        db_session,
-        tenant_id=tenant.id,
+        session,
+        tenant_id=tenant_id,
         workflow_id=flow.id,
         spec=spec,
         spec_hash="h",
         source="web",
-        published_by=owner.id,
+        published_by=owner,
     )
-    await db_session.commit()
-    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
-    return World(sm, make_settings(**settings), tenant.id, owner.id, flow.id)
+    return flow.id

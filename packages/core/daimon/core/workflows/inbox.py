@@ -16,7 +16,7 @@ from daimon.core.stores.workflow_publish_requests import PublishRequestRow
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.stores.workflow_waits import Wait
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows import engine, runs, service, views, waits
+from daimon.core.workflows import runs, service, views, waits
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AnyNode, ApprovalNode, Spec
 from daimon.core.workflows.views import Person, iso
@@ -166,7 +166,7 @@ async def _wait_detail(
         return None
     workflow = await seen.workflow(run.tenant_id, run.workflow_id)
     node = (await seen.spec(run)).nodes.get(step.node_id)
-    key = engine.step_key(step.node_id, step.visit)
+    key = runs.key_of(step)
     typed = _typed(node, wait)
     decision = None
     if wait.status == "completed" and wait.decision and wait.decided_by_account_id:

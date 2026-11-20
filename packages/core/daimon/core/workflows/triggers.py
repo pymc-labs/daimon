@@ -269,8 +269,14 @@ async def start_called(
     workflow_id: uuid.UUID,
     inputs: dict[str, Any],
     now: datetime,
+    parent_step_id: uuid.UUID | None = None,
+    version: int | None = None,
 ) -> RunRow | Refusal:
-    """A child run of a workflow with a call trigger, from a Workflow node of `parent`."""
+    """A child run of a workflow with a call trigger, from a Workflow node of `parent`.
+
+    `version` pins a published version (the live one by default). A test run's child is a
+    test run too, so a test never writes for real through a call.
+    """
     depth = runs.chain_depth(parent) + 1
     if depth > runs.MAX_CHAIN_DEPTH:
         return Refusal(
@@ -280,22 +286,22 @@ async def start_called(
         target = await workflows.get_workflow(
             session, tenant_id=parent.tenant_id, workflow_id=workflow_id
         )
-        live = (
+        number = version or (target.live_version if target is not None else None)
+        called = (
             await workflows.get_version(
-                session,
-                tenant_id=parent.tenant_id,
-                workflow_id=workflow_id,
-                number=target.live_version,
+                session, tenant_id=parent.tenant_id, workflow_id=workflow_id, number=number
             )
-            if target is not None and target.live_version is not None
+            if target is not None and number is not None
             else None
         )
     call = (
-        next((t for t in parse_spec(live.spec).triggers or [] if isinstance(t, CallTrigger)), None)
-        if live
+        next(
+            (t for t in parse_spec(called.spec).triggers or [] if isinstance(t, CallTrigger)), None
+        )
+        if called
         else None
     )
-    if live is None or call is None:
+    if called is None or call is None:
         return Refusal("not_callable", "That workflow is not published with a call trigger.")
     return await runs.start_run(
         sm,
@@ -303,13 +309,16 @@ async def start_called(
         tenant_id=parent.tenant_id,
         start=runs.Start(
             workflow_id=workflow_id,
-            run_as_account_id=live.published_by_account_id,
+            run_as_account_id=called.published_by_account_id,
             triggered_by={"kind": "call", "run_id": str(parent.id), "depth": depth},
             trigger_kind="call",
             trigger_key=call.id,
             inputs=inputs,
+            mode=parent.mode,
             untrusted_inputs=parent.untrusted_inputs,
             parent_run_id=parent.id,
+            parent_step_id=parent_step_id,
+            version=number,
         ),
         now=now,
     )

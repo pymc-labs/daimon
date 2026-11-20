@@ -62,6 +62,11 @@ def step_key(node_id: str, visit: int) -> str:
     return node_id if visit == 1 else f"{node_id}#{visit}"
 
 
+def item_key(node_id: str, visit: int, index: int) -> str:
+    """`each[3]`: the fourth item of a For each visit."""
+    return f"{step_key(node_id, visit)}[{index}]"
+
+
 def edge_key(edge: Edge) -> str:
     return f"{edge.source}:{edge.slot}"
 
