@@ -22,7 +22,7 @@ from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import tenants, workflow_runs
-from daimon.core.workflows import runs
+from daimon.core.workflows import runs, triggers
 from daimon.core.workflows.engine import RunEnd
 from daimon.core.workflows.features import KEYS, workflow_features
 from sqlalchemy.exc import SQLAlchemyError
@@ -87,7 +87,7 @@ class WorkflowEngine:
 async def starts_step(engine: WorkflowEngine) -> None:
     """Accepted trigger events become runs; queued runs begin when their workflow has room."""
     now = engine.clock()
-    await runs.start_from_trigger_events(engine.sm, engine.settings, now=now)
+    await triggers.start_from_events(engine.sm, engine.settings, now=now)
     async with engine.sm() as session:
         queued = await workflow_runs.queued_runs(session, limit=_BATCH)
     for run_id in queued:
@@ -163,7 +163,7 @@ async def heartbeat_step(engine: WorkflowEngine) -> None:
 
 @scheduler_step
 async def sweep_step(engine: WorkflowEngine) -> None:
-    """Clear old payloads and delete finished runs past their workspace's retention."""
+    """Delete old trigger events and finished runs past their workspace's retention."""
 
     async def retention(tenant_id: uuid.UUID) -> int:
         async with engine.sm() as session:
@@ -178,8 +178,9 @@ async def sweep_step(engine: WorkflowEngine) -> None:
 
 @scheduler_step
 async def schedules_step(engine: WorkflowEngine) -> None:
-    """Schedule triggers fire here (M6); nothing yet."""
-    del engine
+    """Due schedule slots become trigger events; the starts loop runs them."""
+    if await triggers.fire_schedules(engine.sm, now=engine.clock()):
+        engine.wake["starts"].set()
 
 
 STEPS: Final[dict[str, Callable[[WorkflowEngine], Awaitable[None]]]] = {
