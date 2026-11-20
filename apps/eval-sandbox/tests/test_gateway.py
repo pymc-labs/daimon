@@ -50,14 +50,20 @@ def _world(seen: list[httpx.Request], answer: dict[str, object]) -> httpx.AsyncC
 
 async def test_flow_becomes_world_request_and_its_answer() -> None:
     seen: list[httpx.Request] = []
-    reply = {"status": 201, "headers": {"x-id": "7"}, "body_b64": base64.b64encode(b"made").decode()}
+    reply = {
+        "status": 201,
+        "headers": {"x-id": "7"},
+        "body_b64": base64.b64encode(b"made").decode(),
+    }
     gateway = Gateway(CONFIG, _world(seen, {**reply, "refused": False}))
     flow = _flow(AGENT_PORT)
     with taddons.context(gateway):
         await gateway.request(flow)
     assert len(seen) == 1, "one world call per flow"
     sent = json.loads(seen[0].content)
-    assert str(seen[0].url) == "http://world.test/world/item-1/http", "posted to the item's world route"
+    assert str(seen[0].url) == "http://world.test/world/item-1/http", (
+        "posted to the item's world route"
+    )
     assert seen[0].headers["authorization"] == "Bearer tok", "authenticated with the world token"
     assert sent["url"] == "https://api.github.com/repos/acme/app/issues", "url uses the host name"
     assert base64.b64decode(sent["body_b64"]) == b'{"title":"x"}', "body passed through"
