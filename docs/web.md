@@ -37,7 +37,8 @@ You need:
 
 [`DAIMON_WEB__MODULES`](configuration.md#daimon_web__modules) turns sections
 on or off for the whole deployment. Workspace admins can switch them off again
-for their own workspace under **Admin** > **Settings**.
+for their own workspace under **Admin** > **Settings**. The evals section is
+not on by default; see [Evals](evals.md).
 
 ## Set up sign-in
 

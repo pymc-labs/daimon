@@ -17,6 +17,7 @@ typo is silent — check the spelling here.
 
 - [Core](#core)
 - [Compute](#compute)
+- [Evals](#evals)
 - [Long Jobs](#long-jobs)
 - [Monitoring](#monitoring)
 - [Database](#database)
@@ -215,6 +216,36 @@ for at most max_ttl_hours.
 
 Operator-managed image profiles. Empty means no images can be launched. No environment
 or credentials are copied from template apps.
+
+## Evals
+
+Read from `daimon.core.config.EvalsSettings`. Prefix `DAIMON_EVALS__`.
+
+### `DAIMON_EVALS__SIGNING_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Base64 Ed25519 private key (32 raw bytes) that signs exported eval bundles. Unset:
+exports are unsigned.
+
+### `DAIMON_EVALS__TRUSTED_KEYS`
+
+`list[str]` · optional · default unset
+
+Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only bundles
+signed by one of them or by this deployment's signing key.
+
+### `DAIMON_EVALS__SOURCE_LABEL`
+
+`str` · optional · default `daimon`
+
+Label this deployment writes as the source of the bundles it exports.
+
+### `DAIMON_EVALS__MAX_BUNDLE_MB`
+
+`int` · optional · default `128`
+
+Largest eval bundle import or export handles, in MiB.
 
 ## Long Jobs
 
@@ -1142,10 +1173,10 @@ package, where the image build puts it.
 
 ### `DAIMON_WEB__MODULES`
 
-`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
+`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin' | 'evals', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
 
 Sections of the web app that are on, comma-separated: chat, agents, channels, routines,
-credits, integrations, admin.
+credits, integrations, admin. Add evals to offer the evals pages.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 

@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted_from
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
@@ -53,6 +52,7 @@ from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
     environments,
+    evals,
     fly,
     long_jobs,
     routines,
@@ -126,6 +126,7 @@ from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_r
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.agent_editing import AgentEditDeps
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
@@ -590,6 +591,7 @@ def create_mcp_app(
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     long_jobs.register_long_job_tools(mcp, runtime)
+    evals.register_eval_tools(mcp, runtime)
     fly.register_fly_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools

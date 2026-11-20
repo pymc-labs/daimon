@@ -269,6 +269,14 @@ EXEMPT: dict[str, str] = {
     "POST /api/routines/{routine_id}/pause": ("as POST /api/routines"),
     "POST /api/routines/{routine_id}/resume": ("as POST /api/routines"),
     "POST /api/routines/{routine_id}/run": ("as POST /api/routines"),
+    "POST /api/evals/suites": ("eval data of the workspace: no channel and no agent"),
+    "PATCH /api/evals/suites/{suite_id}": ("as POST /api/evals/suites"),
+    "PUT /api/evals/suites/{suite_id}/shares": ("as POST /api/evals/suites"),
+    "PUT /api/evals/suites/{suite_id}/cases/{case_id}": ("as POST /api/evals/suites"),
+    "POST /api/evals/cases/validate": ("checks a case and stores nothing"),
+    "POST /api/evals/arms": ("as POST /api/evals/suites"),
+    "POST /api/evals/bundles/export": ("as POST /api/evals/suites"),
+    "POST /api/evals/bundles/import": ("as POST /api/evals/suites"),
     "POST /api/credits/allowances": ("workspace level: no channel and no agent (credit)"),
     "PATCH /api/credits/allowances/{allowance_id}": (
         "workspace level: no channel and no agent (credit)"

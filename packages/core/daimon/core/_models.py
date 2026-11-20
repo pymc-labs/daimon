@@ -5818,6 +5818,320 @@ class MonitoredEvent(Base):
     created_at: Mapped[TsNow]
 
 
+# ---------- Evals (`daimon.core.evals`) ----------
+# Documents are stored whole as the JSON they arrived as; columns hold what queries need.
+_EvalSuiteFK = Annotated[uuid.UUID, mapped_column(ForeignKey("eval_suites.id", ondelete="CASCADE"))]
+_EvalRunFK = Annotated[uuid.UUID, mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"))]
+_EvalScrub = "scrub_status IN ('scrubbed', 'partial', 'unscrubbed')"
+_EvalSignature = "signature IS NULL OR signature IN ('unsigned', 'unknown_key', 'valid')"
+
+
+class EvalSuite(Base):
+    """An eval suite: its id in documents (`key`), owner and the latest version."""
+
+    __tablename__ = "eval_suites"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="uq_eval_suites_tenant_key"),
+        CheckConstraint(_EvalScrub, name="ck_eval_suites_scrub_status"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    key: Mapped[str]
+    name: Mapped[str]
+    owner_key: Mapped[str]
+    current_version: Mapped[int]
+    scrub_status: Mapped[str]
+    source_instance: Mapped[str | None]
+    archived_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class EvalSuiteVersion(Base):
+    """One immutable suite version: the Suite document, how scrubbed its pinned cases are,
+    and the signature state of the bundle it was imported from (None: made here)."""
+
+    __tablename__ = "eval_suite_versions"
+    __table_args__ = (
+        CheckConstraint(_EvalScrub, name="ck_eval_suite_versions_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_suite_versions_signature"),
+    )
+
+    suite_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_suites.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    document: Mapped[dict[str, Any]]
+    scrub_status: Mapped[str]
+    signature: Mapped[str | None]
+    created_by: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalCase(Base):
+    """A case within a suite; its content lives in revisions."""
+
+    __tablename__ = "eval_cases"
+    __table_args__ = (UniqueConstraint("suite_id", "key", name="uq_eval_cases_suite_key"),)
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    suite_id: Mapped[_EvalSuiteFK]
+    key: Mapped[str]
+    current_revision: Mapped[int]
+    created_at: Mapped[TsNow]
+
+
+class EvalCaseRevision(Base):
+    """One immutable case revision: the Case document and its hash."""
+
+    __tablename__ = "eval_case_revisions"
+
+    case_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_cases.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    document: Mapped[dict[str, Any]]
+    sha256: Mapped[str]
+    fidelity: Mapped[str]
+    flags: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    blob_shas: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    scrub_status: Mapped[str | None]
+    created_by: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalSuiteVersionCase(Base):
+    """Which case revision a suite version pins, in suite order."""
+
+    __tablename__ = "eval_suite_version_cases"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["suite_id", "version"],
+            ["eval_suite_versions.suite_id", "eval_suite_versions.version"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    suite_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(primary_key=True)
+    position: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("eval_cases.id", ondelete="CASCADE"))
+    revision: Mapped[int]
+    weight: Mapped[float] = mapped_column(Double, server_default=text("1"))
+    split: Mapped[str] = mapped_column(server_default="test")
+
+
+class EvalBlob(Base):
+    """A blob a document references, by sha256. Its bytes live in the artifact store;
+    `content` holds them only where the deployment has none."""
+
+    __tablename__ = "eval_blobs"
+
+    tenant_id: Mapped[TenantPk]
+    sha256: Mapped[str] = mapped_column(primary_key=True)
+    size: Mapped[int] = mapped_column(BigInteger)
+    media_type: Mapped[str]
+    scrub: Mapped[str]
+    needs_human_check: Mapped[FalseFlag]
+    content: Mapped[bytes | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalShare(Base):
+    """A person or group a suite is shared with, and their role on it."""
+
+    __tablename__ = "eval_shares"
+    __table_args__ = (
+        CheckConstraint("who_kind IN ('person', 'group')", name="ck_eval_shares_who_kind"),
+        CheckConstraint("role IN ('viewer', 'reviewer', 'editor')", name="ck_eval_shares_role"),
+    )
+
+    suite_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_suites.id", ondelete="CASCADE"), primary_key=True
+    )
+    who_kind: Mapped[str] = mapped_column(primary_key=True)
+    who: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    role: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
+class EvalArm(Base):
+    """An agent configuration or recorded baseline that runs compare."""
+
+    __tablename__ = "eval_arms"
+    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_eval_arms_tenant_key"),)
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    key: Mapped[str]
+    label: Mapped[str]
+    kind: Mapped[str]
+    document: Mapped[dict[str, Any]]
+    config_hash: Mapped[str | None]
+    created_by: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalRun(Base):
+    """A run of a suite version, live, imported or recorded. `signature` is the state of the
+    bundle it was imported from (None: made here)."""
+
+    __tablename__ = "eval_runs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="uq_eval_runs_tenant_key"),
+        CheckConstraint(_EvalScrub, name="ck_eval_runs_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_runs_signature"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    key: Mapped[str]
+    suite_id: Mapped[_EvalSuiteFK]
+    suite_version: Mapped[int]
+    status: Mapped[str]
+    origin: Mapped[str]
+    scrub_status: Mapped[str]
+    signature: Mapped[str | None]
+    document: Mapped[dict[str, Any]]
+    cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    spend_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    created_by: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class EvalRunItem(Base):
+    """One case, arm and repeat of a run."""
+
+    __tablename__ = "eval_run_items"
+    __table_args__ = (
+        UniqueConstraint("run_id", "key", name="uq_eval_run_items_run_key"),
+        Index("ix_eval_run_items_run_status", "run_id", "status"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[_EvalRunFK]
+    key: Mapped[str]
+    case_key: Mapped[str]
+    case_revision: Mapped[int]
+    arm_key: Mapped[str]
+    repeat: Mapped[int]
+    status: Mapped[str]
+    attempts: Mapped[int] = mapped_column(server_default=text("0"))
+    claimed_at: Mapped[datetime | None]
+    document: Mapped[dict[str, Any]]
+    blob_shas: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class EvalScore(Base):
+    """One grader's verdict on an item or a pair."""
+
+    __tablename__ = "eval_scores"
+    __table_args__ = (UniqueConstraint("run_id", "key", name="uq_eval_scores_run_key"),)
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[_EvalRunFK]
+    key: Mapped[str]
+    item_key: Mapped[str | None]
+    criterion: Mapped[str]
+    grader_kind: Mapped[str]
+    document: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+
+
+class EvalReviewQueue(Base):
+    """A review queue over a run's items."""
+
+    __tablename__ = "eval_review_queues"
+    __table_args__ = (UniqueConstraint("run_id", "key", name="uq_eval_review_queues_run_key"),)
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[_EvalRunFK]
+    key: Mapped[str]
+    document: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+
+
+class EvalReviewAssignment(Base):
+    """One reviewer's turn on one item of a queue."""
+
+    __tablename__ = "eval_review_assignments"
+
+    queue_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_review_queues.id", ondelete="CASCADE"), primary_key=True
+    )
+    item_key: Mapped[str] = mapped_column(primary_key=True)
+    reviewer_key: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    reserved_until: Mapped[datetime | None]
+    done_at: Mapped[datetime | None]
+
+
+class EvalComment(Base):
+    """A comment on a run item or a case."""
+
+    __tablename__ = "eval_comments"
+    __table_args__ = (
+        UniqueConstraint("run_id", "key", name="uq_eval_comments_run_key"),
+        UniqueConstraint("suite_id", "key", name="uq_eval_comments_suite_key"),
+        CheckConstraint(
+            "run_id IS NOT NULL OR suite_id IS NOT NULL", name="ck_eval_comments_parent"
+        ),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_runs.id", ondelete="CASCADE"))
+    suite_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("eval_suites.id", ondelete="CASCADE")
+    )
+    key: Mapped[str]
+    document: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+
+
+class EvalBundle(Base):
+    """A bundle that was exported or imported: its manifest and who moved it."""
+
+    __tablename__ = "eval_bundles"
+    __table_args__ = (
+        CheckConstraint("direction IN ('export', 'import')", name="ck_eval_bundles_direction"),
+        CheckConstraint(_EvalScrub, name="ck_eval_bundles_scrub_status"),
+        CheckConstraint(_EvalSignature, name="ck_eval_bundles_signature"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    direction: Mapped[str]
+    key: Mapped[str]
+    manifest: Mapped[dict[str, Any]]
+    actor_key: Mapped[str]
+    scrub_status: Mapped[str]
+    signature: Mapped[str | None]
+    created_at: Mapped[TsNow]
+
+
+class EvalInstance(Base):
+    """The random name a workspace goes by as the source of the bundles it exports."""
+
+    __tablename__ = "eval_instances"
+
+    tenant_id: Mapped[TenantPk]
+    secret: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
 def _install_erased_account_guards() -> None:
     """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
 

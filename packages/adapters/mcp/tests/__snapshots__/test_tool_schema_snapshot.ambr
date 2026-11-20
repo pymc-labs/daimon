@@ -3545,6 +3545,1715 @@
         'type': 'object',
       }),
     }),
+    'eval_arm_create': dict({
+      'description': '''
+        Create an arm, or change one you created. Admins can change any arm. A live arm's
+        agent must be one of this workspace's; its config hash is computed for you.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'Arm': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'baseline': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BaselineArm',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'config_hash': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'kind': dict({
+                'enum': list([
+                  'live',
+                  'baseline',
+                ]),
+                'type': 'string',
+              }),
+              'label': dict({
+                'type': 'string',
+              }),
+              'live': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/LiveArm',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'id',
+              'label',
+              'kind',
+            ]),
+            'type': 'object',
+          }),
+          'BaselineArm': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'recorded_from': dict({
+                'anyOf': list([
+                  dict({
+                    'format': 'date-time',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'recorded_to': dict({
+                'anyOf': list([
+                  dict({
+                    'format': 'date-time',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'source_system': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'BlobRef': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'media_type': dict({
+                'type': 'string',
+              }),
+              'name': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'sha256': dict({
+                'type': 'string',
+              }),
+              'size': dict({
+                'type': 'integer',
+              }),
+            }),
+            'required': list([
+              'sha256',
+              'size',
+              'media_type',
+            ]),
+            'type': 'object',
+          }),
+          'JsonValue': dict({
+          }),
+          'LiveArm': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'agent': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'agent_snapshot': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/BlobRef',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'backend': dict({
+                'type': 'string',
+              }),
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'model': dict({
+                'type': 'string',
+              }),
+              'overrides': dict({
+                'anyOf': list([
+                  dict({
+                    'additionalProperties': dict({
+                      '$ref': '#/$defs/JsonValue',
+                    }),
+                    'type': 'object',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'backend',
+              'model',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'arm': dict({
+            '$ref': '#/$defs/Arm',
+          }),
+        }),
+        'required': list([
+          'arm',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_arms_list': dict({
+      'description': 'List the arms (agent setups to compare) in this workspace.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'eval_bundle_export': dict({
+      'description': '''
+        Export suites and runs as a bundle. People are replaced by labels unless an admin
+        keeps them. Returns a short-lived download link; the file stays in the deployment's
+        artifact storage until its retention removes it. Encrypted bundles are exported from the
+        command line.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'ExportRequest': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'include_identities': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'runs': dict({
+                'default': list([
+                ]),
+                'items': dict({
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'suites': dict({
+                'default': list([
+                ]),
+                'items': dict({
+                  '$ref': '#/$defs/SuitePick',
+                }),
+                'type': 'array',
+              }),
+              'title': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'SuitePick': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'version': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'id',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'request': dict({
+            '$ref': '#/$defs/ExportRequest',
+          }),
+        }),
+        'required': list([
+          'request',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_bundle_import': dict({
+      'description': '''
+        Import a bundle uploaded with create_file_upload_url. Only an owner or an admin
+        can accept one that is not scrubbed. Encrypted bundles are imported from the command
+        line.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'accept_unscrubbed': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'file_handle': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'file_handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_case_get': dict({
+      'description': 'Read one eval case as JSON. No revision reads the latest.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'case_id': dict({
+            'type': 'string',
+          }),
+          'revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+          'case_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_case_put': dict({
+      'description': '''
+        Add a case to an eval suite, or save its next revision; eval_suite_update pins it.
+        Check it first with eval_case_validate; the hash is filled in when missing.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'JsonValue': dict({
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'case': dict({
+            'additionalProperties': dict({
+              '$ref': '#/$defs/JsonValue',
+            }),
+            'type': 'object',
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+          'case',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_case_validate': dict({
+      'description': 'Check an eval case against the format without saving it: problems and warnings.',
+      'parameters': dict({
+        '$defs': dict({
+          'JsonValue': dict({
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'case': dict({
+            'additionalProperties': dict({
+              '$ref': '#/$defs/JsonValue',
+            }),
+            'type': 'object',
+          }),
+        }),
+        'required': list([
+          'case',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_cases_list': dict({
+      'description': 'List the cases of an eval suite version. No version lists the latest.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'suite_id': dict({
+            'type': 'string',
+          }),
+          'version': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'suite_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_item_get': dict({
+      'description': '''
+        Read one eval run item: its transcript, calls and outcome. `blind` hides the arm
+        and model; reviewers always get it so.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'blind': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'item_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'item_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_items_list': dict({
+      'description': '''
+        List the items of an eval run, a page at a time (at most 500). `blind` names the
+        arms by neutral labels; reviewers always see them so.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'blind': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'offset': dict({
+            'default': 0,
+            'type': 'integer',
+          }),
+          'run_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'run_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_suite_create': dict({
+      'description': '''
+        Create an eval suite with no cases; you own it. Add cases with eval_case_put, then
+        pin them with eval_suite_update.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'CallPattern': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'effect': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'server': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'service': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'surface': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'mcp',
+                      'http',
+                      'cli',
+                      'builtin',
+                      'provider_tool',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'JudgeConfig': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'aggregate': dict({
+                'default': 'majority',
+                'enum': list([
+                  'majority',
+                  'mean',
+                  'all',
+                ]),
+                'type': 'string',
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'instructions': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'kind': dict({
+                'enum': list([
+                  'rubric',
+                  'pairwise',
+                  'reference',
+                ]),
+                'type': 'string',
+              }),
+              'models': dict({
+                'items': dict({
+                  '$ref': '#/$defs/ModelChoice',
+                }),
+                'type': 'array',
+              }),
+              'sees': dict({
+                'default': list([
+                  'reply',
+                  'chat',
+                  'files',
+                  'history',
+                ]),
+                'items': dict({
+                  'enum': list([
+                    'reply',
+                    'chat',
+                    'files',
+                    'tool_calls',
+                    'world_calls',
+                    'reference',
+                    'history',
+                  ]),
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'swap_positions': dict({
+                'default': True,
+                'type': 'boolean',
+              }),
+            }),
+            'required': list([
+              'id',
+              'kind',
+              'models',
+            ]),
+            'type': 'object',
+          }),
+          'ModelChoice': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'backend': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'low',
+                      'medium',
+                      'high',
+                      'xhigh',
+                      'max',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'model': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'model',
+            ]),
+            'type': 'object',
+          }),
+          'NetworkPolicy': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'deny': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'package_registries': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'passthrough',
+                      'deny',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'passthrough': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'ReviewDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'blind': dict({
+                'default': True,
+                'type': 'boolean',
+              }),
+              'layout': dict({
+                'default': 'side_by_side',
+                'enum': list([
+                  'single',
+                  'side_by_side',
+                ]),
+                'type': 'string',
+              }),
+              'reviewers_per_item': dict({
+                'default': 1,
+                'type': 'integer',
+              }),
+            }),
+            'type': 'object',
+          }),
+          'StatsDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'cluster_by': dict({
+                'default': 'source_thread',
+                'enum': list([
+                  'case',
+                  'source_thread',
+                ]),
+                'type': 'string',
+              }),
+              'non_inferiority_margin': dict({
+                'default': 0.05,
+                'type': 'number',
+              }),
+              'primary': dict({
+                'default': 'pass_rate',
+                'enum': list([
+                  'pass_rate',
+                  'rubric_score',
+                  'preference',
+                ]),
+                'type': 'string',
+              }),
+            }),
+            'type': 'object',
+          }),
+          'SuiteCasePick': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'revision': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'split': dict({
+                'default': 'test',
+                'enum': list([
+                  'dev',
+                  'test',
+                  'holdout',
+                ]),
+                'type': 'string',
+              }),
+              'weight': dict({
+                'default': 1,
+                'type': 'number',
+              }),
+            }),
+            'required': list([
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'SuiteDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'clock': dict({
+                'default': 'case',
+                'enum': list([
+                  'case',
+                  'real',
+                ]),
+                'type': 'string',
+              }),
+              'judges': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/JudgeConfig',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'network': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/NetworkPolicy',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'repeats': dict({
+                'default': 1,
+                'type': 'integer',
+              }),
+              'review': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ReviewDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'simulator': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ModelChoice',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'stats': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/StatsDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'SuiteDraft': dict({
+            'additionalProperties': False,
+            'description': 'A new suite or the next version of one. `cases` None keeps the cases it pins.',
+            'properties': dict({
+              'cases': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/SuiteCasePick',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'defaults': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/SuiteDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'description': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'id': dict({
+                'pattern': '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+                'type': 'string',
+              }),
+              'name': dict({
+                'type': 'string',
+              }),
+              'tags': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool_aliases': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/ToolAlias',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'id',
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'ToolAlias': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'args_map': dict({
+                'anyOf': list([
+                  dict({
+                    'additionalProperties': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'object',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'from': dict({
+                '$ref': '#/$defs/CallPattern',
+              }),
+              'to_effect': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'to_tool': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ToolTarget',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'from',
+            ]),
+            'type': 'object',
+          }),
+          'ToolTarget': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'server': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tool',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'draft': dict({
+            '$ref': '#/$defs/SuiteDraft',
+          }),
+        }),
+        'required': list([
+          'draft',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_suite_get': dict({
+      'description': 'Read an eval suite: its cases, weights and defaults. No version reads the latest.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'suite_id': dict({
+            'type': 'string',
+          }),
+          'version': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'suite_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_suite_share': dict({
+      'description': '''
+        Replace who an eval suite is shared with: people or groups, as viewer, reviewer or
+        editor. Only its owner or an admin can share; a suite that is not scrubbed cannot be.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'Share': dict({
+            'additionalProperties': False,
+            'description': 'A person or group a suite is shared with. Ids are platform ids as sign-ins carry them.',
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'kind': dict({
+                'enum': list([
+                  'person',
+                  'group',
+                ]),
+                'type': 'string',
+              }),
+              'role': dict({
+                'enum': list([
+                  'viewer',
+                  'reviewer',
+                  'editor',
+                ]),
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'kind',
+              'id',
+              'role',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'shares': dict({
+            'items': dict({
+              '$ref': '#/$defs/Share',
+            }),
+            'type': 'array',
+          }),
+          'suite_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'suite_id',
+          'shares',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_suite_update': dict({
+      'description': '''
+        Save the next version of an eval suite. `cases` pins case revisions (no revision:
+        the latest); leave it out to keep the cases it pins.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'CallPattern': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'effect': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'server': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'service': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'surface': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'mcp',
+                      'http',
+                      'cli',
+                      'builtin',
+                      'provider_tool',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'JudgeConfig': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'aggregate': dict({
+                'default': 'majority',
+                'enum': list([
+                  'majority',
+                  'mean',
+                  'all',
+                ]),
+                'type': 'string',
+              }),
+              'id': dict({
+                'type': 'string',
+              }),
+              'instructions': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'kind': dict({
+                'enum': list([
+                  'rubric',
+                  'pairwise',
+                  'reference',
+                ]),
+                'type': 'string',
+              }),
+              'models': dict({
+                'items': dict({
+                  '$ref': '#/$defs/ModelChoice',
+                }),
+                'type': 'array',
+              }),
+              'sees': dict({
+                'default': list([
+                  'reply',
+                  'chat',
+                  'files',
+                  'history',
+                ]),
+                'items': dict({
+                  'enum': list([
+                    'reply',
+                    'chat',
+                    'files',
+                    'tool_calls',
+                    'world_calls',
+                    'reference',
+                    'history',
+                  ]),
+                  'type': 'string',
+                }),
+                'type': 'array',
+              }),
+              'swap_positions': dict({
+                'default': True,
+                'type': 'boolean',
+              }),
+            }),
+            'required': list([
+              'id',
+              'kind',
+              'models',
+            ]),
+            'type': 'object',
+          }),
+          'ModelChoice': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'backend': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'effort': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'low',
+                      'medium',
+                      'high',
+                      'xhigh',
+                      'max',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'model': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'model',
+            ]),
+            'type': 'object',
+          }),
+          'NetworkPolicy': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'deny': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'package_registries': dict({
+                'anyOf': list([
+                  dict({
+                    'enum': list([
+                      'passthrough',
+                      'deny',
+                    ]),
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'passthrough': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'ReviewDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'blind': dict({
+                'default': True,
+                'type': 'boolean',
+              }),
+              'layout': dict({
+                'default': 'side_by_side',
+                'enum': list([
+                  'single',
+                  'side_by_side',
+                ]),
+                'type': 'string',
+              }),
+              'reviewers_per_item': dict({
+                'default': 1,
+                'type': 'integer',
+              }),
+            }),
+            'type': 'object',
+          }),
+          'StatsDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'cluster_by': dict({
+                'default': 'source_thread',
+                'enum': list([
+                  'case',
+                  'source_thread',
+                ]),
+                'type': 'string',
+              }),
+              'non_inferiority_margin': dict({
+                'default': 0.05,
+                'type': 'number',
+              }),
+              'primary': dict({
+                'default': 'pass_rate',
+                'enum': list([
+                  'pass_rate',
+                  'rubric_score',
+                  'preference',
+                ]),
+                'type': 'string',
+              }),
+            }),
+            'type': 'object',
+          }),
+          'SuiteCasePick': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'id': dict({
+                'type': 'string',
+              }),
+              'revision': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'integer',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'split': dict({
+                'default': 'test',
+                'enum': list([
+                  'dev',
+                  'test',
+                  'holdout',
+                ]),
+                'type': 'string',
+              }),
+              'weight': dict({
+                'default': 1,
+                'type': 'number',
+              }),
+            }),
+            'required': list([
+              'id',
+            ]),
+            'type': 'object',
+          }),
+          'SuiteDefaults': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'clock': dict({
+                'default': 'case',
+                'enum': list([
+                  'case',
+                  'real',
+                ]),
+                'type': 'string',
+              }),
+              'judges': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/JudgeConfig',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'network': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/NetworkPolicy',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'repeats': dict({
+                'default': 1,
+                'type': 'integer',
+              }),
+              'review': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ReviewDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'simulator': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ModelChoice',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'stats': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/StatsDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'type': 'object',
+          }),
+          'SuiteDraft': dict({
+            'additionalProperties': False,
+            'description': 'A new suite or the next version of one. `cases` None keeps the cases it pins.',
+            'properties': dict({
+              'cases': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/SuiteCasePick',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'defaults': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/SuiteDefaults',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'description': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'id': dict({
+                'pattern': '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+                'type': 'string',
+              }),
+              'name': dict({
+                'type': 'string',
+              }),
+              'tags': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool_aliases': dict({
+                'anyOf': list([
+                  dict({
+                    'items': dict({
+                      '$ref': '#/$defs/ToolAlias',
+                    }),
+                    'type': 'array',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'id',
+              'name',
+            ]),
+            'type': 'object',
+          }),
+          'ToolAlias': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'args_map': dict({
+                'anyOf': list([
+                  dict({
+                    'additionalProperties': dict({
+                      'type': 'string',
+                    }),
+                    'type': 'object',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'from': dict({
+                '$ref': '#/$defs/CallPattern',
+              }),
+              'to_effect': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'to_tool': dict({
+                'anyOf': list([
+                  dict({
+                    '$ref': '#/$defs/ToolTarget',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'from',
+            ]),
+            'type': 'object',
+          }),
+          'ToolTarget': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'server': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'tool': dict({
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'tool',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'draft': dict({
+            '$ref': '#/$defs/SuiteDraft',
+          }),
+        }),
+        'required': list([
+          'draft',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'eval_suites_list': dict({
+      'description': 'List the eval suites you can see, with your role on each.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'explain_agent_resolution': dict({
       'description': '''
         Who answers in this channel, for example #growth? Report who answers, the

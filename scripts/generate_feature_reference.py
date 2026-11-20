@@ -39,22 +39,21 @@ _COMBINE = {
 }
 _INTRO = """# Features
 
-Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
-Thread. Each level is On, Off or Default, or one of the feature's values. Default
-inherits from the level above, and at the top it is the feature's built-in default.
-Settings show which level decided.
+A feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
+Thread. Each is On, Off, Default or one of the feature's values. Default inherits from
+above, down to the built-in default. Settings show which level decided.
 
-An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
-below then cannot change it. A locked Off turns the feature off below.
+An admin can lock a value at any level but Thread, and levels below cannot change it.
+A locked Off turns the feature off below.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
-A chat conversation picks up a change to a feature that hides tools at its next message.
-A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
-with; Daimon refuses a tool turned Off since then.
+Chat picks up a change to a feature that hides tools at the next message. A CLI session,
+or an agent chat continued with `send_message`, keeps its starting tools; Daimon refuses
+one turned Off since.
 """
 
 
@@ -105,7 +104,7 @@ def summary() -> str:
             f"| {spec.name} | `{spec.key}` | {_CATEGORY[spec.category]} | {default} | "
             f"{levels} | {_notes(spec)} |"
         )
-    intro = "## All features\n\nWhere each feature can be set, and its default.\n\n"
+    intro = "## All features\n\n"
     return intro + "\n".join(rows) + "\n"
 
 
