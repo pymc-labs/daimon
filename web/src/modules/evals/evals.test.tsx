@@ -106,18 +106,28 @@ describe("blind payloads", () => {
   beforeAll(() => { server.listen({ onUnhandledRequest: "error" }); session.signIn("maya.lindqvist@fernhill.example") })
   afterAll(() => server.close())
 
-  it("carry no usage, arm id, run name or origin to a blind reader", async () => {
+  it("carry no usage, arm id, run name, origin, reason or content hash to a blind reader", async () => {
     // Blind by request (an owner), by the reviewer role (the triage suite), and as a review task.
     const compare = JSON.parse(await get("/runs/run-1/compare?blind=1")) as { rows: { columns: { item_id: string }[] }[] }
     const reviewer = JSON.parse(await get("/runs/run-4/compare")) as typeof compare
     const ids = [...compare.rows, ...reviewer.rows].flatMap((r) => r.columns.map((c) => c.item_id))
+    const items = await Promise.all(ids.map((id) => get(`/items/${id}?blind=1`)))
     const payloads = [
-      JSON.stringify(compare), JSON.stringify(reviewer), await get("/runs/run-4"), await get("/queues/run-1~q-1/next"), await get("/queues/run-4~q-3/next"),
-      ...(await Promise.all(ids.map((id) => get(`/items/${id}?blind=1`)))),
+      JSON.stringify(compare), JSON.stringify(reviewer), await get("/runs/run-4"), await get("/queues/run-1~q-1/next"), await get("/queues/run-4~q-3/next"), ...items,
     ].join("\n")
     expect(ids.length).toBeGreaterThan(4)
-    for (const leak of ["usage", "enclosure", "cost_usd", "replica", "baseline", "Replica against baseline", "Triage replay", "simulated", "denied", "passthrough", "run-1:", "run-4:"]) {
+    for (const leak of ["usage", "enclosure", "cost_usd", "replica", "baseline", "Replica against baseline", "Triage replay", "simulated", "denied", "passthrough", "run-1:", "run-4:", "\"reason\"", "\"arm_id\":\"replica", "\"sha256\":\"b:", "Not in the recorded world"]) {
       expect(payloads.toLowerCase(), `a blind payload mentions ${leak}`).not.toContain(leak.toLowerCase())
     }
+    // A run's own origin (local) is not a world answer's.
+    const origins = new Set([...payloads.matchAll(/"origin":"(\w+)"/g)].map((m) => m[1]).filter((o) => o !== "local"))
+    expect([...origins], "a world answer tells its origin").toEqual(["recorded"])
+    // Files open by blind name through the item, and the same item has another id in each view.
+    const item = JSON.parse(items[0]!) as { id: string; outputs: { id: string; blob: { sha256: string } }[] }
+    expect(item.outputs[0]!.blob.sha256).toBe(`${item.id}~out1`)
+    expect((await fetch(new URL(`/api/evals/blobs/${item.outputs[0]!.blob.sha256}`, location.href))).ok).toBe(true)
+    const next = JSON.parse(await get("/queues/run-1~q-1/next")) as { columns: { item: { id: string } }[] }
+    expect(next.columns.map((c) => c.item.id).filter((id) => ids.includes(id)), "an item id is the same in two views").toEqual([])
   })
+
 })

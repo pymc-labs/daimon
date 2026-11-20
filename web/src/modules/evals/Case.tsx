@@ -6,11 +6,12 @@ import { useNavigate, useParams } from "react-router"
 import { QueryState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/api"
 import { useParam } from "@/lib/filters"
 import { E, useCase, useSuites } from "./api"
-import { canEdit } from "./bits"
+import { canEdit, isCase } from "./bits"
 import { Expectations, Preview, Provenance, Script, World } from "./CaseParts"
 import type { Case, CaseCheck } from "./types"
 
@@ -88,7 +89,8 @@ export function CasePage() {
   const fresh = id === "new"
   const [start] = useState(blank)
   const query = useCase(suite, fresh ? "" : id)
-  const mine = useSuites().data?.find((s) => s.id === suite)
+  const suites = useSuites()
+  const mine = suites.data?.find((s) => s.id === suite)
   const role = mine?.role ?? "viewer"
   const active = fresh ? "json" : tab || "preview"
   const body = (c: Case) => {
@@ -102,14 +104,14 @@ export function CasePage() {
     }
   }
   const crumbs = (title: string) => [{ label: "Evals", to: "/evals" }, { label: mine?.name ?? suite, to: `/evals/suites/${suite}` }, { label: title }]
-  if (fresh) return <Page crumbs={crumbs("New case")}>{mine && !canEdit(role) ? <div className="py-16 text-center text-sm text-muted-foreground">Only editors and owners can add cases. Ask an owner.</div> : <JsonEditor suite={suite} c={start} editable />}</Page>
+  if (fresh) return <Page crumbs={crumbs("New case")}>{!suites.data ? <Skeleton className="h-64" /> : !canEdit(role) ? <div className="py-16 text-center text-sm text-muted-foreground">Only editors and owners can add cases. Ask an owner.</div> : <JsonEditor suite={suite} c={start} editable />}</Page>
   return (
     <Page
       crumbs={crumbs(query.data?.title ?? id)}
       tabs={TABS.map(([key, label]) => ({ label, to: `?tab=${key}`, active: active === key }))}
     >
       <QueryState query={query}>
-        {(c) => <><Flags suite={suite} c={c} editable={canEdit(role)} />{body(c)}</>}
+        {(c) => isCase(c) ? <><Flags suite={suite} c={c} editable={canEdit(role)} />{body(c)}</> : null}
       </QueryState>
     </Page>
   )

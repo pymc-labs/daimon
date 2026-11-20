@@ -1,5 +1,5 @@
 import { Pill } from "../agents/bits"
-import type { BlindRun, Run, RunStatus, ScrubStatus, SuiteRole } from "./types"
+import type { BlindRun, Case, CaseView, Run, RunStatus, ScrubStatus, SuiteRole } from "./types"
 
 const RUN: Record<RunStatus, { label: string; cls?: string }> = {
   draft: { label: "Draft" }, estimated: { label: "Awaiting admin approval", cls: "text-warning" }, approved: { label: "Queued" }, running: { label: "Running", cls: "text-link" },
@@ -20,3 +20,6 @@ export const pct = (v: number | null | undefined) => (v == null ? "–" : `${Mat
 
 /** A reviewer's view of a run names its arms by label only. */
 export const isBlindRun = (r: Run | BlindRun): r is BlindRun => typeof r.arms[0] === "string"
+
+/** The full case, not the reviewers' cut of it. */
+export const isCase = (c: Case | CaseView): c is Case => "surface" in c

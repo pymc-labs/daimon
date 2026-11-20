@@ -35,8 +35,9 @@ export function NewRun() {
   const go = useNavigate()
   const info = useSuite(suite, version)
   const cases = useCases(suite, version)
-  const arms = useArms()
   const suites = useSuites().data
+  const role = suites?.find((x) => x.id === suite)?.role
+  const arms = useArms(!!role && canEdit(role))
   const admin = useIsAdmin()
   const [chosen, setChosen] = useState<string[]>([])
   const [judges, setJudges] = useState<string[] | null>(null)
@@ -53,7 +54,6 @@ export function NewRun() {
   const start = useMutation({ mutationFn: (cap: number) => api.post<Run>(`${E}/runs`, { ...draft, cap_usd: cap }), onSuccess: (r) => go(`/evals/runs/${r.id}`) })
   const toggle = (list: string[], id: string, on: boolean) => (on ? [...list, id] : list.filter((x) => x !== id))
   const tagOptions = [...new Set((cases.data ?? []).flatMap((c) => c.tags ?? []))].map((t) => ({ value: t, label: t }))
-  const role = suites?.find((x) => x.id === suite)?.role
   if (suites && !canEdit(role ?? "viewer")) return <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: "New run" }]}><div className="py-16 text-center text-sm text-muted-foreground">Only editors and owners can start runs. Ask an owner.</div></Page>
   return (
     <Page crumbs={[{ label: "Evals", to: "/evals" }, { label: s?.name ?? suite, to: `/evals/suites/${suite}` }, { label: "New run" }]}>

@@ -11,19 +11,19 @@ import { Switch } from "@/components/ui/switch"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useParam } from "@/lib/filters"
 import { cn } from "@/lib/utils"
-import { isBlindRun } from "./bits"
+import { isBlindRun, isCase } from "./bits"
 import { useCase, useCompare, useItem, useRole, useRun } from "./api"
 import { Comments } from "./Comments"
 import { ItemColumn } from "./Item"
-import type { Anchor, Case, CompareColumn } from "./types"
+import type { Anchor, Case, CaseView, CompareColumn } from "./types"
 
-function Column({ col, other, title, blind, diff, c, onPin }: { col: CompareColumn; other?: CompareColumn; title?: string; blind: boolean; diff: boolean; c?: Case; onPin?: (a: Anchor) => void }) {
+function Column({ col, other, title, blind, diff, c, onPin }: { col: CompareColumn; other?: CompareColumn; title?: string; blind: boolean; diff: boolean; c?: Case | CaseView; onPin?: (a: Anchor) => void }) {
   const item = useItem(col.item_id, blind)
   const before = useItem(other?.item_id ?? "", blind)
   if (item.error) return <p role="alert" className="text-sm text-destructive">{item.error.message}</p>
   if (!item.data) return <Skeleton className="h-64" />
   return (
-    <ItemColumn label={col.label} title={title} item={item.data} scores={col.scores} blind={blind} platform={c?.surface.platform ?? "web"} case={c} onPin={onPin}
+    <ItemColumn label={col.label} title={title} item={item.data} scores={col.scores} blind={blind} platform={!c ? "web" : isCase(c) ? c.surface.platform : c.platform} case={c} onPin={onPin}
       diff={diff && other ? { before: other.reply ?? "", after: col.reply ?? "", outputs: before.data?.outputs } : undefined} />
   )
 }
@@ -54,7 +54,7 @@ export function Compare() {
   const cols = row?.columns ?? []
   const diff = diffParam === "1" && !single
   const shown = single ? cols.filter((x) => x.label === (arm || cols[0]?.label)) : cols
-  const c = useCase(run?.suite.id ?? "", forced ? "" : current)
+  const c = useCase(run?.suite.id ?? "", current)
   const baseline = (label: string) => !!run && !isBlindRun(run) && run.arms.find((a) => a.label === label)?.kind === "baseline"
   return (
     <Page crumbs={blind ? [{ label: "Evals", to: "/evals" }, { label: "Review" }, { label: "Compare" }] : [{ label: "Evals", to: "/evals" }, { label: run && !isBlindRun(run) ? run.name ?? id : id, to: `/evals/runs/${id}` }, { label: "Compare" }]} flush className="flex flex-col">

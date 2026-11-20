@@ -44,7 +44,7 @@ function CaseContext({ c }: { c: CaseView }) {
       {c.history.length > 0 && (
         <details>
           <summary className="cursor-pointer text-xs text-muted-foreground">Earlier messages</summary>
-          <div className="pt-2"><ChatThread platform={c.platform} messages={fromMessages(c.history)} skin={{ people: {} }} /></div>
+          <div className="pt-2"><ChatThread platform={c.platform} messages={fromMessages(c.history)} skin={{ people: c.participants }} /></div>
         </details>
       )}
       {c.reference?.text && <div><div className="text-xs font-medium text-muted-foreground">Reference</div><p className="whitespace-pre-wrap break-words">{c.reference.text}</p></div>}
@@ -62,7 +62,7 @@ function Form({ task }: { task: ReviewTask }) {
   const [help, setHelp] = useState(false)
   const panel = useRef<HTMLElement>(null)
   useEffect(() => panel.current?.focus(), [])
-  const complete = slots.every((s) => answers[keyOf(s)])
+  const complete = slots.length > 0 && slots.every((s) => answers[keyOf(s)])
   const submit = useMutation({
     mutationFn: () => api.post(`${E}/scores`, {
       task_id: task.id,
@@ -86,7 +86,7 @@ function Form({ task }: { task: ReviewTask }) {
       <div className="min-w-0 flex-1 space-y-4 overflow-y-auto p-4 lg:p-6">
         <CaseContext c={task.case} />
         <div className={cn("grid gap-4", task.layout === "side_by_side" && task.columns.length > 1 && "xl:grid-cols-2")}>
-          {task.columns.map((col) => <ItemColumn key={col.label} label={col.label} title={col.arm?.label} item={col.item} blind={task.blind} platform={task.case.platform} anchorRef={col.label} onPin={setAnchor} />)}
+          {task.columns.map((col) => <ItemColumn key={col.label} label={col.label} title={col.arm?.label} item={col.item} blind={task.blind} platform={task.case.platform} case={task.case} anchorRef={col.label} onPin={setAnchor} />)}
         </div>
       </div>
       <aside ref={panel} tabIndex={-1} onKeyDown={onKey} aria-label="Review" className="flex w-full shrink-0 flex-col border-t outline-none lg:w-96 lg:border-l lg:border-t-0">
@@ -97,6 +97,7 @@ function Form({ task }: { task: ReviewTask }) {
             <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setHelp(true)}>Shortcuts <Kbd>?</Kbd></Button>
           </div>
           <div role="status" className="sr-only">{status}</div>
+          {!slots.length && <p role="alert" className="text-sm text-destructive">This task has no questions to answer. Ask an editor.</p>}
           {task.criteria.map((k) => (
             <fieldset key={k.id} className="space-y-2 rounded-lg border p-3">
               <legend className="sr-only">{k.question}</legend>

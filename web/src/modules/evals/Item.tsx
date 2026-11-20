@@ -4,9 +4,10 @@ import { useState } from "react"
 import { Money } from "@/components/common"
 import { cn } from "@/lib/utils"
 import { duration } from "@/lib/format"
+import { isCase } from "./bits"
 import { ChatThread, fromEvents } from "./previews"
 import type { Skin } from "./previews/parts"
-import type { Anchor, Case, Origin, Output, Platform, RunItem, ScoreLine, WorldCall } from "./types"
+import type { Anchor, Case, CaseView, Origin, Output, Platform, RunItem, ScoreLine, WorldCall } from "./types"
 import { FileDiff } from "./viewers"
 import { Artifact } from "./viewers"
 import { Payload } from "./viewers/Json"
@@ -18,6 +19,8 @@ const ORIGIN: Record<Origin, string> = {
 
 export const names = (c?: Case): Record<string, string> =>
   Object.fromEntries([...(c?.surface.participants ?? []), ...(c ? [c.surface.bot] : [])].map((p) => [p.id, p.display_name]))
+/** Who wrote what, from the full case or from the reviewers' cut of it. */
+export const peopleOf = (c?: Case | CaseView): Record<string, string> => (!c ? {} : isCase(c) ? names(c) : c.participants)
 
 const Section = ({ title, children, aside }: { title: string; children: React.ReactNode; aside?: React.ReactNode }) => (
   <section className="border-t px-3 py-3">
@@ -89,17 +92,17 @@ function Files({ outputs, others, onPin }: { outputs: Output[]; others?: Output[
  * With `diff`, the reply and files are set against another answer's. `anchorRef` is what comments name this column by. */
 export function ItemColumn({ label, title, item, scores, blind, diff, platform, case: c, anchorRef, onPin }: {
   label: string; title?: string; item: RunItem; scores?: ScoreLine[]; blind: boolean; diff?: { before: string; after: string; outputs?: Output[] }
-  platform: Platform; case?: Case; anchorRef?: string; onPin?: (a: Anchor) => void
+  platform: Platform; case?: Case | CaseView; anchorRef?: string; onPin?: (a: Anchor) => void
 }) {
   const pin = onPin && ((a: Omit<Anchor, "item_id">) => onPin({ ...a, item_id: anchorRef ?? item.id }))
-  const skin: Skin = { people: names(c), pin, me: c?.surface.participants.find((p) => p.is_requester)?.id }
+  const skin: Skin = { people: peopleOf(c), pin, me: c && isCase(c) ? c.surface.participants.find((p) => p.is_requester)?.id : undefined }
   return (
     <div className="min-w-0 overflow-hidden rounded-lg border bg-card" data-column={label}>
       <div className="flex h-11 items-center gap-2 px-3">
         <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-accent px-1.5 text-xs font-semibold">{blind ? label : label.slice(0, 1)}</span>
         {title && !blind && <span className="truncate text-sm font-medium">{title}</span>}
         <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground tabular">
-          {item.status !== "done" && <span className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>}
+          {item.status !== "done" && (blind ? <span>no answer</span> : <span className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>)}
           {!blind && item.usage?.duration_ms != null && <span>{duration(item.usage.duration_ms)}</span>}
           {!blind && item.usage?.cost_usd != null && <Money usd={item.usage.cost_usd} />}
         </span>

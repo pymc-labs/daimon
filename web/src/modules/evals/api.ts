@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 
 import { api, qs } from "@/lib/api"
 import { useMe } from "@/lib/hooks"
-import type { Arm, BlindRun, Case, CaseSummary, Compare, QueueView, Run, RunItem, RunItemSummary, RunSummary, Suite, SuiteRole, SuiteSummary } from "./types"
+import type { Arm, BlindRun, Case, CaseSummary, CaseView, Compare, QueueView, Run, RunItem, RunItemSummary, RunSummary, Suite, SuiteRole, SuiteSummary } from "./types"
 
 const E = "/api/evals"
 const LIVE: Run["status"][] = ["approved", "running"]
@@ -20,9 +20,11 @@ export const useSuite = (id: string, version?: number) =>
   useQuery({ queryKey: ["evals", "suite", id, version ?? "current"], queryFn: () => api.get<Suite>(`${E}/suites/${id}${qs({ version })}`) })
 export const useCases = (id: string, version?: number) =>
   useQuery({ queryKey: ["evals", "cases", id, version ?? "current"], queryFn: () => api.get<CaseSummary[]>(`${E}/suites/${id}/cases${qs({ version })}`) })
+/** The case, or for reviewers only the part of it they may see (`CaseView`). */
 export const useCase = (suite: string, id: string) =>
-  useQuery({ queryKey: ["evals", "case", suite, id], queryFn: () => api.get<Case>(`${E}/suites/${suite}/cases/${id}`), enabled: !!id })
-export const useArms = () => useQuery({ queryKey: ["evals", "arms"], queryFn: () => api.get<Arm[]>(`${E}/arms`) })
+  useQuery({ queryKey: ["evals", "case", suite, id], queryFn: () => api.get<Case | CaseView>(`${E}/suites/${suite}/cases/${id}`), enabled: !!id })
+/** Only admins, editors and owners may list arms; the server refuses everyone else. */
+export const useArms = (enabled: boolean) => useQuery({ queryKey: ["evals", "arms"], queryFn: () => api.get<Arm[]>(`${E}/arms`), enabled })
 export const useRuns = (suite?: string) => useQuery({ queryKey: ["evals", "runs", suite ?? "all"], queryFn: () => api.get<Run[]>(`${E}/runs${qs({ suite })}`) })
 /** A run: the full document, or the blind one for reviewers. */
 export const useRun = (id: string) =>

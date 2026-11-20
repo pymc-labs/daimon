@@ -52,6 +52,7 @@ function Grid({ run, items }: { run: RunDoc; items: RunItemSummary[] }) {
 /** Estimate one judge over a finished run, then run it under a spend ceiling. Ceilings above the admin limit are refused by the server, which says who to ask. */
 function Judge({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onOpenChange: (o: boolean) => void }) {
   const qc = useQueryClient()
+  const admin = useIsAdmin()
   const judges = run.judges ?? []
   const [id, setId] = useState(judges[0]?.id ?? "")
   const judge = judges.find((j) => j.id === id)
@@ -77,7 +78,7 @@ function Judge({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onOpen
         {(ask.error ?? go.error) && <p role="alert" className="text-sm text-destructive">{(ask.error ?? go.error)!.message}</p>}
         <DialogFooter className="sm:justify-end">
           {done ? <Button onClick={() => onOpenChange(false)}>Done</Button>
-            : outcome ? <ApproveBar estimate={outcome.estimate} label="Approve and judge" pending={go.isPending} onApprove={(c) => go.mutate(c)} />
+            : outcome ? <ApproveBar estimate={outcome.estimate} label="Approve and judge" limit={outcome.estimate.admin_approval_usd} admin={admin} pending={go.isPending} onApprove={(c) => go.mutate(c)} />
             : <Button disabled={ask.isPending || !judge} onClick={() => ask.mutate()}>Estimate</Button>}
         </DialogFooter>
       </DialogContent>
@@ -87,8 +88,10 @@ function Judge({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onOpen
 
 function NewQueue({ run, open, onOpenChange }: { run: RunDoc; open: boolean; onOpenChange: (o: boolean) => void }) {
   const go = useNavigate()
-  const [name, setName] = useState(`Review of ${run.name ?? run.id}`)
+  // A blind queue's name reaches reviewers, so the default says nothing of the run.
+  const [typed, setName] = useState<string | null>(null)
   const [blind, setBlind] = useState(true)
+  const name = typed ?? (blind ? "Review queue" : `Review of ${run.name ?? run.id}`)
   const [layout, setLayout] = useState<QueueDraft["layout"]>(run.arms.length > 1 ? "side_by_side" : "single")
   const [id] = useState(() => `queue-${crypto.randomUUID().slice(0, 8)}`)
   const draft: QueueDraft = { id, name, blind, layout }

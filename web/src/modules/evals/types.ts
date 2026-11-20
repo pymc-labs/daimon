@@ -103,7 +103,7 @@ export type RunDraft = { suite: { id: string; version: number }; case_ids?: stri
 /** The estimate of a draft run, with the spend above which an admin must approve. */
 export type RunEstimate = Estimate & { admin_approval_usd: number }
 export type JudgeRequest = { id: string; kind: Judge["kind"]; models?: ModelChoice[]; aggregate: "majority" | "mean" | "all"; batch: boolean; approve_cap_usd?: number }
-export type JudgeOutcome = { estimate: Estimate; ran: boolean; scores: number; spent_usd: number; skipped: number; failed: number }
+export type JudgeOutcome = { estimate: Estimate & { admin_approval_usd?: number }; ran: boolean; scores: number; spent_usd: number; skipped: number; failed: number }
 export type ItemStatus = "pending" | "running" | "done" | "error" | "skipped" | "cancelled"
 export type RunItemSummary = { id: string; key: string; case_id: string; case_revision: number; arm_id: string; repeat: number; status: ItemStatus }
 
@@ -162,7 +162,11 @@ export type QueueView = { ref: string; run_id: string; queue: ReviewQueue; total
 export type QueueDraft = { id: string; name: string; layout: Layout; blind: boolean }
 export type Criterion = { id: string; question: string; kind: "binary" | "scale" | "overall" | "preference"; scale?: { min: number; max: number } }
 /** The part of a case a reviewer sees. */
-export type CaseView = { id: string; title: string; platform: Platform; history: ChatMessage[]; turn: ChatMessage[]; reference?: { text?: string; note?: string } | null }
+export type CaseView = {
+  id: string; title: string; platform: Platform; history: ChatMessage[]; turn: ChatMessage[]; reference?: { text?: string; note?: string } | null
+  /** Author id to display name, the bot included. */
+  participants: Record<string, string>
+}
 /** One column of a review task: `label` names it in scores and comments; `arm` is absent in a blind queue. */
 export type TaskColumn = { label: string; arm?: Arm | null; item: RunItem }
 export type Comment = { id: string; item_id?: string; case_id?: string; parent_id?: string; author: { display_name?: string; kind?: string }; text: string; anchors?: Anchor[]; resolved: boolean; at: string }
