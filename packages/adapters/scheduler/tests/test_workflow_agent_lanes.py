@@ -19,11 +19,14 @@ from daimon.adapters.scheduler.workflows import (
     HeadlessLaneTurn,
     WorkflowEngine,
     lane_turn,
+    owner_dm,
     run_once,
 )
+from daimon.core.direct_messages import DirectMessageAccessRevoked
 from daimon.core.headless_runner import StepTurn
 from daimon.core.stores import accounts, spend_allowances, tenants
-from daimon.core.workflows import step_tools
+from daimon.core.stores.direct_messages import set_dm_enabled
+from daimon.core.workflows import runs, step_tools
 from daimon.core.workflows.agent_step import AgentStepExecutor
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.workflows import NOW, World, make_world
@@ -217,3 +220,52 @@ async def test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_
     done, steps = await world.get(run_id), await world.steps(run_id)
     assert used == done.cost_usd > 0, "the first step's spend counts against their allowance"
     assert (seen, steps["write"].waiting_reason) == ([None], "blocked"), "the next step waits"
+
+
+@pytest.mark.parametrize("busy", [False, True])
+async def test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_busy(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, busy: bool
+) -> None:
+    nodes = {
+        "run": {"kind": "agent", "agent": "daimon", "instructions": "Hi", "session": "owner_dm"},
+        "done": {"kind": "finish"},
+    }
+    nodes["run"]["next"] = "done"
+    world = await make_world(db_session, nodes, "run")
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    owner = await accounts.get_account(db_session, world.owner)
+    assert tenant is not None and owner is not None
+    await make_platform_principal(
+        db_session, platform="discord", external_id="U1", tenant=tenant, account=owner
+    )
+    await set_dm_enabled(db_session, tenant_id=world.tenant_id, enabled=True)
+    await db_session.commit()
+    asked: list[tuple[str, str]] = []
+
+    async def fake_dm(_deps: object, *, owner_user_id: str, prompt: str, **_: Any) -> object:
+        asked.append((owner_user_id, prompt))
+        if busy:
+            raise DirectMessageAccessRevoked("owner_busy", message="busy")
+        return SimpleNamespace(text="Your digest")
+
+    monkeypatch.setattr(owner_dm, "run_dm_routine", fake_dm)
+    monkeypatch.setattr(owner_dm, "owner_granted", AsyncMock(return_value=True))
+    deps = SimpleNamespace(membership_resolver=None)
+    executor = AgentStepExecutor(
+        world.sm,
+        world.settings,
+        AsyncMock(),
+        owner_dm=owner_dm.OwnerDmTurn(world.sm, world.settings, deps),  # type: ignore[arg-type]
+    )
+    run = await world.run()
+    await runs.execute(
+        world.sm,
+        world.settings,
+        {"agent": executor},
+        await world.claim(run.id, "run"),
+        clock=lambda: NOW,
+    )
+    done, step = await world.get(run.id), (await world.steps(run.id))["run"]
+    assert asked == [("U1", "Hi")], "the owner's DM turn gets the instructions"
+    assert done.status == "succeeded", done
+    assert step.summary == ("Skipped: the owner was busy." if busy else "Your digest"), step

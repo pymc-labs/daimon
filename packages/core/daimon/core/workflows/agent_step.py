@@ -87,6 +87,9 @@ class LaneTurn(Protocol):
     ) -> None: ...
 
 
+#: An `owner_dm` step: a fresh private DM turn of the workflow's owner, as a DM routine's fire.
+OwnerDm = Callable[[StepWork], Awaitable[engine.Outcome]]
+
 #: The M8 seam: buffer a third-party write as a proposal and answer the paused call.
 #: Records a write as a proposal; gets the call and why it needs review.
 Propose = Callable[[ToolCall, str | None], Awaitable[ToolConfirmationResult]]
@@ -236,13 +239,16 @@ class AgentStepExecutor:
     turn: LaneTurn
     #: Records proposed writes and sends them once approved; without it proposals are refused.
     tools: ToolClient | None = None
+    owner_dm: OwnerDm | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     async def __call__(self, work: StepWork) -> engine.Outcome | Park:
         node = work.node
         assert isinstance(node, AgentNode), "the agent executor runs agent nodes"
         if node.session == OWNER_DM:
-            return engine.Failed("fatal", "Owner DM steps are not available yet")
+            if self.owner_dm is None:
+                return engine.Failed("fatal", "Owner DM steps run on Discord only.")
+            return await self.owner_dm(work)
         if (held := await reviewed(self.sm, work)) is not None:
             return await send_proposals(
                 self.sm, self.settings, self.tools, work, held, self.clock()

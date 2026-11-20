@@ -64,7 +64,6 @@ from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
     Settings,
-    env_admits,
     get_repo_memory_settings,
     load_settings,
 )
@@ -75,7 +74,6 @@ from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver, send_discord_error_dm
-from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -153,7 +151,6 @@ from daimon.core.spend_gate import (
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
@@ -421,11 +418,8 @@ async def _build_fire(
     async def _owner_dm_open(s: AsyncSession, row: RoutineRow, platform: str) -> bool:
         """Whether a routine may DM its owner: Discord, routine DMs on, owner allowed."""
         owner = row.created_by_user_id
-        return (
-            platform == "discord"
-            and owner is not None
-            and env_admits(settings.direct_message_policies, row.tenant_id, owner)
-            and await dm_enabled(s, tenant_id=row.tenant_id)
+        return owner is not None and await workflows.dm_open(
+            s, settings, tenant_id=row.tenant_id, platform=platform, owner=owner
         )
 
     async def _tell_lapsed_owner(row: RoutineRow, platform: str) -> None:
@@ -565,14 +559,8 @@ async def _build_fire(
         """
         async with sm() as s:
             tenant = await get_tenant(s, row.tenant_id)
-        return tenant is not None and await sender_admits(
-            sm,
-            tenant_id=row.tenant_id,
-            agent_name=row.agent_name,
-            user_id=owner,
-            groups=roles_by_membership(
-                membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
-            ),
+        return tenant is not None and await workflows.owner_granted(
+            sm, membership_resolver, tenant=tenant, agent_name=row.agent_name, owner=owner
         )
 
     async def _fire(row: RoutineRow) -> None:
@@ -2181,7 +2169,13 @@ async def run(
         sm,
         settings,
         {
-            "agent": AgentStepExecutor(sm, settings, lane_turn, tool_client),
+            "agent": AgentStepExecutor(
+                sm,
+                settings,
+                lane_turn,
+                tool_client,
+                owner_dm=workflows.OwnerDmTurn(sm, settings, dm_turn_deps),
+            ),
             "action": ActionStepExecutor(sm, settings, tool_client),
             "workflow": WorkflowStepExecutor(sm, settings),
             "code": CodeStepExecutor(

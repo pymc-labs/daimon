@@ -166,7 +166,9 @@ async def _plan(session: AsyncSession, env: Env, routine_id: uuid.UUID) -> Plan:
     builtins = (await opted_in_by_many(session, [row], tenant.platform))[row.id] is not None
     other = await _on_other_backend(session, row, tenant.platform)
     spec = routine_spec(row, builtins=builtins)
-    return Plan(row, spec, paused=other or not row.enabled, other_backend=other)
+    # A DM routine moves paused: its reply posts to the owner once workflow DMs are sent.
+    paused = other or not row.enabled or row.destination_kind == "dm"
+    return Plan(row, spec, paused=paused, other_backend=other)
 
 
 def _admin(env: Env) -> None:
