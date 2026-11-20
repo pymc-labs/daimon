@@ -335,6 +335,7 @@ source_modules = [
     "daimon.core.posted_controls",
     "daimon.core.pricing",
     "daimon.core.privacy",
+    "daimon.core.private_answer",
     "daimon.core.promo_allocation",
     "daimon.core.promo_codes",
     "daimon.core.promo_credit",
