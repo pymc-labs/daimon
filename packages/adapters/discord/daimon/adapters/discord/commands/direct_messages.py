@@ -49,6 +49,7 @@ from daimon.core.channel_audience import (
 )
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, env_admits, env_dm_policy
+from daimon.core.continuity.messages import render_fresh_start
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
@@ -72,7 +73,7 @@ from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -89,6 +90,8 @@ from daimon.core.stores.direct_messages import (
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
+from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
@@ -874,11 +877,54 @@ class DirectMessageCog(commands.Cog):
         return "started"
 
     @app_commands.command(name="new", description=DESCRIPTIONS["new"])
-    # Contexts apply to the global registration production uses; a lane's
-    # per-guild copy also shows /new in channels, where the handler refuses it.
-    @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
+    # Listed in servers too, for threads where `thread_new` is on; elsewhere in a
+    # server the handler refuses it.
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
     async def new(self, interaction: discord.Interaction[commands.Bot]) -> None:
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread) and await self._fresh_thread(interaction, channel):
+            return
         await self._new_conversation(interaction, scope_id=None)
+
+    async def _fresh_thread(
+        self, interaction: discord.Interaction[commands.Bot], thread: discord.Thread
+    ) -> bool:
+        """Start the caller's conversation in a thread Daimon started afresh, as Teams'
+        `new` does; False where `thread_new` is off or the thread is someone else's."""
+        runtime, me = self.bot.runtime, self.bot.user
+        if me is None or thread.owner_id != me.id:
+            return False
+        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+        place = FeaturePlace.of(tenant_id, "discord", str(thread.parent_id), str(thread.id))
+        if not (
+            await place_feature(runtime.sessionmaker, runtime.settings, place, "thread_new")
+        ).on:
+            return False
+        async with runtime.sessionmaker.begin() as session:
+            principal = await find_platform_principal(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_id=str(interaction.user.id),
+            )
+            live = (
+                await get_live_thread_session(
+                    session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    account_id=principal.account_id,
+                )
+                if principal is not None
+                else None
+            )
+            if live is not None:
+                await request_fresh_start(session, id=live.id, at=datetime.now(UTC))
+        await interaction.response.send_message(
+            embed=build_notice_embed(render_fresh_start("the agent"), neutral=True),
+            ephemeral=True,
+        )
+        return True
 
     @app_commands.command(name="dm-settings", description=DESCRIPTIONS["dm_settings"])
     @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
@@ -1337,9 +1383,14 @@ class DirectMessageCog(commands.Cog):
                 kwargs.pop("_allow_replacement", None)
                 return await sent.edit(**kwargs)
 
+            async def delete(sent: discord.Message) -> None:
+                # A pinged answer is posted below its card, which then goes.
+                await sent.delete()
+
             card = DiscordTurnLifecycle(
                 send=channel.send,
                 edit=edit,
+                delete=delete,
                 agent_name=admission.agent.name,
                 model_id=admission.agent.model.id,
                 markup=runtime.turn_deps.markup,
@@ -1347,6 +1398,8 @@ class DirectMessageCog(commands.Cog):
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
+                notify_on_completion=admission.shown("dm_completion_pings")
+                and admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,

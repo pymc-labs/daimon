@@ -907,6 +907,91 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     assert delivery.await_count == 2, "a proved refusal closes the card for the rest of the turn"
 
 
+@pytest.mark.parametrize(
+    ("dm_pings", "pings", "expected"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+    ids=["dm-off", "pings-off", "both-on"],
+)
+async def test_dm_turn_card_pings_only_where_dm_completion_pings_and_completion_pings_are_on(
+    db_session_factory, monkeypatch, dm_pings, pings, expected
+):
+    """`dm_completion_pings` makes a DM answer follow Completion pings; off, it never pings."""
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(message())
+    shown = {"dm_completion_pings": dm_pings, "completion_pings": pings}
+    admission = SimpleNamespace(
+        grant=private_reply(await conversation(db_session_factory)).grant,
+        agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
+        shown=lambda key, *_args: shown.get(key, False),
+        answer_message_cap=5,
+        is_admin=False,
+        budget_channel_id=None,
+    )
+    card = await _card_from_turn(cog, message(102), reply, admission)
+    assert card._notify_on_completion is expected, "the DM card pings only with both on"
+
+
+async def _new_in_thread(db_session_factory, monkeypatch, *, enabled: bool, owner_id: int):
+    """Run /new in a thread of the first server, with the caller's live session there."""
+    from daimon.core.features.service import set_workspace_feature
+    from daimon.core.stores.thread_sessions import get_thread_session_by_id
+    from daimon.testing.factories import make_platform_principal, make_thread_session
+
+    cog, tenants, *_ = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        principal = await make_platform_principal(
+            session, platform="discord", external_id="999", tenant=tenants[0]
+        )
+        row = await make_thread_session(
+            session,
+            tenant=tenants[0],
+            account=SimpleNamespace(id=principal.account_id),
+            thread_id="4242",
+        )
+        if enabled:
+            await set_workspace_feature(
+                session,
+                None,
+                tenant_id=tenants[0].id,
+                platform="discord",
+                key="thread_new",
+                value="on",
+                account_id=None,
+                surface="cli",
+            )
+    cog.bot.user = SimpleNamespace(id=1)
+    thread = MagicMock(spec=discord.Thread)
+    thread.owner_id, thread.parent_id = owner_id, 77
+    thread.guild = SimpleNamespace(id=int(tenants[0].external_id))
+    asked = interaction(route=4242, channel=thread)
+    await cog.new.callback(cog, asked)
+    async with db_session_factory() as session:
+        after = await get_thread_session_by_id(session, id=row.id)
+    await cog.cog_unload()
+    return asked.response.send_message.await_args, after
+
+
+async def test_new_in_a_thread_daimon_started_starts_fresh_when_thread_new_is_on(
+    db_session_factory, monkeypatch
+):
+    sent, row = await _new_in_thread(db_session_factory, monkeypatch, enabled=True, owner_id=1)
+    assert row is not None and row.fresh_start_requested_at is not None, (
+        "the caller's session in the thread is marked to start fresh"
+    )
+    assert "Starting fresh" in sent.kwargs["embed"].description, "the fresh-start notice"
+
+
+@pytest.mark.parametrize(("enabled", "owner_id"), [(False, 1), (True, 2)], ids=["off", "not-own"])
+async def test_new_in_a_thread_is_refused_when_off_or_not_daimons_thread(
+    db_session_factory, monkeypatch, enabled, owner_id
+):
+    sent, row = await _new_in_thread(
+        db_session_factory, monkeypatch, enabled=enabled, owner_id=owner_id
+    )
+    assert row is not None and row.fresh_start_requested_at is None, "nothing is reset"
+    assert "in your DMs" in sent.args[0], "the DM-only refusal, as before"
+
+
 async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     await cog.on_message(message())
