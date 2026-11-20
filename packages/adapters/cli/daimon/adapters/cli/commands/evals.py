@@ -26,7 +26,7 @@ from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
+from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, scrub_path
 from daimon.core.evals.scrub.sweep import Leftover
 from daimon.core.evals.service import (
     CaseRef,
@@ -76,6 +76,11 @@ _KEY = typer.Option(
 )
 _MAP = typer.Option(
     "--map", help="Fake map file, kept between runs (private; read and written). Required."
+)
+_LEARNED = typer.Option(
+    "--learned",
+    help="Names found in earlier runs (private, plain text, mode 600): read first, added to at the"
+    " end. Use the same file for batches run one after another.",
 )
 _SALT = typer.Option(
     "--salt",
@@ -329,14 +334,21 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
 
 
 def _scrubber(
-    entities: Path | None, key: str | None, salt: str, map_path: Path, ner: str, jobs: int
+    entities: Path | None,
+    key: str | None,
+    salt: str,
+    map_path: Path,
+    learned: Path | None,
+    ner: str,
+    jobs: int,
 ) -> Scrubber:
     if entities is None or not key:
         raise typer.BadParameter("--entities and a scrub key (DAIMON_EVALS__SCRUB_KEY) are needed.")
     try:
         return load_scrubber(
-            entities, key, salt=salt, map_path=map_path, ner_model=ner or None, jobs=jobs
-        )
+            entities, key, salt=salt, map_path=map_path, learned_path=learned,
+            ner_model=ner or None, jobs=jobs,
+        )  # fmt: skip
     except ValidationError as failed:
         # Only where and what kind: the message would quote the private names.
         bad = [f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in failed.errors()]
@@ -358,6 +370,7 @@ def bundle_scrub(
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Write here, not in place.")] = None,
+    learned: Annotated[Path | None, _LEARNED] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     jobs: Annotated[int, _JOBS] = 1,
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
@@ -366,13 +379,14 @@ def bundle_scrub(
 
     Prints counts and places only, never the text found. Exits 1 unless fully scrubbed.
     """
-    scrubber = _scrubber(entities, key, salt, map_path, ner_model, jobs)
+    scrubber = _scrubber(entities, key, salt, map_path, learned, ner_model, jobs)
     try:
-        report = scrub_path(path, out, scrubber, passphrase=passphrase)
+        report = scrub_path(
+            path, out, scrubber, passphrase=passphrase, map_path=map_path, learned_path=learned
+        )
     except (InvalidDocument, OSError) as failed:
         problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
         raise _Failed("; ".join(problems)) from None
-    save_map(scrubber, map_path)
     _print(
         {
             "status": report.status,
@@ -394,12 +408,13 @@ def bundle_leftovers(
     map_path: Annotated[Path, _MAP],
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
+    learned: Annotated[Path | None, _LEARNED] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     jobs: Annotated[int, _JOBS] = 1,
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
 ) -> None:
     """List what a scrub would still change in a bundle, by place and kind. Exits 1 if any."""
-    scrubber = _scrubber(entities, key, salt, map_path, ner_model, jobs)
+    scrubber = _scrubber(entities, key, salt, map_path, learned, ner_model, jobs)
     try:
         found = leftovers_of(path, scrubber, passphrase=passphrase)
     except (InvalidDocument, OSError) as failed:
