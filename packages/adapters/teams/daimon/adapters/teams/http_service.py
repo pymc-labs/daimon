@@ -74,6 +74,7 @@ from daimon.adapters.teams.thread_model import VERB as THREAD_MODEL_VERB
 from daimon.adapters.teams.thread_model import ThreadModelActions, show_model
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
+from daimon.adapters.teams.workflow_delivery import make_teams_workflow_poster
 from daimon.core.config import TeamsSettings
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.logging_setup import mark_shutting_down
@@ -435,6 +436,9 @@ def create_teams_http_service(
             dm_policies=runtime.settings.direct_message_policies,
             feed=feed,
             team_members=team_member_lookup(runtime),
+        ),
+        workflow_poster=make_teams_workflow_poster(
+            runtime.sessionmaker, direct, tenant_id=installs.tenant_id, settings=runtime.settings
         ),
     )
 

@@ -119,6 +119,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.delivery import WorkflowPoster
 from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_debounce import React as BurstMark
@@ -428,6 +429,7 @@ class TeamsApp:
         installs: TeamInstalls | None = None,
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
+        workflow_poster: WorkflowPoster | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
         catch_up: RestartCatchUp | None = None,
@@ -463,6 +465,8 @@ class TeamsApp:
         )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
+        # Posts workflow results and notices beside them; None leaves them pending.
+        self._workflow_poster = workflow_poster
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
         # Graph subscriptions to private and shared channels; None leaves them mention-only.
@@ -563,6 +567,7 @@ class TeamsApp:
                         self.runtime.sessionmaker,
                         platform="teams",
                         post=self._routine_poster,
+                        workflow=self._workflow_poster,
                         should_stop=lambda: self.draining,
                     )
                     self._delivery_poller = asyncio.create_task(
