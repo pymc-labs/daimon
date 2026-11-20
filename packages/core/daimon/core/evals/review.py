@@ -196,16 +196,18 @@ def _units(
     for i in live:
         groups[(i.case_key, i.repeat)].append(i)
     if queue.layout == "single":
-        return [
+        units = [
             _Unit(handle(secret, "unit", i.key), i.case_key, i.repeat, (i.key,))
             for g in groups.values()
             for i in g
         ]
-    return [
-        _Unit(handle(secret, "unit", case, str(repeat)), case, repeat, tuple(i.key for i in g))
-        for (case, repeat), g in groups.items()
-        if len(g) >= 2
-    ]
+    else:
+        units = [
+            _Unit(handle(secret, "unit", case, str(repeat)), case, repeat, tuple(i.key for i in g))
+            for (case, repeat), g in groups.items()
+            if len(g) >= 2
+        ]
+    return sorted(units, key=lambda u: u.key)  # raw arm, case or repeat order tells arms
 
 
 def _comment_prefix(secret: str, queue_ref: str) -> str:
