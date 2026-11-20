@@ -12,11 +12,21 @@ from typing import Literal, cast
 
 from daimon.core.config import EvalsSettings
 from daimon.core.evals.access import Subject
-from daimon.core.evals.blind import arm_labels, blind_item_view, is_blind
+from daimon.core.evals.blind import (
+    arm_labels,
+    blind_blobs,
+    blind_item_view,
+    blind_pool,
+    handle,
+    is_blind,
+    opaque_id,
+    roll,
+)
 from daimon.core.evals.compare import build_comparison
 from daimon.core.evals.format import (
     BlobRef,
     Case,
+    Check,
     Grader,
     ItemPair,
     JudgeConfig,
@@ -29,6 +39,7 @@ from daimon.core.evals.format import (
     ScoreValue,
 )
 from daimon.core.evals.review import _units  # pyright: ignore[reportPrivateUsage]
+from daimon.core.evals.scoring.checks import check_value
 from daimon.core.evals.scoring.judges import (
     Completion,
     JudgeDeps,
@@ -60,6 +71,7 @@ _CASE = Case.model_validate_json(
 _ITEM = json.loads((_BUNDLE / "runs/baseline-a-2026-01/items.jsonl").read_text().splitlines()[0])
 _PRICED = next(iter(MODEL_PRICING))
 _AT = datetime(2026, 1, 1, tzinfo=UTC)
+_SECRET = "secret-one"
 
 
 def _run() -> Run:
@@ -81,13 +93,15 @@ def test_blind_compare_when_arms_named_by_id_then_nothing_is_picked_and_no_score
         id="s1", item_id=items[0].id, criterion="x", grader=Grader(kind="code"),
         value=ScoreValue(pass_=True), at=_AT,
     )  # fmt: skip
-    ids = {i.id: f"opaque-{n}" for n, i in enumerate(items)}
-    probe = build_comparison(run, items, [score], [_CASE], blind=True, arms=["baseline-a"])
+    ids = {opaque_id(_SECRET, run.id, "compare", i.id) for i in items}
+    probe = build_comparison(
+        run, items, [score], [_CASE], blind=True, secret=_SECRET, arms=["baseline-a"]
+    )
     assert probe.rows == [], "a real arm id picks nothing in a blind view"
-    shown = build_comparison(run, items, [score], [_CASE], blind=True, item_ids=ids)
+    shown = build_comparison(run, items, [score], [_CASE], blind=True, secret=_SECRET)
     [row] = shown.rows
-    assert {c.label for c in row.columns} == set(arm_labels(run).values())
-    assert {c.item_id for c in row.columns} == set(ids.values()), "only opaque ids"
+    assert {c.label for c in row.columns} == set(arm_labels(run, _SECRET).values())
+    assert {c.item_id for c in row.columns} == ids, "only opaque ids"
     assert all(c.scores == [] and c.passed is None for c in row.columns), "no verdicts"
 
 
@@ -109,7 +123,7 @@ def test_blind_item_view_when_built_then_usage_model_times_origin_and_repeat_are
 
 def test_blind_run_when_built_then_no_arm_kind_or_name_shows() -> None:
     run = _run()
-    text = blind_run(run).model_dump_json(exclude={"id"})
+    text = blind_run(run, _SECRET).model_dump_json(exclude={"id"})
     for word in ("baseline", "cand-live", "Candidate", "arm-model-7", '"live"'):
         assert word not in text, f"the blind run shows {word!r}"
     assert is_blind("reviewer") and is_blind("admin", True) and not is_blind("admin")
@@ -136,9 +150,85 @@ def test_units_when_queue_is_single_then_task_keys_name_no_item_or_arm() -> None
     ] + [ItemIndexRow(key="r.c1.cand-live.1", case_key="c1", arm_key="cand-live", repeat=1,
                       status="done")]  # fmt: skip
     queue = ReviewQueue(id="q", name="Q", layout="single", blind=True)
-    units = _units(queue, "salt", ["baseline-a", "cand-live"], rows)
+    units = _units(queue, _SECRET, ["baseline-a", "cand-live"], rows, blind=True)
     assert len(units) == 2, "a repeat only one arm has is not served blind"
     assert all("cand" not in u.key and "baseline" not in u.key for u in units)
+
+
+def test_blind_handles_when_the_secret_differs_then_labels_ids_and_shuffles_differ() -> None:
+    run = _run()
+    orders = {arm_labels(run, f"s{n}")["baseline-a"] for n in range(12)}
+    assert len(orders) > 1, "the label order depends on the secret, not on public ids"
+    assert handle("a", "x") != handle("b", "x") and opaque_id("a", "r", "items", "k") != opaque_id(
+        "b", "r", "items", "k"
+    ), "handles are keyed"
+    assert opaque_id(_SECRET, "r", "items", "k") != opaque_id(_SECRET, "r", "compare", "k"), (
+        "one item has a different id in each view"
+    )
+    deck = list(range(20))
+    mixed = [roll(s, "x").sample(deck, 20) for s in ("a", "b")]
+    assert mixed[0] != mixed[1], "shuffles are keyed"
+
+
+def test_blind_pool_when_repeats_are_partial_or_failed_then_only_matched_done_items_show() -> None:
+    def row(arm: str, repeat: int, status: str) -> ItemIndexRow:
+        return ItemIndexRow(
+            key=f"r.c1.{arm}.{repeat}", case_key="c1", arm_key=arm, repeat=repeat, status=status
+        )
+
+    index = [
+        row("a", 0, "done"), row("b", 0, "done"),
+        row("a", 1, "done"), row("b", 1, "error"),
+        row("b", 2, "done"),
+    ]  # fmt: skip
+    assert {i.key for i in blind_pool(index, {"a", "b"})} == {"r.c1.a.0", "r.c1.b.0"}
+
+
+def test_blind_compare_when_an_arm_errored_then_that_repeat_is_not_shown() -> None:
+    run = _run()
+    ok = [_item("baseline-a"), _item("cand-live")]
+    failed = [_item("baseline-a", repeat=1), _item("cand-live", repeat=1, status="error")]
+    shown = build_comparison(run, [*ok, *failed], [], [_CASE], blind=True, secret=_SECRET)
+    assert len(shown.rows) == 1, "an error on one arm only would tell live from recorded"
+    open_view = build_comparison(run, [*ok, *failed], [], [_CASE], blind=False, secret=_SECRET)
+    assert len(open_view.rows) == 2, "an editor still sees the failed repeat"
+
+
+def test_blind_item_view_when_item_has_ids_paths_and_platform_data_then_only_neutral_ones_show() -> (
+    None
+):
+    blob = {"sha256": "f" * 64, "size": 3, "media_type": "text/plain"}
+    item = _item(
+        "cand-live",
+        chat=[
+            {"seq": 1, "t_ms": 1234, "kind": "message", "actor": "bot", "message_id": "1700000000123",
+             "text": "hi", "platform_payloads": {"discord": {"id": "1700000000123"}}},
+            {"seq": 2, "t_ms": 1300, "kind": "message", "actor": "bot", "message_id": "1700000000456",
+             "reply_to": "1700000000123", "text": "again"},
+        ],
+        outputs=[{"id": "uuid-out-1", "name": "a.txt", "media_type": "text/plain", "blob": blob,
+                  "source": "sandbox", "path": "/work/a.txt", "renders": [blob], "text": blob}],
+        case={"id": "c", "revision": 7, "hash": "casehash99"},
+        status="error", error={"kind": "timeout", "message": "boom"},
+    )  # fmt: skip
+    view = blind_item_view(item, item_id="r~items~x", label="Arm 1", names=set())
+    text = json.dumps(view)
+    for word in ("1700000000123", "1234", "uuid-out-1", "sandbox", "/work", "f" * 64, "platform_payloads",
+                 "boom", "timeout", "casehash99"):  # fmt: skip
+        assert word not in text, f"the blind item shows {word!r}"
+    assert view["status"] == "done" and view["case"] == {"id": "c", "revision": 0, "hash": ""}
+    out = view["outputs"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
+    assert out["id"] == "out1" and out["blob"]["sha256"] == "r~items~x~out1", "neutral output ids"
+    assert blind_blobs(item)["out1"].sha256 == "f" * 64, "the real file is found by that name"
+
+
+def test_regex_check_when_pattern_backtracks_then_it_stops_and_fails() -> None:
+    check = _check_regex(r"(a|aa)+$")
+    assert check_value(check, True, "a" * 60 + "!") is False, "a runaway pattern fails the check"
+
+
+def _check_regex(pattern: str) -> Check:
+    return Check.model_validate({"op": "regex", "pattern": pattern})
 
 
 def test_judge_panel_when_unset_or_sharing_an_arm_provider_then_it_is_refused() -> None:

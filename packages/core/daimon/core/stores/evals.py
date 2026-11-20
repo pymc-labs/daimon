@@ -551,6 +551,11 @@ async def run_by_key(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -
     return row and RunRow.model_validate(row)
 
 
+async def run_keys(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[str]:
+    """The key of every run in the workspace."""
+    return list(await session.scalars(select(EvalRun.key).where(EvalRun.tenant_id == tenant_id)))
+
+
 async def runs_of_suite(session: AsyncSession, *, suite_id: uuid.UUID) -> list[RunRow]:
     rows = await session.scalars(
         select(EvalRun).where(EvalRun.suite_id == suite_id).order_by(EvalRun.created_at)
