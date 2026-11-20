@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 from daimon.core.evals.dedupe import group_id, groups, thin
-from daimon.core.evals.draft import Completion, draft_case, estimate_draft
+from daimon.core.evals.draft import Completion, draft_case, draft_model, estimate_draft
 from daimon.core.evals.from_thread import (
     ThreadCall,
     ThreadMessage,
@@ -93,5 +93,5 @@ async def test_draft_when_model_answers_then_expectations_are_set_and_flagged() 
     assert {"reason": "expectations_unreviewed"} in drafted["review_flags"], "flagged"  # type: ignore[operator]
     assert drafted["provenance"]["expectations_by"][0]["action"] == "drafted"  # type: ignore[index]
     assert case_problems(drafted) == [], "still a valid case"
-    estimate = estimate_draft([case], "claude-haiku-5-5")
+    estimate = estimate_draft([case], draft_model(None))
     assert estimate.cases == 1 and estimate.usd > 0, "an estimate comes before any call"
