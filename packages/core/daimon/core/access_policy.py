@@ -10,7 +10,7 @@ object and conversation ids) for the tenant's own platform. Channels are named b
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from mux.contracts.ids import Provider
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -154,6 +154,34 @@ class TenantAccessPolicy(BaseModel):
     # Whether an admin chose `enabled_backends`. False: the tenant follows the
     # deployment default (`daimon.core.provider_keys`), resolved when it is loaded.
     backends_explicit: bool = False
+    # Computed from the stored Discord room facts when a policy is loaded, never stored
+    # and never dumped (`attach_automatic_rules`). A narrow room reads `inside`; a room
+    # known open is `OPEN_RULE`. Read only through `daimon.core.permissions`.
+    automatic_channel_rules: dict[str, ChannelRule] = Field(
+        default_factory=dict, exclude=True, repr=False
+    )
+    # Whether a Discord room with no entry above is narrow: its facts are unknown.
+    automatic_unknown_narrow: bool = Field(default=False, exclude=True, repr=False)
+
+    def __eq__(self, other: object) -> bool:
+        """Equal when the stored fields are: a policy rebuilt from a dump carries no
+        automatic rules, so a no-op edit must not read as a change."""
+        if not isinstance(other, TenantAccessPolicy):
+            return NotImplemented
+        return self.model_dump() == other.model_dump()
+
+    def __hash__(self) -> int:
+        return hash(self.model_dump_json())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _automatic_rules_are_never_stored(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        fields = cast("dict[str, Any]", data)
+        if _AUTOMATIC_KEYS & fields.keys():
+            raise ValueError("automatic channel rules are computed, never stored")
+        return fields
 
     @model_validator(mode="before")
     @classmethod
@@ -210,6 +238,19 @@ class TenantAccessPolicy(BaseModel):
             for name, rule in rules.items()
             if rule.runs_in is not None or rule.invoker_role_ids
         }
+
+
+_AUTOMATIC_KEYS: Final = frozenset({"automatic_channel_rules", "automatic_unknown_narrow"})
+
+
+def attach_automatic_rules(
+    policy: TenantAccessPolicy, rules: dict[str, ChannelRule], *, unknown_narrow: bool
+) -> TenantAccessPolicy:
+    """The policy with computed rules. The one way to set them: they never pass validation,
+    so a stored payload cannot carry them, and a rebuilt policy starts without them."""
+    return policy.model_copy(
+        update={"automatic_channel_rules": dict(rules), "automatic_unknown_narrow": unknown_narrow}
+    )
 
 
 def agent_invoker_roles(

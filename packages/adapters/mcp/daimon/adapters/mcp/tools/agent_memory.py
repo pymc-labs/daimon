@@ -19,6 +19,7 @@ from daimon.core.host_memory import (
     HostMemory,
     HostMemoryError,
     HostMemoryPlace,
+    audience_memory_read_only,
     choose_store,
 )
 from daimon.core.ma_identity import derive_agent_uuid
@@ -46,19 +47,35 @@ async def open_host_memory(
     if not origin.attended and not auth.host_builtins:
         # Memory is a built-in on Claude too: off unattended unless policy allows it.
         raise ToolError("Memory is off when nobody is in the conversation.")
+    feature_place = FeaturePlace.of(
+        auth.tenant_id,
+        origin.platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        agent_id=origin.responder_ma_agent_id,
+    )
     features = await resolve_features(
         runtime.session_factory,
         runtime.settings,
-        FeaturePlace.of(
-            auth.tenant_id,
-            origin.platform,
-            origin.parent_channel_id,
-            origin.thread_id,
-            agent_id=origin.responder_ma_agent_id,
-        ),
+        feature_place,
         keys=("memory_shared", "memory_personal", "memory_channel", "dm_memory_read_only"),
     )
     is_dm = origin.thread_id.startswith("dm:")
+    read_only = origin.memory_read_only is not False or (
+        is_dm and features.on("dm_memory_read_only")
+    )
+    if is_dm and origin.platform == "discord":
+        # The audience mode adds to the switch above: `on` makes a DM turn read-only.
+        async with runtime.session_factory() as session:
+            read_only = (
+                await audience_memory_read_only(
+                    session,
+                    feature_place,
+                    agent=origin.responder_name,
+                    already_read_only=read_only,
+                )
+                or read_only
+            )
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(
@@ -68,8 +85,7 @@ async def open_host_memory(
         account_id=auth.account_id,
         hold=auth.hold,
         shared_thread=auth.requester_account_id is not None,
-        read_only=origin.memory_read_only is not False
-        or (is_dm and features.on("dm_memory_read_only")),
+        read_only=read_only,
     )
     try:
         kind = choose_store(
