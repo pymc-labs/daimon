@@ -149,6 +149,10 @@ class StepTurn:
     workflow_step_id: uuid.UUID
     #: Called with the session id before the first send, so a crash can reattach.
     on_session: Callable[[str], Awaitable[None]]
+    #: Reattach to the session's turn in flight (a lost worker's) instead of sending.
+    resume: bool = False
+    #: The turn so far, every render and at the end: the step's live activity.
+    on_render: Callable[[TurnState], Awaitable[None]] | None = None
 
 
 class _NoOpLifecycle(TurnLifecycle):
@@ -165,18 +169,26 @@ class _NoOpLifecycle(TurnLifecycle):
     driver's own pump.
     """
 
-    def __init__(self, *, on_result: Callable[[TurnState], Awaitable[None]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_result: Callable[[TurnState], Awaitable[None]] | None = None,
+        on_render: Callable[[TurnState], Awaitable[None]] | None = None,
+    ) -> None:
         self._on_result = on_result
+        self._on_render = on_render
 
     async def on_render(self, state: TurnState) -> None:
-        return None
+        if self._on_render is not None:
+            await self._on_render(state)
 
     async def on_terminal_success(self, state: TurnState) -> None:
+        await self.on_render(state)
         if self._on_result is not None and state.termination == TerminationReason.COMPLETED:
             await self._on_result(state)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        return None
+        await self.on_render(state)
 
 
 def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
@@ -876,7 +888,7 @@ async def run_turn_impl(
                     + routine_memory
                     + trigger_message
                 ),
-                lifecycle=_NoOpLifecycle(),
+                lifecycle=_NoOpLifecycle(on_render=step.on_render if step is not None else None),
                 cancel=cancel,
                 render_interval_s=2.0,  # nothing renders; do not spin the diff timer
                 billing=billing,
@@ -884,6 +896,7 @@ async def run_turn_impl(
                 # from the policy now in force, never `AutoApprove`.
                 tool_confirmation=step.decide(posture) if step is not None else posture,
                 deadline=effective_deadline,
+                resume_existing=step is not None and step.resume,
             )
 
         if (observation := current_outcome.get()) is not None:

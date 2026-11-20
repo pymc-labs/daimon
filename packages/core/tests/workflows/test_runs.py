@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -14,42 +13,20 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 from daimon.core import usage_recording
 from daimon.core._models import (
     SecurityAuditEvent,
-    Tenant,
     UsageEvent,
     WorkflowRun,
     WorkflowRunEvent,
     WorkflowStep,
 )
-from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.pricing import MODEL_PRICING
-from daimon.core.stores import tenant_ledger, workflow_runs, workflows
-from daimon.core.stores.workflow_run_events import list_events
+from daimon.core.stores import tenant_ledger, workflow_runs
 from daimon.core.workflows import engine, preflight, runs
-from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
-from daimon.core.workflows.runs import Start, StepWork
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.workflows import NOW, make_settings, make_world
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-NOW = datetime(2026, 11, 20, 12, tzinfo=UTC)
-Sessions = async_sessionmaker[AsyncSession]
-
-
-def make_settings(**workflows_settings: Any) -> Settings:
-    return Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-            "features": {"workflows": "on"},
-            "workflows": workflows_settings,
-        }
-    )
-
+from sqlalchemy.ext.asyncio import AsyncSession
 
 INLINE: dict[str, Any] = {
     "b": {"kind": "branch", "cases": [{"when": "${{ inputs.n > 1 }}", "to": "t"}], "else": "f"},
@@ -60,92 +37,6 @@ AGENT: dict[str, Any] = {
     "a": {"kind": "agent", "instructions": "Do it", "next": "f"},
     "f": {"kind": "finish", "output": "${{ steps.a.output }}"},
 }
-
-
-@dataclass
-class World:
-    sm: Sessions
-    settings: Settings
-    tenant_id: uuid.UUID
-    owner: uuid.UUID
-    workflow_id: uuid.UUID
-
-    def start(self, **kw: Any) -> Start:
-        kw.setdefault("run_as_account_id", self.owner)
-        return Start(self.workflow_id, triggered_by={"kind": "person"}, **kw)
-
-    async def run(self, **kw: Any) -> workflow_runs.RunRow:
-        run = await runs.start_run(
-            self.sm, self.settings, tenant_id=self.tenant_id, start=self.start(**kw), now=NOW
-        )
-        assert not isinstance(run, Refusal), f"the run starts: {run}"
-        return run
-
-    async def get(self, run_id: uuid.UUID) -> workflow_runs.RunRow:
-        async with self.sm() as s:
-            run = await workflow_runs.get_run(s, run_id)
-        assert run is not None
-        return run
-
-    async def steps(self, run_id: uuid.UUID) -> dict[str, workflow_runs.StepRow]:
-        async with self.sm() as s:
-            return {
-                engine.step_key(r.node_id, r.visit): r
-                for r in await workflow_runs.list_steps(s, run_id)
-            }
-
-    async def claim(self, run_id: uuid.UUID, key: str, now: datetime = NOW) -> runs.Claimed:
-        step = (await self.steps(run_id))[key]
-        claimed = await runs.claim(
-            self.sm, step_id=step.id, owner="w1", lease=timedelta(minutes=5), now=now
-        )
-        assert claimed is not None, f"{key} is claimed"
-        return claimed
-
-    async def execute(
-        self, claimed: runs.Claimed, *outcomes: engine.Outcome, now: datetime = NOW
-    ) -> None:
-        queue = list(outcomes)
-
-        async def fake(work: StepWork) -> engine.Outcome:
-            assert work.attempt == claimed.attempt, "the executor sees its attempt"
-            return queue.pop(0)
-
-        await runs.execute(self.sm, self.settings, {"agent": fake}, claimed, clock=lambda: now)
-
-    async def verified(self, run_id: uuid.UUID) -> list[str]:
-        async with self.sm() as s:
-            events = await list_events(s, run_id)
-        run = await self.get(run_id)
-        result = verify(run_id, events)
-        assert result.ok and result.head == run.head_hash, f"the ledger verifies: {result}"
-        return [e.type for e in events]
-
-
-async def make_world(
-    db_session: AsyncSession, nodes: dict[str, Any], start: str, **settings: Any
-) -> World:
-    tenant = await make_tenant(db_session)
-    owner = await make_account(db_session, tenant=tenant)
-    await db_session.execute(
-        update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
-    )
-    spec = {"schema": "daimon.workflow/v1", "name": "T", "start": start, "nodes": nodes}
-    flow = await workflows.create_workflow(
-        db_session, tenant_id=tenant.id, owner_account_id=owner.id, name="T", spec=spec
-    )
-    await workflows.publish_version(
-        db_session,
-        tenant_id=tenant.id,
-        workflow_id=flow.id,
-        spec=spec,
-        spec_hash="h",
-        source="web",
-        published_by=owner.id,
-    )
-    await db_session.commit()
-    sm = async_sessionmaker(bind=db_session.bind, expire_on_commit=False)
-    return World(sm, make_settings(**settings), tenant.id, owner.id, flow.id)
 
 
 async def test_a_manual_run_goes_through_branch_transform_finish(db_session: AsyncSession) -> None:
