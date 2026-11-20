@@ -10,12 +10,14 @@ import base64
 import io
 import json
 import os
+import time
 import zipfile
+import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Final, Literal
+from typing import IO, Final, Literal
 
 from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -50,13 +52,17 @@ from daimon.core.evals.validate import (
 ENC_MAGIC: Final = b"DAIMON-EVAL-ENC1"
 _SCRYPT: Final = {"n": 131072, "r": 8, "p": 1}
 DEFAULT_MAX_BYTES: Final = 2 * 1024**3
+MAX_ENTRIES: Final = 100_000
+_ZIP_ERRORS: Final = (
+    zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError, KeyError, OSError,
+)  # fmt: skip
 
 
 class DirSource:
     """A bundle unpacked into a folder."""
 
     def __init__(self, root: Path) -> None:
-        self._root = root
+        self._root = root.resolve()
 
     def names(self) -> frozenset[str]:
         return frozenset(
@@ -64,41 +70,70 @@ class DirSource:
         )
 
     def read(self, path: str) -> bytes:
-        return (self._root / path).read_bytes()
+        target = (self._root / path).resolve()
+        if not target.is_relative_to(self._root):
+            raise InvalidDocument([f"{path}: outside the bundle folder"])
+        return target.read_bytes()
 
 
 class ZipSource:
-    """A zipped bundle, held in memory. Refuses unsafe names and oversized content."""
+    """A zipped bundle. Refuses unsafe or repeated names, too many entries, oversized content
+    and, past `deadline` (a `time.monotonic` value), any further read."""
 
-    def __init__(self, data: bytes, *, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
+    def __init__(
+        self,
+        data: bytes | IO[bytes],
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        deadline: float | None = None,
+    ) -> None:
+        self.deadline = deadline
         try:
-            self._zip = zipfile.ZipFile(io.BytesIO(data))
-        except zipfile.BadZipFile:
+            self._zip = zipfile.ZipFile(io.BytesIO(data) if isinstance(data, bytes) else data)
+            infos = self._zip.infolist()
+        except _ZIP_ERRORS:
             raise InvalidDocument(["not a bundle zip or encrypted bundle"]) from None
-        infos = self._zip.infolist()
+        if len(infos) > MAX_ENTRIES:
+            raise InvalidDocument([f"bundle has more than {MAX_ENTRIES} files"])
         if sum(i.file_size for i in infos) > max_bytes:
             raise InvalidDocument([f"bundle unpacks to more than {max_bytes} bytes"])
+        seen: set[str] = set()
         for info in infos:
             parts = PurePosixPath(info.filename).parts
             if info.filename.startswith("/") or ".." in parts or "\\" in info.filename:
                 raise InvalidDocument([f"{info.filename}: unsafe path in zip"])
+            if info.filename in seen:
+                raise InvalidDocument([f"{info.filename}: in the zip twice"])
+            seen.add(info.filename)
 
     def names(self) -> frozenset[str]:
         return frozenset(n for n in self._zip.namelist() if not n.endswith("/"))
 
     def read(self, path: str) -> bytes:
-        return self._zip.read(path)
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise InvalidDocument(["the bundle takes too long to read"])
+        try:
+            return self._zip.read(path)
+        except _ZIP_ERRORS:
+            raise InvalidDocument([f"{path}: unreadable in the zip"]) from None
 
 
 def open_bundle(
-    data: bytes, *, passphrase: str | None = None, max_bytes: int = DEFAULT_MAX_BYTES
+    data: bytes | IO[bytes],
+    *,
+    passphrase: str | None = None,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    deadline: float | None = None,
 ) -> ZipSource:
-    """A source over zip or encrypted-zip bytes."""
-    if data.startswith(ENC_MAGIC):
+    """A source over zip or encrypted-zip bytes, or a seekable file of them."""
+    head = data[: len(ENC_MAGIC)] if isinstance(data, bytes) else data.read(len(ENC_MAGIC))
+    if not isinstance(data, bytes):
+        data.seek(0)
+    if head == ENC_MAGIC:
         if not passphrase:
             raise InvalidDocument(["bundle is encrypted: give its passphrase"])
-        data = decrypt(data, passphrase)
-    return ZipSource(data, max_bytes=max_bytes)
+        data = decrypt(data if isinstance(data, bytes) else data.read(), passphrase)
+    return ZipSource(data, max_bytes=max_bytes, deadline=deadline)
 
 
 def open_path(path: Path, *, passphrase: str | None = None) -> BundleSource:
@@ -126,16 +161,16 @@ def decrypt(data: bytes, passphrase: str) -> bytes:
     try:
         magic, header_line, sealed = data.split(b"\n", 2)
         header = json.loads(header_line)
-        n, r, p = int(header["n"]), int(header["r"]), int(header["p"])
+        params = {k: header[k] for k in _SCRYPT}
         salt, nonce = base64.b64decode(header["salt"]), base64.b64decode(header["nonce"])
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, RecursionError):
         raise InvalidDocument(["not a Daimon encrypted bundle"]) from None
     if magic != ENC_MAGIC or header.get("kdf") != "scrypt":
         raise InvalidDocument(["not a Daimon encrypted bundle"])
-    if n > 2**20 or r > 16 or p > 4:
-        raise InvalidDocument(["encryption parameters are out of range"])
+    if params != _SCRYPT:  # only what `encrypt` writes: costlier settings are a cheap attack
+        raise InvalidDocument(["encryption parameters are not the ones Daimon writes"])
     try:
-        return AESGCM(_key(passphrase, salt, n, r, p)).decrypt(nonce, sealed, None)
+        return AESGCM(_key(passphrase, salt, **_SCRYPT)).decrypt(nonce, sealed, None)
     except (InvalidTag, ValueError):
         raise InvalidDocument(["wrong passphrase or damaged bundle"]) from None
 
@@ -231,6 +266,20 @@ def build_files(
     signing_key: Ed25519PrivateKey | None = None,
 ) -> dict[str, bytes]:
     """Every file of a bundle by path, with the manifest hashing all of them."""
+    files = document_files(header, suites, runs, blobs, signing_key=signing_key)
+    files.update({blob_path(b.sha256): blobs[b] for b in blobs})
+    return files
+
+
+def document_files(
+    header: BundleHeader,
+    suites: Iterable[LoadedSuite],
+    runs: Iterable[LoadedRun],
+    blobs: Iterable[BlobEntry],
+    *,
+    signing_key: Ed25519PrivateKey | None = None,
+) -> dict[str, bytes]:
+    """The manifest and document files of a bundle by path, without the blob files."""
     files: dict[str, bytes] = {}
     suite_entries: list[SuiteEntry] = []
     for suite in suites:
@@ -292,21 +341,20 @@ def build_files(
     if signing_key is not None:
         document = sign(document, signing_key)
     files[MANIFEST_PATH] = dumps(document)
-    files.update({blob_path(b.sha256): blobs[b] for b in entries})
     return files
+
+
+def zip_add(archive: zipfile.ZipFile, path: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+    archive.writestr(info, data, zipfile.ZIP_DEFLATED)
 
 
 def to_zip(files: Mapping[str, bytes]) -> bytes:
     """A deterministic deflate zip of `files`, manifest first."""
     out = io.BytesIO()
-    order = sorted(files, key=lambda p: (p != MANIFEST_PATH, p))
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in order:
-            archive.writestr(
-                zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0)),
-                files[path],
-                zipfile.ZIP_DEFLATED,
-            )
+        for path in sorted(files, key=lambda p: (p != MANIFEST_PATH, p)):
+            zip_add(archive, path, files[path])
     return out.getvalue()
 
 

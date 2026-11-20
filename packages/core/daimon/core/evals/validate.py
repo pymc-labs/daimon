@@ -17,6 +17,7 @@ from typing import Final, Literal, Protocol
 from daimon.core.evals.blobs import BLOB_DIR, SHA256, blob_refs
 from daimon.core.evals.effects import is_known_verb
 from daimon.core.evals.format import (
+    FORMAT_VERSION,
     Case,
     Comment,
     JsonObject,
@@ -175,9 +176,47 @@ def validate_bundle(source: BundleSource) -> ValidationReport:
         _check(source, report)
     except InvalidDocument as refused:
         report.problems += refused.problems
-    except (ValueError, KeyError) as broken:  # bad JSON or a missing listed file
-        report.problems.append(f"unreadable: {broken}")
+    except (ValueError, KeyError, OSError) as broken:  # bad JSON or a missing listed file
+        report.problems.append(f"unreadable: {type(broken).__name__}")
+    except RecursionError:
+        report.problems.append("unreadable: JSON nested too deep")
     return report
+
+
+def _newer(raw_manifest: JsonObject) -> str | None:
+    found = raw_manifest.get("format_version")
+    try:
+        major, minor = (int(p) for p in str(found).split("."))
+    except ValueError:
+        return None
+    ours = tuple(int(p) for p in FORMAT_VERSION.split("."))
+    if (major, minor) <= ours:
+        return None
+    return f"{MANIFEST_PATH}: format {found} is newer than this Daimon reads ({FORMAT_VERSION})"
+
+
+def _layout_problems(manifest: Manifest) -> list[str]:
+    """Each suite and run at its own canonical paths, each listed in `files`, ids unique."""
+    listed = {f.path for f in manifest.files}
+    problems = _duplicates(MANIFEST_PATH, "suite", [s.id for s in manifest.contents.suites])
+    problems += _duplicates(MANIFEST_PATH, "run", [r.id for r in manifest.contents.runs])
+    problems += _duplicates(MANIFEST_PATH, "file", [f.path for f in manifest.files])
+    problems += _duplicates(MANIFEST_PATH, "blob", [b.sha256 for b in manifest.blobs])
+    paths: list[tuple[str | None, str]] = []
+    for suite in manifest.contents.suites:
+        base = f"suites/{suite.id}/"
+        paths += [(suite.path, f"{base}suite.json"), (suite.cases_path, f"{base}cases.jsonl")]
+    for run in manifest.contents.runs:
+        base = f"runs/{run.id}/"
+        paths += [(run.path, f"{base}run.json"), (run.items_path, f"{base}items.jsonl")]
+        optional = ((run.scores_path, "scores.jsonl"), (run.reviews_path, "reviews.jsonl"))
+        paths += [(p, f"{base}{n}") for p, n in optional if p]
+    for path, want in paths:
+        if path != want:
+            problems.append(f"{MANIFEST_PATH}: {path} should be {want}")
+        elif path not in listed:
+            problems.append(f"{MANIFEST_PATH}: {path} is not in files")
+    return problems
 
 
 def _check(source: BundleSource, report: ValidationReport) -> None:
@@ -185,9 +224,13 @@ def _check(source: BundleSource, report: ValidationReport) -> None:
     if MANIFEST_PATH not in names:
         raise InvalidDocument([f"{MANIFEST_PATH} is missing"])
     raw_manifest = _json(source, MANIFEST_PATH)
+    if newer := _newer(raw_manifest):
+        raise InvalidDocument([newer])
     if problems := schema_problems("Manifest", raw_manifest, MANIFEST_PATH):
         raise InvalidDocument(problems)
     manifest = report.manifest = Manifest.model_validate(raw_manifest)
+    if problems := _layout_problems(manifest):
+        raise InvalidDocument(problems)
     _check_files(source, names, manifest, report)
     if report.problems:
         return  # documents are only trusted once every file matches the manifest
@@ -222,8 +265,6 @@ def _check(source: BundleSource, report: ValidationReport) -> None:
             ):
                 report.problems.append(f"{entry.path}: does not match its manifest entry")
             report.runs.append(loaded_run)
-    report.problems += _duplicates(MANIFEST_PATH, "suite", [s.id for s in manifest.contents.suites])
-    report.problems += _duplicates(MANIFEST_PATH, "run", [r.id for r in manifest.contents.runs])
     documents: list[JsonValue] = [s.document for s in report.suites]
     documents += [c for s in report.suites for c in s.cases]
     documents += [d for r in report.runs for d in (r.document, *r.items, *r.scores, *r.reviews)]
@@ -258,7 +299,6 @@ def _check_files(
         sha = path.removeprefix(BLOB_DIR)
         if not (path.startswith(BLOB_DIR) and SHA256.match(sha) and sha in blobs):
             report.problems.append(f"{path}: not listed in the manifest")
-    report.problems += _duplicates(MANIFEST_PATH, "file", [f.path for f in manifest.files])
 
 
 def _check_suite(
@@ -280,8 +320,10 @@ def _check_suite(
         by_id[case.id] = case
         report.warnings += case_warnings(case, where)
         status = case.provenance.scrub.status if case.provenance.scrub else None
-        if scrubbed and status not in (None, "scrubbed"):
-            report.problems.append(f"{where}: case is {status} but the bundle says scrubbed")
+        if scrubbed and status != "scrubbed":
+            report.problems.append(
+                f"{where}: case is {status or 'unscrubbed'} but the bundle says scrubbed"
+            )
     report.problems += _duplicates(cases_path, "case", [str(c.get("id")) for c in cases])
     pins = {(p.id, p.revision, p.hash) for p in suite.cases}
     have = {(c.id, c.revision, c.hash or "") for c in by_id.values()}
@@ -343,6 +385,12 @@ def _check_run(
             report.problems.append(f"{where}: case {item.case.id} is not pinned by the suite")
     item_ids = {i.id for i in items}
     report.problems += _duplicates(items_path, "item", [i.id for i in items])
+    report.problems += _duplicates(
+        str(scores_path), "score", [str(s.get("id")) for s in loaded.scores]
+    )
+    report.problems += _duplicates(
+        str(reviews_path), "review", [str(r.get("id")) for r in loaded.reviews]
+    )
     for number, raw in enumerate(loaded.scores, start=1):
         where = f"{scores_path}:{number}"
         if problems := schema_problems("Score", raw, where):

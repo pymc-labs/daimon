@@ -29,3 +29,11 @@ class ArtifactStore(Protocol):
     ) -> StoredArtifact:
         """Store one private object and mint a short-lived GET URL."""
         ...
+
+    async def put(self, *, key: str, content: bytes, content_type: str) -> None:
+        """Store one private object, replacing any under the same key."""
+        ...
+
+    async def read(self, *, key: str) -> bytes | None:
+        """The object's bytes, or None when there is none under `key`."""
+        ...
