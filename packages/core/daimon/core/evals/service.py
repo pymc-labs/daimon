@@ -398,6 +398,13 @@ class EvalService:
         """Refuse unless `actor` may use evals here at all."""
         await self._check_on(actor)
 
+    async def version_access(
+        self, session: AsyncSession, actor: Subject, suite_id: str, version: int | None,
+        action: Action,
+    ) -> tuple[store.SuiteRow, SuiteRole, int]:
+        """A suite version the actor may `action`, with their role and the version's number."""
+        return await self._version(session, actor, suite_id, version, action)
+
     async def run_access(
         self, session: AsyncSession, actor: Subject, run_id: str, action: Action
     ) -> tuple[store.RunRow, SuiteRole]:
