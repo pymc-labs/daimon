@@ -371,11 +371,14 @@ def test_value_when_bundle_document_then_keys_and_schema_fields_kept() -> None:
         ("id d1e3a32d1766 and Jane Roe", "d1e3a32d1766"),  # no digit term from "(+3)"
         ("PrimRose garden", "PrimRose garden"),  # one-word terms: whole words only
         ("see https://github.com/x and notes.md", "https://github.com/x and notes.md"),
+        ("at docs.google.com/d and github.com", "docs.google.com/d and github.com"),
     ],
 )
 def test_text_when_word_inside_another_or_url_scheme_then_kept(text: str, kept: str) -> None:
     entities = KnownEntities.model_validate({"people": ["Jane Roe (+3)", "Rose Dunn"]})
-    scrubber = _scrubber(entities.model_copy(update={"phrases": ["https", "test"]}))
+    scrubber = _scrubber(
+        entities.model_copy(update={"phrases": ["https", "test", "github", "google"]})
+    )
     out = scrubber.text(text)
     assert kept in out and "Roe" not in out, out
 

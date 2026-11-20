@@ -572,8 +572,9 @@ class Detector:
         ]
         if names and self._ner is not None and namey(view.text):
             found += self._ner.find(view.text)
-        schemes = [m.span() for m in _SCHEME.finditer(view.text)]
-        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in schemes)]
+        # A scheme or a public service's address is never a name ("github" in github.com).
+        fixed = [m.span() for m in _SCHEME.finditer(view.text)] + _public_suffixes(view.text)
+        hits += [h for h in found if not any(a < h.end and h.start < b for a, b in fixed)]
         out: list[Hit] = []
         for hit in _resolve(hits):
             start, end = view.span(hit.start, hit.end)
@@ -608,13 +609,29 @@ class Detector:
             yield from (_group(m, "repo", _P_HOST) for m in p.finditer(text))
         yield from (Hit(m.start(), m.end(), "host", _P_HOST) for m in _HOST.finditer(text))
         for m in _PUBLIC_HOST.finditer(text):
-            labels = m.group().casefold().split(".")
-            if not any(".".join(labels[i:]) in _PUBLIC_SERVICES for i in range(len(labels) - 1)):
+            if _public_suffix(m.group()) is None:
                 yield Hit(m.start(), m.end(), "host", _P_HOST)
         for m in _TENANT_HOST.finditer(text):
             if m.group(1).casefold() not in _SHARED_HOSTS:
                 yield _group(m, "company", _P_HOST)
         yield from (Hit(m.start(), m.end(), "ip", _P_HOST) for m in _IP.finditer(text))
+
+
+def _public_suffix(host: str) -> int | None:
+    """Where the public service's own name starts in `host` (`docs.google.com`: 5), or None."""
+    labels = host.casefold().split(".")
+    for i in range(len(labels) - 1):
+        if ".".join(labels[i:]) in _PUBLIC_SERVICES:
+            return sum(len(label) + 1 for label in labels[:i])
+    return None
+
+
+def _public_suffixes(text: str) -> list[tuple[int, int]]:
+    return [
+        (m.start() + at, m.end())
+        for m in _PUBLIC_HOST.finditer(text)
+        if (at := _public_suffix(m.group())) is not None
+    ]
 
 
 def _merge(a: Hit, b: Hit) -> Hit:
