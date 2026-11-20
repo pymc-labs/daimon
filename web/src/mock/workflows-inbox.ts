@@ -2,14 +2,15 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import { newGrants } from "@/modules/workflows/review"
+import { project } from "@/modules/workflows/runs"
 import { clone } from "@/modules/workflows/spec"
 import type {
-  Decision, Draft, InboxDecide, InboxDetail, InboxItem, InboxRoute, Person, Spec, Version, VersionSpec,
+  Decision, Draft, InboxDecide, InboxDetail, InboxItem, InboxRoute, Person, RunWait, Spec, StepRun, Version, VersionSpec,
 } from "@/modules/workflows/types"
 import { forbidden, notFound, unauthorized, wait } from "./util"
 import { me } from "./world"
 import { ago, allRuns, detail, draftOf, find, findRun, mkDraft, P, versionsOf, W, type Stored } from "./workflows"
-import { decideWait } from "./workflows-runs"
+import { decideWait, visible as released, type Run } from "./workflows-runs"
 import { publicRequest, requests } from "./workflows-store"
 
 const who = (): Person => ({ id: me()!.id, name: me()!.name })
@@ -45,7 +46,7 @@ const RECS: Rec[] = [
     show: "**Brightwave Telecom** (strong fit)\n" + LEAD_BODY,
     bound: [{ tool: "gmail/send_message", label: "Send email", step: "Send", args: { to: "ana@brightwave.example", subject: "Forecasting promotions before Q1", body: LEAD_BODY } }],
     form: { type: "object", required: ["body"], properties: { body: { type: "string", title: "Reply" } } }, values: { body: LEAD_BODY } },
-  { id: "ib_content", kind: "approval", title: "Editor approval", workflow: { id: "wf_content", name: "Content pipeline" }, run: run("wf_content", 125), step: "approve", asked_by: "Content Writer",
+  { id: "ib_content", kind: "approval", title: "Editor approval", workflow: { id: "wf_content", name: "Content pipeline" }, run: run("wf_content", 126), step: "approve", asked_by: "Content Writer",
     since: ago(7), expires_at: ago(-65), to: ["p_maya", "p_priya"], decision: null, routes: approve, show: "**Priors for media mix**\n" + ARTICLE,
     bound: [{ tool: "notion/create_page", label: "Create page", step: "Create Notion page", args: { title: "Priors for media mix", parent: "Blog drafts" } }] },
   { id: "ib_triage", kind: "proposals", title: "Label issues", workflow: { id: "wf_triage", name: "Issue triage" }, run: run("wf_triage", 126), step: "label", asked_by: "Code Reviewer",
@@ -72,6 +73,12 @@ const RECS: Rec[] = [
     since: ago(30), expires_at: null, to: ["p_maya", "p_jonas"], routes: approve,
     decision: { route: "approve", label: "Approved", by: P.maya!, at: ago(29), comment: null, selected: null }, show: "**3 risky deals** this week, 2 with a slipped close date.\nNorthwind renewal has had no activity in 21 days.",
     bound: [{ tool: "slack/post_message", label: "Post message", step: "Post to sales", args: { channel: "#sales", text: "3 risky deals this week." } }] },
+  { id: "ib_kickoff", kind: "question", title: "Kickoff channel for Fernhill", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 123), step: "welcome", asked_by: "Sales Desk",
+    since: ago(52), expires_at: null, to: ["p_maya", "p_jonas"], routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }],
+    question: "Which channel should the Fernhill kickoff notes go to, and who joins?",
+    decision: { route: "answer", label: "Answered", by: P.jonas!, at: ago(50), comment: null, selected: null },
+    sent: [{ platform: "discord", where: "Thread in #delivery", link: "https://discord.com/channels/745261709622771773/1/3", at: ago(52) }],
+    answer: { by: P.jonas!, via: "discord", text: "#delivery, please. Maya and Priya join; I will send the agenda the day before.", values: { text: "#delivery, please. Maya and Priya join; I will send the agenda the day before." }, files: [], at: ago(50) } },
 ]
 const VERB: Record<string, string> = { approve: "Approved", reject: "Rejected", answer: "Answered" }
 const live = new Map<string, Rec>(RECS.map((r) => [r.id, r]))
@@ -85,9 +92,40 @@ function fromRequest(r: ReturnType<typeof requests.all>[number]): Rec {
   }
 }
 
+/** Every wait of a run is an inbox item named by the wait's id; a seeded item for the same step takes that id. */
+const stepsWaiting = (run: Run) => project(released(run)).steps.filter((s) => s.wait)
+const waitOf = (r: Rec): RunWait | null => {
+  const run = r.run && findRun(r.run.id)
+  return (run && stepsWaiting(run).find((s) => s.key === r.step)?.wait) || null
+}
+function bind(r: Rec): Rec {
+  const w = waitOf(r)
+  if (!w || (w.status !== "waiting" && !w.decider)) return r
+  const d = w.status !== "waiting" && w.decision ? { route: w.decision, label: VERB[w.decision] ?? "Decided", by: w.decider!, at: w.closed_at!, comment: null, selected: null } : null
+  return { ...r, id: w.id, decision: r.decision ?? d, sent: r.sent ?? w.sent, attachments: r.attachments ?? w.attachments }
+}
+
+function fromWait(run: Run, s: StepRun): Rec | null {
+  const n = run.spec.nodes[s.node]
+  const w = s.wait
+  if (n?.kind !== "approval" || w?.status !== "waiting") return null
+  const typed = n.answer === "text" || n.answer === "form"
+  const routes: InboxRoute[] = typed ? [{ name: "answer", label: "Send answer", primary: true, comment: false }]
+    : n.answer === "choice" ? Object.keys(n.routes ?? {}).map((name, i, all) => ({ name, label: name[0]!.toUpperCase() + name.slice(1), primary: i === all.length - 1, comment: false }))
+    : approve
+  return {
+    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, asked_by: "Daimon",
+    since: w.opened_at, expires_at: w.expires_at, to: w.addressees.map((p) => p.id), decision: null, routes, sent: w.sent, attachments: w.attachments,
+    ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const, title: "Answer" } } } } : {}),
+  }
+}
+
 function recsFor(): Rec[] {
   const m = me()!
-  const mine = RECS.filter((r) => r.to.includes(m.id))
+  const seeded = RECS.map(bind)
+  const have = new Set(seeded.map((r) => r.id))
+  const waits = allRuns().flatMap((run) => stepsWaiting(run).map((s) => fromWait(run, s))).filter((r): r is Rec => !!r && !have.has(r.id))
+  const mine = [...seeded, ...waits].filter((r) => r.to.includes(m.id))
   const reqs = m.role === "admin" ? requests.all().map(fromRequest) : []
   return [...reqs, ...mine].sort((a, b) => b.since.localeCompare(a.since))
 }

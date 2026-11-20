@@ -4,7 +4,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 import { allEdges, clone, diff, finishDeliver, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
 import { ACTIVE_RUN, project } from "@/modules/workflows/runs"
 import type {
-  AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
+  AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Node as SpecNode, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
   Platform, WorkflowPatch, WorkflowSummary,
 } from "@/modules/workflows/types"
 import { fromYaml, toYaml } from "@/modules/workflows/yaml"
@@ -42,6 +42,13 @@ export const CATALOG: Catalog = {
   ].map(([id, name], i) => ({ id: id!, name: name!, platform: "discord" as Platform, shared: i === 5 })),
 }
 
+/** The seed with one approval asked a different way (the shared fixtures keep the plain spec). */
+function delivered(spec: Spec, id: string, patch: Partial<SpecNode>): Spec {
+  const s = clone(spec)
+  Object.assign(s.nodes[id]!, patch)
+  return s
+}
+
 const TEMPLATES: Template[] = [
   { id: "daily_digest", name: "Daily digest", trigger: "schedule", kinds: ["agent", "branch", "finish"] },
   { id: "webhook_triage", name: "Webhook triage", trigger: "webhook", kinds: ["agent", "finish"] },
@@ -59,7 +66,7 @@ export type Stored = {
 }
 
 export const W: Stored[] = [
-  { id: "wf_lead", status: "live", owner: P.maya!, live: SPECS.lead, version: 7, draft: null, ticks: "ssfssTsswr", spend: 18.4, next_h: null,
+  { id: "wf_lead", status: "live", owner: P.maya!, live: delivered(SPECS.lead, "review", { deliver: "dm" }), version: 7, draft: null, ticks: "ssfssTsswr", spend: 18.4, next_h: null,
     editors: [P.jonas!], runners: [P.priya!], labels: ["ana@brightwave.example", "lee@tidewater.example", "sam@larkspur.example", "info@cobalt.example", "jo@northwind.example"] },
   { id: "wf_digest", status: "live", owner: P.jonas!, live: SPECS.digest, version: 3, draft: null, ticks: "ssssssssss", spend: 2.15, next_h: 62, editors: [P.maya!], runners: [] },
   { id: "wf_meeting", status: "live", owner: P.maya!, live: SPECS.meeting, version: 5, draft: null, ticks: "sssssfssss", spend: 9.8, next_h: null, editors: [], runners: [P.jonas!],
@@ -68,7 +75,7 @@ export const W: Stored[] = [
   { id: "wf_triage", status: "live", owner: P.priya!, live: SPECS.triage, version: 11, draft: null, ticks: "ssssssscss", spend: 24.65, next_h: null, editors: [P.jonas!], runners: [],
     labels: ["Adstock decay ignores lag", "Docs: install on Windows", "Support Python 3.14", "Prior predictive fails"] },
   { id: "wf_research", status: "needs_review", owner: P.maya!, live: SPECS.research, version: 2, draft: null, ticks: "sssr", spend: 6.3, next_h: null, editors: [], runners: [] },
-  { id: "wf_content", status: "live", owner: P.priya!, live: SPECS.content, version: 4, draft: null, ticks: "ssfsssw", spend: 7.9, next_h: null, editors: [P.maya!], runners: [P.maya!],
+  { id: "wf_content", status: "live", owner: P.priya!, live: delivered(SPECS.content, "approve", { deliver: "thread", channel: "C0SALES", attach: "${{ steps.write.output.body }}" }), version: 4, draft: null, ticks: "ssfsssw", spend: 7.9, next_h: null, editors: [P.maya!], runners: [P.maya!],
     labels: ["Priors for media mix", "Why Bayesian pricing", "Adstock in practice"] },
   { id: "wf_onboard", status: "live", owner: P.jonas!, live: SPECS.onboard, version: 6, draft: null, ticks: "ssssu", spend: 4.4, next_h: null, editors: [P.maya!], runners: [P.priya!],
     labels: ["Brightwave Telecom", "Tidewater Foods", "Larkspur Retail"] },
