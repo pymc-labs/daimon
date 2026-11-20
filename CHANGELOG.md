@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases, share them, and move them between deployments as signed or encrypted
   bundles. `daimon evals bundle validate` checks a bundle offline.
 
+- **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
+  draft their pass criteria after a cost estimate, and mark near-duplicates.
+  `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.

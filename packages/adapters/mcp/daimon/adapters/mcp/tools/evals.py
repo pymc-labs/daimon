@@ -13,15 +13,18 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._dm_groups import slack_groups, slack_http, teams_groups
+from daimon.adapters.mcp.tools._eval_threads import thread_source
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.dm_access import member_roles, resolve_groups
 from daimon.core.evals.access import GroupLookup, Share, Subject, WorkspaceRole, platform_groups
+from daimon.core.evals.draft import DraftEstimate
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.service import (
     CaseCheck,
     CaseRef,
     CaseSummary,
+    DedupeReport,
     EvalRefused,
     EvalService,
     ExportRequest,
@@ -142,6 +145,41 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def eval_case_validate(ctx: Context, case: JsonObject) -> CaseCheck:  # pyright: ignore[reportUnusedFunction]
         """Check an eval case against the format without saving it: problems and warnings."""
         return await _call(service.check_case(await actor(ctx), case))
+
+    @mcp.tool
+    async def eval_case_from_thread(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, suite_id: str, link: str
+    ) -> list[CaseRef]:
+        """Make scrubbed eval cases from a thread you can read, given its link: one case per turn
+        the agent answered. People, places and secrets are replaced before anything is saved."""
+        auth = await _auth(ctx)
+        source = thread_source(runtime, auth)
+        return await _call(
+            service.cases_from_thread(eval_subject(runtime, auth), source, link, suite_id)
+        )
+
+    @mcp.tool
+    async def eval_cases_draft_estimate(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, suite_id: str, case_ids: list[str]
+    ) -> DraftEstimate:
+        """Estimate what it costs to draft expectations for cases with a model. Drafting itself
+        needs a confirmation of the cost, given in the app or on the command line."""
+        result = await _call(
+            service.draft_expectations(
+                await actor(ctx), suite_id, case_ids, complete=None, confirm=False
+            )
+        )
+        return result.estimate
+
+    @mcp.tool
+    async def eval_cases_dedupe(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, suite_id: str, keep: int | None = None, threshold: float = 0.8
+    ) -> DedupeReport:
+        """Mark near-duplicate cases of a suite with a group. With `keep`, also drop all but that
+        many of each group from the suite's next version."""
+        return await _call(
+            service.dedupe(await actor(ctx), suite_id, threshold=threshold, keep=keep)
+        )
 
     @mcp.tool
     async def eval_arms_list(ctx: Context) -> list[JsonObject]:  # pyright: ignore[reportUnusedFunction]

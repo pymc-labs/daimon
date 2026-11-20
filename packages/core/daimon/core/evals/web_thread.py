@@ -31,14 +31,17 @@ def thread_id_of(ref: str) -> uuid.UUID:
 
 
 class WebChatSource:
-    """Reads threads of one web person; someone else's thread reads as not found."""
+    """Reads threads of one web person; someone else's thread reads as not found.
+
+    Without `person_id` (an operator) it reads any live thread of the workspace.
+    """
 
     def __init__(
         self,
         sessions: async_sessionmaker[AsyncSession],
         *,
         tenant_id: uuid.UUID,
-        person_id: uuid.UUID,
+        person_id: uuid.UUID | None = None,
     ) -> None:
         self._sessions = sessions
         self._tenant_id = tenant_id
@@ -47,11 +50,16 @@ class WebChatSource:
     async def thread(self, ref: str) -> ThreadRecord:
         thread_id = thread_id_of(ref)
         async with self._sessions() as session:
-            thread = await web_chat.get_thread(
-                session, person_id=self._person_id, thread_id=thread_id
-            )
-            person = await web_people.get_person(
-                session, tenant_id=self._tenant_id, person_id=self._person_id
+            if self._person_id is None:
+                thread = await web_chat.get_tenant_thread(
+                    session, tenant_id=self._tenant_id, thread_id=thread_id
+                )
+            else:
+                thread = await web_chat.get_thread(
+                    session, person_id=self._person_id, thread_id=thread_id
+                )
+            person = thread and await web_people.get_person(
+                session, tenant_id=self._tenant_id, person_id=thread.person_id
             )
             rows = await web_chat.list_messages(session, thread_id=thread_id)
         if thread is None or person is None or thread.tenant_id != self._tenant_id:

@@ -186,6 +186,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
     manifest = loaded.manifest
     if manifest is None:
         raise InvalidDocument(["bundle.json is missing"])
+    start = Counter(scrubber.counts)
     documents = [
         *(s.document for s in loaded.suites),
         *(c for s in loaded.suites for c in s.cases),
@@ -272,7 +273,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         )  # fmt: skip
     partial = partial or bool(report.leftovers)
     report.status = "partial" if partial else "scrubbed"
-    report.replaced = dict(scrubber.counts)
+    report.replaced = dict(scrubber.counts - start)
     header = BundleHeader(
         id=manifest.id,
         created_at=datetime.now(UTC),
