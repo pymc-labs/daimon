@@ -65,7 +65,7 @@ def _real_host() -> Iterator[str]:
     container = started.stdout.strip()
     try:
         found = subprocess.run(
-            ["docker", "inspect", container, "-f", "{{.NetworkSettings.IPAddress}}"],
+            ["docker", "inspect", container, "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"],
             capture_output=True, text=True, check=True,
         )  # fmt: skip
         yield found.stdout.strip()
