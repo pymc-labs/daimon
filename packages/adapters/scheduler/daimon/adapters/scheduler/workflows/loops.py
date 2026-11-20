@@ -103,12 +103,13 @@ async def steps_step(engine: WorkflowEngine) -> None:
         total, per_tenant, per_owner = await workflow_runs.running_counts(session)
         free = caps.max_concurrent_steps - total
         due = await workflow_runs.ready_steps(session, now=now, limit=max(free, 0) * 3)
-    for step_id, tenant_id, owner in due:
+    for step_id, tenant_id, owner, agent in due:
         if free <= 0:
             return
-        if per_tenant.get(tenant_id, 0) >= caps.per_tenant_agent_steps:
+        # The workspace and run-as caps count agent steps only.
+        if agent and per_tenant.get(tenant_id, 0) >= caps.per_tenant_agent_steps:
             continue
-        if owner is not None and per_owner.get(owner, 0) >= caps.per_owner_agent_steps:
+        if agent and owner is not None and per_owner.get(owner, 0) >= caps.per_owner_agent_steps:
             continue
         claimed = await runs.claim(
             engine.sm, step_id=step_id, owner=engine.owner, lease=LEASE, now=now
@@ -116,9 +117,10 @@ async def steps_step(engine: WorkflowEngine) -> None:
         if claimed is None:
             continue
         free -= 1
-        per_tenant[tenant_id] = per_tenant.get(tenant_id, 0) + 1
-        if owner is not None:
-            per_owner[owner] = per_owner.get(owner, 0) + 1
+        if agent:
+            per_tenant[tenant_id] = per_tenant.get(tenant_id, 0) + 1
+            if owner is not None:
+                per_owner[owner] = per_owner.get(owner, 0) + 1
         engine.spawn(claimed)
 
 
