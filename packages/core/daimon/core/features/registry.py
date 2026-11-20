@@ -654,10 +654,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc=(
-            "Checks who can see each room. Report only writes down what Daimon would hold "
-            "back and changes nothing."
-        ),
+        doc="Report only changes nothing.",
         platforms=frozenset({"discord"}),
         authority=_SERVER_ADMIN,
     ),

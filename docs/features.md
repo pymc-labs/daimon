@@ -646,7 +646,7 @@ A reply in a direct message can read the agent's memory but not change it.
 
 ## Rooms with outside people
 
-Checks who can see each room. Report only writes down what Daimon would hold back and changes nothing.
+Report only changes nothing.
 
 | | |
 | --- | --- |

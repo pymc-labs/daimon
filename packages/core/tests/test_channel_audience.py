@@ -94,3 +94,39 @@ def test_no_code_reads_audience_hold_through_dot_on() -> None:
                     if isinstance(node, ast.Attribute) and node.attr == "on"
                 ]
     assert not offenders, f"read audience_hold with .on (shadow counts as on): {offenders}"
+
+
+_REGISTRY_READS = frozenset({"is_channel_shared", "list_shared_channel_ids"})
+# The audience module and the two stores that define the reads.
+_REGISTRY_READERS_ALLOWED = frozenset(
+    {
+        "packages/core/daimon/core/channel_audience.py",
+        "packages/core/daimon/core/stores/shared_channels.py",
+        "packages/core/daimon/core/stores/channel_directory.py",
+    }
+)
+
+
+def test_every_hold_reader_asks_channel_has_outsiders_and_none_reads_the_registry_directly() -> (
+    None
+):
+    """Admission, `/memory`, routines and the channel list must not go around the one question."""
+    offenders: list[str] = []
+    for path in sorted((_ROOT / "packages").glob("*/**/daimon/**/*.py")):
+        rel = path.relative_to(_ROOT).as_posix()
+        if "/tests/" in rel or rel in _REGISTRY_READERS_ALLOWED:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            name = (
+                node.id
+                if isinstance(node, ast.Name)
+                else node.attr
+                if isinstance(node, ast.Attribute)
+                else next((a.name for a in node.names if a.name in _REGISTRY_READS), None)
+                if isinstance(node, ast.ImportFrom)
+                else None
+            )
+            if name in _REGISTRY_READS:
+                offenders.append(f"{rel}:{node.lineno}")
+    assert offenders == []
