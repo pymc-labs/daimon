@@ -46,9 +46,9 @@ export function Summary({ s, arms }: { s: RunSummary; arms: Arm[] }) {
               return (
                 <TableRow key={a.arm_id}>
                   <TableCell className="font-medium">{a.label}{a.errors > 0 && <span className="ml-2 text-xs text-destructive">{a.errors} errors</span>}</TableCell>
-                  <TableCell className="text-right tabular">{pct(a.pass_rate)}<span className="text-muted-foreground"> · {a.passed}/{a.scored}</span></TableCell>
+                  <TableCell className="text-right tabular">{pct(a.pass_rate)}<span className="text-muted-foreground">, {a.passed}/{a.scored}</span></TableCell>
                   <TableCell className="text-right tabular max-sm:hidden">{a.rubric_score == null ? "–" : a.rubric_score.toFixed(2)}</TableCell>
-                  <TableCell className="text-right text-muted-foreground tabular max-md:hidden">{n && n > 1 ? `pass@${n} ${pct(a.pass_at_k[n])} · pass^${n} ${pct(a.pass_pow_k[n])}` : "–"}</TableCell>
+                  <TableCell className="text-right text-muted-foreground tabular max-md:hidden">{n && n > 1 ? `pass@${n} ${pct(a.pass_at_k[n])}, pass^${n} ${pct(a.pass_pow_k[n])}` : "–"}</TableCell>
                   <TableCell className="text-right"><Money usd={a.cost_usd} /></TableCell>
                 </TableRow>
               )
@@ -64,7 +64,7 @@ export function Summary({ s, arms }: { s: RunSummary; arms: Arm[] }) {
             <TableBody>
               {s.comparisons.map((p) => (
                 <TableRow key={`${p.candidate}:${p.reference}`}>
-                  <TableCell>{label(p.candidate)}<span className="text-muted-foreground"> vs {label(p.reference)}</span><span className="block text-xs text-muted-foreground tabular">{p.cases} cases · margin {points(-p.margin)}</span></TableCell>
+                  <TableCell>{label(p.candidate)}<span className="text-muted-foreground"> vs {label(p.reference)}</span><span className="block text-xs text-muted-foreground tabular">{p.cases} cases, margin {points(-p.margin)}</span></TableCell>
                   <TableCell className="text-right tabular">{points(p.difference)}<span className="block text-xs text-muted-foreground">{points(p.low)} to {points(p.high)}</span></TableCell>
                   <TableCell className="max-sm:hidden"><Interval p={p} /></TableCell>
                   <TableCell>{verdict(p)}</TableCell>
@@ -77,7 +77,7 @@ export function Summary({ s, arms }: { s: RunSummary; arms: Arm[] }) {
       {!!s.preferences.length && (
         <section>
           <H>Preferences</H>
-          <ul className="space-y-1 text-sm">{s.preferences.map((p) => <li key={`${p.arm_a}:${p.arm_b}`} className="tabular">{label(p.arm_a)} {p.a_wins}<span className="text-muted-foreground"> · ties {p.ties} · </span>{label(p.arm_b)} {p.b_wins}</li>)}</ul>
+          <ul className="space-y-1 text-sm">{s.preferences.map((p) => <li key={`${p.arm_a}:${p.arm_b}`} className="tabular">{label(p.arm_a)} {p.a_wins}<span className="text-muted-foreground">, ties {p.ties}, </span>{label(p.arm_b)} {p.b_wins}</li>)}</ul>
         </section>
       )}
       {!!s.calibration.length && (
@@ -108,7 +108,7 @@ export function Summary({ s, arms }: { s: RunSummary; arms: Arm[] }) {
               {buckets.map((b) => (
                 <TableRow key={b}>
                   <TableCell>{b}</TableCell>
-                  {s.arms.map((a) => { const r = a.breakdown[dim]?.[b]; return <TableCell key={a.arm_id} className="text-right tabular">{r ? <>{pct(r.pass_rate)}<span className="text-muted-foreground"> · {r.items}</span></> : "–"}</TableCell> })}
+                  {s.arms.map((a) => { const r = a.breakdown[dim]?.[b]; return <TableCell key={a.arm_id} className="text-right tabular">{r ? <>{pct(r.pass_rate)}<span className="text-muted-foreground">, {r.items}</span></> : "–"}</TableCell> })}
                 </TableRow>
               ))}
             </TableBody>

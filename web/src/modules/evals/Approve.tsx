@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { usd } from "@/lib/format"
 import type { Arm, Estimate } from "./types"
 
-const LABEL = { agent: "Agent turns", simulator: "Simulator", judge: "Judges", compile: "Compile", sandbox: "Sandbox" } as const
+const LABEL = { agent: "Agent replies", simulator: "Simulator", judge: "Judges", compile: "Compile", sandbox: "Sandbox" } as const
 export const suggestedCap = (e: Estimate) => Math.ceil(e.high_usd * 1.2 * 100) / 100
 
 /** The estimate by line, low, expected and high. */
@@ -21,7 +21,7 @@ export function EstimateView({ estimate, arms = [] }: { estimate: Estimate; arms
         <TableBody>
           {estimate.lines.map((l, i) => (
             <TableRow key={i}>
-              <TableCell>{LABEL[l.category]}{l.arm_id && <span className="text-muted-foreground"> · {arms.find((a) => a.id === l.arm_id)?.label ?? l.arm_id}</span>}</TableCell>
+              <TableCell>{LABEL[l.category]}{l.arm_id && <span className="text-muted-foreground">, {arms.find((a) => a.id === l.arm_id)?.label ?? l.arm_id}</span>}</TableCell>
               <TableCell className="text-right tabular">{l.items ?? ""}</TableCell>
               <TableCell className="text-right"><Money usd={l.expected_usd} /></TableCell>
             </TableRow>

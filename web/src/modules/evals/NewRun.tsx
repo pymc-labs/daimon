@@ -66,7 +66,7 @@ export function NewRun() {
               <div className="grid gap-2 sm:grid-cols-2">
                 {list.map((a) => (
                   <Choice key={a.id} checked={chosen.includes(a.id)} onChange={(v) => setChosen(toggle(chosen, a.id, v))} title={a.label}
-                    detail={a.kind === "live" ? `Live · ${a.live?.model}${a.live?.effort ? ` · ${a.live.effort}` : ""}` : `Baseline${a.baseline?.recorded_from ? ` · ${shortDate(a.baseline.recorded_from)}` : ""}`} />
+                    detail={a.kind === "live" ? `Live, ${a.live?.model}${a.live?.effort ? `, ${a.live.effort}` : ""}` : `Baseline${a.baseline?.recorded_from ? `, ${shortDate(a.baseline.recorded_from)}` : ""}`} />
                 ))}
               </div>
             )}
@@ -77,7 +77,7 @@ export function NewRun() {
           {!!s?.defaults?.judges?.length && (
             <Section title="Judges">
               <div className="grid gap-2">
-                {s.defaults.judges.map((j) => <Choice key={j.id} checked={judgeIds.includes(j.id)} onChange={(v) => setJudges(toggle(judgeIds, j.id, v))} title={j.id} detail={`${j.kind[0]!.toUpperCase()}${j.kind.slice(1)} · ${j.models.length} ${j.models.length === 1 ? "model" : "models"}`} />)}
+                {s.defaults.judges.map((j) => <Choice key={j.id} checked={judgeIds.includes(j.id)} onChange={(v) => setJudges(toggle(judgeIds, j.id, v))} title={j.id} detail={`${j.kind[0]!.toUpperCase()}${j.kind.slice(1)}, ${j.models.length} ${j.models.length === 1 ? "model" : "models"}`} />)}
               </div>
             </Section>
           )}

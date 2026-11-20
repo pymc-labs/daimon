@@ -83,7 +83,7 @@ export function Card({ card, skin, className, button }: {
       {(card.footer || answered) && (
         <div className="text-xs text-faint">
           {answered && (card.answer?.button ? `${ANSWER[card.buttons?.find((b) => b.id === card.answer?.button)?.action ?? "custom"] ?? "Answered"}${card.answer.by ? ` by ${nameOf(skin, card.answer.by)}` : ""}` : card.state === "answered" ? "Answered" : card.state === "expired" ? "Expired" : "Cancelled")}
-          {answered && card.footer ? " · " : ""}{card.footer}
+          {answered && card.footer ? ", " : ""}{card.footer}
         </div>
       )}
     </div>

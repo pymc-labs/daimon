@@ -13,7 +13,7 @@ import { Payload } from "./viewers/Json"
 
 const Group = ({ title, children }: { title: string; children: React.ReactNode }) => <section className="space-y-2"><h3 className="text-xs font-medium text-muted-foreground">{title}</h3>{children}</section>
 const Empty = ({ children }: { children: React.ReactNode }) => <div className="py-10 text-center text-sm text-muted-foreground">{children}</div>
-const pattern = (p: CallPattern) => [p.effect, p.service, p.server, p.tool].filter(Boolean).join(" · ") || p.surface || "any"
+const pattern = (p: CallPattern) => [p.effect, p.service, p.server, p.tool].filter(Boolean).join(", ") || p.surface || "any"
 const check = (c?: Check) => (c ? [c.op, c.pattern ?? c.value ?? c.values?.join(", ")].filter((x) => x !== undefined).join(" ") : "")
 const times = (min: number, max?: number) => (max === undefined ? `at least ${min}` : min === max ? `${min}` : `${min} to ${max}`)
 const Hard = ({ hard }: { hard: boolean }) => (hard ? <Tag>Hard</Tag> : null)
@@ -115,7 +115,7 @@ export function Expectations({ c }: { c: Case }) {
       {(!!e.forbidden_calls?.length || !!e.forbidden_effects?.length) && (
         <Group title="Never"><ul className="space-y-1">{[...(e.forbidden_calls ?? []).map(pattern), ...(e.forbidden_effects ?? [])].map((x) => <Line key={x}>{x}</Line>)}</ul></Group>
       )}
-      {!!e.outputs?.length && <Group title="Outputs"><ul className="space-y-1">{e.outputs.map((o, i) => <Line key={i} aside={<Hard hard={o.hard} />}>{o.kind.replace("_", " ")} <span className="text-muted-foreground">{[o.where, o.card_kind, check(o.text)].filter(Boolean).join(" · ")}</span></Line>)}</ul></Group>}
+      {!!e.outputs?.length && <Group title="Outputs"><ul className="space-y-1">{e.outputs.map((o, i) => <Line key={i} aside={<Hard hard={o.hard} />}>{o.kind.replace("_", " ")} <span className="text-muted-foreground">{[o.where, o.card_kind, check(o.text)].filter(Boolean).join(", ")}</span></Line>)}</ul></Group>}
       {!!e.rubric?.length && <Group title="Rubric"><ul className="space-y-1">{e.rubric.map((r) => <Line key={r.id} aside={<Hard hard={r.hard} />}>{r.criterion}</Line>)}</ul></Group>}
       {e.reference?.text && <Group title="Reference"><p className="whitespace-pre-wrap rounded-md border bg-muted/40 p-3 text-sm">{e.reference.text}</p></Group>}
       {e.limits && <Group title="Limits"><Facts rows={[["Tool calls", e.limits.max_tool_calls], ["Duration", e.limits.max_duration_s && `${e.limits.max_duration_s} s`], ["Cost", e.limits.max_cost_usd && `$${e.limits.max_cost_usd}`], ["Messages", e.limits.max_messages]].map(([k, v]) => [k as string, v === undefined ? null : String(v)])} /></Group>}

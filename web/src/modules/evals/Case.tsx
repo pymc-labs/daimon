@@ -73,7 +73,7 @@ function Flags({ suite, c }: { suite: string; c: Case }) {
     <ul className="mx-auto mb-4 max-w-[1040px] space-y-1">
       {open.map((f) => (
         <li key={f.reason} className="flex min-h-9 items-center gap-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-1 text-sm">
-          <Flag className="size-4 shrink-0 text-warning" /><span className="min-w-0 flex-1">{f.reason.replace(/_/g, " ").replace(/^./, (x) => x.toUpperCase())}{f.detail && <span className="text-muted-foreground"> · {f.detail}</span>}</span>
+          <Flag className="size-4 shrink-0 text-warning" /><span className="min-w-0 flex-1">{f.reason.replace(/_/g, " ").replace(/^./, (x) => x.toUpperCase())}{f.detail && <span className="text-muted-foreground">, {f.detail}</span>}</span>
           {clear.error && <span className="text-xs text-destructive">{clear.error.message}</span>}
           <Button variant="outline" size="sm" disabled={clear.isPending} onClick={() => clear.mutate(f.reason)}>Clear</Button>
         </li>

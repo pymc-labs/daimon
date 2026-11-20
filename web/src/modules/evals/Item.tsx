@@ -61,8 +61,8 @@ function Scores({ scores }: { scores: Score[] }) {
         <li key={s.id} className="flex items-start gap-2 text-sm">
           <span className="mt-0.5 shrink-0">{s.value.unknown ? <span className="text-faint">?</span> : s.value.pass === false ? <X className="size-4 text-destructive" /> : s.value.pass || s.value.score !== undefined ? <Check className="size-4 text-success" /> : null}</span>
           <span className="min-w-0 flex-1">
-            <span>{s.criterion}</span>{s.value.score !== undefined && <span className="tabular text-muted-foreground"> · {s.value.score}</span>}
-            <span className="text-xs text-faint"> · {s.grader.kind}</span>
+            <span>{s.criterion}</span>{s.value.score !== undefined && <span className="tabular text-muted-foreground">, {s.value.score}</span>}
+            <span className="text-xs text-faint">, {s.grader.kind}</span>
             {s.rationale && <span className="block text-xs text-muted-foreground">{s.rationale}</span>}
           </span>
         </li>
@@ -100,7 +100,7 @@ export function ItemColumn({ col, other, diff, platform, case: c, onPin }: {
     <div className="min-w-0 overflow-hidden rounded-lg border bg-card" data-column={col.label}>
       <div className="flex h-11 items-center gap-2 px-3">
         <span className="flex size-6 items-center justify-center rounded-md bg-accent text-xs font-semibold">{col.label.slice(0, 1)}</span>
-        {col.arm && <span className="truncate text-sm font-medium">{col.arm.label}{col.arm.kind === "baseline" && <span className="font-normal text-muted-foreground"> · baseline</span>}</span>}
+        {col.arm && <span className="truncate text-sm font-medium">{col.arm.label}{col.arm.kind === "baseline" && <span className="font-normal text-muted-foreground">, baseline</span>}</span>}
         <span className="ml-auto flex items-center gap-2 text-xs text-muted-foreground tabular">
           {item.status !== "done" && <span className={item.status === "error" ? "text-destructive" : ""}>{item.status}</span>}
           {item.usage?.duration_ms != null && <span>{duration(item.usage.duration_ms)}</span>}
