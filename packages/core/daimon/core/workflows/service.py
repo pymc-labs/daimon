@@ -288,14 +288,17 @@ async def delete(env: Env, workflow_id: uuid.UUID) -> None:
 # ---------- the draft ----------
 
 
-async def _draft(env: Env, session: AsyncSession, workflow: WorkflowRow) -> views.Draft:
-    return await views.draft_view(session, workflow, await _validate(env, workflow.draft_spec))
+async def _draft(env: Env, workflow: WorkflowRow) -> views.Draft:
+    """The draft as shown; call it after your transaction ends, it opens its own."""
+    validation = await _validate(env, workflow.draft_spec)
+    async with env.sm() as session:
+        return await views.draft_view(session, workflow, validation)
 
 
 async def get_draft(env: Env, workflow_id: uuid.UUID) -> views.Draft:
     async with env.sm() as session:
         workflow, _, _ = await _load(session, env, workflow_id)
-        return await _draft(env, session, workflow)
+    return await _draft(env, workflow)
 
 
 async def context(
@@ -347,18 +350,21 @@ async def save_draft(
             spec=spec,
             account_id=env.who.account_id,
         )
+        current: WorkflowRow | None = None
         if saved is None:
             current = await store.get_workflow(
                 session, tenant_id=workflow.tenant_id, workflow_id=workflow.id
             )
-            assert current is not None
-            raise Stale(await _draft(env, session, current))
-        name = _sync(spec).get("name")
-        if name and name != workflow.name:
-            await store.update_settings(
-                session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, name=name
-            )
-        return await _draft(env, session, saved)
+        else:
+            name = _sync(spec).get("name")
+            if name and name != workflow.name:
+                await store.update_settings(
+                    session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, name=name
+                )
+    if saved is None:
+        assert current is not None, "a refused save finds the workflow it names"
+        raise Stale(await _draft(env, current))
+    return await _draft(env, saved)
 
 
 async def discard_draft(env: Env, workflow_id: uuid.UUID) -> views.Draft:
@@ -372,7 +378,7 @@ async def discard_draft(env: Env, workflow_id: uuid.UUID) -> views.Draft:
             session, tenant_id=workflow.tenant_id, workflow_id=workflow.id
         )
         assert fresh is not None
-        return await _draft(env, session, fresh)
+    return await _draft(env, fresh)
 
 
 async def _copy_version(
@@ -432,7 +438,7 @@ async def restore(env: Env, workflow_id: uuid.UUID, number: int) -> views.Draft:
             session, tenant_id=workflow.tenant_id, workflow_id=workflow.id
         )
         assert fresh is not None
-        return await _draft(env, session, fresh)
+    return await _draft(env, fresh)
 
 
 async def publish(
