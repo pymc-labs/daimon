@@ -72,6 +72,7 @@ def _gateway() -> None:
 
     # Leaf certificates start decades back, so tools on a fake past clock accept them.
     certs.CERT_VALIDITY_OFFSET = timedelta(days=-365 * 30)
+    certs.CERT_EXPIRY = timedelta(days=365 * 31)  # counted from that offset
     confdir = Path(tempfile.mkdtemp(prefix="mitm-"))
     (confdir / "mitmproxy-ca.pem").write_bytes((GATEWAY_DIR / "ca.pem").read_bytes())
     config = GatewayConfig.load(GATEWAY_DIR / "config.json")
