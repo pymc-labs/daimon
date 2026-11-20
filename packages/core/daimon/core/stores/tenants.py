@@ -25,7 +25,6 @@ from daimon.core._models import (
     UsageEvent,
 )
 from daimon.core.errors import StoreError
-from daimon.core.evals.eval_tenant import EVAL_TENANT_ID
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
@@ -36,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 def background_tenant_ids() -> Select[tuple[uuid.UUID]]:
     """Tenants background loops serve: live ones, never the hidden eval tenant."""
+    from daimon.core.evals.eval_tenant import EVAL_TENANT_ID  # it imports the stores
+
     return select(Tenant.id).where(Tenant.archived_at.is_(None), Tenant.id != EVAL_TENANT_ID)
 
 
