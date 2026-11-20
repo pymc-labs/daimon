@@ -32,4 +32,4 @@ class GenericService:
     def guidance(self, item: ItemRef, request: WorldRequest) -> str:
         if request.surface == "http" and request.raw is not None:
             return f"The real service at {request.raw.host}; use its documented API shapes."
-        return f"The MCP server {request.server}, tool {request.tool}; follow its schema."
+        return f"The tool {request.tool} of the server {request.server}; follow its schema."
