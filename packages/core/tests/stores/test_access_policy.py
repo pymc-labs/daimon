@@ -209,14 +209,12 @@ async def test_team_roles_roundtrip_are_pruned_when_empty_and_discord_only(
         await set_access_policy(
             db_session,
             tenant_id=tenant.id,
-            policy=TenantAccessPolicy.model_construct(
-                **{**policy.model_dump(), "team_role_ids": ("111",)}
-            ),
+            policy=TenantAccessPolicy(internal_role_ids=("222", "111"), team_role_ids=("111",)),
         )
     slack = await make_tenant(db_session, platform="slack")
     with pytest.raises(ValueError, match="Discord"):
         await set_access_policy(
             db_session,
             tenant_id=slack.id,
-            policy=TenantAccessPolicy.model_construct(**{**policy.model_dump()}),
+            policy=policy,
         )

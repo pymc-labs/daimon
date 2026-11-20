@@ -30,6 +30,34 @@ class StoredRoom:
     parent_id: str | None = None
 
 
+def merge_with_baseline(
+    cache: Mapping[str, StoredRoom], baseline: Mapping[str, StoredRoom] | None
+) -> dict[str, StoredRoom]:
+    """Rooms computed from the gateway cache, never more open than the last reconcile saw.
+
+    A room also in `baseline` is contained or narrow if either says so, so only the next
+    reconcile can relax what a reconcile found. A room not in `baseline` (new since) keeps
+    the cache result, and a room missing from `cache` is dropped. Pure.
+    """
+    merged: dict[str, StoredRoom] = {}
+    for channel_id, room in cache.items():
+        before = (baseline or {}).get(channel_id)
+        if before is None or not room.facts.known:
+            merged[channel_id] = room
+            continue
+        facts = room.facts
+        merged[channel_id] = StoredRoom(
+            RoomFacts(
+                contained=facts.contained or before.facts.contained,
+                narrow=facts.narrow or before.facts.narrow,
+                outsiders_count=facts.outsiders_count,
+                team_shut_out_count=facts.team_shut_out_count,
+            ),
+            room.parent_id,
+        )
+    return merged
+
+
 @dataclass(frozen=True)
 class AudienceStatus:
     """A server's state row, read at `now`."""

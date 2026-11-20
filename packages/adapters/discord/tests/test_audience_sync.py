@@ -308,15 +308,84 @@ async def test_an_event_recompute_keeps_what_a_reconcile_read_from_discord(
     await audience.tick([server])  # type: ignore[list-item]
     assert (await _fact(db_session_factory, clock, "1")).contained
 
-    # An unrelated member event recomputes from the stale cache plus a fresh REST read.
+    # An unrelated member event recomputes from the stale cache: no REST, no reopening.
     clock.now += timedelta(seconds=30)
     audience.schedule(server)  # type: ignore[arg-type]
     await audience.settle()
     assert (await _fact(db_session_factory, clock, "1")).contained, "the room stays contained"
-    assert server.fetch_channels.await_count == 2, "the tick reconcile and the recompute"  # type: ignore[attr-defined]
+    assert server.fetch_channels.await_count == 1, "only the tick reconcile asks Discord"  # type: ignore[attr-defined]
 
 
-async def test_a_failed_rest_read_on_an_event_makes_the_server_unknown_and_a_tick_recovers(
+def _gated_server() -> Any:
+    """A room open to a role nobody holds yet; the outsider (30) will gain that role."""
+    gated = fake.internal_only()
+    gated[fake.target(discord.Role, 50)] = discord.PermissionOverwrite(view_channel=True)
+    return fake.guild(
+        channels=[
+            fake.channel(1, "planning", gated),
+            fake.channel(2, "guest", fake.internal_only()),
+        ]
+    )
+
+
+def _gained_role(server: Any) -> list[Any]:
+    """The member list Discord returns once the outsider holds the role."""
+    return [fake.member(30, [fake.role(50)]) if m.id == 30 else m for m in server.members]
+
+
+async def test_an_event_never_reopens_what_a_reconcile_closed_after_a_missed_role_update(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _gated_server()
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert not (await _fact(db_session_factory, clock, "1")).contained
+
+    # The role update was missed: the cache keeps the old member, the chunk has the new one.
+    server.chunk = AsyncMock(return_value=_gained_role(server))  # type: ignore[attr-defined]
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained, "stays contained"
+    server.fetch_roles.assert_awaited()  # type: ignore[attr-defined]
+    assert server.fetch_roles.await_count == 2, "no REST read for the event"  # type: ignore[attr-defined]
+
+
+async def test_a_real_opening_shows_at_the_next_reconcile_and_a_closing_at_once(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _gated_server()
+    with_role = _gained_role(server)
+    server.members = with_role  # type: ignore[attr-defined]
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+    # An event removes the outsider; the room stays contained until the next reconcile.
+    server.members = [m for m in server.members if m.id != 30]  # type: ignore[attr-defined]
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained, "relaxed only by a reconcile"
+
+    clock.now += timedelta(seconds=300)
+    await audience.tick([server])  # type: ignore[list-item]
+    assert not (await _fact(db_session_factory, clock, "1")).contained, "the reconcile opens it"
+
+    # The other way is immediate: an event that gives someone view access shows at once.
+    server.members = with_role  # type: ignore[attr-defined]
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+
+async def test_a_channel_created_after_the_reconcile_uses_the_cache_result(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     await _setup(db_session, db_session_factory)
@@ -325,16 +394,44 @@ async def test_a_failed_rest_read_on_an_event_makes_the_server_unknown_and_a_tic
     server = _server()
     assert await audience.reconcile(server)  # type: ignore[arg-type]
 
-    real: Any = server.fetch_channels  # type: ignore[attr-defined]
-    server.fetch_channels = AsyncMock(side_effect=discord.ClientException("down"))  # type: ignore[attr-defined]
+    everyone = {
+        fake.target(discord.Role, fake.GUILD): discord.PermissionOverwrite(view_channel=True)
+    }
+    for channel in (
+        fake.channel(4, "new-open", everyone),
+        fake.channel(5, "new-closed", fake.internal_only()),
+    ):
+        channel.guild = server
+        server.channels.append(channel)  # type: ignore[attr-defined]
     audience.schedule(server)  # type: ignore[arg-type]
     await audience.settle()
-    assert await _fact(db_session_factory, clock, "2") == UNKNOWN_FACTS, "fail closed"
 
-    server.fetch_channels = real  # type: ignore[attr-defined]
-    clock.now += timedelta(seconds=60)
-    await audience.tick([server])  # type: ignore[list-item]
-    assert (await _fact(db_session_factory, clock, "2")).contained, "the next tick recovers"
+    assert (await _fact(db_session_factory, clock, "4")).contained
+    assert await _fact(db_session_factory, clock, "5") == RoomFacts(False, False)
+    server.channels.pop(0)  # type: ignore[attr-defined]
+    audience.schedule(server)  # type: ignore[arg-type]
+    await audience.settle()
+    assert await _fact(db_session_factory, clock, "1") == UNKNOWN_FACTS, "a deleted room is dropped"
+
+
+async def test_a_disconnect_clears_the_baseline(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    await _setup(db_session, db_session_factory)
+    clock = Clock()
+    audience, _ = _sync(db_session_factory, clock)
+    server = _gated_server()
+    server.chunk = AsyncMock(return_value=_gained_role(server))  # type: ignore[attr-defined]
+    assert await audience.reconcile(server)  # type: ignore[arg-type]
+    assert (await _fact(db_session_factory, clock, "1")).contained
+
+    await audience.disconnected([server])  # type: ignore[list-item]
+    assert not audience._baseline  # type: ignore[reportPrivateUsage]
+    await audience.publish(server, reconciled=True)  # a reload from the (stale) cache
+    assert not (await _fact(db_session_factory, clock, "1")).contained, "no old baseline"
+
+    await audience.mark_unknown(server)  # type: ignore[arg-type]
+    assert not audience._baseline  # type: ignore[reportPrivateUsage]
 
 
 async def test_a_failed_publish_on_reconnect_recovers_at_the_next_tick(

@@ -165,3 +165,38 @@ async def test_known_survives_a_database_round_trip_for_every_kind_of_row(
     assert (narrow.contained, narrow.narrow) == (False, True)
     assert not (await _read(db_session, tenant.id, "404")).known
     assert (await _read(db_session, tenant.id, "70", parent_id="1")).known, "from the parent"
+
+
+def _rooms(**kinds: RoomFacts) -> dict[str, StoredRoom]:
+    return {channel: StoredRoom(facts, parent_id=f"p{channel}") for channel, facts in kinds.items()}
+
+
+def test_a_cache_result_is_never_more_open_than_the_baseline_in_either_fact() -> None:
+    both, neither = RoomFacts(True, True, 1, 4), RoomFacts(False, False, 0, 0)
+    merged = store.merge_with_baseline(
+        _rooms(a=neither, b=neither, c=RoomFacts(True, False, 2, 0), d=neither),
+        _rooms(a=both, b=RoomFacts(True, False, 1, 0), c=RoomFacts(False, True, 0, 4), d=neither),
+    )
+
+    assert (merged["a"].facts.contained, merged["a"].facts.narrow) == (True, True)
+    assert (merged["b"].facts.contained, merged["b"].facts.narrow) == (True, False)
+    assert (merged["c"].facts.contained, merged["c"].facts.narrow) == (True, True), "either one"
+    assert (merged["d"].facts.contained, merged["d"].facts.narrow) == (False, False)
+    assert merged["c"].facts.outsiders_count == 2, "counts come from the cache"
+    assert merged["a"].parent_id == "pa"
+
+
+def test_a_new_room_keeps_the_cache_result_and_a_missing_room_is_dropped() -> None:
+    cache = _rooms(new=OPEN, kept=OPEN)
+    merged = store.merge_with_baseline(cache, _rooms(kept=NARROW, gone=CONTAINED))
+
+    assert merged["new"] == cache["new"]
+    assert merged["kept"].facts.narrow
+    assert "gone" not in merged
+    assert store.merge_with_baseline(cache, None) == cache, "no baseline: the cache result"
+
+
+def test_an_unknown_room_stays_unknown_whatever_the_baseline_says() -> None:
+    merged = store.merge_with_baseline(_rooms(x=UNKNOWN_FACTS), _rooms(x=OPEN))
+
+    assert not merged["x"].facts.known
