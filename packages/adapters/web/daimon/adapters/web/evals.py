@@ -13,7 +13,19 @@ from daimon.adapters.web.caller import WebCaller, groups_of, requires
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.dm_access import member_roles
 from daimon.core.evals.access import Share, Subject, platform_groups
-from daimon.core.evals.format import Arm, JsonObject, to_document
+from daimon.core.evals.compare import Comparison
+from daimon.core.evals.format import Arm, Comment, JsonObject, to_document
+from daimon.core.evals.review import (
+    CommentDraft,
+    QueueDraft,
+    QueueView,
+    ReviewService,
+    ReviewTask,
+    ScoreDraft,
+)
+from daimon.core.evals.scoring.client import MuxJudgeClient
+from daimon.core.evals.scoring.service import JudgeOutcome, JudgeRequest, ScoringService
+from daimon.core.evals.scoring.summary import RunSummary
 from daimon.core.evals.service import (
     CaseCheck,
     CaseRef,
@@ -29,9 +41,20 @@ from daimon.core.evals.service import (
     SuiteDraft,
     SuiteSummary,
 )
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
+from pydantic import BaseModel
 
 Caller = Annotated[WebCaller, Depends(requires("evals.use"))]
+
+
+class QueueCreate(BaseModel):
+    run_id: str
+    queue: QueueDraft
+
+
+class ScoreSubmit(BaseModel):
+    task_id: str
+    scores: list[ScoreDraft]
 
 
 async def _call[T](work: Awaitable[T]) -> T:
@@ -50,6 +73,10 @@ async def _call[T](work: Awaitable[T]) -> T:
 def evals_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/evals")
     service = EvalService(runtime.sessionmaker, runtime.settings)
+    scoring = ScoringService(
+        runtime.sessionmaker, runtime.settings, client=MuxJudgeClient(runtime.anthropic)
+    )
+    review = ReviewService(runtime.sessionmaker, runtime.settings)
 
     async def subject(caller: WebCaller) -> Subject:
         async with runtime.sessionmaker() as db:
@@ -137,6 +164,54 @@ def evals_router(runtime: WebRuntime) -> APIRouter:
     ) -> list[RunItemSummary]:
         page = Page(offset=offset, limit=limit)
         return await _call(service.items(await subject(caller), run_id, page))
+
+    @router.get("/runs/{run_id}/summary")
+    async def run_summary(caller: Caller, run_id: str) -> RunSummary:  # pyright: ignore[reportUnusedFunction]
+        return await _call(scoring.summary(await subject(caller), run_id))
+
+    @router.get("/runs/{run_id}/compare")
+    async def run_compare(  # pyright: ignore[reportUnusedFunction]
+        caller: Caller, run_id: str, arms: Annotated[list[str] | None, Query()] = None,
+        blind: bool = False,
+    ) -> Comparison:  # fmt: skip
+        return await _call(scoring.compare(await subject(caller), run_id, arms=arms, blind=blind))
+
+    @router.post("/runs/{run_id}/judge")
+    async def judge_run(  # pyright: ignore[reportUnusedFunction]
+        caller: Caller, run_id: str, request: JudgeRequest
+    ) -> JudgeOutcome:
+        return await _call(scoring.judge(await subject(caller), run_id, request))
+
+    @router.get("/queues")
+    async def list_queues(caller: Caller, run_id: str) -> list[QueueView]:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.queues(await subject(caller), run_id))
+
+    @router.post("/queues")
+    async def create_queue(caller: Caller, body: QueueCreate) -> QueueView:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.create_queue(await subject(caller), body.run_id, body.queue))
+
+    @router.get("/queues/{queue_ref}/next")
+    async def next_task(caller: Caller, queue_ref: str) -> ReviewTask | None:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.next(await subject(caller), queue_ref))
+
+    @router.post("/scores", status_code=204)
+    async def submit_scores(caller: Caller, body: ScoreSubmit) -> None:  # pyright: ignore[reportUnusedFunction]
+        await _call(review.submit(await subject(caller), body.task_id, body.scores))
+
+    @router.get("/comments")
+    async def list_comments(caller: Caller, run_id: str) -> list[Comment]:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.comments(await subject(caller), run_id))
+
+    @router.post("/comments")
+    async def add_comment(caller: Caller, draft: CommentDraft) -> Comment:  # pyright: ignore[reportUnusedFunction]
+        return await _call(review.comment(await subject(caller), draft))
+
+    @router.post("/comments/{comment_id}/resolve")
+    async def resolve_comment(  # pyright: ignore[reportUnusedFunction]
+        caller: Caller, comment_id: str, resolved: bool = True
+    ) -> Comment:
+        work = review.resolve_comment(await subject(caller), comment_id, resolved=resolved)
+        return await _call(work)
 
     @router.get("/items/{item_id}")
     async def get_item(  # pyright: ignore[reportUnusedFunction]

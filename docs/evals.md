@@ -79,6 +79,50 @@ signature from a trusted key is refused.
 A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
 passphrase another way than the file.
 
+## Scoring
+
+Deterministic checks (call and effect matching in `strict`, `unordered`, `subset` or
+`superset` mode, output text checks, limits) score each finished item with no model.
+Model judges add rubric, pairwise and reference-guided scores. A pairwise judge sees
+both orders; a verdict that flips with position counts as a tie. Judges write critique
+first and may answer unknown.
+
+```bash
+daimon evals runs judge RUN_ID                # estimate only
+daimon evals runs judge RUN_ID --approve 5    # run, spending at most 5 USD
+daimon evals runs compare RUN_ID --blind
+```
+
+Judging is paid. It never runs without an approved spending ceiling, stops when the
+ceiling is reached, and refuses a model with no known price. Agents over MCP can only
+ask for the estimate. Running again replaces the same scores. The panel comes from
+[`DAIMON_EVALS__JUDGE_MODELS`](configuration.md#daimon_evals__judge_models).
+
+`GET /api/evals/runs/{id}/summary` gives pass rate, rubric score, cost, pass@k and
+pass^k per arm. Arms are compared on the same cases with a bootstrap interval that
+resamples whole source threads, an exact McNemar test and a non-inferiority check.
+A recorded baseline has one answer per case, so its variance is unknown. Judges are
+checked against human scores with Cohen's kappa; below
+[`DAIMON_EVALS__KAPPA_WARN`](configuration.md#daimon_evals__kappa_warn) they are flagged.
+
+## Review
+
+A review queue hands people or agents one task at a time: one item, or the same case
+from several arms side by side. A task is reserved for its reviewer for 30 minutes.
+A queue can ask for several reviewers per item. Editors adjudicate disagreements with
+a score that supersedes the earlier ones. Comments attach to an item, a case or a
+passage of a transcript.
+
+A blind queue shows arms as letters, hides model names, model reactions and usage,
+and orders the columns randomly per reviewer and task. The server does this on every
+surface, and a reviewer who only reviews sees every run they can open this way while a
+blind queue is open.
+
+```bash
+daimon evals review next RUN_ID~QUEUE_ID
+daimon evals review submit TASK_ID scores.json
+```
+
 ## Where to use it
 
 The same rules apply on every surface:

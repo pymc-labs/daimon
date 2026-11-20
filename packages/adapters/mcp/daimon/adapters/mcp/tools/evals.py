@@ -17,7 +17,10 @@ from daimon.adapters.mcp.tools._file_handles import staged_uploads
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.dm_access import member_roles, resolve_groups
 from daimon.core.evals.access import GroupLookup, Share, Subject, WorkspaceRole, platform_groups
-from daimon.core.evals.format import Arm, JsonObject, to_document
+from daimon.core.evals.compare import Comparison
+from daimon.core.evals.format import Arm, Comment, JsonObject, to_document
+from daimon.core.evals.review import CommentDraft, ReviewService, ReviewTask, ScoreDraft
+from daimon.core.evals.scoring.service import JudgeOutcome, JudgeRequest, ScoringService
 from daimon.core.evals.service import (
     CaseCheck,
     CaseRef,
@@ -81,6 +84,8 @@ def eval_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
 
 def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     service = EvalService(runtime.session_factory, runtime.settings)
+    scoring = ScoringService(runtime.session_factory, runtime.settings)
+    review = ReviewService(runtime.session_factory, runtime.settings)
 
     async def actor(ctx: Context) -> Subject:
         return eval_subject(runtime, await _auth(ctx))
@@ -169,6 +174,43 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         subject = await actor(ctx)
         found = service.item(subject, item_id, blind_for=subject.key if blind else None)
         return to_document(await _call(found))
+
+    @mcp.tool
+    async def eval_compare(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, run_id: str, arms: list[str] | None = None, blind: bool = False
+    ) -> Comparison:
+        """Compare the arms of an eval run side by side, case by case, with each item's replies
+        and scores. `blind` hides arm and model names behind letters and shuffles the columns."""
+        return await _call(scoring.compare(await actor(ctx), run_id, arms=arms, blind=blind))
+
+    @mcp.tool
+    async def eval_judge_run(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, run_id: str, request: JudgeRequest | None = None
+    ) -> JudgeOutcome:
+        """Estimate what judging an eval run with models would cost. Never runs the judges:
+        a person approves the estimate and a spending ceiling on the evals page or in the CLI."""
+        ask = (request or JudgeRequest()).model_copy(update={"approve_cap_usd": None})
+        return await _call(scoring.judge(await actor(ctx), run_id, ask))
+
+    @mcp.tool
+    async def eval_review_next(ctx: Context, queue: str) -> ReviewTask | None:  # pyright: ignore[reportUnusedFunction]
+        """Get your next review task from a queue (`run~queue`), or none when none is left.
+        The task is yours for 30 minutes. Blind queues show letters, never arm or model names."""
+        return await _call(review.next(await actor(ctx), queue))
+
+    @mcp.tool
+    async def eval_review_submit(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, task_id: str, scores: list[ScoreDraft]
+    ) -> str:
+        """Submit your scores for a review task: one per criterion the task asks for, naming
+        the column (A, B...) each is about. Closes the task for you."""
+        await _call(review.submit(await actor(ctx), task_id, scores, by="agent"))
+        return "Saved."
+
+    @mcp.tool
+    async def eval_comment_add(ctx: Context, comment: CommentDraft) -> Comment:  # pyright: ignore[reportUnusedFunction]
+        """Comment on an eval item or case, or from inside a review task by column letter."""
+        return await _call(review.comment(await actor(ctx), comment))
 
     @mcp.tool
     async def eval_bundle_export(ctx: Context, request: ExportRequest) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
