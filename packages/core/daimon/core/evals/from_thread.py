@@ -175,7 +175,7 @@ def _turns(record: ThreadRecord) -> list[_Turn]:
 
 def _title(text: str) -> str:
     line = next((x.strip() for x in text.splitlines() if x.strip()), "")
-    return (line[:_TITLE_CHARS] or "Untitled thread turn").strip()
+    return (line[:_TITLE_CHARS] or "Untitled request").strip()
 
 
 def _message(message: ThreadMessage, attachments: list[Attachment]) -> ChatMessage:
