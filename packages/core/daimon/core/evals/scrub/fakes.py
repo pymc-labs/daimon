@@ -20,7 +20,19 @@ if TYPE_CHECKING:
 
 _SUFFIXES: Final = ("Labs", "Group", "Systems", "Partners", "Works", "Industries", "Holdings")
 _ATTEMPTS: Final = 30
-_DERIVED: Final = ("person_first", "person_last")
+_DERIVED: Final = ("person_first", "person_last", "company_first")
+
+
+def scrub_key(key: bytes, salt: str) -> bytes:
+    """The key fakes are made with: the deployment's key bound to a tenant (or an offline salt),
+    so the same name gets different fakes in different tenants and a guess made in one says
+    nothing about another."""
+    return hmac.new(key, f"daimon.evals.scrub\0{salt}".encode(), hashlib.sha256).digest()
+
+
+def key_check(key: bytes) -> str:
+    """Names a scrub key without revealing it, so a map is never mixed across keys."""
+    return hmac.new(key, b"check", hashlib.sha256).hexdigest()[:16]
 
 
 def keyed_hash(key: bytes, kind: str, real: str) -> str:
@@ -49,7 +61,7 @@ def adapt(matched: str, fake: str) -> str:
     elif matched.islower():
         fake = fake.lower()
     if not any(c.isspace() for c in matched) and " " in fake:
-        slug = re.search(r"[-_.]", matched)
+        slug = re.search(r"[-_.+]", matched)
         fake = fake.replace(" ", slug.group() if slug else "-" if matched.islower() else "")
     return fake
 
@@ -80,11 +92,21 @@ class FakeMap:
             self._faker = Faker("en_US")
         return self._faker
 
+    def forbid(self, words: Iterable[str]) -> None:
+        """Real words learned later, which no new fake may hold."""
+        for word in map(normalize, words):
+            if " " in word:
+                self._forbidden_phrases.append(word)
+            else:
+                self._forbidden_words.add(word)
+
     def values(self) -> list[str]:
         """Every fake handed out so far, for the sweep to tell fakes from leftovers."""
         return [*self._known.values(), *self.added.values()]
 
     def fake(self, kind: str, real: str, *, of: str | None = None) -> str:
+        if kind == "company" and of:
+            return self.fake("company", of)  # a short form takes the company's own fake
         digest = keyed_hash(self._key, kind, real)
         found = self._known.get((kind, digest)) or self.added.get((kind, digest))
         if found is not None:
@@ -113,8 +135,9 @@ class FakeMap:
         rng, faker = random.Random(seed), self._gen()
         faker.seed_instance(seed)
         if kind in _DERIVED:
-            parts = self.fake("person", of or real).split()
-            return parts[0] if kind == "person_first" else parts[-1]
+            whole = "company" if kind == "company_first" else "person"
+            parts = self.fake(whole, of or real).split()
+            return parts[-1] if kind == "person_last" else parts[0]
         if kind == "person":
             first = faker.first_name()
             return first if len(real.split()) == 1 else f"{first} {faker.last_name()}"

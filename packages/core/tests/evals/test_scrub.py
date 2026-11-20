@@ -86,7 +86,7 @@ def test_person_when_in_text_json_file_and_name_then_one_fake_and_token_removed(
             _message(2, "999999999999999999", "Done."),
         ],
     )
-    scrubber = Scrubber(record.entities(), KEY, ner_model=None)
+    scrubber = Scrubber(record.entities(), KEY, salt="t1", ner_model=None)
     (built,) = build_cases(record, scrubber)
     fake = scrubber.fakes.fake("person", WHO)
     fake_mail = scrubber.fakes.fake("email", EMAIL)
@@ -108,7 +108,7 @@ def test_person_when_in_text_json_file_and_name_then_one_fake_and_token_removed(
 
 def test_sweep_when_a_name_is_planted_then_it_is_reported_by_place_and_kind() -> None:
     document = {"id": "c1", "notes": f"Ask {WHO} about it", "title": "ok"}
-    scrubber = Scrubber(KnownEntities(people=[WHO]), KEY, ner_model=None)
+    scrubber = Scrubber(KnownEntities(people=[WHO]), KEY, salt="t1", ner_model=None)
     found = sweep_document(scrubber, document, "case c1")
     assert [(x.where, x.kind, x.count) for x in found] == [("case c1", "person", 1)]
     assert WHO not in repr(found), "a leftover never carries the text"
@@ -119,7 +119,7 @@ def test_bundle_when_scrubbed_offline_then_valid_stable_and_nothing_left(tmp_pat
     shutil.copytree(EXAMPLE, source)
     names = tmp_path / "names.json"
     names.write_text(json.dumps({"phrases": ["support-basics"], "companies": ["Acme Corp"]}))
-    scrubber = load_scrubber(names, "0123456789abcdef0123", ner_model=None)
+    scrubber = load_scrubber(names, "0123456789abcdef0123", salt="t1", ner_model=None)
     report = scrub_path(source, tmp_path / "out", scrubber)
     out = DirSource(tmp_path / "out")
     assert validate_bundle(out).ok, "the scrubbed bundle validates"
