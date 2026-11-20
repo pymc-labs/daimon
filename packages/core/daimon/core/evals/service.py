@@ -7,15 +7,24 @@ the JSON the bundle format defines.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import importlib.util
 import json
+import tempfile
+import time
 import uuid
-from collections.abc import AsyncIterable, Iterable, Sequence
+import zipfile
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Final, Literal
+from typing import IO, Final, Literal
 
+from anthropic import AsyncAnthropic
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.config import Settings
 from daimon.core.evals import bundle as bundles
 from daimon.core.evals import dedupe
@@ -28,7 +37,8 @@ from daimon.core.evals.access import (
     held_groups,
     suite_role,
 )
-from daimon.core.evals.blobs import blob_path, blob_refs
+from daimon.core.evals.agents import AgentLookup, agent_lookup
+from daimon.core.evals.blobs import ObjectStore, blob_path, blob_refs, object_key
 from daimon.core.evals.draft import (
     Complete,
     DraftError,
@@ -40,31 +50,39 @@ from daimon.core.evals.draft import (
 from daimon.core.evals.format import (
     Arm,
     BlobEntry,
-    BlobRef,
     Case,
+    EventStream,
     ItemCaseRef,
     JsonObject,
     Manifest,
     Run,
     RunItem,
+    RunOrigin,
     ScrubStatus,
     SourceInfo,
     Suite,
     SuiteDefaults,
     ToolAlias,
+    canonical_json,
     case_hash,
     sha256_hex,
     to_document,
 )
 from daimon.core.evals.from_thread import ThreadNotFound, ThreadSource, build_cases
-from daimon.core.evals.scrub.bundle import scrub_case
 from daimon.core.evals.scrub.engine import Scrubber
-from daimon.core.evals.scrub.entities import KnownEntities, load_entities, merge_entities
+from daimon.core.evals.scrub.entities import (
+    KnownEntities,
+    PersonEntry,
+    load_entities,
+    merge_entities,
+)
 from daimon.core.evals.scrub.offline import MIN_KEY
 from daimon.core.evals.validate import (
+    MANIFEST_PATH,
     InvalidDocument,
     LoadedRun,
     LoadedSuite,
+    ValidationReport,
     case_problems,
     case_warnings,
     schema_problems,
@@ -79,6 +97,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 CaseRef = ItemCaseRef
 _SCRUB_ORDER: Final[tuple[ScrubStatus, ...]] = ("scrubbed", "partial", "unscrubbed")
 OFF: Final = "Evals are off here. Ask an admin or an owner to turn them on."
+_SPOOL_BYTES: Final = 8 * 1024 * 1024
+_IMPORT_SECONDS: Final = 120.0
+_UNFINISHED_RUN: Final = frozenset({"draft", "estimated", "approved", "running"})
 
 
 class EvalRefused(Exception):
@@ -120,6 +141,8 @@ class CaseSummary(_Out):
 
 class SuiteCasePick(_Out):
     id: str
+    revision: int | None = None
+    """None: the case's latest revision."""
     weight: float = 1
     split: Literal["dev", "test", "holdout"] = "test"
 
@@ -160,10 +183,8 @@ class ExportRequest(_Out):
     suites: list[SuitePick] = []
     runs: list[str] = []
     title: str | None = None
-    passphrase: str | None = None
-    """Set: the bundle is encrypted with it (`*.daimon-eval.enc`)."""
     include_identities: bool = False
-    """Owners and admins only: keep who reviewed and owns instead of neutral labels."""
+    """Admins only: keep who reviewed and owns instead of neutral labels."""
 
 
 class CaseCheck(_Out):
@@ -188,18 +209,6 @@ class ImportReport(_Out):
     warnings: list[str]
 
 
-class Leftover(_Out):
-    where: str
-    kind: str
-    count: int
-
-
-class ScrubResult(_Out):
-    case: JsonObject
-    status: ScrubStatus
-    leftovers: list[Leftover]
-
-
 class DraftResult(_Out):
     estimate: DraftEstimate
     drafted: list[CaseRef]
@@ -212,7 +221,8 @@ class DedupeReport(_Out):
 
 
 def _worst(statuses: Iterable[str | None]) -> ScrubStatus:
-    found = [s for s in statuses if s in _SCRUB_ORDER]
+    """The least scrubbed of `statuses`; a missing or unknown one counts as unscrubbed."""
+    found = [s if s in _SCRUB_ORDER else "unscrubbed" for s in statuses]
     return max(found, key=_SCRUB_ORDER.index, default="scrubbed")  # pyright: ignore[reportReturnType]
 
 
@@ -227,9 +237,18 @@ def _daimon_version() -> str | None:
         return None
 
 
-def _label_people(documents: Sequence[JsonObject]) -> list[JsonObject]:
-    """Copies with every person, group and agent reference replaced by a stable label."""
-    labels: dict[tuple[str, str], str] = {}
+def _keyed(secret: str, text: str) -> str:
+    return hmac.new(secret.encode(), text.encode(), hashlib.sha256).hexdigest()
+
+
+def _instance(secret: str) -> str:
+    """An opaque, stable name for a workspace as a bundle source."""
+    return _keyed(secret, "instance")[:16]
+
+
+def _label_people(document: JsonObject, secret: str) -> JsonObject:
+    """A copy with every person, group and agent reference replaced by a label, the same in
+    every bundle this workspace exports and meaningless without its secret."""
 
     def walk(node: JsonValue) -> JsonValue:
         if isinstance(node, list):
@@ -239,36 +258,72 @@ def _label_people(documents: Sequence[JsonObject]) -> list[JsonObject]:
         kind, ref = node.get("kind"), node.get("id")
         is_ref = node.keys() <= {"kind", "id", "display_name"} and isinstance(ref, str)
         if is_ref and kind in ("person", "group", "agent"):
-            key = (str(kind), str(ref))
-            labels.setdefault(key, f"{kind}-{sum(k[0] == kind for k in labels) + 1}")
-            return {"kind": "label", "id": labels[key]}
+            return {"kind": "label", "id": f"{kind}-{_keyed(secret, f'{kind}:{ref}')[:12]}"}
         return {k: walk(v) for k, v in node.items()}
 
-    out: list[JsonObject] = []
-    for document in documents:
-        walked = walk(document)
-        assert isinstance(walked, dict)
-        out.append(walked)
-    return out
+    walked = walk(document)
+    assert isinstance(walked, dict)
+    return walked
+
+
+def arm_labels(run: Run) -> dict[str, str]:
+    """The neutral name of each arm a blind reviewer sees."""
+    return run.blind_labels or {a.id: f"Arm {n}" for n, a in enumerate(run.arms, start=1)}
 
 
 def blind_item(document: JsonObject, labels: dict[str, str]) -> JsonObject:
-    """An item as a blind reviewer sees it: the arm as its neutral label, no model names."""
+    """An item as a blind reviewer sees it: only what the agent said and did, under the arm's
+    neutral label. Usage, the enclosure, extensions and the stored transcript are left out."""
     item = RunItem.model_validate(document)
     events = item.transcript.events if item.transcript else None
-    update: dict[str, object] = {"arm_id": labels.get(item.arm_id, "arm")}
-    if item.transcript and events is not None:
-        quiet = [e.model_copy(update={"model": None}) for e in events]
-        update["transcript"] = item.transcript.model_copy(update={"events": quiet})
-    if item.enclosure:
-        update["enclosure"] = item.enclosure.model_copy(update={"backend": None})
-    return to_document(item.model_copy(update=update))
+    quiet = [e.model_copy(update={"model": None, "usage": None}) for e in events or []]
+    blind = RunItem(
+        id=item.id, run_id=item.run_id, case=item.case, arm_id=labels.get(item.arm_id, "Arm"),
+        repeat=item.repeat, status=item.status, error=item.error, started_at=item.started_at,
+        finished_at=item.finished_at, transcript=EventStream(events=quiet) if events else None,
+        chat=item.chat, outputs=item.outputs, world_calls=item.world_calls,
+    )  # fmt: skip
+    return to_document(blind)
+
+
+@dataclass
+class BundleFile:
+    """An exported bundle, spooled to a temporary file; `chunks` streams and then closes it."""
+
+    name: str
+    media_type: str
+    size: int
+    sha256: str
+    file: IO[bytes]
+
+    async def chunks(self, size: int = 1024 * 1024) -> AsyncIterator[bytes]:
+        try:
+            await asyncio.to_thread(self.file.seek, 0)
+            while chunk := await asyncio.to_thread(self.file.read, size):
+                yield chunk
+        finally:
+            self.file.close()
+
+    async def read(self) -> bytes:
+        return b"".join([c async for c in self.chunks()])
 
 
 class EvalService:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+    """`objects` keeps blob bytes (the artifact store); without one they stay in Postgres.
+    `agents` checks the agents live arms name; without it such arms are refused."""
+
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        *,
+        objects: ObjectStore | None = None,
+        agents: AgentLookup | None = None,
+    ) -> None:
         self._sessions = sessions
         self._settings = settings
+        self._objects = objects
+        self._agents = agents
 
     # ---------- checks ----------
 
@@ -283,33 +338,73 @@ class EvalService:
             raise EvalForbidden(OFF)
 
     async def _role(
-        self, session: AsyncSession, actor: Subject, suite: store.SuiteRow
+        self, session: AsyncSession, actor: Subject, suite: store.SuiteRow, scrub: str | None
     ) -> SuiteRole | None:
+        """The actor's role on a live suite, for content as scrubbed as `scrub`. Shares only
+        reach scrubbed content: anything else is for owners and admins."""
+        if suite.archived_at is not None:
+            return None
         shares = _shares((await store.shares_of(session, [suite.id])).get(suite.id, []))
         groups = await held_groups(actor, shares)
-        return suite_role(actor, owner_key=suite.owner_key, shares=shares, groups=groups)
+        role = suite_role(actor, owner_key=suite.owner_key, shares=shares, groups=groups)
+        return role if role == "owner" or scrub == "scrubbed" else None
 
     async def _suite(
-        self, session: AsyncSession, actor: Subject, key: str, action: Action
+        self, session: AsyncSession, actor: Subject, key: str, action: Action, *, lock: bool = False
     ) -> tuple[store.SuiteRow, SuiteRole]:
-        suite = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=key)
-        role = suite and suite.archived_at is None and await self._role(session, actor, suite)
+        suite = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=key, lock=lock)
+        role = suite and await self._role(session, actor, suite, suite.scrub_status)
         if suite is None or not role:
             raise EvalNotFound(f"No suite {key} here.")
         if not allows(role, action):
             raise EvalForbidden(f"You can't {action} this suite. Ask its owner.")
         return suite, role
 
+    async def _version(
+        self,
+        session: AsyncSession,
+        actor: Subject,
+        key: str,
+        version: int | None,
+        action: Action = "view",
+    ) -> tuple[store.SuiteRow, SuiteRole, int]:
+        """A suite version the actor may act on; an older one is checked on its own."""
+        suite, role = await self._suite(session, actor, key, action)
+        number = version or suite.current_version
+        scrub = await store.version_scrub(session, suite_id=suite.id, version=number)
+        if scrub is None or (role != "owner" and scrub != "scrubbed"):
+            raise EvalNotFound(f"Suite {key} has no version {number}.")
+        return suite, role, number
+
     async def _run(
         self, session: AsyncSession, actor: Subject, run: store.RunRow | None, action: Action
     ) -> tuple[store.RunRow, SuiteRole]:
         suite = run and (await store.suites_by_id(session, [run.suite_id])).get(run.suite_id)
-        role = suite and await self._role(session, actor, suite)
+        role = run and suite and await self._role(session, actor, suite, run.scrub_status)
         if run is None or not role:
             raise EvalNotFound("No such run here.")
         if not allows(role, action):
             raise EvalForbidden(f"You can't {action} this run. Ask its suite's owner.")
         return run, role
+
+    # ---------- blob bytes ----------
+
+    async def _put_blob(
+        self, session: AsyncSession, tenant_id: uuid.UUID, row: store.BlobRow, content: bytes
+    ) -> None:
+        if self._objects is not None:
+            key = object_key(tenant_id, row.sha256)
+            await self._objects.put(key=key, content=content, content_type=row.media_type)
+        kept = None if self._objects is not None else content
+        await store.put_blob(session, tenant_id=tenant_id, blob=row, content=kept)
+
+    async def _read_blob(
+        self, session: AsyncSession, tenant_id: uuid.UUID, sha256: str
+    ) -> bytes | None:
+        content = await store.blob_content(session, tenant_id=tenant_id, sha256=sha256)
+        if content is None and self._objects is not None:
+            content = await self._objects.read(key=object_key(tenant_id, sha256))
+        return content
 
     # ---------- suites and cases ----------
 
@@ -327,7 +422,7 @@ class EvalService:
                 shares=_shares(shares.get(row.id, [])),
                 groups=groups,
             )
-            if role is not None:
+            if role == "owner" or (role is not None and row.scrub_status == "scrubbed"):
                 found.append(
                     SuiteSummary(
                         id=row.key, name=row.name, version=row.current_version, role=role,
@@ -339,12 +434,9 @@ class EvalService:
     async def suite(self, actor: Subject, suite_id: str, version: int | None = None) -> Suite:
         await self._check_on(actor)
         async with self._sessions() as session:
-            suite, _ = await self._suite(session, actor, suite_id, "view")
-            document = await store.suite_document(
-                session, suite_id=suite.id, version=version or suite.current_version
-            )
-        if document is None:
-            raise EvalNotFound(f"Suite {suite_id} has no version {version}.")
+            suite, _, number = await self._version(session, actor, suite_id, version)
+            document = await store.suite_document(session, suite_id=suite.id, version=number)
+        assert document is not None
         return Suite.model_validate(document)
 
     async def cases(
@@ -352,10 +444,8 @@ class EvalService:
     ) -> list[CaseSummary]:
         await self._check_on(actor)
         async with self._sessions() as session:
-            suite, _ = await self._suite(session, actor, suite_id, "view")
-            rows = await store.version_cases(
-                session, suite_id=suite.id, version=version or suite.current_version
-            )
+            suite, _, number = await self._version(session, actor, suite_id, version)
+            rows = await store.version_cases(session, suite_id=suite.id, version=number)
         return [
             CaseSummary(
                 id=r.key, revision=r.revision, hash=r.sha256, title=case.title,
@@ -370,11 +460,11 @@ class EvalService:
     ) -> JsonObject:
         await self._check_on(actor)
         async with self._sessions() as session:
-            suite, _ = await self._suite(session, actor, suite_id, "view")
+            suite, role = await self._suite(session, actor, suite_id, "view")
             row = await store.case_revision(
                 session, suite_id=suite.id, key=case_id, revision=revision
             )
-        if row is None:
+        if row is None or (role != "owner" and row.scrub_status != "scrubbed"):
             raise EvalNotFound(f"No case {case_id} in suite {suite_id}.")
         return row.document
 
@@ -396,14 +486,16 @@ class EvalService:
         """Create the suite or add its next version; `new` True or False insists on one."""
         await self._check_on(actor)
         async with self._sessions() as session, session.begin():
-            existing = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=draft.id)
+            existing = await store.suite_by_key(
+                session, tenant_id=actor.tenant_id, key=draft.id, lock=True
+            )
             if new and existing is not None:
                 raise EvalRefused(f"A suite {draft.id} already exists. Pick another id.")
             if new is False and existing is None:
                 raise EvalNotFound(f"No suite {draft.id} here.")
             if existing is None:
                 if draft.cases:
-                    raise EvalRefused("A new suite starts with no cases. Add them one by one.")
+                    raise EvalRefused("A new suite starts with no cases. Add them, then pin them.")
                 suite = await store.create_suite(
                     session,
                     tenant_id=actor.tenant_id,
@@ -411,13 +503,11 @@ class EvalService:
                     name=draft.name,
                     owner_key=actor.key,
                 )
-                pinned: list[store.CaseRevisionRow] = []
+                if suite is None:
+                    raise EvalRefused(f"A suite {draft.id} already exists. Pick another id.")
                 previous: JsonObject = {}
             else:
                 suite, _ = await self._suite(session, actor, draft.id, "edit")
-                pinned = await store.version_cases(
-                    session, suite_id=suite.id, version=suite.current_version
-                )
                 previous = (
                     await store.suite_document(
                         session, suite_id=suite.id, version=suite.current_version
@@ -426,7 +516,7 @@ class EvalService:
                 )
             refs = _pins_of(previous)
             if draft.cases is not None:
-                refs = await self._picked(session, suite, draft.cases, refs)
+                refs = await self._picked(session, suite, draft.cases)
             document = to_document(
                 Suite(
                     id=draft.id, version=suite.current_version + 1, name=draft.name,
@@ -434,27 +524,25 @@ class EvalService:
                     cases=refs, tool_aliases=draft.tool_aliases, defaults=draft.defaults,  # pyright: ignore[reportArgumentType]
                 )
             )  # fmt: skip
-            statuses = {(r.key, r.revision): r.scrub_status for r in pinned}
-            await self._store_version(session, suite, document, actor, statuses)
+            await self._store_version(session, suite, document, actor)
         return Suite.model_validate(document)
 
     async def _picked(
-        self,
-        session: AsyncSession,
-        suite: store.SuiteRow,
-        picks: Sequence[SuiteCasePick],
-        refs: list[JsonObject],
+        self, session: AsyncSession, suite: store.SuiteRow, picks: Sequence[SuiteCasePick]
     ) -> list[JsonObject]:
-        current = {str(r["id"]): r for r in refs}
         picked: list[JsonObject] = []
         for pick in picks:
-            row = current.get(pick.id)
-            if row is None:
-                found = await store.case_revision(session, suite_id=suite.id, key=pick.id)
-                if found is None:
-                    raise EvalNotFound(f"No case {pick.id} in suite {suite.key}.")
-                row = {"id": pick.id, "revision": found.revision, "hash": found.sha256}
-            picked.append({**row, "weight": pick.weight, "split": pick.split})
+            found = await store.case_revision(
+                session, suite_id=suite.id, key=pick.id, revision=pick.revision
+            )
+            if found is None:
+                raise EvalNotFound(f"No case {pick.id} in suite {suite.key}.")
+            picked.append(
+                {
+                    "id": pick.id, "revision": found.revision, "hash": found.sha256,
+                    "weight": pick.weight, "split": pick.split,
+                }
+            )  # fmt: skip
         return picked
 
     async def _store_version(
@@ -463,12 +551,16 @@ class EvalService:
         suite: store.SuiteRow,
         document: JsonObject,
         actor: Subject,
-        statuses: dict[tuple[str, int], str | None],
+        *,
+        signature: str | None = None,
     ) -> None:
+        """Store a version; how scrubbed it is comes from the stored revisions it pins."""
         if problems := schema_problems("Suite", document, "suite"):
             raise EvalRefused("This suite is not valid.", problems)
         ids = await store.case_ids(session, suite_id=suite.id)
         refs = _pins_of(document)
+        if missing := sorted({str(r["id"]) for r in refs} - ids.keys()):
+            raise EvalNotFound("This suite pins cases it does not have.", missing)
         pins = [
             store.PinRow(
                 case_id=ids[str(r["id"])], revision=int(str(r["revision"])),
@@ -476,66 +568,50 @@ class EvalService:
             )
             for r in refs
         ]  # fmt: skip
-        scrub = _worst(statuses.get((str(r["id"]), int(str(r["revision"])))) for r in refs)
-        version = int(str(document["version"]))
+        scrubs = await store.revision_scrubs(session, [(p.case_id, p.revision) for p in pins])
         await store.add_suite_version(
-            session, suite, version=version, document=document, pins=pins, scrub_status=scrub,
-            created_by=actor.key,
+            session, suite, version=int(str(document["version"])), document=document, pins=pins,
+            scrub_status=_worst(scrubs), created_by=actor.key, signature=signature,
         )  # fmt: skip
 
-    async def put_case(self, actor: Subject, suite_id: str, case: JsonObject) -> CaseRef:
-        """Store `case` as the next revision of its id and pin it in a new suite version."""
+    async def put_case(
+        self,
+        actor: Subject,
+        suite_id: str,
+        case: JsonObject,
+        *,
+        blobs: Mapping[BlobEntry, bytes] | None = None,
+    ) -> CaseRef:
+        """Store `case` as the next revision of its id; `save_suite` pins it. Files it uses
+        must already be in the suite, or come in `blobs`."""
         await self._check_on(actor)
         key = str(case.get("id"))
         async with self._sessions() as session, session.begin():
-            suite, _ = await self._suite(session, actor, suite_id, "edit")
+            suite, _ = await self._suite(session, actor, suite_id, "edit", lock=True)
             latest = await store.case_revision(session, suite_id=suite.id, key=key)
             document = {k: v for k, v in case.items() if k != "hash"}
             document["revision"] = latest.revision + 1 if latest else 1
             document["hash"] = case_hash(document)
             if problems := case_problems(document):
                 raise EvalRefused("This case is not valid.", problems)
+            new = dict(blobs or {})
+            if bad := [e.sha256 for e, data in new.items() if not _matches(e, data)]:
+                raise EvalRefused("These files do not match their names or sizes.", bad)
             shas = blob_refs(document)
-            missing = (
-                shas - (await store.blob_rows(session, tenant_id=actor.tenant_id, shas=shas)).keys()
-            )
-            if missing:
-                raise EvalRefused(
-                    "This case uses files this deployment does not have.", sorted(missing)
-                )
+            have = await store.suite_blobs(session, suite_id=suite.id)
+            if missing := sorted(shas - have - {e.sha256 for e in new}):
+                raise EvalRefused("This case uses files the suite does not have.", missing)
+            for entry, data in new.items():
+                row = store.BlobRow.model_validate(entry.model_dump())
+                await self._put_blob(session, actor.tenant_id, row, data)
             model = _case_model(document)
-            scrub = model.provenance.scrub.status if model.provenance.scrub else None
             await store.add_case_revision(
                 session, suite=suite, key=key, revision=model.revision, document=document,
                 sha256=str(document["hash"]), fidelity=model.fidelity.level,
                 flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
-                scrub_status=scrub, created_by=actor.key,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
+                created_by=actor.key,
             )  # fmt: skip
-            pinned = await store.version_cases(
-                session, suite_id=suite.id, version=suite.current_version
-            )
-            previous = (
-                await store.suite_document(
-                    session, suite_id=suite.id, version=suite.current_version
-                )
-                or {}
-            )
-            pin: JsonObject = {"id": key, "revision": model.revision, "hash": str(document["hash"])}
-            refs = _pins_of(previous)
-            at = next((i for i, r in enumerate(refs) if r["id"] == key), None)
-            if at is None:
-                refs.append(pin)
-            else:
-                refs[at] = {**refs[at], **pin}
-            suite_doc: JsonObject = {**previous, "version": suite.current_version + 1}
-            suite_doc["cases"] = list[JsonValue](refs)
-            if not previous:
-                suite_doc |= {"schema": "daimon.eval.suite/1", "id": suite.key, "name": suite.name}
-            statuses: dict[tuple[str, int], str | None] = {
-                (r.key, r.revision): r.scrub_status for r in pinned
-            }
-            statuses[(key, model.revision)] = scrub
-            await self._store_version(session, suite, suite_doc, actor, statuses)
         return CaseRef(id=key, revision=model.revision, hash=str(document["hash"]))
 
     # ---------- cases from threads ----------
@@ -547,6 +623,10 @@ class EvalService:
             raise EvalRefused(
                 f"Scrubbing needs DAIMON_EVALS__SCRUB_KEY, at least {MIN_KEY} characters."
             )
+        if importlib.util.find_spec("faker") is None:
+            raise EvalRefused(
+                "Scrubbing needs the evals extra installed here. Ask an admin or an owner."
+            )
         file = (
             [load_entities(Path(settings.scrub_entities_file))]
             if settings.scrub_entities_file
@@ -554,14 +634,36 @@ class EvalService:
         )
         async with self._sessions() as session:
             fakes = await eval_scrub.load_map(session, tenant_id=tenant_id)
+            names = await eval_scrub.deployment_names(session, tenant_id=tenant_id)
         return Scrubber(
-            merge_entities(known, *file), key.encode(),
-            ner_model=settings.scrub_ner_model or None, known=fakes,
+            merge_entities(known, _deployment_entities(names), *file), key.encode(),
+            salt=str(tenant_id), ner_model=settings.scrub_ner_model or None, known=fakes,
         )  # fmt: skip
 
-    async def _keep_fakes(self, tenant_id: uuid.UUID, scrubber: Scrubber) -> None:
-        async with self._sessions() as session, session.begin():
-            await eval_scrub.save_map(session, tenant_id=tenant_id, rows=scrubber.fakes.added)
+    async def _pin(
+        self, actor: Subject, suite_id: str, refs: Sequence[CaseRef], drop: Iterable[str] = ()
+    ) -> None:
+        """Save the suite's next version pinning `refs` (added or moved to that revision)."""
+        current = await self.suite(actor, suite_id)
+        moved = {r.id: r.revision for r in refs}
+        gone = set(drop)
+        picks = [
+            SuiteCasePick(
+                id=c.id, revision=moved.pop(c.id, c.revision), weight=c.weight, split=c.split
+            )
+            for c in current.cases
+            if c.id not in gone
+        ]
+        picks += [SuiteCasePick(id=key, revision=rev) for key, rev in moved.items()]
+        await self.save_suite(
+            actor,
+            SuiteDraft(
+                id=current.id, name=current.name, description=current.description,
+                tags=current.tags, tool_aliases=current.tool_aliases, defaults=current.defaults,
+                cases=picks,
+            ),
+            new=False,
+        )  # fmt: skip
 
     async def cases_from_thread(
         self, actor: Subject, source: ThreadSource, ref: str, suite_id: str
@@ -580,47 +682,21 @@ class EvalService:
             raise EvalRefused("That thread has no turn the agent answered.")
         async with self._sessions() as session, session.begin():
             await eval_scrub.save_map(session, tenant_id=actor.tenant_id, rows=scrubber.fakes.added)
-            for item in built:
-                for sha, blob in item.blobs.items():
-                    row = store.BlobRow(
-                        sha256=sha, size=len(blob.data), media_type=blob.media_type,
-                        scrub=blob.scrub, needs_human_check=blob.needs_human_check,
-                    )  # fmt: skip
-                    await store.put_blob(
-                        session, tenant_id=actor.tenant_id, blob=row, content=blob.data
-                    )
-        return [await self.put_case(actor, suite_id, item.case) for item in built]
-
-    async def scrub_case(self, actor: Subject, case: JsonObject) -> ScrubResult:
-        """`case` with fakes for who it names, and what a person should still check."""
-        await self._check_on(actor)
-        model = _case_model(case)
-        people = [*model.surface.participants, model.surface.bot]
-        scrubber = await self._scrubber(
-            actor.tenant_id,
-            KnownEntities.model_validate(
-                {
-                    "people": [
-                        {
-                            "name": p.display_name,
-                            "emails": [p.email] if p.email else [],
-                            "handles": [p.handle] if p.handle else [],
-                            "ids": [p.id],
-                        }
-                        for p in people
-                        if not p.is_bot
-                    ]
-                }
-            ),
-        )
-        done, leftovers = await asyncio.to_thread(scrub_case, scrubber, case)
-        await self._keep_fakes(actor.tenant_id, scrubber)
-        scrub = _case_model(done).provenance.scrub
-        return ScrubResult(
-            case=done,
-            status=scrub.status if scrub else "partial",
-            leftovers=[Leftover(where=x.where, kind=x.kind, count=x.count) for x in leftovers],
-        )
+        refs = [
+            await self.put_case(
+                actor, suite_id, item.case,
+                blobs={
+                    BlobEntry(
+                        sha256=sha, size=len(b.data), media_type=b.media_type,
+                        scrub=b.scrub, needs_human_check=b.needs_human_check,  # pyright: ignore[reportArgumentType]
+                    ): b.data
+                    for sha, b in item.blobs.items()
+                },
+            )
+            for item in built
+        ]  # fmt: skip
+        await self._pin(actor, suite_id, refs)
+        return refs
 
     async def draft_expectations(
         self,
@@ -633,11 +709,13 @@ class EvalService:
     ) -> DraftResult:
         """Draft expectations for cases with a model. Without `confirm` only the cost estimate."""
         await self._check_on(actor)
+        async with self._sessions() as session:
+            await self._suite(session, actor, suite_id, "edit")  # before any paid call
         documents = [await self.case(actor, suite_id, key) for key in case_ids]
         for document in documents:
             scrub = _case_model(document).provenance.scrub
-            if scrub and scrub.status == "unscrubbed":
-                raise EvalRefused("Drafting sends a case to a model: scrub it first.")
+            if scrub is None or scrub.status != "scrubbed":
+                raise EvalRefused("Drafting sends a case to a model: only scrubbed cases can go.")
         try:
             estimate = estimate_draft(documents, draft_model(self._settings.evals.draft_model))
             if not confirm:
@@ -650,6 +728,7 @@ class EvalService:
                 refs.append(await self.put_case(actor, suite_id, drafted))
         except DraftError as exc:
             raise EvalRefused(str(exc)) from None
+        await self._pin(actor, suite_id, refs)
         return DraftResult(estimate=estimate, drafted=refs)
 
     async def dedupe(
@@ -668,37 +747,27 @@ class EvalService:
             rows = await store.version_cases(
                 session, suite_id=suite.id, version=suite.current_version
             )
-        found = dedupe.groups([r.document for r in rows], threshold)
-        for ids in found:
-            name = dedupe.group_id(ids)
-            for key in ids:
-                document = next(r.document for r in rows if r.key == key)
-                if document.get("dedupe_group") != name:
-                    await self.put_case(actor, suite_id, {**document, "dedupe_group": name})
+        found = await asyncio.to_thread(dedupe.groups, [r.document for r in rows], threshold)
+        by_key = {r.key: r.document for r in rows}
+        marked = [
+            await self.put_case(actor, suite_id, {**by_key[key], "dedupe_group": name})
+            for ids in found
+            for name in [dedupe.group_id(ids)]
+            for key in ids
+            if by_key[key].get("dedupe_group") != name
+        ]
         dropped = dedupe.thin(found, keep) if keep is not None else []
-        if dropped:
-            current = await self.suite(actor, suite_id)
-            await self.save_suite(
-                actor,
-                SuiteDraft(
-                    id=current.id, name=current.name, description=current.description,
-                    tags=current.tags, tool_aliases=current.tool_aliases,
-                    defaults=current.defaults,
-                    cases=[
-                        SuiteCasePick(id=c.id, weight=c.weight, split=c.split)
-                        for c in current.cases
-                        if c.id not in dropped
-                    ],
-                ),
-                new=False,
-            )  # fmt: skip
+        if marked or dropped:
+            await self._pin(actor, suite_id, marked, dropped)  # one new version for all of it
         return DedupeReport(groups=found, dropped=dropped)
 
     async def share(self, actor: Subject, suite_id: str, shares: Sequence[Share]) -> None:
         """Replace who the suite is shared with."""
         await self._check_on(actor)
+        if len({(s.kind, s.id) for s in shares}) != len(shares):
+            raise EvalRefused("Each person or group can be shared with once.")
         async with self._sessions() as session, session.begin():
-            suite, _ = await self._suite(session, actor, suite_id, "share")
+            suite, _ = await self._suite(session, actor, suite_id, "share", lock=True)
             if shares and suite.scrub_status != "scrubbed":
                 raise EvalForbidden(
                     "This suite is not scrubbed, so only owners and admins can see it."
@@ -715,9 +784,21 @@ class EvalService:
         return [Arm.model_validate(r.document) for r in rows]
 
     async def save_arm(self, actor: Subject, arm: Arm) -> Arm:
-        """Create an arm, or replace one its creator or an admin owns."""
+        """Create an arm, or replace one its creator or an admin owns. A live arm's agent must
+        be one the workspace has; `config_hash` is computed here from it and the arm."""
         await self._check_on(actor)
-        document = to_document(arm)
+        config_hash = None
+        if arm.kind == "live" and arm.live is not None:
+            config: JsonValue = None
+            if arm.live.agent is not None:
+                if self._agents is None:
+                    raise EvalRefused("Agents can't be checked here. Ask an admin or an owner.")
+                config = await self._agents(actor.tenant_id, arm.live.agent)
+                if config is None:
+                    raise EvalNotFound(f"No agent {arm.live.agent} here.")
+            live = to_document(arm.live)
+            config_hash = sha256_hex(canonical_json({"agent": config, "live": live}))
+        document = to_document(arm.model_copy(update={"config_hash": config_hash}))
         if problems := schema_problems("Arm", document, "arm"):  # pyright: ignore[reportArgumentType]
             raise EvalRefused("This arm is not valid.", problems)
         async with self._sessions() as session, session.begin():
@@ -736,24 +817,29 @@ class EvalService:
             run, _ = await self._run(session, actor, found, "view")
         return Run.model_validate(run.document)
 
-    async def items(self, actor: Subject, run_id: str, page: Page) -> list[RunItemSummary]:
+    async def items(
+        self, actor: Subject, run_id: str, page: Page, *, blind: bool = False
+    ) -> list[RunItemSummary]:
+        """A page of a run's items; reviewers, and `blind`, see arms by their neutral label."""
         await self._check_on(actor)
         async with self._sessions() as session:
             found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id)
-            run, _ = await self._run(session, actor, found, "view")
+            run, role = await self._run(session, actor, found, "view")
             rows = await store.items_of_run(
                 session, run_id=run.id, offset=page.offset, limit=page.limit
             )
+        labels = arm_labels(Run.model_validate(run.document)) if blind or role == "reviewer" else {}
         return [
             RunItemSummary(
                 id=str(r.id), key=r.key, case_id=r.case_key, case_revision=r.case_revision,
-                arm_id=r.arm_key, repeat=r.repeat, status=r.status,
+                arm_id=labels.get(r.arm_key, "Arm") if labels else r.arm_key, repeat=r.repeat,
+                status=r.status,
             )
             for r in rows
         ]  # fmt: skip
 
-    async def item(self, actor: Subject, item_id: str, *, blind_for: str | None = None) -> RunItem:
-        """One run item; `blind_for` (a reviewer) hides which arm and model produced it."""
+    async def item(self, actor: Subject, item_id: str, *, blind: bool = False) -> RunItem:
+        """One run item. Reviewers, and `blind`, get the blind view (`blind_item`)."""
         await self._check_on(actor)
         try:
             item_uuid = uuid.UUID(item_id)
@@ -763,136 +849,156 @@ class EvalService:
             row = await store.item_by_id(session, tenant_id=actor.tenant_id, item_id=item_uuid)
             if row is None:
                 raise EvalNotFound("No such item here.")
-            run, _ = await self._run(
+            run, role = await self._run(
                 session, actor, await store.run_by_id(session, row.run_id), "view"
             )
         document = row.document
-        if blind_for is not None:
-            labels = Run.model_validate(run.document).blind_labels or {}
-            document = blind_item(document, labels)
+        if blind or role == "reviewer":
+            document = blind_item(document, arm_labels(Run.model_validate(run.document)))
         return RunItem.model_validate(document)
 
     async def blob(self, actor: Subject, sha256: str) -> tuple[store.BlobRow, bytes]:
-        """A blob the actor may read: one their suites, runs or exports reference."""
+        """A blob the actor may read: one a live suite's cases or runs reference, at content
+        the actor may see there."""
         await self._check_on(actor)
         async with self._sessions() as session:
             rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=[sha256])
-            readable = actor.is_admin or bool(
-                await store.exported_by(session, tenant_id=actor.tenant_id, sha256=sha256)
-                & actor.ids
-            )
+            readable = actor.is_admin and sha256 in rows
             if sha256 in rows and not readable:
-                ids = await store.suites_using_blob(
-                    session, tenant_id=actor.tenant_id, sha256=sha256
-                )
-                for suite in (await store.suites_by_id(session, ids)).values():
-                    if allows(await self._role(session, actor, suite), "view"):
+                uses = await store.blob_uses(session, tenant_id=actor.tenant_id, sha256=sha256)
+                suites = await store.suites_by_id(session, {s for s, _ in uses})
+                for suite_id, scrub in uses:
+                    if await self._role(session, actor, suites[suite_id], scrub):
                         readable = True
                         break
-            content = await store.blob_content(session, tenant_id=actor.tenant_id, sha256=sha256)
-        if sha256 not in rows or content is None or not readable:
+            content = await self._read_blob(session, actor.tenant_id, sha256) if readable else None
+        if content is None:
             raise EvalNotFound("No such file here.")
         return rows[sha256], content
 
     # ---------- bundles ----------
 
-    def _instance(self, tenant_id: uuid.UUID) -> str:
-        """An opaque, stable name for this workspace as a bundle source."""
-        return sha256_hex(f"daimon-evals:{tenant_id}".encode())[:16]
-
-    async def export_bundle(self, actor: Subject, request: ExportRequest) -> BlobRef:
-        """Write the chosen suites and runs as a bundle, keep it as a blob, return its ref."""
+    async def export_bundle(
+        self, actor: Subject, request: ExportRequest, *, passphrase: str | None = None
+    ) -> BundleFile:
+        """Write the chosen suites and runs as a bundle, encrypted with `passphrase` if given.
+        Nothing is kept but the record that it was exported."""
         await self._check_on(actor)
+        if request.include_identities and not actor.is_admin:
+            raise EvalForbidden("Only an admin or an owner can export who did what.")
         suites: list[LoadedSuite] = []
         runs: list[LoadedRun] = []
         statuses: list[str | None] = []
         roles: list[SuiteRole] = []
-        async with self._sessions() as session:
+        pinned: list[JsonObject] = []
+        async with self._sessions() as session, session.begin():
+            secret = await store.instance_secret(session, tenant_id=actor.tenant_id)
             for pick in request.suites:
-                suite, role = await self._suite(session, actor, pick.id, "export")
-                number = pick.version or suite.current_version
+                suite, role, number = await self._version(
+                    session, actor, pick.id, pick.version, "export"
+                )
                 document = await store.suite_document(session, suite_id=suite.id, version=number)
-                if document is None:
-                    raise EvalNotFound(f"Suite {pick.id} has no version {number}.")
-                cases = await store.version_cases(session, suite_id=suite.id, version=number)
-                statuses += [c.scrub_status for c in cases]
+                assert document is not None
+                cases = [c.document for c in await store.version_cases(
+                    session, suite_id=suite.id, version=number
+                )]  # fmt: skip
+                statuses.append(
+                    await store.version_scrub(session, suite_id=suite.id, version=number)
+                )
                 roles.append(role)
-                suites.append(LoadedSuite(document, [c.document for c in cases]))
+                suites.append(LoadedSuite(document, cases))
             for key in request.runs:
                 found = await store.run_by_key(session, tenant_id=actor.tenant_id, key=key)
                 run, role = await self._run(session, actor, found, "export")
-                run_suite = (await store.suites_by_id(session, [run.suite_id]))[run.suite_id]
-                statuses.append(run_suite.scrub_status)
+                statuses.append(run.scrub_status)
                 roles.append(role)
+                pinned += [c.document for c in await store.version_cases(
+                    session, suite_id=run.suite_id, version=run.suite_version
+                )]  # fmt: skip
                 items, scores, reviews = await store.run_parts(session, run_id=run.id)
                 runs.append(LoadedRun(run.document, items, scores, reviews))
             if not suites and not runs:
                 raise EvalRefused("Pick at least one suite or run to export.")
             documents: list[JsonValue] = [d for s in suites for d in (s.document, *s.cases)]
             documents += [d for r in runs for d in (r.document, *r.items, *r.scores, *r.reviews)]
-            shas = blob_refs(documents)
-            blob_rows = await store.blob_rows(session, tenant_id=actor.tenant_id, shas=shas)
-            contents = {
-                sha: await store.blob_content(session, tenant_id=actor.tenant_id, sha256=sha)
-                for sha in shas
-            }
-        status = _worst(
-            [*statuses, *("unscrubbed" for b in blob_rows.values() if b.scrub == "unscrubbed")]
-        )
-        owner = actor.is_admin or all(r == "owner" for r in roles)
-        if status != "scrubbed" and not owner:
-            raise EvalForbidden("Only the owner or an admin can export what is not scrubbed.")
-        if request.include_identities and not owner:
-            raise EvalForbidden("Only the owner or an admin can export who did what.")
-        if not request.include_identities:
-            suites, runs = _labelled(suites, runs)
-        missing = [sha for sha, data in contents.items() if data is None or sha not in blob_rows]
-        if missing:
-            raise EvalRefused("Some files these documents use are missing.", missing)
-        blobs = {
-            BlobEntry(
-                sha256=sha, size=row.size, media_type=row.media_type, scrub=row.scrub,  # pyright: ignore[reportArgumentType]
-                needs_human_check=row.needs_human_check,
-            ): contents[sha] or b""
-            for sha, row in blob_rows.items()
-        }  # fmt: skip
-        now = datetime.now(UTC)
-        header = bundles.BundleHeader(
-            id=f"bundle-{uuid.uuid4().hex[:16]}",
-            created_at=now.replace(microsecond=0),
-            title=request.title,
-            source=SourceInfo(
-                kind="deployment",
-                label=self._settings.evals.source_label,
-                instance=self._instance(actor.tenant_id),
-                daimon_version=_daimon_version(),
-            ),  # fmt: skip
-            scrub_status=status,
-            includes_identities=request.include_identities,
-        )
-        key = self._settings.evals.signing_key
-        files = bundles.build_files(
-            header, suites, runs, blobs,
-            signing_key=bundles.private_key(key.get_secret_value()) if key else None,
-        )  # fmt: skip
-        data = bundles.to_zip(files)
-        name, media_type = f"{header.id}.daimon-eval.zip", "application/zip"
-        if request.passphrase:
-            data = bundles.encrypt(data, request.passphrase)
-            name, media_type = f"{header.id}.daimon-eval.enc", "application/octet-stream"
-        sha = sha256_hex(data)
-        manifest = json.loads(files[bundles.MANIFEST_PATH])
-        async with self._sessions() as session, session.begin():
-            blob = store.BlobRow(
-                sha256=sha, size=len(data), media_type=media_type, needs_human_check=False,
-                scrub="unscrubbed" if status != "scrubbed" else "clean",
+            blob_rows = await store.blob_rows(
+                session, tenant_id=actor.tenant_id, shas=blob_refs(documents)
+            )
+            if missing := sorted(blob_refs(documents) - blob_rows.keys()):
+                raise EvalRefused("Some files these documents use are missing.", missing)
+            status = _worst(
+                [*statuses, *("unscrubbed" for b in blob_rows.values() if b.scrub == "unscrubbed")]
+            )
+            if status != "scrubbed" and not (actor.is_admin or all(r == "owner" for r in roles)):
+                raise EvalForbidden("Only the owner or an admin can export what is not scrubbed.")
+            if not request.include_identities:
+                suites, runs = _labelled(suites, runs, pinned, secret)
+            entries = [
+                BlobEntry(
+                    sha256=sha, size=row.size, media_type=row.media_type, scrub=row.scrub,  # pyright: ignore[reportArgumentType]
+                    needs_human_check=row.needs_human_check,
+                )
+                for sha, row in sorted(blob_rows.items())
+            ]  # fmt: skip
+            key = self._settings.evals.signing_key
+            header = bundles.BundleHeader(
+                id=f"bundle-{uuid.uuid4().hex[:16]}",
+                created_at=datetime.now(UTC).replace(microsecond=0),
+                title=request.title,
+                source=SourceInfo(
+                    kind="deployment",
+                    label=self._settings.evals.source_label,
+                    instance=_instance(secret),
+                    daimon_version=_daimon_version(),
+                ),  # fmt: skip
+                scrub_status=status,
+                includes_identities=request.include_identities,
+            )
+            files = bundles.document_files(
+                header, suites, runs, entries,
+                signing_key=bundles.private_key(key.get_secret_value()) if key else None,
             )  # fmt: skip
-            await store.put_blob(session, tenant_id=actor.tenant_id, blob=blob, content=data)
             await store.record_bundle(
-                session, tenant_id=actor.tenant_id, direction="export", manifest=manifest,
-                actor_key=actor.key, blob_sha256=sha,
+                session, tenant_id=actor.tenant_id, direction="export",
+                manifest=json.loads(files[MANIFEST_PATH]), actor_key=actor.key,
+                signature="valid" if key else "unsigned",
             )  # fmt: skip
-        return BlobRef(sha256=sha, size=len(data), media_type=media_type, name=name)
+            spool = await self._zip(session, actor.tenant_id, files, entries)
+        name, media_type = f"{header.id}.daimon-eval.zip", "application/zip"
+        if passphrase:
+            sealed = await asyncio.to_thread(bundles.encrypt, spool.read(), passphrase)
+            spool.close()
+            spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_BYTES)  # noqa: SIM115
+            spool.write(sealed)
+            name, media_type = f"{header.id}.daimon-eval.enc", "application/octet-stream"
+        size, sha = await asyncio.to_thread(_measure, spool)
+        return BundleFile(name=name, media_type=media_type, size=size, sha256=sha, file=spool)
+
+    async def _zip(
+        self,
+        session: AsyncSession,
+        tenant_id: uuid.UUID,
+        files: Mapping[str, bytes],
+        entries: Sequence[BlobEntry],
+    ) -> IO[bytes]:
+        """The bundle zip in a temporary file, blobs read one at a time; rewound."""
+        spool = tempfile.SpooledTemporaryFile(max_size=_SPOOL_BYTES)  # noqa: SIM115
+        try:
+            with zipfile.ZipFile(spool, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in sorted(files, key=lambda p: (p != MANIFEST_PATH, p)):
+                    await asyncio.to_thread(bundles.zip_add, archive, path, files[path])
+                for entry in entries:
+                    data = await self._read_blob(session, tenant_id, entry.sha256)
+                    if data is None:
+                        raise EvalRefused(
+                            "Some files these documents use are missing.", [entry.sha256]
+                        )
+                    await asyncio.to_thread(bundles.zip_add, archive, blob_path(entry.sha256), data)
+        except BaseException:
+            spool.close()
+            raise
+        spool.seek(0)
+        return spool
 
     async def import_bundle(
         self,
@@ -909,32 +1015,64 @@ class EvalService:
                 "Only an owner or an admin can accept a bundle that is not scrubbed."
             )
         limit = self._settings.evals.max_bundle_mb * 1024 * 1024
-        chunks: list[bytes] = []
-        size = 0
-        async for chunk in data:
-            size += len(chunk)
-            if size > limit:
-                raise EvalRefused(f"The bundle is over {self._settings.evals.max_bundle_mb} MiB.")
-            chunks.append(chunk)
-        try:
-            source = bundles.open_bundle(b"".join(chunks), passphrase=passphrase, max_bytes=limit)
-            report = validate_bundle(source)
-            report.raise_for_problems()
-            raw_manifest = json.loads(source.read(bundles.MANIFEST_PATH))
-            signature = bundles.verify(raw_manifest, self._trusted_keys())
-        except InvalidDocument as invalid:
-            raise EvalRefused("This bundle is not valid.", invalid.problems) from None
+        with tempfile.TemporaryFile() as spool:
+            size = 0
+            async for chunk in data:
+                size += len(chunk)
+                if size > limit:
+                    raise EvalRefused(
+                        f"The bundle is over {self._settings.evals.max_bundle_mb} MiB."
+                    )
+                await asyncio.to_thread(spool.write, chunk)
+            await asyncio.to_thread(spool.seek, 0)
+            try:
+                source, report, raw_manifest, signature = await asyncio.to_thread(
+                    self._open, spool, passphrase, limit
+                )
+            except InvalidDocument as invalid:
+                raise EvalRefused("This bundle is not valid.", invalid.problems) from None
+            manifest = report.manifest
+            assert manifest is not None
+            if self._settings.evals.trusted_keys and signature != "valid":
+                raise EvalForbidden("Only bundles signed by a trusted key import here.")
+            if refusal := bundles.scrub_refusal(manifest, accept_unscrubbed=accept_unscrubbed):
+                raise EvalForbidden(refusal)
+            return await self._store_bundle(actor, source, report, raw_manifest, signature)
+
+    def _open(
+        self, spool: IO[bytes], passphrase: str | None, limit: int
+    ) -> tuple[bundles.ZipSource, ValidationReport, JsonObject, bundles.SignatureState]:
+        """Decrypt, open, validate and verify, within `_IMPORT_SECONDS`. Runs in a thread."""
+        source = bundles.open_bundle(
+            spool, passphrase=passphrase, max_bytes=limit,
+            deadline=time.monotonic() + _IMPORT_SECONDS,
+        )  # fmt: skip
+        report = validate_bundle(source)
+        report.raise_for_problems()
+        raw_manifest = json.loads(source.read(MANIFEST_PATH))
+        signature = bundles.verify(raw_manifest, self._trusted_keys())
+        source.deadline = None
+        return source, report, raw_manifest, signature
+
+    async def _store_bundle(
+        self,
+        actor: Subject,
+        source: bundles.ZipSource,
+        report: ValidationReport,
+        raw_manifest: JsonObject,
+        signature: bundles.SignatureState,
+    ) -> ImportReport:
         manifest = report.manifest
         assert manifest is not None
-        if refusal := bundles.scrub_refusal(manifest, accept_unscrubbed=accept_unscrubbed):
-            raise EvalForbidden(refusal)
         async with self._sessions() as session, session.begin():
+            own = _instance(await store.instance_secret(session, tenant_id=actor.tenant_id))
             for entry in manifest.blobs:
                 row = store.BlobRow.model_validate(entry.model_dump())
-                content = source.read(blob_path(entry.sha256))
-                await store.put_blob(session, tenant_id=actor.tenant_id, blob=row, content=content)
+                content = await asyncio.to_thread(source.read, blob_path(entry.sha256))
+                await self._put_blob(session, actor.tenant_id, row, content)
             imported = [
-                await self._import_suite(session, actor, manifest, s) for s in report.suites
+                await self._import_suite(session, actor, manifest, s, own, signature)
+                for s in report.suites
             ]
             renamed = {s.bundle_id: s.id for s in imported}
             done: list[str] = []
@@ -944,11 +1082,11 @@ class EvalService:
                 if await store.run_by_key(session, tenant_id=actor.tenant_id, key=run_id):
                     skipped.append(run_id)
                     continue
-                await self._import_run(session, actor, run, renamed)
+                await self._import_run(session, actor, manifest, run, renamed, signature)
                 done.append(run_id)
             await store.record_bundle(
                 session, tenant_id=actor.tenant_id, direction="import", manifest=raw_manifest,
-                actor_key=actor.key,
+                actor_key=actor.key, signature=signature,
             )  # fmt: skip
         return ImportReport(
             bundle_id=manifest.id, suites=imported, runs=done, skipped_runs=skipped,
@@ -963,22 +1101,28 @@ class EvalService:
         return keys
 
     async def _import_suite(
-        self, session: AsyncSession, actor: Subject, manifest: Manifest, loaded: LoadedSuite
+        self,
+        session: AsyncSession,
+        actor: Subject,
+        manifest: Manifest,
+        loaded: LoadedSuite,
+        own: str,
+        signature: str,
     ) -> ImportedSuite:
         """A suite lands as a new version of the same suite from the same source when the actor
         may edit it and no case revision conflicts; otherwise as a new suite."""
         key, number = str(loaded.document["id"]), int(str(loaded.document["version"]))
         instance = manifest.source.instance
-        existing = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=key)
+        existing = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=key, lock=True)
         if existing is not None:
-            same_source = (existing.source_instance or self._instance(actor.tenant_id)) == instance
+            same_source = (existing.source_instance or own) == instance
             hashes = await store.case_hashes(session, suite_id=existing.id)
             clash = any(
                 hashes.get((str(c["id"]), int(str(c["revision"]))), c["hash"]) != c["hash"]
                 for c in loaded.cases
             )
             stored = await store.suite_document(session, suite_id=existing.id, version=number)
-            role = await self._role(session, actor, existing)
+            role = await self._role(session, actor, existing, existing.scrub_status)
             if (
                 allows(role, "edit")
                 and same_source
@@ -987,23 +1131,21 @@ class EvalService:
             ):
                 if stored is None:
                     await self._store_cases(session, actor, existing, loaded, hashes)
-                    await self._store_imported_version(
-                        session, actor, existing, loaded.document, loaded
+                    await self._store_version(
+                        session, existing, loaded.document, actor, signature=signature
                     )
                 return ImportedSuite(bundle_id=key, id=key, version=number, created=False)
-        target = key
-        n = 1
-        while existing is not None:
+        target, n, suite = key, 1, None
+        while suite is None:
+            suite = await store.create_suite(
+                session, tenant_id=actor.tenant_id, key=target, name=str(loaded.document["name"]),
+                owner_key=actor.key, source_instance=instance,
+            )  # fmt: skip
             n += 1
-            target = f"{key[:120]}-{n}"
-            existing = await store.suite_by_key(session, tenant_id=actor.tenant_id, key=target)
-        document = {**loaded.document, "id": target}
-        suite = await store.create_suite(
-            session, tenant_id=actor.tenant_id, key=target, name=str(document["name"]),
-            owner_key=actor.key, source_instance=instance,
-        )  # fmt: skip
+            target = suite.key if suite else f"{key[:120]}-{n}"
         await self._store_cases(session, actor, suite, loaded, {})
-        await self._store_imported_version(session, actor, suite, document, loaded)
+        document = {**loaded.document, "id": target}
+        await self._store_version(session, suite, document, actor, signature=signature)
         return ImportedSuite(bundle_id=key, id=target, version=number, created=True)
 
     async def _store_cases(
@@ -1018,50 +1160,108 @@ class EvalService:
             model = _case_model(case)
             if (model.id, model.revision) in stored:
                 continue
+            shas = blob_refs(case)
             await store.add_case_revision(
                 session, suite=suite, key=model.id, revision=model.revision, document=case,
                 sha256=str(case["hash"]), fidelity=model.fidelity.level,
-                flags=[f.reason for f in model.review_flags or []], blob_shas=blob_refs(case),
-                scrub_status=model.provenance.scrub.status if model.provenance.scrub else None,
+                flags=[f.reason for f in model.review_flags or []], blob_shas=shas,
+                scrub_status=await _with_blobs(session, actor.tenant_id, model, shas),
                 created_by=actor.key,
             )  # fmt: skip
 
-    async def _store_imported_version(
+    async def _import_run(
         self,
         session: AsyncSession,
         actor: Subject,
-        suite: store.SuiteRow,
-        document: JsonObject,
-        loaded: LoadedSuite,
+        manifest: Manifest,
+        loaded: LoadedRun,
+        renamed: dict[str, str],
+        signature: str,
     ) -> None:
-        statuses: dict[tuple[str, int], str | None] = {}
-        for case in loaded.cases:
-            model = _case_model(case)
-            statuses[(model.id, model.revision)] = (
-                model.provenance.scrub.status if model.provenance.scrub else None
-            )
-        refreshed = await store.suite_by_key(session, tenant_id=suite.tenant_id, key=suite.key)
-        assert refreshed is not None
-        await self._store_version(session, refreshed, document, actor, statuses)
-
-    async def _import_run(
-        self, session: AsyncSession, actor: Subject, loaded: LoadedRun, renamed: dict[str, str]
-    ) -> None:
-        pin = Run.model_validate(loaded.document).suite
-        key = renamed.get(pin.id, pin.id)
+        """Store a run as a record of work done elsewhere: never as one to carry on here."""
+        run = Run.model_validate(loaded.document)
+        key = renamed.get(run.suite.id, run.suite.id)
         suite, _ = await self._suite(session, actor, key, "edit")
-        if await store.suite_document(session, suite_id=suite.id, version=pin.version) is None:
-            raise EvalRefused(
-                f"Run {loaded.document['id']} needs suite {key} version {pin.version}."
-            )
-        document = dict(loaded.document)
-        if key != pin.id:
-            document["suite"] = {"id": key, "version": pin.version}
+        version = await store.suite_document(session, suite_id=suite.id, version=run.suite.version)
+        if version is None:
+            raise EvalRefused(f"Run {run.id} needs suite {key} version {run.suite.version}.")
+        pins = {(str(c["id"]), c["revision"], c["hash"]) for c in _pins_of(version)}
+        items = [RunItem.model_validate(i) for i in loaded.items]
+        if stray := sorted(
+            {i.case.id for i in items if (i.case.id, i.case.revision, i.case.hash) not in pins}
+        ):
+            raise EvalRefused(f"Run {run.id} has cases suite {key} does not pin.", stray)
+        document = {k: v for k, v in loaded.document.items() if k != "approval"}
+        document["suite"] = {"id": key, "version": run.suite.version}
+        if run.status in _UNFINISHED_RUN:
+            document["status"] = "cancelled"
+        if run.origin.kind == "local":
+            origin = RunOrigin(
+                kind="imported", deployment=manifest.source.label,
+                daimon_version=manifest.source.daimon_version,
+            )  # fmt: skip
+            document["origin"] = to_document(origin)
+        documents = [
+            {**raw, "status": "cancelled"} if item.status in ("pending", "running") else raw
+            for raw, item in zip(loaded.items, items, strict=True)
+        ]
+        scrub = await store.version_scrub(session, suite_id=suite.id, version=run.suite.version)
         await store.add_run(
             session, tenant_id=actor.tenant_id, suite_id=suite.id, document=document,
-            items=[(i, blob_refs(i)) for i in loaded.items], scores=loaded.scores,
-            reviews=loaded.reviews, created_by=actor.key,
+            items=[(i, blob_refs(i)) for i in documents], scores=loaded.scores,
+            reviews=loaded.reviews, scrub_status=_worst([manifest.scrub.status, scrub]),
+            created_by=actor.key, signature=signature,
         )  # fmt: skip
+
+
+def eval_service(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    anthropic: AsyncAnthropic | None,
+) -> EvalService:
+    """The service as every surface builds it: blob bytes in the deployment's artifact store
+    when it has one, live arms checked against its agents."""
+    return EvalService(
+        sessions,
+        settings,
+        objects=build_artifact_store(settings.artifacts) if settings.artifacts else None,
+        agents=agent_lookup(sessions, anthropic) if anthropic else None,
+    )
+
+
+# Default channel names are everyday words: faking them would rewrite ordinary text.
+_COMMON_PLACES: Final = frozenset(
+    {"general", "random", "announcements", "help", "support", "dev", "test", "chat", "team",
+     "off-topic", "introductions", "welcome", "rules", "news", "questions", "feedback"}
+)  # fmt: skip
+
+
+def _deployment_entities(names: eval_scrub.DeploymentNames) -> KnownEntities:
+    return KnownEntities(
+        people=[
+            PersonEntry(
+                name=name, handles=[handle] if handle else [], ids=[uid] if uid else [],
+                emails=[email] if email else [],
+            )
+            for name, handle, uid, email in names.people
+        ],
+        channels=[p for p in names.places if p.casefold().lstrip("#") not in _COMMON_PLACES],
+        repos=names.repos,
+    )  # fmt: skip
+
+
+def _matches(entry: BlobEntry, data: bytes) -> bool:
+    return sha256_hex(data) == entry.sha256 and len(data) == entry.size
+
+
+def _measure(spool: IO[bytes]) -> tuple[int, str]:
+    spool.seek(0)
+    digest, size = hashlib.sha256(), 0
+    while chunk := spool.read(1024 * 1024):
+        digest.update(chunk)
+        size += len(chunk)
+    spool.seek(0)
+    return size, digest.hexdigest()
 
 
 def _pins_of(suite: JsonObject) -> list[JsonObject]:
@@ -1073,21 +1273,58 @@ def _case_model(document: JsonObject) -> Case:
     return Case.model_validate(document)
 
 
+def _case_scrub(case: Case) -> str | None:
+    return case.provenance.scrub.status if case.provenance.scrub else None
+
+
+async def _with_blobs(
+    session: AsyncSession, tenant_id: uuid.UUID, case: Case, shas: Iterable[str]
+) -> str | None:
+    """How scrubbed a case is, files included: one that holds a raw file is at best `partial`,
+    so it can be neither shared nor exported as scrubbed."""
+    status = _case_scrub(case)
+    if status != "scrubbed":
+        return status
+    rows = await store.blob_rows(session, tenant_id=tenant_id, shas=shas)
+    return "partial" if any(r.scrub == "unscrubbed" for r in rows.values()) else status
+
+
 def _labelled(
-    suites: Sequence[LoadedSuite], runs: Sequence[LoadedRun]
+    suites: Sequence[LoadedSuite],
+    runs: Sequence[LoadedRun],
+    pinned: Sequence[JsonObject],
+    secret: str,
 ) -> tuple[list[LoadedSuite], list[LoadedRun]]:
-    """Suites and runs with people as labels, numbered across the whole bundle. Cases are left
-    as they are: their hash covers them, and scrubbing has already replaced people there."""
-    flat = [s.document for s in suites]
-    for run in runs:
-        flat += [run.document, *run.scores, *run.reviews]
-    labelled = iter(_label_people(flat))
-    new_suites = [LoadedSuite(next(labelled), s.cases) for s in suites]
+    """Suites and runs with people as labels. A case changed by that gets a new hash, which
+    the suites pinning it and the run items running it follow."""
+    rehashed: dict[str, str] = {}
+
+    def case(document: JsonObject) -> JsonObject:
+        labelled = _label_people(document, secret)
+        labelled["hash"] = case_hash(labelled)
+        rehashed[str(document["hash"])] = str(labelled["hash"])
+        return labelled
+
+    def pin(ref: JsonValue) -> JsonValue:
+        if isinstance(ref, dict) and isinstance(ref.get("hash"), str):
+            return {**ref, "hash": rehashed.get(str(ref["hash"]), ref["hash"])}
+        return ref
+
+    new_suites: list[LoadedSuite] = []
+    for suite in suites:
+        cases = [case(c) for c in suite.cases]
+        document = _label_people(suite.document, secret)
+        document["cases"] = [pin(r) for r in _pins_of(document)]
+        new_suites.append(LoadedSuite(document, cases))
+    for document in pinned:
+        case(document)
     new_runs = [
         LoadedRun(
-            next(labelled), r.items, [next(labelled) for _ in r.scores],
-            [next(labelled) for _ in r.reviews],
+            _label_people(r.document, secret),
+            [{**i, "case": pin(i.get("case"))} for i in r.items],
+            [_label_people(s, secret) for s in r.scores],
+            [_label_people(v, secret) for v in r.reviews],
         )
         for r in runs
-    ]  # fmt: skip
+    ]
     return new_suites, new_runs

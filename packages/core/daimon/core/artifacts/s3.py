@@ -10,13 +10,20 @@ from urllib.parse import quote
 
 # Botocore does not ship inline type metadata for these runtime imports.
 from botocore.config import Config  # pyright: ignore[reportMissingTypeStubs]
+from botocore.exceptions import ClientError  # pyright: ignore[reportMissingTypeStubs]
 from botocore.session import Session  # pyright: ignore[reportMissingTypeStubs]
-from daimon.core.artifacts import ArtifactStore, StoredArtifact
+from daimon.core.artifacts.store import ArtifactStore, StoredArtifact
 from daimon.core.config import ArtifactsSettings
+
+
+class _Body(Protocol):
+    def read(self) -> bytes: ...
 
 
 class _S3Client(Protocol):
     def put_object(self, **kwargs: object) -> object: ...
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, _Body]: ...
 
     def generate_presigned_url(
         self,
@@ -82,11 +89,30 @@ class S3ArtifactStore:
             expires_at=self._clock() + dt.timedelta(seconds=ttl_seconds),
         )
 
+    async def put(self, *, key: str, content: bytes, content_type: str) -> None:
+        await asyncio.to_thread(
+            self._client.put_object,
+            Bucket=self._bucket, Key=key, Body=content, ContentType=content_type,
+        )  # fmt: skip
+
+    async def read(self, *, key: str) -> bytes | None:
+        def _read() -> bytes | None:
+            try:
+                return self._client.get_object(Bucket=self._bucket, Key=key)["Body"].read()
+            except ClientError as error:
+                response = cast("dict[str, dict[str, str]]", error.response)
+                code = response.get("Error", {}).get("Code")
+                if code in ("NoSuchKey", "404"):
+                    return None
+                raise
+
+        return await asyncio.to_thread(_read)
+
 
 def build_artifact_store(settings: ArtifactsSettings) -> ArtifactStore:
     """Construct the configured private store from validated settings."""
     if settings.backend == "azure_blob":
-        from daimon.adapters.mcp.artifacts.azure_blob import build_azure_blob_store
+        from daimon.core.artifacts.azure_blob import build_azure_blob_store
 
         return build_azure_blob_store(settings)
     client = Session().create_client(  # pyright: ignore[reportUnknownMemberType]  # botocore has no inline types

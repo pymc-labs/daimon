@@ -18,12 +18,13 @@ from daimon.core.evals.bundle import BundleHeader, build_files
 from daimon.core.evals.format import (
     BlobEntry,
     JsonObject,
+    PrincipalRef,
     ScrubStatus,
     SourceInfo,
     case_hash,
     sha256_hex,
 )
-from daimon.core.evals.scrub.engine import Scrubber
+from daimon.core.evals.scrub.engine import PAYLOAD, Scrubber
 from daimon.core.evals.scrub.fakes import keyed_hash
 from daimon.core.evals.scrub.files import rebuild
 from daimon.core.evals.scrub.sweep import Leftover, sweep_blob, sweep_document
@@ -37,6 +38,8 @@ from daimon.core.evals.validate import (
 from pydantic import JsonValue
 
 POLICY: Final = "default/1"
+# Message and clock times are kept to the hour: an exact time can single out a thread.
+_TIMES: Final = (("history", "at"), ("turn", "messages", "at"), ("clock", "now"))
 
 
 @dataclass
@@ -91,16 +94,40 @@ def _flag(case: JsonObject, reason: str, detail: str) -> None:
     case["review_flags"] = flags
 
 
+def _hour(value: JsonValue) -> JsonValue:
+    if not isinstance(value, str):
+        return value
+    try:
+        at = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    at = at.astimezone(UTC) if at.tzinfo else at
+    return at.strftime("%Y-%m-%dT%H:00:00Z" if at.tzinfo else "%Y-%m-%dT%H:00:00")
+
+
+def _coarse_times(node: JsonValue, path: tuple[str, ...]) -> None:
+    if isinstance(node, list):
+        for item in node:
+            _coarse_times(item, path)
+    elif isinstance(node, dict) and path:
+        head, rest = path[0], path[1:]
+        if not rest and head in node:
+            node[head] = _hour(node[head])
+        elif rest:
+            _coarse_times(node.get(head), rest)
+
+
 def scrub_case(
-    scrubber: Scrubber, case: JsonObject, *, blob_reasons: Mapping[str, str] | None = None
+    scrubber: Scrubber, case: JsonObject, *, blobs: Mapping[str, ScrubbedBlob] | None = None
 ) -> tuple[JsonObject, list[Leftover]]:
     """`case` with fakes, a scrub record, review flags and a fresh hash; plus its leftovers.
 
-    Blobs the case references must already be scrubbed; `blob_reasons` (sha256 to flag reason)
-    puts their checks on the case. Raw text is never kept: `source_ref` and `source_thread` become
-    keyed hashes.
+    Blobs the case references must already be scrubbed and be in `blobs` (by sha256): their
+    checks go on the case, and one left as it was (or not given) keeps the case `partial`. Raw
+    text is never kept: `source_ref` and `source_thread` become keyed hashes.
     """
     before = sum(scrubber.counts.values())
+    dropped = scrubber.counts[PAYLOAD]
     keyed = {
         k: f"kh:{keyed_hash(scrubber.key, k, str(v))[:24]}"
         for k in ("source_thread",)
@@ -114,15 +141,21 @@ def scrub_case(
     provenance = out.get("provenance")
     if isinstance(provenance, dict) and ref is not None:
         provenance["source_ref"] = f"kh:{keyed_hash(scrubber.key, 'source_ref', str(ref))[:24]}"
+    for path in _TIMES:
+        _coarse_times(out, path)
+    if isinstance(provenance, dict) and "recorded_at" in provenance:
+        provenance["recorded_at"] = _hour(provenance["recorded_at"])
     where = f"case {out.get('id')}"
     leftovers = sweep_document(scrubber, out, where)
-    reasons = Counter(
-        r
-        for sha in {str(n["sha256"]) for n in ref_nodes(out)}
-        if (r := (blob_reasons or {}).get(str(sha)))
-    )
+    used = [(blobs or {}).get(sha) for sha in {str(n["sha256"]) for n in ref_nodes(out)}]
+    reasons = Counter(b.reason for b in used if b and b.reason)
     for reason in reasons:
         _flag(out, reason, f"{reasons[reason]} file(s) need a person's check")
+    raw = sum(1 for b in used if b is None or b.scrub == "unscrubbed")
+    if raw:
+        leftovers.append(Leftover(where, "unscrubbed_blob", raw))
+    if scrubber.counts[PAYLOAD] > dropped:
+        _flag(out, "world_incomplete", "Embedded files were removed.")
     clean = not leftovers and scrubber.names_checked
     if not clean:
         _flag(out, "scrub_uncertain", "Some private text may remain; check before sharing.")
@@ -193,17 +226,18 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         *(d for r in loaded.runs for d in (r.document, *r.items, *r.scores, *r.reviews)),
     ]
     names = _ref_names(documents)
+    for document in documents:
+        scrubber.learn(document)  # names learned anywhere are replaced everywhere
     report = ScrubReport(status="scrubbed", names_checked=scrubber.names_checked)
     mapping: dict[str, _NewBlob] = {}
-    reasons: dict[str, str] = {}
+    scrubbed_blobs: dict[str, ScrubbedBlob] = {}
     blobs_out: dict[BlobEntry, bytes] = {}
     for entry in manifest.blobs:
         data = source.read(f"{BLOB_DIR}{entry.sha256}")
         done = scrub_blob(scrubber, data, entry.media_type, names.get(entry.sha256))
         sha = sha256_hex(done.data)
         mapping[entry.sha256] = _NewBlob(sha, len(done.data), done.media_type, done.scrub)
-        if done.reason:
-            reasons[sha] = done.reason
+        scrubbed_blobs[sha] = done
         blobs_out[
             BlobEntry(
                 sha256=sha, size=len(done.data), media_type=done.media_type,
@@ -215,13 +249,10 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         report.blobs["needs_human_check"] = (
             report.blobs.get("needs_human_check", 0) + done.needs_human_check
         )
-        report.leftovers += (
-            [Leftover(f"blob {sha[:12]}", "unsupported_blob", 1)]
-            if done.scrub == "unscrubbed"
-            else sweep_blob(
+        if done.scrub != "unscrubbed":  # an unscrubbed one is reported by each case using it
+            report.leftovers += sweep_blob(
                 scrubber, done.data, done.media_type, names.get(entry.sha256), f"blob {sha[:12]}"
             )
-        )
     for doc in documents:
         _retarget(doc, mapping)
     new_hash: dict[tuple[str, int, str], str] = {}
@@ -231,7 +262,7 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
         cases: list[JsonObject] = []
         for case in suite.cases:
             old = (str(case["id"]), int(str(case["revision"])), str(case.get("hash")))
-            fresh, left = scrub_case(scrubber, case, blob_reasons=reasons)
+            fresh, left = scrub_case(scrubber, case, blobs=scrubbed_blobs)
             new_hash[old] = str(fresh["hash"])
             report.leftovers += left
             status = _obj(_obj(fresh.get("provenance")).get("scrub")).get("status")
@@ -271,16 +302,25 @@ def scrub_bundle(source: BundleSource, scrubber: Scrubber) -> tuple[dict[str, by
                 [d for d in scrubbed[2] if isinstance(d, dict)],
             )
         )  # fmt: skip
+    title = scrubber.text(manifest.title) if manifest.title else None
+    label = scrubber.text(manifest.source.label) if manifest.source.label else None
+    report.leftovers += sweep_document(scrubber, {"title": title, "label": label}, "bundle")
     partial = partial or bool(report.leftovers)
     report.status = "partial" if partial else "scrubbed"
     report.replaced = dict(scrubber.counts - start)
+    who = manifest.created_by
     header = BundleHeader(
         id=manifest.id,
         created_at=datetime.now(UTC),
-        source=SourceInfo.model_validate(manifest.source.model_dump(exclude_none=True)),
+        # The instance is the deployment's own address: dropped, never faked.
+        source=SourceInfo(kind=manifest.source.kind, label=label),
         scrub_status=report.status,
-        title=manifest.title,
-        created_by=manifest.created_by,
+        title=title,
+        created_by=PrincipalRef(
+            kind="label", id=f"person-{keyed_hash(scrubber.key, 'person', who.id)[:8]}"
+        )
+        if who and who.kind != "label"
+        else who,
         includes_identities=manifest.includes_identities,
     )
     return build_files(header, suites, runs, blobs_out), report

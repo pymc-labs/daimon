@@ -15,6 +15,9 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._dm_groups import slack_groups, slack_http, teams_groups
 from daimon.adapters.mcp.tools._eval_threads import thread_source
 from daimon.adapters.mcp.tools._file_handles import staged_uploads
+from daimon.adapters.mcp.tools.channels import (
+    _read_policy,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
 from daimon.core.dm_access import member_roles, resolve_groups
 from daimon.core.evals.access import GroupLookup, Share, Subject, WorkspaceRole, platform_groups
@@ -26,13 +29,13 @@ from daimon.core.evals.service import (
     CaseSummary,
     DedupeReport,
     EvalRefused,
-    EvalService,
     ExportRequest,
     ImportReport,
     Page,
     RunItemSummary,
     SuiteDraft,
     SuiteSummary,
+    eval_service,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -67,11 +70,10 @@ def _groups(runtime: McpRuntime, auth: AuthIdentity, user_id: str) -> GroupLooku
 
 
 def eval_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
-    """Who is calling: admins manage everything, clients of another organisation nothing."""
+    """Who is calling: admins manage everything, clients of another organisation nothing.
+    External agent keys and held turns are never admins (`admin_for`)."""
     user_id = auth.platform_user_id
-    role: WorkspaceRole = (
-        "admin" if auth.is_admin else "visitor" if auth.foreign_home_id else "member"
-    )
+    role: WorkspaceRole = "admin" if auth.admin_for() else "visitor" if auth.client else "member"
     subject = Subject(
         tenant_id=auth.tenant_id,
         platform=auth.platform or "",
@@ -83,7 +85,7 @@ def eval_subject(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
 
 
 def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    service = EvalService(runtime.session_factory, runtime.settings)
+    service = eval_service(runtime.session_factory, runtime.settings, runtime.client)
 
     async def actor(ctx: Context) -> Subject:
         return eval_subject(runtime, await _auth(ctx))
@@ -102,12 +104,14 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def eval_suite_create(ctx: Context, draft: SuiteDraft) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
-        """Create an eval suite with no cases; you own it. Add cases with eval_case_put."""
+        """Create an eval suite with no cases; you own it. Add cases with eval_case_put, then
+        pin them with eval_suite_update."""
         return to_document(await _call(service.save_suite(await actor(ctx), draft, new=True)))
 
     @mcp.tool
     async def eval_suite_update(ctx: Context, draft: SuiteDraft) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
-        """Save the next version of an eval suite. Leave `cases` out to keep the cases it has."""
+        """Save the next version of an eval suite. `cases` pins case revisions (no revision:
+        the latest); leave it out to keep the cases it pins."""
         return to_document(await _call(service.save_suite(await actor(ctx), draft, new=False)))
 
     @mcp.tool
@@ -137,8 +141,8 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def eval_case_put(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, suite_id: str, case: JsonObject
     ) -> CaseRef:
-        """Add a case to an eval suite, or save its next revision. Check it first with
-        eval_case_validate; the hash is filled in when missing."""
+        """Add a case to an eval suite, or save its next revision; eval_suite_update pins it.
+        Check it first with eval_case_validate; the hash is filled in when missing."""
         return await _call(service.put_case(await actor(ctx), suite_id, case))
 
     @mcp.tool
@@ -148,12 +152,13 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def eval_case_from_thread(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, suite_id: str, link: str
+        ctx: Context, suite_id: str, link: str, origin_context_id: str | None = None
     ) -> list[CaseRef]:
         """Make scrubbed eval cases from a thread you can read, given its link: one case per turn
-        the agent answered. People, places and secrets are replaced before anything is saved."""
+        the agent answered. People, places and secrets are replaced before anything is saved.
+        Threads under a sealed channel need origin_context_id, as read_thread does."""
         auth = await _auth(ctx)
-        source = thread_source(runtime, auth)
+        source = thread_source(runtime, auth, await _read_policy(runtime, auth, origin_context_id))
         return await _call(
             service.cases_from_thread(eval_subject(runtime, auth), source, link, suite_id)
         )
@@ -188,41 +193,56 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def eval_arm_create(ctx: Context, arm: Arm) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
-        """Create an arm, or change one you created. Admins can change any arm."""
+        """Create an arm, or change one you created. Admins can change any arm. A live arm's
+        agent must be one of this workspace's; its config hash is computed for you."""
         return to_document(await _call(service.save_arm(await actor(ctx), arm)))
 
     @mcp.tool
     async def eval_items_list(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, run_id: str, offset: int = 0, limit: int = 50
+        ctx: Context, run_id: str, offset: int = 0, limit: int = 50, blind: bool = False
     ) -> list[RunItemSummary]:
-        """List the items of an eval run, a page at a time (at most 500)."""
+        """List the items of an eval run, a page at a time (at most 500). `blind` names the
+        arms by neutral labels; reviewers always see them so."""
         page = Page(offset=offset, limit=limit)
-        return await _call(service.items(await actor(ctx), run_id, page))
+        return await _call(service.items(await actor(ctx), run_id, page, blind=blind))
 
     @mcp.tool
     async def eval_item_get(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, item_id: str, blind: bool = False
     ) -> JsonObject:
-        """Read one eval run item: its transcript, calls and outcome. `blind` hides the arm."""
-        subject = await actor(ctx)
-        found = service.item(subject, item_id, blind_for=subject.key if blind else None)
-        return to_document(await _call(found))
+        """Read one eval run item: its transcript, calls and outcome. `blind` hides the arm
+        and model; reviewers always get it so."""
+        return to_document(await _call(service.item(await actor(ctx), item_id, blind=blind)))
 
     @mcp.tool
     async def eval_bundle_export(ctx: Context, request: ExportRequest) -> JsonObject:  # pyright: ignore[reportUnusedFunction]
-        """Export suites and runs as a bundle. People are replaced by labels unless an owner
-        or admin keeps them. Returns the bundle file's sha256 and size."""
-        return to_document(await _call(service.export_bundle(await actor(ctx), request)))
+        """Export suites and runs as a bundle. People are replaced by labels unless an admin
+        keeps them. Returns a short-lived download link. Encrypted bundles are exported from the
+        command line."""
+        store = runtime.artifact_store
+        if store is None or runtime.settings.artifacts is None:
+            raise ToolError("Downloads are not set up here. Ask an admin or an owner.")
+        bundle = await _call(service.export_bundle(await actor(ctx), request))
+        stored = await store.upload_and_presign(
+            key=f"evals/{(await _auth(ctx)).tenant_id}/exports/{bundle.name}",
+            content=await bundle.read(),
+            content_type=bundle.media_type,
+            ttl_seconds=runtime.settings.artifacts.url_ttl_seconds,
+        )
+        return {
+            "name": bundle.name, "size": bundle.size, "sha256": bundle.sha256, "url": stored.url,
+            "expires_at": stored.expires_at.isoformat(),
+        }  # fmt: skip
 
     @mcp.tool
     async def eval_bundle_import(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         file_handle: str,
         accept_unscrubbed: bool = False,
-        passphrase: str | None = None,
     ) -> ImportReport:
         """Import a bundle uploaded with create_file_upload_url. Only an owner or an admin
-        can accept one that is not scrubbed. Give the passphrase of an encrypted bundle."""
+        can accept one that is not scrubbed. Encrypted bundles are imported from the command
+        line."""
         auth = await _auth(ctx)
         [(_, data)] = await staged_uploads(
             [file_handle], session_factory=runtime.session_factory, tenant_id=auth.tenant_id
@@ -235,6 +255,5 @@ def register_eval_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             eval_subject(runtime, auth),
             chunks(),
             accept_unscrubbed=accept_unscrubbed,
-            passphrase=passphrase,
         )
         return await _call(work)

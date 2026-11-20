@@ -1,7 +1,8 @@
 """`ThreadSource`s for Discord, Slack and Teams threads, over the read tools the caller already has.
 
-Each reads through the same implementation (and so the same access checks) as `read_thread`; the
-caller sees nothing they could not read. A chat platform keeps no tool calls, so these are text
+Each reads through the same implementation and the same channel read policy (sealed channels,
+channel-held keys, the Teams group-chat refusal) as `read_thread`; the caller sees nothing they
+could not read there. A chat platform keeps no tool calls, so these are text
 recordings. Files are fetched when the platform gives a link, else listed by name only.
 """
 
@@ -14,7 +15,7 @@ from typing import Any, Final, cast
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import OPEN_READ_POLICY
+from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
 from daimon.adapters.mcp.tools.discord._read import (
     _parse_link_impl,  # pyright: ignore[reportPrivateUsage]
     _read_thread_impl,  # pyright: ignore[reportPrivateUsage]
@@ -83,8 +84,10 @@ def _people(known: dict[str, ThreadPerson], person: ThreadPerson) -> None:
 
 
 class DiscordThreadSource:
-    def __init__(self, runtime: McpRuntime, auth: AuthIdentity) -> None:
-        self._runtime, self._auth = runtime, auth
+    def __init__(
+        self, runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy
+    ) -> None:
+        self._runtime, self._auth, self._policy = runtime, auth, read_policy
 
     async def thread(self, ref: str) -> ThreadRecord:
         try:
@@ -100,8 +103,9 @@ class DiscordThreadSource:
             try:
                 while count < MAX_MESSAGES:
                     result = await _read_thread_impl(
-                        self._runtime, self._auth, thread_id=thread_id, limit=_PAGE, before=before
-                    )
+                        self._runtime, self._auth, thread_id=thread_id, limit=_PAGE,
+                        before=before, read_policy=self._policy,
+                    )  # fmt: skip
                     batch: list[ThreadMessage] = []
                     for row in result.rows:
                         bot = row.role == "assistant"
@@ -109,7 +113,7 @@ class DiscordThreadSource:
                             people,
                             ThreadPerson(
                                 id=row.author_id, name=row.author_username or row.author_id,
-                                is_bot=bot,
+                                handle=row.author_username or None, is_bot=bot,
                             ),
                         )  # fmt: skip
                         files = [await _file(a.filename, a.url) for a in row.attachments]
@@ -133,12 +137,15 @@ class DiscordThreadSource:
         return ThreadRecord(
             platform="discord", ref=ref, conversation="thread", people=list(people.values()),
             messages=messages,
+            place_ids=[i for i in (link.guild_id, link.channel_id, link.message_id) if i],
         )  # fmt: skip
 
 
 class SlackThreadSource:
-    def __init__(self, runtime: McpRuntime, auth: AuthIdentity) -> None:
-        self._runtime, self._auth = runtime, auth
+    def __init__(
+        self, runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy
+    ) -> None:
+        self._runtime, self._auth, self._policy = runtime, auth, read_policy
 
     async def thread(self, ref: str) -> ThreadRecord:
         team_id = self._auth.external_id
@@ -158,15 +165,18 @@ class SlackThreadSource:
         while len(found) < MAX_MESSAGES:
             try:
                 result = await _slack_read_thread_impl(
-                    self._runtime, self._auth, thread_id=thread_id, limit=_PAGE, cursor=cursor
-                )
+                    self._runtime, self._auth, thread_id=thread_id, limit=_PAGE, cursor=cursor,
+                    read_policy=self._policy,
+                )  # fmt: skip
             except ToolError:
                 raise ThreadNotFound(ref) from None
             for row in result.messages:
                 who = row.user_id or "unknown"
                 _people(
                     people,
-                    ThreadPerson(id=who, name=row.username or who, is_bot=who == bot_id),
+                    ThreadPerson(
+                        id=who, name=row.username or who, handle=row.username, is_bot=who == bot_id
+                    ),
                 )  # fmt: skip
                 files = [await _file(f.name, f.url, f.mimetype) for f in row.files]
                 found[row.ts] = ThreadMessage(
@@ -179,13 +189,15 @@ class SlackThreadSource:
         messages = [found[ts] for ts in sorted(found, key=float)]
         return ThreadRecord(
             platform="slack", ref=ref, conversation="thread", people=list(people.values()),
-            messages=messages,
+            messages=messages, place_ids=[team_id, link.channel_id],
         )  # fmt: skip
 
 
 class TeamsThreadSource:
-    def __init__(self, runtime: McpRuntime, auth: AuthIdentity) -> None:
-        self._runtime, self._auth = runtime, auth
+    def __init__(
+        self, runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy
+    ) -> None:
+        self._runtime, self._auth, self._policy = runtime, auth, read_policy
 
     async def thread(self, ref: str) -> ThreadRecord:
         try:
@@ -201,7 +213,7 @@ class TeamsThreadSource:
             try:
                 result = await _teams_read_thread_impl(
                     self._runtime, self._auth, thread_id=link.thread_id, limit=_PAGE,
-                    cursor=cursor, read_policy=OPEN_READ_POLICY,
+                    cursor=cursor, read_policy=self._policy,
                 )  # fmt: skip
             except ToolError:
                 raise ThreadNotFound(ref) from None
@@ -221,12 +233,14 @@ class TeamsThreadSource:
         messages = sorted(found.values(), key=lambda m: m.at)
         return ThreadRecord(
             platform="teams", ref=ref, conversation="thread", people=list(people.values()),
-            messages=messages,
+            messages=messages, place_ids=[link.channel_id, link.thread_id],
         )  # fmt: skip
 
 
-def thread_source(runtime: McpRuntime, auth: AuthIdentity) -> ThreadSource:
-    """The reader for the caller's own platform."""
+def thread_source(
+    runtime: McpRuntime, auth: AuthIdentity, read_policy: ChannelReadPolicy
+) -> ThreadSource:
+    """The reader for the caller's own platform, under the caller's channel read policy."""
     sources = {
         "discord": DiscordThreadSource,
         "slack": SlackThreadSource,
@@ -235,4 +249,4 @@ def thread_source(runtime: McpRuntime, auth: AuthIdentity) -> ThreadSource:
     source = sources.get(auth.platform or "")
     if source is None:
         raise ToolError("Cases can be made from Discord, Slack and Teams threads here.")
-    return source(runtime, auth)
+    return source(runtime, auth, read_policy)

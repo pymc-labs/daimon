@@ -1,7 +1,8 @@
 """Scrub or sweep a bundle on disk with no database: what `daimon evals bundle scrub` runs.
 
-The dictionary file, the key and an optional map file (keyed hashes to fakes, no real values)
-are the only inputs. Reuse the same key and map for every bundle of a suite so fakes stay the same.
+The dictionary file, the key, a salt (the tenant or project the data belongs to) and a map file
+(keyed hashes to fakes, no real values) are the only inputs. Reuse the same key, salt and map for
+every bundle of a suite so fakes stay the same; a map made with another key or salt is refused.
 """
 
 from __future__ import annotations
@@ -25,34 +26,44 @@ from daimon.core.evals.format import JsonObject
 from daimon.core.evals.scrub.bundle import ScrubReport, scrub_bundle
 from daimon.core.evals.scrub.engine import Scrubber
 from daimon.core.evals.scrub.entities import load_entities
+from daimon.core.evals.scrub.fakes import key_check, scrub_key
 from daimon.core.evals.scrub.sweep import Leftover, sweep_blob, sweep_document
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
 
 MIN_KEY: Final = 16
 
 
+def _read_map(path: Path, check: str) -> dict[tuple[str, str], str]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    if data.get("check") != check:
+        raise InvalidDocument(["the map was made with another key or salt"])
+    return {(r["kind"], r["hash"]): r["fake"] for r in data["entries"]}
+
+
 def load_scrubber(
-    entities: Path, key: str, *, map_path: Path | None = None, ner_model: str | None
+    entities: Path, key: str, *, salt: str, map_path: Path | None = None, ner_model: str | None
 ) -> Scrubber:
     if len(key) < MIN_KEY:
         raise InvalidDocument([f"the scrub key must be at least {MIN_KEY} characters"])
-    known: dict[tuple[str, str], str] = {}
-    if map_path is not None and map_path.exists():
-        rows = json.loads(map_path.read_text())["entries"]
-        known = {(r["kind"], r["hash"]): r["fake"] for r in rows}
-    return Scrubber(load_entities(entities), key.encode(), ner_model=ner_model, known=known)
+    if not salt.strip():
+        raise InvalidDocument(["the salt must not be empty"])
+    check = key_check(scrub_key(key.encode(), salt))
+    known = _read_map(map_path, check) if map_path is not None else {}
+    return Scrubber(
+        load_entities(entities), key.encode(), salt=salt, ner_model=ner_model, known=known
+    )
 
 
 def save_map(scrubber: Scrubber, path: Path) -> None:
     """Write the map, past entries and new, owner-readable only: it is private data."""
-    rows: dict[tuple[str, str], str] = {}
-    if path.exists():
-        rows = {(r["kind"], r["hash"]): r["fake"] for r in json.loads(path.read_text())["entries"]}
+    rows = _read_map(path, scrubber.key_check)
     rows.update(scrubber.fakes.added)
     entries = [{"kind": k, "hash": h, "fake": f} for (k, h), f in sorted(rows.items())]
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as out:
-        json.dump({"entries": entries}, out, indent=1)
+        json.dump({"check": scrubber.key_check, "entries": entries}, out, indent=1)
 
 
 def _write(files: dict[str, bytes], target: Path, *, as_zip: bool, passphrase: str | None) -> None:
@@ -107,6 +118,18 @@ def leftovers_of(
         for r in ref_nodes(d)
         if r.get("name")
     }
+    found += sweep_document(
+        scrubber,
+        {
+            "title": manifest.title,
+            "label": manifest.source.label,
+            "instance": manifest.source.instance,
+            "by": manifest.created_by.display_name if manifest.created_by else None,
+        },
+        "bundle",
+    )
+    if manifest.created_by and manifest.created_by.kind != "label":
+        found.append(Leftover("bundle", "person", 1))
     for where, document in documents:
         found += sweep_document(scrubber, document, where)
     for blob in manifest.blobs:

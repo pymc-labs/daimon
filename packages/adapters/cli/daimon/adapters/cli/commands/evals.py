@@ -21,7 +21,7 @@ from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_
 from daimon.core.config import load_settings
 from daimon.core.errors import DaimonError
 from daimon.core.evals.access import Share, Subject
-from daimon.core.evals.bundle import open_path
+from daimon.core.evals.bundle import DirSource, open_path, to_zip
 from daimon.core.evals.draft import auxiliary_completer
 from daimon.core.evals.format import Arm, JsonObject, to_document
 from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
@@ -36,11 +36,12 @@ from daimon.core.evals.service import (
     ExportRequest,
     Page,
     SuiteDraft,
+    eval_service,
 )
 from daimon.core.evals.validate import InvalidDocument, validate_bundle
 from daimon.core.evals.web_thread import WebChatSource
 from daimon.core.stores.tenants import get_tenant
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 
 evals_app = typer.Typer(help="Eval suites, cases, arms, run items and bundles.")
@@ -73,7 +74,13 @@ _KEY = typer.Option(
     envvar="DAIMON_EVALS__SCRUB_KEY",
     help="Scrub key, at least 16 characters. Prefer the environment variable.",
 )
-_MAP = typer.Option("--map", help="Fake map file, kept between runs (private; read and written).")
+_MAP = typer.Option(
+    "--map", help="Fake map file, kept between runs (private; read and written). Required."
+)
+_SALT = typer.Option(
+    "--salt",
+    help="Tenant or suite name mixed into the key; use the same one on every run. Required.",
+)
 _NER = typer.Option("--ner-model", help="spaCy model for names; empty to use known names only.")
 
 
@@ -131,7 +138,8 @@ def _run_rt(
                 operator=True,
             )
             try:
-                _print(await work(EvalService(rt.sessionmaker, rt.settings), actor, rt))
+                service = eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
+                _print(await work(service, actor, rt))
             except EvalRefused as exc:
                 raise _Failed("; ".join((exc.message, *exc.problems))) from None
 
@@ -143,16 +151,23 @@ def suites_list(ctx: typer.Context) -> None:
     _run(ctx, lambda s, a: s.suites(a))
 
 
-@suites_app.command("get")
-def suites_get(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
+@suites_app.command("show")
+def suites_show(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
     _run(ctx, lambda s, a: s.suite(a, suite_id, version))
 
 
-@suites_app.command("save")
-def suites_save(ctx: typer.Context, draft: Path) -> None:
-    """Create a suite or save its next version from a JSON draft."""
+@suites_app.command("create")
+def suites_create(ctx: typer.Context, draft: Path) -> None:
+    """Create a suite with no cases from a JSON draft."""
     parsed = SuiteDraft.model_validate(_read_json(draft))
-    _run(ctx, lambda s, a: s.save_suite(a, parsed))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=True))
+
+
+@suites_app.command("edit")
+def suites_edit(ctx: typer.Context, draft: Path) -> None:
+    """Save a suite's next version from a JSON draft; its `cases` pin case revisions."""
+    parsed = SuiteDraft.model_validate(_read_json(draft))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=False))
 
 
 @suites_app.command("share")
@@ -172,14 +187,16 @@ def cases_list(ctx: typer.Context, suite_id: str, version: int | None = None) ->
     _run(ctx, lambda s, a: s.cases(a, suite_id, version))
 
 
-@cases_app.command("get")
-def cases_get(ctx: typer.Context, suite_id: str, case_id: str, revision: int | None = None) -> None:
+@cases_app.command("show")
+def cases_show(
+    ctx: typer.Context, suite_id: str, case_id: str, revision: int | None = None
+) -> None:
     _run(ctx, lambda s, a: s.case(a, suite_id, case_id, revision))
 
 
 @cases_app.command("put")
 def cases_put(ctx: typer.Context, suite_id: str, case: Path) -> None:
-    """Add a case from a JSON file, or save its next revision."""
+    """Add a case from a JSON file, or save its next revision; `suites edit` pins it."""
     document = _read_json(case)
     _run(ctx, lambda s, a: s.put_case(a, suite_id, document))
 
@@ -271,8 +288,8 @@ def arms_list(ctx: typer.Context) -> None:
     _run(ctx, lambda s, a: s.arms(a))
 
 
-@arms_app.command("save")
-def arms_save(ctx: typer.Context, arm: Path) -> None:
+@arms_app.command("create")
+def arms_create(ctx: typer.Context, arm: Path) -> None:
     parsed = Arm.model_validate(_read_json(arm))
     _run(ctx, lambda s, a: s.save_arm(a, parsed))
 
@@ -282,8 +299,8 @@ def items_list(ctx: typer.Context, run_id: str, offset: int = 0, limit: int = 50
     _run(ctx, lambda s, a: s.items(a, run_id, Page(offset=offset, limit=limit)))
 
 
-@items_app.command("get")
-def items_get(ctx: typer.Context, item_id: str) -> None:
+@items_app.command("show")
+def items_show(ctx: typer.Context, item_id: str) -> None:
     _run(ctx, lambda s, a: s.item(a, item_id))
 
 
@@ -292,9 +309,8 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
     """Check a bundle folder, zip or encrypted file, offline. Exits 1 on any problem."""
     try:
         report = validate_bundle(open_path(path, passphrase=passphrase))
-    except (InvalidDocument, OSError) as failed:
-        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
-        warnings, counts = [], {}
+    except InvalidDocument as failed:
+        problems, warnings, counts = list(failed.problems), [], {}
     else:
         problems, warnings = report.problems, report.warnings
         counts = {
@@ -309,11 +325,17 @@ def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] =
         raise typer.Exit(code=1)
 
 
-def _scrubber(entities: Path | None, key: str | None, map_path: Path | None, ner: str) -> Scrubber:
+def _scrubber(
+    entities: Path | None, key: str | None, salt: str, map_path: Path, ner: str
+) -> Scrubber:
     if entities is None or not key:
         raise typer.BadParameter("--entities and a scrub key (DAIMON_EVALS__SCRUB_KEY) are needed.")
     try:
-        return load_scrubber(entities, key, map_path=map_path, ner_model=ner or None)
+        return load_scrubber(entities, key, salt=salt, map_path=map_path, ner_model=ner or None)
+    except ValidationError as failed:
+        # Only where and what kind: the message would quote the private names.
+        bad = [f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in failed.errors()]
+        raise _Failed("the entities file is not valid: " + "; ".join(bad)) from None
     except (InvalidDocument, OSError, ValueError) as failed:
         problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
         raise _Failed("; ".join(problems)) from None
@@ -326,25 +348,25 @@ def _leftover_rows(found: Sequence[Leftover]) -> list[JsonObject]:
 @bundle_app.command("scrub")
 def bundle_scrub(
     path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
     out: Annotated[Path | None, typer.Option("--out", help="Write here, not in place.")] = None,
-    map_path: Annotated[Path | None, _MAP] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
 ) -> None:
     """Scrub a bundle folder, zip or encrypted file offline, in place or into --out.
 
-    Prints counts and places only, never the text found. Exits 1 when something is left.
+    Prints counts and places only, never the text found. Exits 1 unless fully scrubbed.
     """
-    scrubber = _scrubber(entities, key, map_path, ner_model)
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model)
     try:
         report = scrub_path(path, out, scrubber, passphrase=passphrase)
     except (InvalidDocument, OSError) as failed:
         problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
         raise _Failed("; ".join(problems)) from None
-    if map_path is not None:
-        save_map(scrubber, map_path)
+    save_map(scrubber, map_path)
     _print(
         {
             "status": report.status,
@@ -355,21 +377,22 @@ def bundle_scrub(
             "leftovers": _leftover_rows(report.leftovers),
         }
     )
-    if report.leftovers:
+    if report.leftovers or report.status != "scrubbed":
         raise typer.Exit(code=1)
 
 
 @bundle_app.command("leftovers")
 def bundle_leftovers(
     path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
     entities: Annotated[Path | None, _ENTITIES] = None,
     key: Annotated[str | None, _KEY] = None,
-    map_path: Annotated[Path | None, _MAP] = None,
     ner_model: Annotated[str, _NER] = "en_core_web_sm",
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
 ) -> None:
     """List what a scrub would still change in a bundle, by place and kind. Exits 1 if any."""
-    scrubber = _scrubber(entities, key, map_path, ner_model)
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model)
     try:
         found = leftovers_of(path, scrubber, passphrase=passphrase)
     except (InvalidDocument, OSError) as failed:
@@ -394,16 +417,16 @@ def bundle_export(
         {
             "suites": [{"id": s} for s in suite or []],
             "runs": run or [],
-            "passphrase": passphrase,
             "include_identities": include_identities,
         }
     )
 
     async def work(s: EvalService, a: Subject) -> JsonObject:
-        ref = await s.export_bundle(a, request)
-        _, content = await s.blob(a, ref.sha256)
-        out.write_bytes(content)
-        return to_document(ref)
+        bundle = await s.export_bundle(a, request, passphrase=passphrase)
+        with out.open("wb") as target:
+            async for chunk in bundle.chunks():
+                target.write(chunk)
+        return {"name": bundle.name, "size": bundle.size, "sha256": bundle.sha256}
 
     _run(ctx, work)
 
@@ -415,8 +438,12 @@ def bundle_import(
     passphrase: Annotated[str | None, _PASSPHRASE] = None,
     accept_unscrubbed: bool = False,
 ) -> None:
-    """Import a bundle zip or encrypted file into the workspace."""
-    data = path.read_bytes()
+    """Import a bundle folder, zip or encrypted file into the workspace."""
+    if path.is_dir():
+        source = DirSource(path)
+        data = to_zip({name: source.read(name) for name in source.names()})
+    else:
+        data = path.read_bytes()
 
     async def chunks() -> AsyncIterator[bytes]:
         yield data

@@ -2,14 +2,16 @@
 
 A JSON or YAML file with a list per kind. Person entries are a name or an object with
 `aliases`, `emails`, `handles` and `ids`; companies, projects and channels may be a name or
-`{name, aliases}`. Every other kind is a list of strings.
+`{name, aliases}`. Every other kind (groups and roles among them) is a list of strings.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
 
@@ -17,10 +19,19 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 TermKind = Literal[
-    "person", "person_first", "person_last", "email", "handle", "company", "project", "host",
-    "repo", "channel", "phrase", "id",
+    "person", "person_first", "person_last", "email", "handle", "company", "company_first",
+    "project", "host", "repo", "channel", "phrase", "id",
 ]  # fmt: skip
 MIN_PART: Final = 3
+_LEGAL: Final = re.compile(
+    r"[,\s]+(?:inc|incorporated|corp|corporation|co|company|ltd|limited|llc|llp|plc|gmbh|ag|sa"
+    r"|bv|nv|oy|ab|as|pty|srl|spa|kk|group|holdings|industries|labs|technologies|systems)\.?$",
+    re.IGNORECASE,
+)
+_COMMON_FIRST: Final = frozenset(
+    {"the", "new", "first", "global", "united", "national", "international", "general", "big",
+     "open", "best", "great", "north", "south", "east", "west", "american", "european"}
+)  # fmt: skip
 
 
 class _Model(BaseModel):
@@ -48,6 +59,8 @@ class KnownEntities(_Model):
     hostnames: list[str] = Field(default_factory=list[str])
     repos: list[str] = Field(default_factory=list[str])
     channels: list[str | NamedEntry] = Field(default_factory=list[str | NamedEntry])
+    groups: list[str] = Field(default_factory=list[str])
+    """Roles, user groups and teams."""
     ids: list[str] = Field(default_factory=list[str])
     phrases: list[str] = Field(default_factory=list[str])
 
@@ -61,8 +74,27 @@ class Term:
     of: str | None = None
 
 
+_LETTERS: Final = {
+    "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ß": "ss", "æ": "ae",
+    "Æ": "AE", "œ": "oe", "Œ": "OE", "ı": "i", "þ": "th", "Þ": "Th", "ð": "d",
+}  # fmt: skip
+
+
+@lru_cache(maxsize=8192)
+def fold_char(ch: str) -> str:
+    """`ch` without accents; zero-width marks and soft hyphens become nothing."""
+    if ch.isascii():
+        return ch
+    if unicodedata.category(ch) == "Cf":
+        return ""
+    if ch in _LETTERS:
+        return _LETTERS[ch]
+    return "".join(c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c))
+
+
 def normalize(text: str) -> str:
-    return " ".join(text.casefold().split())
+    """Case, accents and spacing folded: what a fake is keyed by."""
+    return " ".join("".join(fold_char(c) for c in text).casefold().split())
 
 
 def load_entities(path: Path) -> KnownEntities:
@@ -74,6 +106,21 @@ def load_entities(path: Path) -> KnownEntities:
 def _named(entry: str | NamedEntry, kind: TermKind) -> list[Term]:
     name, aliases = (entry, []) if isinstance(entry, str) else (entry.name, entry.aliases)
     return [Term(kind, name), *(Term(kind, a, of=name) for a in aliases)]
+
+
+def _company(entry: str | NamedEntry) -> list[Term]:
+    """The company, its aliases, and its short forms: "Acme" and "Acme Corp" for "Acme Corp Inc"."""
+    terms = _named(entry, "company")
+    name = terms[0].text
+    short = name
+    while (cut := _LEGAL.sub("", short)) != short and cut:
+        short = cut
+    first = re.split(r"[\s,]+", short.strip())[0]
+    if first != name and len(first) >= MIN_PART and first.casefold() not in _COMMON_FIRST:
+        terms.append(Term("company_first", first, of=name))
+    if short not in (name, first) and len(short) >= MIN_PART:
+        terms.append(Term("company", short, of=name))
+    return terms
 
 
 def _person(entry: str | PersonEntry) -> list[Term]:
@@ -115,7 +162,7 @@ def terms_of(entities: KnownEntities) -> list[Term]:
         found += _person(p)
     found += [Term("email", e) for e in entities.emails]
     for c in entities.companies:
-        found += _named(c, "company")
+        found += _company(c)
     for pr in entities.projects:
         found += _named(pr, "project")
     found += [Term("host", h) for h in entities.hostnames]
@@ -123,6 +170,7 @@ def terms_of(entities: KnownEntities) -> list[Term]:
         found += _repo(r)
     for ch in entities.channels:
         found += [Term(t.kind, re.sub(r"^#", "", t.text), t.of) for t in _named(ch, "channel")]
+    found += [Term("channel", g) for g in entities.groups]
     found += [Term("id", i) for i in entities.ids]
     found += [Term("phrase", p) for p in entities.phrases]
     unique: dict[str, Term] = {}

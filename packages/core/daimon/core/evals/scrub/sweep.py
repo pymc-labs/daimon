@@ -35,6 +35,9 @@ class Probe:
         self.found += self._scrubber.residue_of(node, key=key)
         return node
 
+    def learn(self, node: JsonValue, *, key: str = "") -> None:
+        pass
+
     def spans(self, text: str) -> list[tuple[int, int]]:
         return []
 

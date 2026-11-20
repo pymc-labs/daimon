@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
+import zipfile
 from pathlib import Path
 
 import pytest
 from daimon.core.evals.bundle import (
+    ENC_MAGIC,
     DirSource,
     ZipSource,
     decrypt,
@@ -17,7 +20,7 @@ from daimon.core.evals.bundle import (
     to_zip,
 )
 from daimon.core.evals.format import canonical_json, sha256_hex
-from daimon.core.evals.validate import validate_bundle
+from daimon.core.evals.validate import InvalidDocument, validate_bundle
 
 EXAMPLE = Path(__file__).parent / "example_bundle"
 
@@ -100,3 +103,51 @@ def test_canonical_json_when_keys_need_utf16_order_then_sorted_by_code_units() -
     document = {"\u20ac": 1, "\U0001f600": 2, "a": [True, None, "\n"]}
     expected = '{"a":[true,null,"\\n"],"\u20ac":1,"\U0001f600":2}'
     assert canonical_json(document) == expected.encode(), "keys sort by UTF-16 code units"
+
+
+def _example_files() -> dict[str, bytes]:
+    return {name: DirSource(EXAMPLE).read(name) for name in DirSource(EXAMPLE).names()}
+
+
+def test_encrypted_bundle_when_scrypt_costs_differ_then_refused_before_deriving() -> None:
+    magic, header, sealed = encrypt(b"zip", "pw").split(b"\n", 2)
+    costly = json.loads(header) | {"n": 2**20, "r": 16, "p": 4}
+    forged = b"\n".join((magic, json.dumps(costly).encode(), sealed))
+    assert forged.startswith(ENC_MAGIC), "still looks like an encrypted bundle"
+    with pytest.raises(InvalidDocument, match="not the ones Daimon writes"):
+        decrypt(forged, "pw")
+
+
+def test_zip_when_names_repeat_or_entries_corrupt_then_problems_not_crashes() -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive, pytest.warns(UserWarning):
+        archive.writestr("bundle.json", b"{}")
+        archive.writestr("bundle.json", b"{}")
+    with pytest.raises(InvalidDocument, match="in the zip twice"):
+        ZipSource(out.getvalue())
+    data = bytearray(to_zip(_example_files()))
+    at = data.index(b"bundle.json") + len("bundle.json")
+    data[at : at + 64] = bytes(64)  # break the manifest's compressed bytes
+    problems = validate_bundle(ZipSource(bytes(data))).problems
+    assert problems, "a damaged entry is a problem, never an exception"
+
+
+def test_manifest_when_paths_repeat_or_stray_then_refused_before_reading(tmp_path: Path) -> None:
+    root = _copy(tmp_path)
+    manifest = json.loads((root / "bundle.json").read_text())
+    run = manifest["contents"]["runs"][0]
+    run["scores_path"] = run["items_path"]
+    (root / "bundle.json").write_text(json.dumps(manifest))
+    problems = validate_bundle(DirSource(root)).problems
+    assert any("should be" in p for p in problems), f"non-canonical path: {problems}"
+    manifest["contents"]["runs"].append(manifest["contents"]["runs"][0])
+    (root / "bundle.json").write_text(json.dumps(manifest | {"format_version": "1.5"}))
+    problems = validate_bundle(DirSource(root)).problems
+    assert problems == ["bundle.json: format 1.5 is newer than this Daimon reads (1.0)"], problems
+
+
+def test_folder_when_manifest_points_outside_then_refused(tmp_path: Path) -> None:
+    root = _copy(tmp_path)
+    (tmp_path / "secret.txt").write_text("not part of the bundle")
+    with pytest.raises(InvalidDocument, match="outside the bundle folder"):
+        DirSource(root).read("../secret.txt")

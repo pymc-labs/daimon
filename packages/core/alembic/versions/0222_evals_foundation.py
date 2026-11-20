@@ -1,7 +1,8 @@
 """Evals: suites, case revisions, blobs, shares, arms, runs, items, scores, reviews, bundles.
 
-Fifteen new tables, all tenant scoped. Documents are JSONB copies of the bundle format;
-columns carry what queries filter on. Additive only.
+Sixteen new tables, all tenant scoped. Documents are JSONB copies of the bundle format;
+columns carry what queries filter on. Blob bytes live in the artifact store; `content` holds
+them only where none is set up. Additive only.
 
 downgrade: destructive
 """
@@ -34,7 +35,10 @@ _TABLES = (
     "eval_review_assignments",
     "eval_comments",
     "eval_bundles",
+    "eval_instances",
 )
+_SCRUB = "scrub_status IN ('scrubbed', 'partial', 'unscrubbed')"
+_SIGNATURE = "signature IS NULL OR signature IN ('unsigned', 'unknown_key', 'valid')"
 
 
 def upgrade() -> None:
@@ -47,7 +51,7 @@ def upgrade() -> None:
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("owner_key", sa.Text(), nullable=False),
         sa.Column("current_version", sa.Integer(), nullable=False),
-        sa.Column("scrub_status", sa.Text(), server_default="scrubbed", nullable=False),
+        sa.Column("scrub_status", sa.Text(), nullable=False),
         sa.Column("source_instance", sa.Text(), nullable=True),
         sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
@@ -62,10 +66,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint(
-            "scrub_status IN ('scrubbed', 'partial', 'unscrubbed')",
-            name="ck_eval_suites_scrub_status",
-        ),
+        sa.CheckConstraint(_SCRUB, name="ck_eval_suites_scrub_status"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("tenant_id", "key", name="uq_eval_suites_tenant_key"),
@@ -76,6 +77,8 @@ def upgrade() -> None:
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("tenant_id", sa.UUID(), nullable=False),
         sa.Column("document", postgresql.JSONB(astext_type=Text()), nullable=False),
+        sa.Column("scrub_status", sa.Text(), nullable=False),
+        sa.Column("signature", sa.Text(), nullable=True),
         sa.Column("created_by", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
@@ -83,6 +86,8 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.CheckConstraint(_SCRUB, name="ck_eval_suite_versions_scrub_status"),
+        sa.CheckConstraint(_SIGNATURE, name="ck_eval_suite_versions_signature"),
         sa.ForeignKeyConstraint(["suite_id"], ["eval_suites.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("suite_id", "version"),
@@ -160,7 +165,7 @@ def upgrade() -> None:
         sa.Column(
             "needs_human_check", sa.Boolean(), server_default=sa.text("false"), nullable=False
         ),
-        sa.Column("content", sa.LargeBinary(), nullable=False),
+        sa.Column("content", sa.LargeBinary(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -218,6 +223,8 @@ def upgrade() -> None:
         sa.Column("suite_version", sa.Integer(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False),
         sa.Column("origin", sa.Text(), nullable=False),
+        sa.Column("scrub_status", sa.Text(), nullable=False),
+        sa.Column("signature", sa.Text(), nullable=True),
         sa.Column("document", postgresql.JSONB(astext_type=Text()), nullable=False),
         sa.Column("cap_usd", sa.Numeric(precision=12, scale=4), nullable=True),
         sa.Column("spend_usd", sa.Numeric(precision=12, scale=4), nullable=True),
@@ -234,6 +241,8 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.CheckConstraint(_SCRUB, name="ck_eval_runs_scrub_status"),
+        sa.CheckConstraint(_SIGNATURE, name="ck_eval_runs_signature"),
         sa.ForeignKeyConstraint(["suite_id"], ["eval_suites.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
@@ -348,7 +357,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["suite_id"], ["eval_suites.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("tenant_id", "key", name="uq_eval_comments_tenant_key"),
+        sa.UniqueConstraint("run_id", "key", name="uq_eval_comments_run_key"),
+        sa.UniqueConstraint("suite_id", "key", name="uq_eval_comments_suite_key"),
     )
     op.create_table(
         "eval_bundles",
@@ -359,7 +369,7 @@ def upgrade() -> None:
         sa.Column("manifest", postgresql.JSONB(astext_type=Text()), nullable=False),
         sa.Column("actor_key", sa.Text(), nullable=False),
         sa.Column("scrub_status", sa.Text(), nullable=False),
-        sa.Column("blob_sha256", sa.Text(), nullable=True),
+        sa.Column("signature", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -367,12 +377,23 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint("direction IN ('export', 'import')", name="ck_eval_bundles_direction"),
-        sa.CheckConstraint(
-            "scrub_status IN ('scrubbed', 'partial', 'unscrubbed')",
-            name="ck_eval_bundles_scrub_status",
-        ),
+        sa.CheckConstraint(_SCRUB, name="ck_eval_bundles_scrub_status"),
+        sa.CheckConstraint(_SIGNATURE, name="ck_eval_bundles_signature"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_table(
+        "eval_instances",
+        sa.Column("tenant_id", sa.UUID(), nullable=False),
+        sa.Column("secret", sa.Text(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("tenant_id"),
     )
 
 
