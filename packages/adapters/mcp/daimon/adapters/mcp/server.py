@@ -557,7 +557,7 @@ def create_mcp_app(
         effective_sessionmaker,
         ModelSimulator(effective_anthropic, effective_sessionmaker, eval_settings.simulator_model,
                        eval_settings.simulator_effort),
-        git_root=Path(tempfile.gettempdir()) / "daimon-eval-git",
+        git_root=Path(tempfile.gettempdir()) / "daimon-eval-git", objects=artifact_store,
     )  # fmt: skip
     runtime = McpRuntime(
         session_factory=effective_sessionmaker,

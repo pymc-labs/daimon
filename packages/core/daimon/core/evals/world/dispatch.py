@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, Literal
 
+from daimon.core.evals.blobs import ObjectStore, object_key
 from daimon.core.evals.format import (
     BlobRef,
     Body,
@@ -172,14 +173,33 @@ class FakeWorld:
     simulator: Simulator | None
     git_root: Path
     services: tuple[Service, ...] = (GithubService(), GoogleService(), WebService())
+    objects: ObjectStore | None = None
     _items: OrderedDict[uuid.UUID, ItemRef] = field(default_factory=OrderedDict[uuid.UUID, ItemRef])
 
     def __post_init__(self) -> None:
         self.git = GitService(self.git_root, self._load_blob)
 
+    async def _put_blob(
+        self, session: AsyncSession, tenant_id: uuid.UUID, row: BlobRow, content: bytes
+    ) -> None:
+        """As the eval service keeps blobs: in the artifact store when there is one."""
+        if self.objects is not None:
+            key = object_key(tenant_id, row.sha256)
+            await self.objects.put(key=key, content=content, content_type=row.media_type)
+        kept = None if self.objects is not None else content
+        await evals.put_blob(session, tenant_id=tenant_id, blob=row, content=kept)
+
+    async def _read_blob(
+        self, session: AsyncSession, tenant_id: uuid.UUID, sha256: str
+    ) -> bytes | None:
+        content = await evals.blob_content(session, tenant_id=tenant_id, sha256=sha256)
+        if content is None and self.objects is not None:
+            content = await self.objects.read(key=object_key(tenant_id, sha256))
+        return content
+
     async def _load_blob(self, item: ItemRef, sha256: str) -> bytes:
         async with self.sessions() as session:
-            content = await evals.blob_content(session, tenant_id=item.tenant_id, sha256=sha256)
+            content = await self._read_blob(session, item.tenant_id, sha256)
         if content is None:
             raise ItemNotRunningError(f"blob {sha256} of item {item.id} is missing")
         return content
@@ -330,7 +350,7 @@ class FakeWorld:
         for ref, content in overlay.blobs.values() if overlay else ():
             row = BlobRow(sha256=ref.sha256, size=ref.size, media_type=ref.media_type,
                           scrub="generated", needs_human_check=False)  # fmt: skip
-            await evals.put_blob(session, tenant_id=item.tenant_id, blob=row, content=content)
+            await self._put_blob(session, item.tenant_id, row, content)
         record = WorldCall(
             seq=seq, surface=surface or request.surface, service=request.service,
             server=request.server, tool=request.tool, request=request.request,
@@ -364,7 +384,7 @@ class FakeWorld:
         sha = body.blob.sha256
         if sha in overlay.blobs:
             return overlay.blobs[sha][1]
-        return await evals.blob_content(session, tenant_id=item.tenant_id, sha256=sha) or b""
+        return await self._read_blob(session, item.tenant_id, sha) or b""
 
     @staticmethod
     async def _verdict(session: AsyncSession, item: ItemRef, judge: _Judge) -> bool | None:

@@ -148,6 +148,32 @@ async def _git(*args: str, cwd: Path | None = None) -> str:
     return out.decode()
 
 
+class _Objects:
+    def __init__(self) -> None:
+        self.kept: dict[str, bytes] = {}
+
+    async def put(self, *, key: str, content: bytes, content_type: str) -> None:
+        self.kept[key] = content
+
+    async def read(self, *, key: str) -> bytes | None:
+        return self.kept.get(key)
+
+
+async def test_a_request_blob_when_the_deployment_has_an_object_store_then_it_is_kept_there(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    objects = _Objects()
+    world = FakeWorld(db_session_factory, None, tmp_path, objects=objects)
+    item = await _item(db_session, db_session_factory, world, eval_case({}))
+    await world.http(item, HttpCall("POST", "https://api.example.com/upload", {}, b"\xff\xfe"))
+    sha = hashlib.sha256(b"\xff\xfe").hexdigest()
+    assert list(objects.kept.values()) == [b"\xff\xfe"], "the bytes go to the object store"
+    async with db_session_factory() as session:
+        kept = await evals.blob_content(session, tenant_id=item.tenant_id, sha256=sha)
+        assert kept is None, "the database keeps only the blob's row"
+        assert await world._read_blob(session, item.tenant_id, sha) == b"\xff\xfe"  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.mark.parametrize(
     "url", ["https://github.com/../../x/github.com/acme/app", "https://../../../../home/app/repo"]
 )

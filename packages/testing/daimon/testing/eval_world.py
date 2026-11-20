@@ -42,7 +42,7 @@ async def make_running_item(session: AsyncSession, tenant_id: uuid.UUID, case: C
     """Suite, case revision, run and one running item of `case`, flushed; the item's id."""
     document, key = to_document(case), uuid.uuid4().hex[:12]
     suite = EvalSuite(tenant_id=tenant_id, key=f"suite-{key}", name="World",
-                      owner_key="web:alex", current_version=1)  # fmt: skip
+                      owner_key="web:alex", current_version=1, scrub_status="scrubbed")  # fmt: skip
     session.add(suite)
     await session.flush()
     row = EvalCase(tenant_id=tenant_id, suite_id=suite.id, key=case.id, current_revision=1)
@@ -52,7 +52,8 @@ async def make_running_item(session: AsyncSession, tenant_id: uuid.UUID, case: C
                                  document=document, sha256=case_hash(document),
                                  fidelity=case.fidelity.level))  # fmt: skip
     run = EvalRun(tenant_id=tenant_id, key=f"run-{key}", suite_id=suite.id, suite_version=1,
-                  status="running", origin="local", document={})  # fmt: skip
+                  status="running", origin="local", scrub_status="scrubbed",
+                  document={})  # fmt: skip
     session.add(run)
     await session.flush()
     item = EvalRunItem(tenant_id=tenant_id, run_id=run.id, key="item", case_key=case.id,
