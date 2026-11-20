@@ -11,9 +11,25 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 
-#: A member's state after an event: listed with this admin flag, or None for gone.
-MemberChange = bool | None
+
+@dataclass(frozen=True)
+class MemberState:
+    """A listed member: their admin flag and, where the platform has roles, their role ids.
+
+    `role_ids` of None means the platform keeps none (Slack), so a write leaves them alone.
+    """
+
+    is_admin: bool
+    role_ids: tuple[str, ...] | None = None
+
+
+#: A listed member as a platform writes it: a bare admin flag, or the full state.
+MemberValue = bool | MemberState
+
+#: A member's state after an event: listed as this, or None for gone.
+MemberChange = MemberValue | None
 
 
 class ReloadChanges:
@@ -47,9 +63,11 @@ class ReloadChanges:
         return dict(changes)
 
 
-def overlay(members: Mapping[str, bool], changes: Mapping[str, MemberChange]) -> dict[str, bool]:
+def overlay(
+    members: Mapping[str, MemberValue], changes: Mapping[str, MemberChange]
+) -> dict[str, MemberValue]:
     """The platform's list read with the changes events made since laid over it."""
-    merged = dict(members)
+    merged: dict[str, MemberValue] = dict(members)
     for user_id, change in changes.items():
         if change is None:
             merged.pop(user_id, None)

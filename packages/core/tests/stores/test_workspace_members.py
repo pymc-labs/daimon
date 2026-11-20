@@ -113,3 +113,50 @@ async def test_clear_platform_lists_forgets_only_that_platforms_lists(
         db_session, platform_user_id="u", tenant_ids=ids
     )
     assert found == {slack_tenant.id}, "the cleared platform's members are gone"
+
+
+async def test_role_ids_are_stored_and_standing_is_read_from_the_current_internal_roles(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.member_reloads import MemberState
+
+    tenant = await make_tenant(db_session, workspace_id="333333333333333333")
+
+    async def standing(user: str, internal: tuple[str, ...]) -> bool | None:
+        return await members_store.member_is_internal(
+            db_session, tenant_id=tenant.id, user_id=user, internal_role_ids=internal
+        )
+
+    assert await standing("a", ("r1",)) is None, "not in the mirror"
+    await members_store.replace_members(
+        db_session,
+        tenant_id=tenant.id,
+        members={"a": MemberState(False, ("r1",)), "b": MemberState(True, ()), "legacy": True},
+        workspace_name="G",
+        now=_NOW,
+    )
+    assert await standing("a", ("r1",)) is True
+    assert await standing("a", ("r2",)) is False, "the policy changed, with no reload"
+    assert await standing("b", ("r1",)) is False
+    assert await standing("legacy", ("r1",)) is None, "a row with no recorded roles says nothing"
+
+    await members_store.upsert_member(
+        db_session,
+        tenant_id=tenant.id,
+        platform_user_id="legacy",
+        is_admin=False,
+        role_ids=("r1",),
+        now=_NOW,
+    )
+    await members_store.apply_changes(
+        db_session,
+        tenant_id=tenant.id,
+        changes={"a": MemberState(False, ("r2",)), "b": False, "c": None},
+        now=_NOW,
+    )
+    await members_store.update_member_states(
+        db_session, tenant_id=tenant.id, states={"legacy": MemberState(True, ("r3",))}, now=_NOW
+    )
+    assert await standing("legacy", ("r3",)) is True
+    assert await standing("a", ("r2",)) is True, "a role change event keeps the roles current"
+    assert await standing("b", ("r1",)) is False, "a bare flag leaves stored roles alone"
