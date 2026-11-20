@@ -195,7 +195,7 @@ from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from daimon.core.workflows import waits as workflow_waits
 from daimon.core.workflows.action_step import ActionStepExecutor
-from daimon.core.workflows.agent_step import AgentStepExecutor
+from daimon.core.workflows.agent_step import AgentStepExecutor, session_files
 from daimon.core.workflows.call_step import WorkflowStepExecutor
 from daimon.core.workflows.code_step import CodeStepExecutor
 from daimon.core.workflows.code_worker import ManagedCodeWorker
@@ -2175,6 +2175,7 @@ async def run(
                 lane_turn,
                 tool_client,
                 owner_dm=workflows.OwnerDmTurn(sm, settings, dm_turn_deps),
+                collect_files=functools.partial(session_files, client),
             ),
             "action": ActionStepExecutor(sm, settings, tool_client),
             "workflow": WorkflowStepExecutor(sm, settings),
