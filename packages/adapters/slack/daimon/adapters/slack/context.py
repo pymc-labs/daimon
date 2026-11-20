@@ -27,15 +27,18 @@ import asyncio
 from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
-from xml.sax.saxutils import escape, quoteattr
 
 import aiohttp
 import structlog
 from daimon.adapters.slack.attachments import ProxyUrlContext, build_proxy_url
 from daimon.adapters.slack.channel_reads import ChannelReadPolicy
 from daimon.adapters.slack.vision import SlackFile
-from daimon.core.turn_keys import render_keys_element
-from daimon.core.untrusted import untrusted_block
+from daimon.core.chat_history import (
+    ContextOptions,
+    HistoryAttachment,
+    HistoryMessage,
+    render_context,
+)
 from slack_sdk.errors import SlackApiError
 from slack_sdk.http_retry.builtin_async_handlers import AsyncRateLimitErrorRetryHandler
 from slack_sdk.web.async_client import AsyncWebClient
@@ -94,65 +97,51 @@ def _message_text(msg: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _render_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> list[str]:
-    """Render a single Slack message dict as XML lines.
-
-    When the proxy is configured, each attached file becomes an
-    ``<attachment>`` element whose ``url`` is a signed proxy URL the agent can
-    fetch; otherwise files are omitted (no fetchable handle available).
-    Attribute values are XML-quoted; text content is XML-escaped.
-    """
-    user_id = str(msg.get("user", ""))
-    username = str(msg.get("username", "") or msg.get("user", ""))
-    ts = str(msg.get("ts", ""))
-    is_bot = "true" if "bot_id" in msg else "false"
-    text = escape(_message_text(msg))
-
-    attrs = (
-        f" user_id={quoteattr(user_id)}"
-        f" username={quoteattr(username)}"
-        f" is_bot={quoteattr(is_bot)}"
-        f" timestamp={quoteattr(ts)}"
-    )
-
+def _history_message(msg: dict[str, Any], *, proxy: ProxyUrlContext | None) -> HistoryMessage:
+    """A Slack message dict as a neutral history message. With the proxy configured each
+    attached file carries a signed proxy URL the agent can fetch; otherwise files are
+    omitted (no fetchable handle available)."""
     files: list[dict[str, Any]] = msg.get("files", []) if proxy is not None else []
-    if proxy is None or not files:
-        return [f"<message{attrs}>{text}</message>"]
-
-    lines = [f"<message{attrs}>", text, "<attachments>"]
-    for f in files:
-        proxy_url = build_proxy_url(cast("SlackFile", f), proxy)
-        att_attrs = (
-            f" name={quoteattr(str(f.get('name', 'file')))}"
-            f" url={quoteattr(proxy_url)}"
-            f" mimetype={quoteattr(str(f.get('mimetype', 'unknown')))}"
-        )
-        lines.append(f"<attachment{att_attrs}/>")
-    lines.append("</attachments>")
-    lines.append("</message>")
-    return lines
-
-
-def _user_query_open_tag(author_id: str, is_admin: bool, author_name: str | None = None) -> str:
-    """Opening <user_query> tag, with quoted author_id/is_admin attributes when present.
-
-    ``author_name`` is the requester's display name; it is rendered, quoted and
-    escaped, only when non-empty and ``author_id`` is set. It is user-controlled
-    text: the model treats it as data, like the rest of the tag.
-
-    ``is_admin`` is rendered as the lowercase literal ``"true"``/``"false"``
-    (``is_admin="true|false"``, matching Discord's rendering
-    byte-for-byte), never Python's ``True``/``False``. When ``author_id`` is
-    empty the tag stays bare (back-compat) and ``is_admin`` is not rendered —
-    there is no caller identity to attach it to.
-    """
-    if not author_id:
-        return "<user_query>"
-    name_attr = f" author_name={quoteattr(author_name)}" if author_name else ""
-    return (
-        f"<user_query author_id={quoteattr(author_id)}"
-        f" is_admin={quoteattr('true' if is_admin else 'false')}{name_attr}>"
+    return HistoryMessage(
+        user_id=str(msg.get("user", "")),
+        username=str(msg.get("username", "") or msg.get("user", "")),
+        is_bot="bot_id" in msg,
+        timestamp=str(msg.get("ts", "")),
+        text=_message_text(msg),
+        attachments=tuple(
+            HistoryAttachment(
+                name=str(f.get("name", "file")),
+                url=build_proxy_url(cast("SlackFile", f), proxy),
+                media_type=str(f.get("mimetype", "unknown")),
+            )
+            for f in files
+            if proxy is not None
+        ),
     )
+
+
+def _render(
+    channel: str,
+    messages: Sequence[dict[str, Any]],
+    *,
+    block: str,
+    attrs: dict[str, str],
+    user_query: str,
+    author_id: str,
+    is_admin: bool,
+    author_name: str | None,
+    proxy: ProxyUrlContext | None,
+    key_names: Sequence[str],
+) -> str:
+    return render_context(
+        "slack",
+        [_history_message(m, proxy=proxy) for m in messages],
+        HistoryMessage(user_id=author_id, username="", is_bot=False, timestamp="", text=user_query),
+        ContextOptions(
+            channel_id=channel, block=block, block_attrs=attrs, key_names=key_names,
+            is_admin=is_admin, author_name=author_name,
+        ),
+    )  # fmt: skip
 
 
 async def build_context_xml(
@@ -197,25 +186,11 @@ async def build_context_xml(
         messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
         truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
-    lines: list[str] = [
-        "<context>",
-        f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
-    body = [
-        line
-        for msg in _replayed(messages, status_ts=status_ts)
-        for line in _render_message(msg, proxy=proxy)
-    ]
-    lines.extend(untrusted_block("thread_history", body, _history_attrs(truncated=truncated)))
-    lines.append("</context>")
-    lines.append("")
-    lines.append(
-        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
-    )
-
-    return "\n".join(lines)
+    return _render(
+        channel, _replayed(messages, status_ts=status_ts), block="thread_history",
+        attrs=_history_attrs(truncated=truncated), user_query=user_query, author_id=author_id,
+        is_admin=is_admin, author_name=author_name, proxy=proxy, key_names=key_names,
+    )  # fmt: skip
 
 
 async def build_delta_xml(
@@ -258,25 +233,11 @@ async def build_delta_xml(
     messages = cast(list[dict[str, Any]], resp["messages"])  # pyright: ignore[reportUnknownVariableType]
     truncated = bool(resp.get("has_more"))  # pyright: ignore[reportUnknownMemberType]
 
-    lines: list[str] = [
-        "<context>",
-        f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
-    body = [
-        line
-        for msg in _replayed(messages, status_ts=status_ts)
-        for line in _render_message(msg, proxy=proxy)
-    ]
-    lines.extend(untrusted_block("thread_delta", body, _history_attrs(truncated=truncated)))
-    lines.append("</context>")
-    lines.append("")
-    lines.append(
-        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
-    )
-
-    return "\n".join(lines)
+    return _render(
+        channel, _replayed(messages, status_ts=status_ts), block="thread_delta",
+        attrs=_history_attrs(truncated=truncated), user_query=user_query, author_id=author_id,
+        is_admin=is_admin, author_name=author_name, proxy=proxy, key_names=key_names,
+    )  # fmt: skip
 
 
 def _without_rate_limit_wait(client: AsyncWebClient) -> AsyncWebClient:
@@ -362,16 +323,9 @@ async def build_channel_context_xml(
         else await _channel_history(client, channel=channel, trigger_ts=trigger_ts, limit=limit)
     )
 
-    lines: list[str] = [
-        "<context>",
-        f"<channel platform={quoteattr('slack')} id={quoteattr(channel)}/>",
-        render_keys_element(key_names),
-    ]
-    lines = [line for line in lines if line]
     if read_policy is None or history is None:
-        lines.extend(
-            untrusted_block("channel_context", [], {"source": "slack", "status": "unavailable"})
-        )
+        shown: list[dict[str, Any]] = []
+        attrs = {"source": "slack", "status": "unavailable"}
     else:
         messages, has_more = history
         shown = [
@@ -382,12 +336,8 @@ async def build_channel_context_xml(
         attrs = {"source": "slack", "count": str(len(shown))}
         if has_more:
             attrs["truncated"] = "true"
-        body = [line for msg in shown for line in _render_message(msg, proxy=proxy)]
-        lines.extend(untrusted_block("channel_context", body, attrs))
-    lines.append("</context>")
-    lines.append("")
-    lines.append(
-        f"{_user_query_open_tag(author_id, is_admin, author_name)}{escape(user_query)}</user_query>"
-    )
-
-    return "\n".join(lines)
+    return _render(
+        channel, shown, block="channel_context", attrs=attrs, user_query=user_query,
+        author_id=author_id, is_admin=is_admin, author_name=author_name, proxy=proxy,
+        key_names=key_names,
+    )  # fmt: skip

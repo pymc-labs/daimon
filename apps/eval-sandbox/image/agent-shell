@@ -1,0 +1,4 @@
+#!/bin/sh
+# The agent's shell: the agent environment only, then bash with the caller's arguments.
+. /run/eval/state/agent.sh
+exec /bin/bash "$@"

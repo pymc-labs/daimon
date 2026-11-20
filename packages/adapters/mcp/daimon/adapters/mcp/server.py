@@ -11,24 +11,31 @@ any collaborator the caller supplied.
 from __future__ import annotations
 
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
-from daimon.adapters.mcp.artifacts import build_artifact_store
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted_from
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
+from daimon.adapters.mcp.eval_mcp import (
+    EVAL_MCP_ROUTE,
+    EVAL_WORLD_TAG,
+    build_eval_mcp_route,
+)
 from daimon.adapters.mcp.hub.app import mount_hub_apps
 from daimon.adapters.mcp.middleware.call_origin import CallOriginMiddleware
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
+from daimon.adapters.mcp.middleware.eval_world import EvalWorldMiddleware
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
     ClaimResolver,
@@ -53,6 +60,7 @@ from daimon.adapters.mcp.tools import (
     agent_chat,
     agents,
     environments,
+    evals,
     fly,
     long_jobs,
     routines,
@@ -61,6 +69,9 @@ from daimon.adapters.mcp.tools import (
     skills,
     time,
     vault,
+)
+from daimon.adapters.mcp.tools import (
+    eval_world as eval_world_tools,
 )
 from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
@@ -126,12 +137,15 @@ from daimon.adapters.mcp.uploads import build_helper_files_route, build_upload_r
 from daimon.adapters.mcp.web_shell import CSS_SHA256, STATIC_DIR, configure_environment_label
 from daimon.adapters.mcp.webhooks import build_github_webhook, build_stripe_webhook
 from daimon.core.agent_editing import AgentEditDeps
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.config import Settings, load_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
+from daimon.core.evals.world.dispatch import FakeWorld
+from daimon.core.evals.world.simulator import ModelSimulator
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.host_memory import HOST_MEMORY_TAG
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG, PINNED_HOST_TOOLS
@@ -499,6 +513,7 @@ def create_mcp_app(
     # Memory for backends without their own stores: provider turns only.
     mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
     mcp.add_transform(Visibility(False, tags={HOST_WEB_FETCH_TAG}))
+    mcp.add_transform(Visibility(False, tags={EVAL_WORLD_TAG}))  # eval callers only
     # Deployment-wide promo issuing: only an operator token holding the scope
     # re-enables these (middleware/mcp_identity.py); admins never see them.
     mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
@@ -537,6 +552,13 @@ def create_mcp_app(
         else None
     )
 
+    eval_settings = effective_settings.evals
+    eval_world = FakeWorld(
+        effective_sessionmaker,
+        ModelSimulator(effective_anthropic, effective_sessionmaker, eval_settings.simulator_model,
+                       eval_settings.simulator_effort),
+        git_root=Path(tempfile.gettempdir()) / "daimon-eval-git", objects=artifact_store,
+    )  # fmt: skip
     runtime = McpRuntime(
         session_factory=effective_sessionmaker,
         client=effective_anthropic,
@@ -551,6 +573,7 @@ def create_mcp_app(
         slack_http=slack_http,
         microsoft=microsoft,
         identity_key=node_identity_key(effective_settings),
+        eval_world=eval_world,
     )
     from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
 
@@ -558,7 +581,9 @@ def create_mcp_app(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
     mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
-    mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
+    mcp.add_middleware(CapabilityGateMiddleware(runtime))  # reads the identity
+    mcp.add_middleware(EvalWorldMiddleware(eval_world))  # innermost: eval callers never run
+    eval_world_tools.register_eval_world_tools(mcp)
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
     environments.register_environment_tools(mcp, runtime)
@@ -590,6 +615,7 @@ def create_mcp_app(
     register_model_tools(mcp, runtime)  # list_models: names, ids and list prices
     routines.register_routines_tools(mcp, runtime)
     long_jobs.register_long_job_tools(mcp, runtime)
+    evals.register_eval_tools(mcp, runtime)
     fly.register_fly_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     from daimon.adapters.mcp.tools.watches import register_watch_tools
@@ -738,6 +764,7 @@ def create_mcp_app(
                 anthropic=effective_anthropic,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
+                world=eval_world,
             ),
             methods=RELAY_METHODS,
         )
@@ -773,6 +800,7 @@ def create_mcp_app(
         # Served where relay_url points: under the public URL's path (/mcp/connectors/...).
         prefix = urlsplit(public_url).path.rstrip("/")
         app.add_route(prefix + CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST", "DELETE"])
+    app.add_route(EVAL_MCP_ROUTE, build_eval_mcp_route(eval_world), methods=["GET", "POST"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
         "/avatars/{token}/{sha12}.png",

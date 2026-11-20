@@ -96,6 +96,7 @@ _NARROWED: dict[str, str] = {
     "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
+    "eval_package_registries": "operator-only: eval sandboxes belong to the deployment",
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
@@ -112,6 +113,7 @@ _NARROWED: dict[str, str] = {
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
+    "evals": "a team's choice: suites belong to the workspace, not to a channel or agent",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

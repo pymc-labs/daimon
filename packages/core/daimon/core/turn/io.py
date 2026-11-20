@@ -28,7 +28,13 @@ from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backen
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.provider_actions import BoundProviderActions, ProviderActionApproval
 from daimon.core.turn.runtimes import hosted_backend
-from mux.contracts.actions import InputEvent, NativeInput, UserMessage, UserToolConfirmation
+from mux.contracts.actions import (
+    InputEvent,
+    NativeInput,
+    UserMessage,
+    UserToolConfirmation,
+    UserToolResult,
+)
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import ContentPart, Event, ImagePart, TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -208,6 +214,14 @@ def neutral_inputs(events: Sequence[BetaManagedAgentsEventParams]) -> tuple[Inpu
                         }
                     )
                 )
+            case "user.custom_tool_result":
+                inputs.append(
+                    UserToolResult(
+                        action_id=str(event["custom_tool_use_id"]),
+                        content=_content(event["content"]),
+                        is_error=event.get("is_error") is True,
+                    )
+                )
             case "system.message":
                 inputs.append(
                     NativeInput(
@@ -229,7 +243,9 @@ def _send_kind(inputs: Sequence[InputEvent]) -> str:
     action_ids: JsonValue = [
         action_id
         for action_id in sorted(
-            event.action_id for event in inputs if isinstance(event, UserToolConfirmation)
+            event.action_id
+            for event in inputs
+            if isinstance(event, UserToolConfirmation | UserToolResult)
         )
     ]
     return "actions:" + request_digest(action_ids)

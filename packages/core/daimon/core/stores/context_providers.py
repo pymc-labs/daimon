@@ -6,10 +6,11 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from daimon.core._models import ContextProviderBinding, Tenant
+from daimon.core._models import ContextProviderBinding
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
 from daimon.core.context_provider import ProviderConfig
+from daimon.core.stores.tenants import background_tenant_ids
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,7 +91,7 @@ async def set_provider(
 
 async def warmup_configs(session: AsyncSession) -> list[ProviderConfig]:
     """Read live bindings under each active tenant's RLS scope, without credentials."""
-    tenants = await session.scalars(select(Tenant.id).where(Tenant.archived_at.is_(None)))
+    tenants = await session.scalars(background_tenant_ids())
     configs: list[ProviderConfig] = []
     for tenant_id in tenants:
         await _scope(session, tenant_id)

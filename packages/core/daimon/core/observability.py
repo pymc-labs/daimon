@@ -105,7 +105,8 @@ _SECRET_NAME_EXACT: frozenset[str] = frozenset(
     }
 )
 _SECRET_NAME_PATTERN = re.compile(
-    r"token|secret|passw|pwd|api[_-]?key|apikey|auth|cookie|session|signature|credential|"
+    r"token|secret|passw|pass[_-]?phrase|pwd|api[_-]?key|apikey|auth|cookie|session|signature|"
+    r"credential|"
     r"private[_-]?key|verifier|bearer|(?:^|[_.-])(?:keys?|sig|dsn)$"
 )
 # Names that contain a secret-looking word but carry counts, ids or labels.

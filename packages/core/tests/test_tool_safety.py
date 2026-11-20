@@ -287,6 +287,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "change_workspace_settings",
                 "create_watch",
                 "delete_allowance",
+                "eval_run_start",
                 "fly_extend_session",
                 "fly_launch_session",
                 "remove_my_data",

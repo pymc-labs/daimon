@@ -33,6 +33,8 @@ from mux.contracts.resources import (
 from mux.drivers.openai import session_mcp
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
+from mux.drivers.openai.agents import is_eval_agent
+from mux.drivers.openai.environments import SELF_HOSTED
 from mux.drivers.openai.mcp_auth import MCPSecretResolver, non_mcp_tool
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
@@ -108,7 +110,7 @@ class OpenAISessions:
             raise ContinuityLost(binding.id, ("session agent identity changed",))
         environment = object_json(raw["environment"])
         persistent = self._c.profile_id == "openai.persistent_workspace"
-        if persistent and environment.get("type") != "openai_hosted":
+        if persistent and environment.get("type") not in ("openai_hosted", "self_hosted"):
             raise ContinuityLost(binding.id, ("persistent hosted workspace is unavailable",))
         if not persistent and environment.get("type") != "none":
             raise ContinuityLost(binding.id, ("conversation-only environment mode changed",))
@@ -224,6 +226,11 @@ class OpenAISessions:
                     "invalid_request", retryable=False, native_code="initial_input_required"
                 )
             environment: Object = {"type": "none"}
+        elif spec.environment is not None and spec.environment.id == SELF_HOSTED:
+            self._c.check(scope, spec.environment, "environment")
+            if self._controls.container_size is not None or spec.skills:
+                raise self._c.unsupported("self_hosted_environment")
+            environment = {"type": "self_hosted", "workspace_directory": "/workspace"}
         else:
             environment = {"type": "openai_hosted"}
             if self._controls.container_size is not None:
@@ -237,6 +244,8 @@ class OpenAISessions:
         if agent.get("id") != spec.agent.id:
             raise ValueError("wrong session agent identity")
         self._c.record(scope, agent)
+        if environment["type"] == "self_hosted" and not is_eval_agent(agent):
+            raise self._c.unsupported("self_hosted_environment")
         if any(pin.source is not None for pin in spec.skills):
             raise self._c.unsupported("session_skill_source")
         pins = session_pins(decode(agent.get("metadata")), spec.skills)

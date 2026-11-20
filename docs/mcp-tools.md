@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 234 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 263 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,7 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **eval runs only** — carries the `eval-world` tag.
 - **OpenAI and Gemini agents** — carries the `host-memory` tag.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
@@ -271,6 +272,49 @@ Environment tools: list / get / create / update / archive.
 | `get_environment` | all callers | Return one environment by name. |
 | `list_environments` | operator tokens with tenant:read | List environments in the tenant pool. |
 | `update_environment` | admin only | Patch-update an environment. |
+
+## `eval_world`
+
+The search tool eval agents get in place of a provider's own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `web_search` | eval runs only | Search the public web and return the top results: title, link and a short extract. |
+
+## `evals`
+
+Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service`.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `eval_arm_create` | all callers | Create an arm, or change one you created. |
+| `eval_arms_list` | all callers | List the arms (agent setups to compare) in this workspace. |
+| `eval_bundle_export` | all callers | Export suites and runs as a bundle. |
+| `eval_bundle_import` | all callers | Import a bundle uploaded with create_file_upload_url. |
+| `eval_case_from_thread` | all callers | Make scrubbed eval cases from a thread you can read, given its link: one case per turn the agent answered. |
+| `eval_case_get` | all callers | Read one eval case as JSON. |
+| `eval_case_put` | all callers | Add a case to an eval suite, or save its next revision; eval_suite_update pins it. |
+| `eval_case_validate` | all callers | Check an eval case against the format without saving it: problems and warnings. |
+| `eval_cases_dedupe` | all callers | Mark near-duplicate cases of a suite with a group. |
+| `eval_cases_draft_estimate` | all callers | Estimate what it costs to draft expectations for cases with a model. |
+| `eval_cases_list` | all callers | List the cases of an eval suite version. |
+| `eval_comment_add` | all callers | Comment on an eval item or case, or from inside a review task by column letter. |
+| `eval_compare` | all callers | Compare the arms of an eval run side by side, case by case, with each item's replies and scores. |
+| `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
+| `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |
+| `eval_judge_run` | all callers | Estimate what judging an eval run with models would cost. |
+| `eval_review_next` | all callers | Get your next review task from a queue (`run~queue`), or none when none is left. |
+| `eval_review_queues` | all callers | List the open eval review queues you may work, across every run you review. |
+| `eval_review_submit` | all callers | Submit your scores for a review task: one per criterion the task asks for, naming the column (A, B...) each is about. |
+| `eval_run_cancel` | all callers | Stop an eval run: no more items start, and running ones are interrupted. |
+| `eval_run_estimate` | all callers | Estimate what an eval run would cost: low, expected and high in USD, per category. |
+| `eval_run_start` | all callers | Start an eval run that stops once it has spent `cap_usd`. |
+| `eval_run_status` | all callers | Read an eval run: its status, spend so far and estimate. |
+| `eval_suite_create` | all callers | Create an eval suite with no cases; you own it. |
+| `eval_suite_get` | all callers | Read an eval suite: its cases, weights and defaults. |
+| `eval_suite_share` | all callers | Replace who an eval suite is shared with: people or groups, as viewer, reviewer or editor. |
+| `eval_suite_update` | all callers | Save the next version of an eval suite. |
+| `eval_suites_list` | all callers | List the eval suites you can see, with your role on each. |
 
 ## `fly`
 

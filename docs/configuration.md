@@ -17,6 +17,7 @@ typo is silent — check the spelling here.
 
 - [Core](#core)
 - [Compute](#compute)
+- [Evals](#evals)
 - [Long Jobs](#long-jobs)
 - [Monitoring](#monitoring)
 - [Database](#database)
@@ -215,6 +216,199 @@ for at most max_ttl_hours.
 
 Operator-managed image profiles. Empty means no images can be launched. No environment
 or credentials are copied from template apps.
+
+## Evals
+
+Read from `daimon.core.config.EvalsSettings`. Prefix `DAIMON_EVALS__`.
+
+### `DAIMON_EVALS__SIGNING_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Base64 Ed25519 private key (32 raw bytes) that signs exported eval bundles. Unset:
+exports are unsigned.
+
+### `DAIMON_EVALS__TRUSTED_KEYS`
+
+`list[str]` · optional · default unset
+
+Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only bundles
+signed by one of them or by this deployment's signing key.
+
+### `DAIMON_EVALS__SOURCE_LABEL`
+
+`str` · optional · default `daimon`
+
+Label this deployment writes as the source of the bundles it exports.
+
+### `DAIMON_EVALS__MAX_BUNDLE_MB`
+
+`int` · optional · default `128`
+
+Largest eval bundle import or export handles, in MiB.
+
+### `DAIMON_EVALS__SCRUB_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Secret that keys the scrub map (at least 16 characters). Required to scrub real
+conversations into eval cases; changing it changes every fake made afterwards.
+
+### `DAIMON_EVALS__SCRUB_NER_MODEL`
+
+`str` · optional · default `en_core_web_sm`
+
+spaCy model that finds names, places and organizations while scrubbing. Not installed or
+empty: only known names and patterns are found and cases stay partial.
+
+### `DAIMON_EVALS__SCRUB_ENTITIES_FILE`
+
+`str | None` · optional · default unset
+
+JSON or YAML file of known private names added to every scrub.
+
+### `DAIMON_EVALS__DRAFT_MODEL`
+
+`str | None` · optional · default unset
+
+Model that drafts case expectations. Unset: the side-call model.
+
+### `DAIMON_EVALS__SIMULATOR_MODEL`
+
+`str | None` · optional · default unset
+
+Anthropic model that answers eval world calls nobody recorded. Unset: the side-call
+model.
+
+### `DAIMON_EVALS__SIMULATOR_EFFORT`
+
+`'none' | 'low' | 'medium' | 'high'` · optional · default `low`
+
+Effort the eval world simulator runs at.
+
+### `DAIMON_EVALS__WORLD_URL`
+
+`str | None` · optional · default unset
+
+Base URL where eval sandbox gateways reach the eval worker's fake world, e.g.
+http://eval-worker:8090. Unset: no sandbox can be enclosed.
+
+### `DAIMON_EVALS__WORLD_PORT`
+
+`int` · optional · default `8090`
+
+Port the eval worker serves its fake world on, on every interface.
+
+### `DAIMON_EVALS__ENVIRONMENT_ID`
+
+`str | None` · optional · default unset
+
+Self-hosted environment eval items run in, made in the provider's console. Items on it
+run one at a time. Unset: live arms cannot run.
+
+### `DAIMON_EVALS__ENVIRONMENT_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+Environment key the eval sandbox's executor polls that environment with. Unset: live
+arms cannot run.
+
+### `DAIMON_EVALS__SANDBOX_RUNTIME`
+
+`'docker' | 'kubernetes' | None` · optional · default unset
+
+Where eval sandbox pods run: a Docker host or a Kubernetes namespace.
+
+### `DAIMON_EVALS__DOCKER_HOST`
+
+`str` · optional · default `unix:///var/run/docker.sock`
+
+Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS files.
+
+### `DAIMON_EVALS__DOCKER_NETWORK`
+
+`str | None` · optional · default unset
+
+Docker network for eval pods; it must reach the eval world URL. Unset: the default
+bridge.
+
+### `DAIMON_EVALS__DOCKER_TLS_CA`
+
+`Path | None` · optional · default unset
+
+CA file that signs the remote Docker host's certificate.
+
+### `DAIMON_EVALS__DOCKER_TLS_CERT`
+
+`Path | None` · optional · default unset
+
+Client certificate file for the remote Docker host.
+
+### `DAIMON_EVALS__DOCKER_TLS_KEY`
+
+`Path | None` · optional · default unset
+
+Client key file for the remote Docker host.
+
+### `DAIMON_EVALS__KUBERNETES_NAMESPACE`
+
+`str` · optional · default `daimon-evals`
+
+Namespace for eval sandbox pods, reached with the worker's in-cluster service account.
+
+### `DAIMON_EVALS__SANDBOX_IMAGE`
+
+`str | None` · optional · default unset
+
+Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...).
+
+### `DAIMON_EVALS__CA_KEY`
+
+`SecretStr | None` · optional · default unset · secret
+
+PEM RSA private key of the eval CA. Sandbox tools trust it; the gateway mints a
+certificate per host with it. Unset: no sandbox can be enclosed.
+
+### `DAIMON_EVALS__PASSTHROUGH_HOSTS`
+
+`list[str]` · optional · default unset
+
+Extra hosts the eval executor's own user may reach untouched, besides its provider's
+control plane. Matched by TLS server name, not Host. Shells the executor starts run as
+the agent and reach the fake world; commands it starts without a shell run as the
+executor and reach these hosts.
+
+### `DAIMON_EVALS__SANDBOX_RATE_USD_PER_HOUR`
+
+`Decimal` · optional · default `0`
+
+What an hour of one eval sandbox pod costs, for run cost reports.
+
+### `DAIMON_EVALS__JUDGE_MODELS`
+
+`list[JudgeModelSetting]` · optional · default unset
+
+The judge panel for eval runs that name none: each model scores each item and the panel
+votes. Every model needs a known price, and none may share a model or a provider with an
+arm it judges. Empty: judging names its models.
+
+### `DAIMON_EVALS__ADMIN_APPROVAL_USD`
+
+`float` · optional · default `25.0`
+
+Eval spending ceilings above this, in USD, need an admin to approve them.
+
+### `DAIMON_EVALS__WORKER_CONCURRENCY`
+
+`int` · optional · default `2`
+
+Eval items one eval worker runs at once.
+
+### `DAIMON_EVALS__KAPPA_WARN`
+
+`float` · optional · default `0.4`
+
+A judge whose kappa against human scores is below this is flagged.
 
 ## Long Jobs
 
@@ -1142,10 +1336,10 @@ package, where the image build puts it.
 
 ### `DAIMON_WEB__MODULES`
 
-`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
+`tuple['chat' | 'agents' | 'channels' | 'routines' | 'credits' | 'integrations' | 'admin' | 'evals', ...]` · optional · default `chat,agents,channels,routines,credits,integrations,admin`
 
 Sections of the web app that are on, comma-separated: chat, agents, channels, routines,
-credits, integrations, admin.
+credits, integrations, admin. Add evals to offer the evals pages.
 
 ### `DAIMON_WEB__NODES__DATA_SERVER__IDENTITY_SERVER`
 

@@ -472,7 +472,7 @@ _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
-    "chat", "agents", "channels", "routines", "credits", "integrations",
+    "chat", "agents", "channels", "routines", "credits", "integrations", "evals",
 )  # fmt: skip
 
 
@@ -695,6 +695,19 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
         legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
+    ),
+    FeatureSpec(
+        key="eval_package_registries",
+        name="Package registries in eval sandboxes",
+        category="guardrails",
+        effect="guardrail",
+        values={"passthrough": "Reach package registries", "deny": "Block package registries"},
+        default="deny",
+        tiers=("deployment",),
+        binds="turn",
+        doc="Block answers package installs from the fake world.",
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="host_call_gate",
@@ -930,6 +943,14 @@ def _limit(
 
 
 _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
+    _capability(
+        "evals",
+        "Evals",
+        "People build and share eval suites. Off hides evals and their tools.",
+        tiers=("deployment", "workspace"),
+        default="off",
+        authority=_ADMIN,
+    ),
     _capability(
         "watches",
         "Watches",

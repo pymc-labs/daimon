@@ -1,25 +1,22 @@
 # Features
 
-Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
-Thread. Each level is On, Off or Default, or one of the feature's values. Default
-inherits from the level above, and at the top it is the feature's built-in default.
-Settings show which level decided.
+A feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
+Thread. Each is On, Off, Default or one of the feature's values. Default inherits
+from above. Settings show which level decided.
 
-An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
-below then cannot change it. A locked Off turns the feature off below.
+An admin can lock a value at any level but Thread, and levels below cannot change it.
+A locked Off turns the feature off below.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
 the `change_setting` MCP tool, the web app or `daimon features`.
 
-A chat conversation picks up a change to a feature that hides tools at its next message.
-A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
-with; Daimon refuses a tool turned Off since then.
+Chat picks up a change to a feature that hides tools at the next message. A CLI session,
+or an agent chat continued with `send_message`, keeps its starting tools; Daimon refuses
+one turned Off since.
 
 ## All features
-
-Where each feature can be set, and its default.
 
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Routine | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -70,6 +67,8 @@ Where each feature can be set, and its default.
 | Web app: routines | `web.routines` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: credits | `web.credits` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: integrations | `web.integrations` | Capability | On | ✓ | ✓ |  |  |  |  |  |
+| Web app: evals | `web.evals` | Capability | On | ✓ | ✓ |  |  |  |  |  |
+| Evals | `evals` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -98,6 +97,7 @@ Where each feature can be set, and its default.
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
+| Package registries in eval sandboxes | `eval_package_registries` | Guardrail | Block package registries | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -728,6 +728,30 @@ The integrations pages of the web app. Off hides them for everyone on the team.
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
+## Web app: evals
+
+The evals pages of the web app. Off hides them for everyone on the team.
+
+| | |
+| --- | --- |
+| Key | `web.evals` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
+## Evals
+
+People build and share eval suites. Off hides evals and their tools.
+
+| | |
+| --- | --- |
+| Key | `evals` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace |
+| Combines | Off above is a ceiling |
+
 ## Watches
 
 The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches only run once whoever runs Daimon allows them, whatever this says.
@@ -1048,6 +1072,18 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | Levels | Deployment |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
+
+## Package registries in eval sandboxes
+
+Block answers package installs from the fake world.
+
+| | |
+| --- | --- |
+| Key | `eval_package_registries` |
+| Values | `passthrough` (Reach package registries), `deny` (Block package registries) |
+| Default | `deny` |
+| Levels | Deployment |
+| Combines | Stricter wins |
 
 ## Approve cards for OpenAI and Gemini
 

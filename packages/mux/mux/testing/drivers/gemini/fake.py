@@ -81,6 +81,10 @@ class FakeTransport:
         self.environment_files[id_] = {}
         return id_
 
+    async def create_self_hosted_environment(self) -> tuple[str, str]:
+        id_ = await self.create_environment({"mode": "self_hosted"})
+        return id_, f"key-{id_}"
+
     async def upload_archive(
         self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
     ) -> None:

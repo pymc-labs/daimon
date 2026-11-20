@@ -12,10 +12,13 @@ from daimon.adapters.mcp.tools.discord import _switch_card
 from daimon.adapters.mcp.tools.slack import _credential_button
 from daimon.adapters.mcp.tools.teams import _send
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
+from daimon.core.evals.eval_tenant import EVAL_TENANT_ID
 from daimon.core.host_calls import card_custom_id
 from daimon.core.posted_controls import CardButton, PostedCard
 from daimon.core.stores.domain import Role, TurnOriginRow
 from fastmcp.exceptions import ToolError
+
+_AUTH = SimpleNamespace(tenant_id=uuid.uuid4())
 
 
 def _origin(platform: str, thread_id: str = "thread-1") -> TurnOriginRow:
@@ -86,7 +89,7 @@ async def test_the_card_goes_to_the_origins_thread_on_each_platform(
     runtime = SimpleNamespace(teams_client=object())
     card = _card()
 
-    got = await _own_card.post_own_card(runtime, SimpleNamespace(), origin=origin, card=card)  # pyright: ignore[reportArgumentType]
+    got = await _own_card.post_own_card(runtime, _AUTH, origin=origin, card=card)  # pyright: ignore[reportArgumentType]
 
     ((name, kwargs),) = calls
     assert (name, got) == (origin.platform, f"{origin.platform}-message"), "its platform posts"
@@ -99,7 +102,7 @@ async def test_an_unknown_platform_is_refused(calls: list[tuple[str, dict[str, o
     with pytest.raises(ToolError):
         await _own_card.post_own_card(
             SimpleNamespace(),  # pyright: ignore[reportArgumentType]
-            SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+            _AUTH,  # pyright: ignore[reportArgumentType]
             origin=_origin("cli"),
             card=_card(),
         )
@@ -127,7 +130,7 @@ async def test_a_web_card_is_a_notice_to_the_chat(monkeypatch: pytest.MonkeyPatc
 
     got = await _own_card.post_own_card(
         runtime,  # pyright: ignore[reportArgumentType]
-        SimpleNamespace(),  # pyright: ignore[reportArgumentType]
+        _AUTH,  # pyright: ignore[reportArgumentType]
         origin=_origin("web", "web:t"),
         card=card,
     )
@@ -136,3 +139,40 @@ async def test_a_web_card_is_a_notice_to_the_chat(monkeypatch: pytest.MonkeyPatc
     assert isinstance(notice, web_notices.WebControlNotice), "a control notice is sent"
     assert (notice.thread_id, notice.title) == ("web:t", card.headline), "it names the chat"
     assert got == notice.card_id and got.startswith("hcc:"), "the card id is the message id"
+
+
+async def test_an_eval_card_when_posted_then_it_goes_to_its_item_never_a_real_chat(
+    calls: list[tuple[str, dict[str, object]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from daimon.core.evals.chat import cards
+
+    sent: list[cards.EvalCardNotice] = []
+
+    async def send(_session: object, notice: cards.EvalCardNotice) -> None:
+        sent.append(notice)
+
+    @asynccontextmanager
+    async def begin():
+        yield object()
+
+    monkeypatch.setattr(cards, "send_eval_card", send)
+    runtime = SimpleNamespace(session_factory=SimpleNamespace(begin=begin))
+    item = uuid.uuid4()
+    with pytest.raises(ToolError):
+        await _own_card.post_own_card(
+            runtime,  # pyright: ignore[reportArgumentType]
+            SimpleNamespace(tenant_id=EVAL_TENANT_ID, eval_item_id=None),  # pyright: ignore[reportArgumentType]
+            origin=_origin("discord"),
+            card=_card(),
+        )
+    got = await _own_card.post_own_card(
+        runtime,  # pyright: ignore[reportArgumentType]
+        SimpleNamespace(tenant_id=EVAL_TENANT_ID, eval_item_id=item),  # pyright: ignore[reportArgumentType]
+        origin=_origin("discord"),
+        card=_card(),
+    )
+    assert calls == [], "an eval caller's card never reaches a real chat"
+    (notice,) = sent
+    assert (notice.item_id, notice.card_id) == (item, got), "it goes to its item, keyed by its id"

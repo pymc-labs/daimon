@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Eval suites and bundles.** With the Evals feature on, people build suites of
+  cases, share them, and move them between deployments as signed or encrypted
+  bundles. `daimon evals bundle validate` checks a bundle offline.
+
+- **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
+  draft their pass criteria after a cost estimate, and mark near-duplicates.
+  `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
+- **Eval runs with spending caps.** Estimate a run, start it with a cap, cancel it, or
+  approve one above the admin limit, from the web API, MCP tools or `daimon evals runs`.
+  Items play the case's script on a simulated chat and stop before passing the cap.
+  `daimon evals worker` runs each item as a real turn of a copy of the arm's agent in its
+  own sandbox, and the script presses its approve cards and receives its files.
+- **A fake world for eval cases.** A running case's web, GitHub, Google, git and
+  MCP calls are answered from the case, its earlier writes or a checked
+  simulation, and never reach real services.
+
+- **Enclosed sandboxes for eval cases.** Each eval item can run its tools in a
+  sandbox pod on a Docker host or in a Kubernetes namespace. A gateway in the
+  pod answers every request from the fake world, and only the provider worker
+  that runs the agent reaches its provider. Anthropic, OpenAI and Gemini agents
+  run in it through self-hosted environments without their own web tools, and
+  the self-hosted harness runs inside it. Package installs are blocked unless
+  the `eval_package_registries` feature lets them reach the real registries.
+
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and
   changes nothing yet: Report only is for a later check of who can see each room.

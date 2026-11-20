@@ -1,0 +1,23 @@
+{
+  "schema": "daimon.eval.suite/1",
+  "id": "support-basics",
+  "version": 1,
+  "name": "Support basics",
+  "description": "Small example suite.",
+  "created_at": "2026-01-05T09:15:00Z",
+  "cases": [
+    {
+      "id": "export-bug-issue",
+      "revision": 1,
+      "hash": "3b4cf8cad9279c1cc6d40e34cb41e52a9ff79a1935efc13bdb49c3b5742dab2f"
+    }
+  ],
+  "tool_aliases": [
+    {
+      "from": {
+        "tool": "gh_issue_create"
+      },
+      "to_effect": "github.issue.create"
+    }
+  ]
+}

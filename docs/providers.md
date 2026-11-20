@@ -21,6 +21,7 @@ in one conversation.
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Web search | Yes | Yes | Yes, through Google Search | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
+| [Eval sandboxes](evals.md#sandboxes) | Yes | Yes | Yes | Yes |
 | Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Not supported | Not supported | Not supported |

@@ -1,0 +1,701 @@
+"""`daimon evals suites|cases|arms|items|runs|review|bundle`: evals in a workspace, as the operator.
+
+The operator acts as an admin past the `evals` switch. Documents are read and printed as
+JSON. `daimon evals bundle validate` checks a bundle folder, zip or encrypted file offline:
+it needs no database or settings.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import signal
+import tempfile
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from pathlib import Path
+from typing import Annotated
+
+import typer
+import uvicorn
+from daimon.adapters.cli.errors import run_cli
+from daimon.adapters.cli.flags import GUILD_OPTION, TENANT_OPTION
+from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
+from daimon.core.artifacts.s3 import build_artifact_store
+from daimon.core.config import load_settings
+from daimon.core.errors import DaimonError
+from daimon.core.evals.access import Share, Subject
+from daimon.core.evals.bundle import DirSource, open_path, to_zip
+from daimon.core.evals.chat.cards import listen_cards
+from daimon.core.evals.cost import default_cap
+from daimon.core.evals.draft import auxiliary_completer
+from daimon.core.evals.eval_tenant import eval_tenant
+from daimon.core.evals.format import Arm, JsonObject, to_document
+from daimon.core.evals.from_thread import ThreadRecord, ThreadSource
+from daimon.core.evals.review import ReviewService, ScoreDraft
+from daimon.core.evals.runner.item import ItemDeps
+from daimon.core.evals.runner.turns import EvalTurns, PodSettings
+from daimon.core.evals.runner.worker import work
+from daimon.core.evals.runs import RunDraft, RunService
+from daimon.core.evals.sandbox import configured_ca, sandbox_runtime
+from daimon.core.evals.sandbox.runtime import registries
+from daimon.core.evals.scoring.client import MuxJudgeClient
+from daimon.core.evals.scoring.service import JudgeRequest, ScoringService
+from daimon.core.evals.scrub.engine import Scrubber
+from daimon.core.evals.scrub.offline import leftovers_of, load_scrubber, save_map, scrub_path
+from daimon.core.evals.scrub.sweep import Leftover
+from daimon.core.evals.service import (
+    CaseRef,
+    DraftResult,
+    EvalRefused,
+    EvalService,
+    ExportRequest,
+    Page,
+    SuiteDraft,
+    eval_service,
+)
+from daimon.core.evals.validate import InvalidDocument, validate_bundle
+from daimon.core.evals.web_thread import WebChatSource
+from daimon.core.evals.world.dispatch import FakeWorld
+from daimon.core.evals.world.http_app import create_world_app
+from daimon.core.evals.world.simulator import ModelSimulator
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.turn.deps import build_turn_deps
+from pydantic import BaseModel, TypeAdapter, ValidationError
+from rich.console import Console
+
+evals_app = typer.Typer(help="Eval suites, cases, arms, run items, results, review and bundles.")
+suites_app = typer.Typer(help="Eval suites.")
+cases_app = typer.Typer(help="Cases of an eval suite.")
+arms_app = typer.Typer(help="Arms: the agent setups a run compares.")
+items_app = typer.Typer(help="Items of an eval run.")
+runs_app = typer.Typer(help="Estimate, start, stop, compare and judge eval runs.")
+review_app = typer.Typer(help="Review tasks: take the next one, submit scores.")
+bundle_app = typer.Typer(help="Validate, export and import bundles.")
+for name, sub in (
+    ("suites", suites_app),
+    ("cases", cases_app),
+    ("arms", arms_app),
+    ("items", items_app),
+    ("runs", runs_app),
+    ("review", review_app),
+    ("bundle", bundle_app),
+):
+    evals_app.add_typer(sub, name=name)
+
+_console = Console(stderr=True)
+_PASSPHRASE = typer.Option(
+    "--passphrase", envvar="DAIMON_EVAL_PASSPHRASE", help="Passphrase of an encrypted bundle."
+)
+_SHARES = TypeAdapter(list[Share])
+_ENTITIES = typer.Option(
+    "--entities",
+    envvar="DAIMON_EVALS__SCRUB_ENTITIES_FILE",
+    help="JSON or YAML file of the private names to replace.",
+)
+_KEY = typer.Option(
+    "--key",
+    envvar="DAIMON_EVALS__SCRUB_KEY",
+    help="Scrub key, at least 16 characters. Prefer the environment variable.",
+)
+_MAP = typer.Option(
+    "--map", help="Fake map file, kept between runs (private; read and written). Required."
+)
+_SALT = typer.Option(
+    "--salt",
+    help="Tenant or suite name mixed into the key; use the same one on every run. Required.",
+)
+_NER = typer.Option("--ner-model", help="spaCy model for names; empty to use known names only.")
+_JOBS = typer.Option("--jobs", min=1, help="Processes that run the names model, each loading it.")
+_DRAFTS = TypeAdapter(list[ScoreDraft])
+
+
+class _Failed(DaimonError):
+    pass
+
+
+@evals_app.callback()
+def evals_callback(
+    ctx: typer.Context,
+    tenant: Annotated[str | None, TENANT_OPTION] = None,
+    guild: Annotated[str | None, GUILD_OPTION] = None,
+) -> None:
+    ctx.obj = TenantSelector(tenant_id=tenant, guild_id=guild)
+
+
+def _print(value: object) -> None:
+    if isinstance(value, BaseModel):
+        value = to_document(value)
+    elif isinstance(value, list):
+        value = [to_document(v) if isinstance(v, BaseModel) else v for v in value]  # pyright: ignore[reportUnknownVariableType]
+    typer.echo(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+
+
+def _read_json(path: Path) -> JsonObject:
+    document = json.loads(path.read_text())
+    if not isinstance(document, dict):
+        raise _Failed(f"{path}: expected a JSON object")
+    return document  # pyright: ignore[reportUnknownVariableType]
+
+
+def _serve[S](
+    ctx: typer.Context,
+    make: Callable[[CliRuntime], S],
+    work: Callable[[S, Subject], Awaitable[object]],
+) -> None:
+    selector: TenantSelector | None = ctx.obj
+
+    async def go() -> None:
+        async with build_runtime(load_settings()) as rt:
+            async with rt.sessionmaker() as session:
+                override = await resolve_tenant_override(session, selector)
+                tenant_id: uuid.UUID = await discover_tenant(session, override=override)
+                tenant = await get_tenant(session, tenant_id)
+            if tenant is None:
+                raise _Failed("no such workspace")
+            actor = Subject(
+                tenant_id=tenant_id,
+                platform=tenant.platform,
+                key=f"cli:{rt.settings.cli.local_user}",
+                role="owner",
+                operator=True,
+            )
+            try:
+                _print(await work(make(rt), actor))
+            except EvalRefused as exc:
+                raise _Failed("; ".join((exc.message, *exc.problems))) from None
+
+    run_cli(go(), console=_console)
+
+
+def _evals(rt: CliRuntime) -> EvalService:
+    return eval_service(rt.sessionmaker, rt.settings, rt.anthropic)
+
+
+def _run(ctx: typer.Context, work: Callable[[EvalService, Subject], Awaitable[object]]) -> None:
+    _serve(ctx, _evals, work)
+
+
+def _run_rt(
+    ctx: typer.Context,
+    work: Callable[[EvalService, Subject, CliRuntime], Awaitable[object]],
+) -> None:
+    _serve(ctx, lambda rt: rt, lambda rt, a: work(_evals(rt), a, rt))
+
+
+@suites_app.command("list")
+def suites_list(ctx: typer.Context) -> None:
+    _run(ctx, lambda s, a: s.suites(a))
+
+
+@suites_app.command("show")
+def suites_show(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
+    _run(ctx, lambda s, a: s.suite(a, suite_id, version))
+
+
+@suites_app.command("create")
+def suites_create(ctx: typer.Context, draft: Path) -> None:
+    """Create a suite with no cases from a JSON draft."""
+    parsed = SuiteDraft.model_validate(_read_json(draft))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=True))
+
+
+@suites_app.command("edit")
+def suites_edit(ctx: typer.Context, draft: Path) -> None:
+    """Save a suite's next version from a JSON draft; its `cases` pin case revisions."""
+    parsed = SuiteDraft.model_validate(_read_json(draft))
+    _run(ctx, lambda s, a: s.save_suite(a, parsed, new=False))
+
+
+@suites_app.command("share")
+def suites_share(ctx: typer.Context, suite_id: str, shares: Path) -> None:
+    """Replace who a suite is shared with, from a JSON list of shares."""
+    parsed = _SHARES.validate_json(shares.read_bytes())
+
+    async def work(s: EvalService, a: Subject) -> str:
+        await s.share(a, suite_id, parsed)
+        return "shared"
+
+    _run(ctx, work)
+
+
+@cases_app.command("list")
+def cases_list(ctx: typer.Context, suite_id: str, version: int | None = None) -> None:
+    _run(ctx, lambda s, a: s.cases(a, suite_id, version))
+
+
+@cases_app.command("show")
+def cases_show(
+    ctx: typer.Context, suite_id: str, case_id: str, revision: int | None = None
+) -> None:
+    _run(ctx, lambda s, a: s.case(a, suite_id, case_id, revision))
+
+
+@cases_app.command("put")
+def cases_put(ctx: typer.Context, suite_id: str, case: Path) -> None:
+    """Add a case from a JSON file, or save its next revision; `suites edit` pins it."""
+    document = _read_json(case)
+    _run(ctx, lambda s, a: s.put_case(a, suite_id, document))
+
+
+class _RecordFile:
+    """A thread record read from a JSON file (a `ThreadRecord`), for threads from anywhere."""
+
+    def __init__(self, path: Path) -> None:
+        self._record = ThreadRecord.model_validate_json(path.read_bytes())
+
+    async def thread(self, ref: str) -> ThreadRecord:
+        return self._record
+
+
+@cases_app.command("from-thread")
+def cases_from_thread(
+    ctx: typer.Context,
+    suite_id: str,
+    link: Annotated[str | None, typer.Argument(help="Link or id of a web chat.")] = None,
+    record: Annotated[Path | None, typer.Option(help="A thread record file instead.")] = None,
+) -> None:
+    """Scrubbed cases from a thread, one per answered turn. Needs DAIMON_EVALS__SCRUB_KEY."""
+    if (link is None) == (record is None):
+        raise typer.BadParameter("Give a web chat link, or --record FILE.")
+
+    async def work(s: EvalService, a: Subject, rt: CliRuntime) -> list[CaseRef]:
+        source: ThreadSource = (
+            WebChatSource(rt.sessionmaker, tenant_id=a.tenant_id)
+            if record is None
+            else _RecordFile(record)
+        )
+        return await s.cases_from_thread(a, source, link or str(record), suite_id)
+
+    _run_rt(ctx, work)
+
+
+@cases_app.command("draft")
+def cases_draft(
+    ctx: typer.Context,
+    suite_id: str,
+    case_ids: Annotated[list[str], typer.Argument(help="Case ids.")],
+    yes: Annotated[bool, typer.Option("--yes", help="Draft now and bill the workspace.")] = False,
+) -> None:
+    """Draft expectations with a model. Without --yes only the cost estimate is shown."""
+
+    async def work(s: EvalService, a: Subject, rt: CliRuntime) -> DraftResult:
+        complete = (
+            auxiliary_completer(
+                rt.anthropic,
+                rt.sessionmaker,
+                tenant_id=a.tenant_id,
+                platform=a.platform,
+                user_id=None,
+                model=rt.settings.evals.draft_model,
+                markup=rt.settings.billing.markup,
+            )  # fmt: skip
+            if yes
+            else None
+        )
+        return await s.draft_expectations(a, suite_id, case_ids, complete=complete, confirm=yes)
+
+    _run_rt(ctx, work)
+
+
+@cases_app.command("dedupe")
+def cases_dedupe(
+    ctx: typer.Context,
+    suite_id: str,
+    keep: Annotated[
+        int | None, typer.Option(help="Keep this many per group; drop the rest.")
+    ] = None,
+    threshold: float = 0.8,
+) -> None:
+    """Mark near-duplicate cases with a group; with --keep, thin each group."""
+    _run(ctx, lambda s, a: s.dedupe(a, suite_id, threshold=threshold, keep=keep))
+
+
+@cases_app.command("validate")
+def cases_validate(case: Path) -> None:
+    """Check a case file against the format, offline."""
+    check = EvalService.validate_case(_read_json(case))
+    _print(check)
+    if check.problems:
+        raise typer.Exit(code=1)
+
+
+@arms_app.command("list")
+def arms_list(ctx: typer.Context) -> None:
+    _run(ctx, lambda s, a: s.arms(a))
+
+
+@arms_app.command("create")
+def arms_create(ctx: typer.Context, arm: Path) -> None:
+    parsed = Arm.model_validate(_read_json(arm))
+    _run(ctx, lambda s, a: s.save_arm(a, parsed))
+
+
+@items_app.command("list")
+def items_list(ctx: typer.Context, run_id: str, offset: int = 0, limit: int = 50) -> None:
+    _run(ctx, lambda s, a: s.items(a, run_id, Page(offset=offset, limit=limit)))
+
+
+@items_app.command("show")
+def items_show(ctx: typer.Context, item_id: str) -> None:
+    _run(ctx, lambda s, a: s.item(a, item_id))
+
+
+def _scoring(rt: CliRuntime) -> ScoringService:
+    return ScoringService(
+        rt.sessionmaker, rt.settings, _evals(rt), client=MuxJudgeClient(rt.anthropic)
+    )
+
+
+def _runs(rt: CliRuntime) -> RunService:
+    return RunService(rt.sessionmaker, rt.settings, _evals(rt))
+
+
+def _draft(path: Path) -> RunDraft:
+    try:
+        return RunDraft.model_validate(_read_json(path))
+    except ValidationError as exc:
+        raise _Failed(f"{path}: {exc}") from None
+
+
+_CAP = typer.Option("--cap", min=0.01, help="Stop the run once it has spent this many USD.")
+
+
+@runs_app.command("list")
+def runs_list(ctx: typer.Context, suite: str | None = None) -> None:
+    """List runs, newest first."""
+    _serve(ctx, _runs, lambda s, a: s.runs(a, suite))
+
+
+@runs_app.command("estimate")
+def runs_estimate(ctx: typer.Context, draft: Path) -> None:
+    """Estimate a run from a JSON draft (suite, arm_ids, case_ids, repeats, judge_ids)."""
+    body = _draft(draft)
+    _serve(ctx, _runs, lambda s, a: s.estimate(a, body))
+
+
+@runs_app.command("start")
+def runs_start(
+    ctx: typer.Context,
+    draft: Path,
+    cap: Annotated[float | None, _CAP] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Start without asking; needs --cap.")] = False,
+) -> None:
+    """Estimate a run, then start it with a spending cap: --cap, or the estimate's high end
+    with a margin."""
+    if yes and cap is None:
+        raise typer.BadParameter("--yes needs --cap.")
+    body = _draft(draft)
+
+    async def work(runs: RunService, actor: Subject) -> object:
+        limit = cap
+        if limit is None:
+            estimate = await runs.estimate(actor, body)
+            limit = default_cap(estimate)
+            _console.print(f"Expected {estimate.expected_usd:.2f} USD, cap {limit:.2f} USD.")
+        if not yes and not typer.confirm("Start this run?"):
+            raise typer.Abort
+        return await runs.start(actor, body, cap_usd=limit)
+
+    _serve(ctx, _runs, work)
+
+
+@runs_app.command("show")
+def runs_show(ctx: typer.Context, run_id: str) -> None:
+    """Show a run: status, estimate, approval and spend."""
+    _serve(ctx, _runs, lambda s, a: s.status(a, run_id))
+
+
+@runs_app.command("cancel")
+def runs_cancel(ctx: typer.Context, run_id: str) -> None:
+    """Stop a run: no more items start, and running ones are interrupted."""
+    _serve(ctx, _runs, lambda s, a: s.cancel(a, run_id))
+
+
+@runs_app.command("approve")
+def runs_approve(ctx: typer.Context, run_id: str, cap: Annotated[float, _CAP]) -> None:
+    """Approve a run waiting for an admin, with its spending cap."""
+    _serve(ctx, _runs, lambda s, a: s.approve(a, run_id, cap_usd=cap))
+
+
+@runs_app.command("compare")
+def runs_compare(
+    ctx: typer.Context,
+    run_id: str,
+    arm: Annotated[list[str] | None, typer.Option("--arm", help="Only these arms.")] = None,
+    blind: bool = False,
+) -> None:
+    """Show the arms side by side, case by case."""
+    _serve(ctx, _scoring, lambda s, a: s.compare(a, run_id, arms=arm, blind=blind))
+
+
+@runs_app.command("judge")
+def runs_judge(
+    ctx: typer.Context,
+    run_id: str,
+    request: Annotated[Path | None, typer.Option("--request", help="JSON judge request.")] = None,
+    approve: Annotated[
+        float | None,
+        typer.Option("--approve", help="Run the judges, spending at most this many USD."),
+    ] = None,
+) -> None:
+    """Estimate judging a run with models; with --approve, run it up to that ceiling."""
+    body = JudgeRequest.model_validate(_read_json(request) if request else {})
+    ask = body.model_copy(update={"approve_cap_usd": approve})
+    _serve(ctx, _scoring, lambda s, a: s.judge(a, run_id, ask))
+
+
+def _review(rt: CliRuntime) -> ReviewService:
+    return ReviewService(rt.sessionmaker, _evals(rt))
+
+
+@review_app.command("queues")
+def review_queues(ctx: typer.Context) -> None:
+    """List the open review queues you may work."""
+    _serve(ctx, _review, lambda s, a: s.my_queues(a))
+
+
+@review_app.command("next")
+def review_next(ctx: typer.Context, queue: str) -> None:
+    """Take the next review task of a queue (`run~queue`)."""
+    _serve(ctx, _review, lambda s, a: s.next(a, queue))
+
+
+@review_app.command("submit")
+def review_submit(ctx: typer.Context, task_id: str, scores: Path) -> None:
+    """Submit scores for a task, from a JSON list of score drafts."""
+    parsed = _DRAFTS.validate_json(scores.read_bytes())
+
+    async def work(s: ReviewService, a: Subject) -> str:
+        await s.submit(a, task_id, parsed)
+        return "saved"
+
+    _serve(ctx, _review, work)
+
+
+@bundle_app.command("validate")
+def bundle_validate(path: Path, passphrase: Annotated[str | None, _PASSPHRASE] = None) -> None:
+    """Check a bundle folder, zip or encrypted file, offline. Exits 1 on any problem."""
+    try:
+        report = validate_bundle(open_path(path, passphrase=passphrase))
+    except InvalidDocument as failed:
+        problems, warnings, counts = list(failed.problems), [], {}
+    except OSError as failed:
+        problems, warnings, counts = [f"{path}: {failed.strerror or 'cannot be read'}"], [], {}
+    else:
+        problems, warnings = report.problems, report.warnings
+        counts = {
+            "suites": len(report.suites),
+            "cases": sum(len(s.cases) for s in report.suites),
+            "runs": len(report.runs),
+            "items": sum(len(r.items) for r in report.runs),
+            "scrub": report.manifest.scrub.status if report.manifest else None,
+        }
+    _print({"ok": not problems, **counts, "problems": problems, "warnings": warnings})
+    if problems:
+        raise typer.Exit(code=1)
+
+
+def _scrubber(
+    entities: Path | None, key: str | None, salt: str, map_path: Path, ner: str, jobs: int
+) -> Scrubber:
+    if entities is None or not key:
+        raise typer.BadParameter("--entities and a scrub key (DAIMON_EVALS__SCRUB_KEY) are needed.")
+    try:
+        return load_scrubber(
+            entities, key, salt=salt, map_path=map_path, ner_model=ner or None, jobs=jobs
+        )
+    except ValidationError as failed:
+        # Only where and what kind: the message would quote the private names.
+        bad = [f"{'.'.join(map(str, e['loc']))}: {e['type']}" for e in failed.errors()]
+        raise _Failed("the entities file is not valid: " + "; ".join(bad)) from None
+    except (InvalidDocument, OSError, ValueError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+
+
+def _leftover_rows(found: Sequence[Leftover]) -> list[JsonObject]:
+    return [{"where": x.where, "kind": x.kind, "count": x.count} for x in found]
+
+
+@bundle_app.command("scrub")
+def bundle_scrub(
+    path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
+    entities: Annotated[Path | None, _ENTITIES] = None,
+    key: Annotated[str | None, _KEY] = None,
+    out: Annotated[Path | None, typer.Option("--out", help="Write here, not in place.")] = None,
+    ner_model: Annotated[str, _NER] = "en_core_web_sm",
+    jobs: Annotated[int, _JOBS] = 1,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+) -> None:
+    """Scrub a bundle folder, zip or encrypted file offline, in place or into --out.
+
+    Prints counts and places only, never the text found. Exits 1 unless fully scrubbed.
+    """
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model, jobs)
+    try:
+        report = scrub_path(path, out, scrubber, passphrase=passphrase)
+    except (InvalidDocument, OSError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+    save_map(scrubber, map_path)
+    _print(
+        {
+            "status": report.status,
+            "cases": report.cases,
+            "replaced": report.replaced,
+            "blobs": report.blobs,
+            "names_checked": report.names_checked,
+            "leftovers": _leftover_rows(report.leftovers),
+        }
+    )
+    if report.leftovers or report.status != "scrubbed":
+        raise typer.Exit(code=1)
+
+
+@bundle_app.command("leftovers")
+def bundle_leftovers(
+    path: Path,
+    salt: Annotated[str, _SALT],
+    map_path: Annotated[Path, _MAP],
+    entities: Annotated[Path | None, _ENTITIES] = None,
+    key: Annotated[str | None, _KEY] = None,
+    ner_model: Annotated[str, _NER] = "en_core_web_sm",
+    jobs: Annotated[int, _JOBS] = 1,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+) -> None:
+    """List what a scrub would still change in a bundle, by place and kind. Exits 1 if any."""
+    scrubber = _scrubber(entities, key, salt, map_path, ner_model, jobs)
+    try:
+        found = leftovers_of(path, scrubber, passphrase=passphrase)
+    except (InvalidDocument, OSError) as failed:
+        problems = failed.problems if isinstance(failed, InvalidDocument) else [str(failed)]
+        raise _Failed("; ".join(problems)) from None
+    _print({"leftovers": _leftover_rows(found)})
+    if found:
+        raise typer.Exit(code=1)
+
+
+@bundle_app.command("export")
+def bundle_export(
+    ctx: typer.Context,
+    out: Annotated[Path, typer.Option("--out", help="Where to write the bundle.")],
+    suite: Annotated[list[str] | None, typer.Option("--suite", help="Suite id.")] = None,
+    run: Annotated[list[str] | None, typer.Option("--run", help="Run id.")] = None,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+    include_identities: bool = False,
+) -> None:
+    """Export suites (latest versions) and runs as a bundle file."""
+    request = ExportRequest.model_validate(
+        {
+            "suites": [{"id": s} for s in suite or []],
+            "runs": run or [],
+            "include_identities": include_identities,
+        }
+    )
+
+    async def work(s: EvalService, a: Subject) -> JsonObject:
+        bundle = await s.export_bundle(a, request, passphrase=passphrase)
+        with out.open("wb") as target:
+            async for chunk in bundle.chunks():
+                target.write(chunk)
+        return {"name": bundle.name, "size": bundle.size, "sha256": bundle.sha256}
+
+    _run(ctx, work)
+
+
+@bundle_app.command("import")
+def bundle_import(
+    ctx: typer.Context,
+    path: Path,
+    passphrase: Annotated[str | None, _PASSPHRASE] = None,
+    accept_unscrubbed: bool = False,
+) -> None:
+    """Import a bundle folder, zip or encrypted file into the workspace."""
+    try:
+        if path.is_dir():
+            source = DirSource(path)
+            data = to_zip({name: source.read(name) for name in source.names()})
+        else:
+            data = path.read_bytes()
+    except (InvalidDocument, OSError) as failed:
+        reason = (
+            "; ".join(failed.problems)
+            if isinstance(failed, InvalidDocument)
+            else f"{path}: {failed.strerror or 'cannot be read'}"
+        )
+        _console.print(f"✗ {reason}", style="red", markup=False)
+        raise typer.Exit(code=1) from None
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield data
+
+    _run(
+        ctx,
+        lambda s, a: s.import_bundle(
+            a, chunks(), accept_unscrubbed=accept_unscrubbed, passphrase=passphrase
+        ),
+    )
+
+
+@evals_app.command("worker")
+def worker(reap_every_s: Annotated[float, typer.Option(min=1)] = 600) -> None:
+    """Run queued eval items until stopped, serving the fake world their sandboxes reach."""
+    run_cli(_work(reap_every_s), console=_console)
+
+
+async def _work(reap_every_s: float) -> None:
+    async with build_runtime(load_settings()) as rt:
+        settings, evals = rt.settings, rt.settings.evals
+        if evals.sandbox_image is None or evals.world_url is None or evals.environment_id is None \
+                or evals.environment_key is None:  # fmt: skip
+            raise _Failed("set DAIMON_EVALS__SANDBOX_IMAGE, __WORLD_URL, __ENVIRONMENT_ID and "
+                          "__ENVIRONMENT_KEY")  # fmt: skip
+        artifacts = settings.artifacts and build_artifact_store(settings.artifacts)
+        simulator = ModelSimulator(rt.anthropic, rt.sessionmaker, evals.simulator_model,
+                                   evals.simulator_effort)  # fmt: skip
+        world = FakeWorld(rt.sessionmaker, simulator, objects=artifacts,
+                          git_root=Path(tempfile.gettempdir()) / "daimon-eval-git")  # fmt: skip
+        runtime = sandbox_runtime(evals)
+        place = FeaturePlace(await eval_tenant(rt.sessionmaker), "web")
+        features = await resolve_features(rt.sessionmaker, settings, place,
+                                          keys=("eval_package_registries",))  # fmt: skip
+        pods = PodSettings(
+            runtime=runtime, image=evals.sandbox_image, ca=configured_ca(evals),
+            world_url=evals.world_url, environment_id=evals.environment_id,
+            passthrough=frozenset(evals.passthrough_hosts),
+            executor_config={"ANTHROPIC_ENVIRONMENT_KEY": evals.environment_key.get_secret_value()},
+            registries=registries(features),
+        )  # fmt: skip
+        deps = build_turn_deps(settings, rt.anthropic, rt.sessionmaker, billing_config=None,
+                               deployment_default=rt.deployment_default,
+                               resolver_cache=rt.resolver_cache)  # fmt: skip
+        turns = EvalTurns(deps, world, pods)
+        rate = float(evals.sandbox_rate_usd_per_hour)
+        items = ItemDeps(rt.sessionmaker, turns, world, sandbox_rate_usd_per_hour=rate)
+        # Every interface: the item pods reach the world from their own network.
+        app, port = create_world_app(world), evals.world_port
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning"))
+        stop = asyncio.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+
+        async def reap() -> None:
+            while True:
+                if gone := await runtime.reap():
+                    _console.print(f"Removed {len(gone)} stray eval sandboxes.")
+                await asyncio.sleep(reap_every_s)
+
+        cards = listen_cards(rt.sessionmaker, turns.raise_card)
+        helpers = [asyncio.create_task(c) for c in (server.serve(), reap(), cards)]
+        try:
+            await work(items, concurrency=evals.worker_concurrency, stop=stop)
+        finally:
+            server.should_exit = True
+            for task in helpers:
+                task.cancel()
+            await asyncio.gather(*helpers, return_exceptions=True)

@@ -1067,7 +1067,9 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "credits", "integrations", "admin", "evals"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
@@ -1170,7 +1172,8 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, credits, integrations, admin. Add evals to "
+            "offer the evals pages."
         ),
     )
     nodes: WebNodesSettings = Field(
@@ -2923,6 +2926,180 @@ class ComputeSettings(BaseModel):
     )
 
 
+class JudgeModelSetting(BaseModel):
+    backend: str | None = Field(
+        default=None, description="Provider that serves the model. Unset: the default one."
+    )
+    model: str = Field(description="Model id.")
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
+class EvalsSettings(BaseModel):
+    signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Base64 Ed25519 private key (32 raw bytes) that signs exported eval bundles. "
+            "Unset: exports are unsigned."
+        ),
+    )
+    trusted_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only "
+            "bundles signed by one of them or by this deployment's signing key."
+        ),
+    )
+    source_label: str = Field(
+        default="daimon",
+        description="Label this deployment writes as the source of the bundles it exports.",
+    )
+    max_bundle_mb: int = Field(
+        default=128, gt=0, description="Largest eval bundle import or export handles, in MiB."
+    )
+    scrub_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Secret that keys the scrub map (at least 16 characters). Required to scrub real "
+            "conversations into eval cases; changing it changes every fake made afterwards."
+        ),
+    )
+    scrub_ner_model: str = Field(
+        default="en_core_web_sm",
+        description=(
+            "spaCy model that finds names, places and organizations while scrubbing. Not "
+            "installed or empty: only known names and patterns are found and cases stay partial."
+        ),
+    )
+    scrub_entities_file: str | None = Field(
+        default=None,
+        description="JSON or YAML file of known private names added to every scrub.",
+    )
+    draft_model: str | None = Field(
+        default=None,
+        description="Model that drafts case expectations. Unset: the side-call model.",
+    )
+    simulator_model: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic model that answers eval world calls nobody recorded. Unset: the "
+            "side-call model."
+        ),
+    )
+    simulator_effort: Literal["none", "low", "medium", "high"] = Field(
+        default="low", description="Effort the eval world simulator runs at."
+    )
+    world_url: str | None = Field(
+        default=None,
+        description=(
+            "Base URL where eval sandbox gateways reach the eval worker's fake world, e.g. "
+            "http://eval-worker:8090. Unset: no sandbox can be enclosed."
+        ),
+    )
+    world_port: int = Field(
+        default=8090,
+        ge=1,
+        le=65535,
+        description="Port the eval worker serves its fake world on, on every interface.",
+    )
+    environment_id: str | None = Field(
+        default=None,
+        description=(
+            "Self-hosted environment eval items run in, made in the provider's console. Items "
+            "on it run one at a time. Unset: live arms cannot run."
+        ),
+    )
+    environment_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Environment key the eval sandbox's executor polls that environment with. Unset: "
+            "live arms cannot run."
+        ),
+    )
+    sandbox_runtime: Literal["docker", "kubernetes"] | None = Field(
+        default=None,
+        description="Where eval sandbox pods run: a Docker host or a Kubernetes namespace.",
+    )
+    docker_host: str = Field(
+        default="unix:///var/run/docker.sock",
+        description=(
+            "Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS "
+            "files."
+        ),
+    )
+    docker_network: str | None = Field(
+        default=None,
+        description=(
+            "Docker network for eval pods; it must reach the eval world URL. Unset: the default "
+            "bridge."
+        ),
+    )
+    docker_tls_ca: Path | None = Field(
+        default=None, description="CA file that signs the remote Docker host's certificate."
+    )
+    docker_tls_cert: Path | None = Field(
+        default=None, description="Client certificate file for the remote Docker host."
+    )
+    docker_tls_key: Path | None = Field(
+        default=None, description="Client key file for the remote Docker host."
+    )
+    kubernetes_namespace: str = Field(
+        default="daimon-evals",
+        description=(
+            "Namespace for eval sandbox pods, reached with the worker's in-cluster service account."
+        ),
+    )
+    sandbox_image: str | None = Field(
+        default=None,
+        description=(
+            "Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...)."
+        ),
+    )
+    ca_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "PEM RSA private key of the eval CA. Sandbox tools trust it; the gateway mints a "
+            "certificate per host with it. Unset: no sandbox can be enclosed."
+        ),
+    )
+    passthrough_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra hosts the eval executor's own user may reach untouched, besides its "
+            "provider's control plane. Matched by TLS server name, not Host. Shells the executor "
+            "starts run as the agent and reach the fake world; commands it starts without a shell "
+            "run as the executor and reach these hosts."
+        ),
+    )
+    sandbox_rate_usd_per_hour: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        allow_inf_nan=False,
+        description="What an hour of one eval sandbox pod costs, for run cost reports.",
+    )
+    judge_models: list[JudgeModelSetting] = Field(
+        default_factory=list[JudgeModelSetting],
+        description=(
+            "The judge panel for eval runs that name none: each model scores each item and the "
+            "panel votes. Every model needs a known price, and none may share a model or a "
+            "provider with an arm it judges. Empty: judging names its models."
+        ),
+    )
+    admin_approval_usd: float = Field(
+        default=25.0,
+        gt=0,
+        description="Eval spending ceilings above this, in USD, need an admin to approve them.",
+    )
+    worker_concurrency: int = Field(
+        default=2, ge=1, le=32, description="Eval items one eval worker runs at once."
+    )
+    kappa_warn: float = Field(
+        default=0.4,
+        ge=-1,
+        le=1,
+        description="A judge whose kappa against human scores is below this is flagged.",
+    )
+
+
 class LongJobsSettings(BaseModel):
     max_deadline_minutes: int = Field(
         default=70,
@@ -3025,6 +3202,7 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
 
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
+    evals: EvalsSettings = Field(default_factory=EvalsSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     security_audit_retention_days: int = Field(

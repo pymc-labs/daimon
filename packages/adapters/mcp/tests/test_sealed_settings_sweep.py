@@ -255,6 +255,7 @@ _TENANT = "tenant-wide: people, admins, credits, allowances, promo codes, invite
 _OWN = "the caller's own data or preference"
 _NEW = "creates or edits a tenant library item or a new agent or environment; it changes no private channel and no agent's own setup"
 _MEMORY = "memory or files of the caller's own session; the isolation view hides a private channel's own agent from an outside caller"
+_EVALS = "eval suites, arms and bundles of the workspace; not a channel or an agent setting"
 _CARD = "needs live provider (a request card posted into a channel); the agent and channel go through the isolation view and the caller's origin"
 
 #: Every other tool of `/mcp`, with why it is not swept.
@@ -298,6 +299,34 @@ EXEMPT: dict[str, str] = {
     "deliver_turn_charts": _LIVE,
     "describe_agent": _READS,
     "edit_message": _LIVE,
+    "eval_arm_create": _EVALS,
+    "eval_arms_list": _READS,
+    "eval_bundle_export": _EVALS,
+    "eval_bundle_import": _EVALS,
+    "eval_case_get": _READS,
+    "eval_case_put": _EVALS,
+    "eval_case_validate": _READS,
+    "eval_case_from_thread": _EVALS,
+    "eval_cases_dedupe": _EVALS,
+    "eval_cases_draft_estimate": _READS,
+    "eval_comment_add": _EVALS,
+    "eval_compare": _READS,
+    "eval_judge_run": _READS,
+    "eval_run_cancel": _EVALS,
+    "eval_run_estimate": _READS,
+    "eval_run_start": _EVALS,
+    "eval_run_status": _READS,
+    "eval_review_next": _EVALS,
+    "eval_review_queues": _READS,
+    "eval_review_submit": _EVALS,
+    "eval_cases_list": _READS,
+    "eval_item_get": _READS,
+    "eval_items_list": _READS,
+    "eval_suite_create": _EVALS,
+    "eval_suite_get": _READS,
+    "eval_suite_share": _EVALS,
+    "eval_suite_update": _EVALS,
+    "eval_suites_list": _READS,
     "explain_agent_resolution": _READS,
     "fetch_youtube_transcript": _READS,
     "fly_extend_session": _LIVE,
@@ -451,6 +480,7 @@ EXEMPT: dict[str, str] = {
     "update_web_person": _TENANT,
     "wait_for_helpers": _TURN,
     "web_fetch": _READS,
+    "web_search": "eval runs only; the fake world answers it and changes no setting",
     "where_am_i": _READS,
 }
 

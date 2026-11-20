@@ -13,14 +13,19 @@ dependencies = [
     "anyio>=4",
     "httpx>=0.27",
     "httpx-sse>=0.4",
+    "websockets>=15",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "azure-identity>=1.25,<2",
+    "azure-storage-blob>=12.27,<13",
+    "botocore>=1.40,<2",
     "alembic>=1.13",
     "pydantic>=2.8",
     "pydantic-settings>=2.5",
     "cryptography>=43",
+    "jsonschema>=4.23",
     "pyyaml>=6.0",
+    "starlette>=0.40",
     "sentry-sdk>=2.61",
     "structlog>=24.1",
     "tenacity>=9.0",
@@ -29,6 +34,19 @@ dependencies = [
     "pillow>=11,<13",
     "numpy>=2,<3",
     "python-ulid>=3.1,<4",
+    "regex>=2024.11,<2027",
+]
+
+[project.optional-dependencies]
+# Scrubbing real conversations into shareable eval cases. The eval worker image and
+# operators who build suites install this extra; other images stay lean. Image OCR
+# uses the `tesseract` binary when it is on PATH, and name detection needs a spaCy model
+# (see docs/evals.md). graphql-core checks simulated GitHub GraphQL answers.
+evals = [
+    "faker>=30",
+    "graphql-core>=3.2,<4",
+    "presidio-analyzer>=2.2,<3",
+    "pdfplumber>=0.11,<1",
 ]
 
 [project.urls]

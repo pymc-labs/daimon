@@ -1,0 +1,23 @@
+{
+  "schema": "daimon.eval.run/1",
+  "id": "baseline-a-2026-01",
+  "name": "Recorded answers",
+  "suite": {
+    "id": "support-basics",
+    "version": 1
+  },
+  "arms": [
+    {
+      "id": "baseline-a",
+      "label": "Baseline A",
+      "kind": "baseline",
+      "baseline": {
+        "source_system": "baseline-a"
+      }
+    }
+  ],
+  "status": "done",
+  "origin": {
+    "kind": "recorded"
+  }
+}
