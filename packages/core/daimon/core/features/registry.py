@@ -662,10 +662,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc=(
-            "Direct messages follow Approvals. A direct message reads only the workspace "
-            "Approvals value, not the origin channel's rule."
-        ),
+        doc="Direct messages follow Approvals as set for everyone.",
         platforms=_DM_PLATFORMS | {"teams"},
         authority=Authority(native=True),
     ),

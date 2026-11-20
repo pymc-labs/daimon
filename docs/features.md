@@ -661,7 +661,7 @@ A reply in a direct message can read the agent's memory but not change it.
 
 ## Approvals in direct messages
 
-Direct messages follow Approvals. A direct message reads only the workspace Approvals value, not the origin channel's rule.
+Direct messages follow Approvals as set for everyone.
 
 | | |
 | --- | --- |
