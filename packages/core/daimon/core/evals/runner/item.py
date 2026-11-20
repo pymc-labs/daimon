@@ -40,6 +40,7 @@ from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
 from daimon.core.stores import eval_runs, eval_world, usage_events
 from daimon.core.stores import evals as store
 from daimon.core.turn.state import TextBlock
+from pydantic_core import to_jsonable_python
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -181,7 +182,8 @@ def _transcript(
 
 
 def to_document_value(value: dict[str, object]) -> JsonObject:
-    return to_document(value)  # pyright: ignore[reportArgumentType]
+    """A tool call's input as JSON (inputs are JSON already; anything else becomes text)."""
+    return to_jsonable_python(value, fallback=str)
 
 
 async def _watch(
@@ -265,7 +267,7 @@ async def run_item(deps: ItemDeps, item: store.ItemRow) -> RunItem | None:
             surface.reply_to = chat.events[-1].message_id
     # One item's failure, whatever it is, must not stop the worker: it is the item's error.
     except Exception as exc:
-        log.warning("eval_item.failed", item_id=str(item.id), error=type(exc).__name__)
+        log.warning("eval_item.failed", item_id=str(item.id), exc_info=True)
         error = ItemError(kind="other", message=type(exc).__name__)
     finally:
         cancel.set()
