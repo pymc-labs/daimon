@@ -37,7 +37,7 @@ from daimon.core.turn.hosted_codec import (
 )
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.persistence import UncertainSend
-from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation
+from mux.contracts.actions import InputEvent, UserMessage, UserToolConfirmation, UserToolResult
 from mux.contracts.events import (
     Event,
     ImagePart,
@@ -153,6 +153,20 @@ def _inputs(
                         "decision": event.get("result"),
                         "deny_message": event.get("deny_message"),
                     }
+                )
+            )
+        elif event.get("type") == "user.custom_tool_result" and codec is SELFHOSTED:
+            # A host tool's result (`host_tools`), for the call it names.
+            identity, content = event.get("custom_tool_use_id"), event.get("content")
+            if not isinstance(identity, str) or not identity.startswith(prefix):
+                raise UnsupportedCapability(("host_origin_confirmation_identity",), profile)
+            if not isinstance(content, list):
+                raise UnsupportedCapability(("host_input_content",), profile)
+            result.append(
+                UserToolResult(
+                    action_id=identity.removeprefix(prefix),
+                    content=tuple(TextPart.model_validate(part) for part in content),
+                    is_error=event.get("is_error") is True,
                 )
             )
         else:
@@ -431,7 +445,11 @@ class HostedTurnIO:
         if new_turn:
             self._input_started = True
             self._resuming = False
-        actions = [item.action_id for item in inputs if isinstance(item, UserToolConfirmation)]
+        actions = [
+            item.action_id
+            for item in inputs
+            if isinstance(item, UserToolConfirmation | UserToolResult)
+        ]
         kind = (
             "send"
             if not actions
@@ -887,7 +905,8 @@ class SelfHostedTurnIO(HostedTurnIO):
         self, events: Sequence[BetaManagedAgentsEventParams], inputs: tuple[InputEvent, ...]
     ) -> tuple[InputEvent, ...] | None:
         if any(
-            isinstance(item, UserToolConfirmation) and item.action_id not in self._action_ids
+            isinstance(item, UserToolConfirmation | UserToolResult)
+            and item.action_id not in self._action_ids
             for item in inputs
         ):
             async with asyncio.timeout(REPLAY_TIMEOUT_S):
@@ -914,7 +933,7 @@ class SelfHostedTurnIO(HostedTurnIO):
                         self._learn_actions(payload)
         resolved: list[InputEvent] = []
         for item in inputs:
-            if isinstance(item, UserToolConfirmation):
+            if isinstance(item, UserToolConfirmation | UserToolResult):
                 action_id = self._action_ids.get(item.action_id)
                 if action_id is None:
                     raise UnsupportedCapability(

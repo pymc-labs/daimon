@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from anthropic.types.beta.sessions import (
+    BetaManagedAgentsAgentCustomToolUseEvent,
     BetaManagedAgentsAgentMCPToolUseEvent,
     BetaManagedAgentsAgentMessageEvent,
     BetaManagedAgentsAgentToolResultEvent,
@@ -67,6 +68,7 @@ type DisplayEvent = (
     BetaManagedAgentsAgentMessageEvent
     | BetaManagedAgentsAgentToolUseEvent
     | BetaManagedAgentsAgentMCPToolUseEvent
+    | BetaManagedAgentsAgentCustomToolUseEvent
     | BetaManagedAgentsAgentToolResultEvent
     | BetaManagedAgentsSessionStatusIdleEvent
     | BetaManagedAgentsSessionStatusRunningEvent
@@ -154,6 +156,12 @@ def _tool_use(payload: ToolUsePayload, raw: dict[str, object], codec: HostedCode
                 {**raw, "type": "agent.mcp_tool_use", "mcp_server_name": payload.mcp_server}
             )
         return BetaManagedAgentsAgentToolUseEvent.model_validate(raw)
+    if payload.executor == "host":
+        # A host tool's call: the turn answers it (`host_tools`), as on Managed Agents.
+        raw.pop("evaluated_permission")
+        return BetaManagedAgentsAgentCustomToolUseEvent.model_validate(
+            {**raw, "type": "agent.custom_tool_use"}
+        )
     server, separator, name = payload.tool_name.partition("/")
     if payload.mcp_server is not None or (payload.executor == "mcp" and separator):
         raw.update(
@@ -271,9 +279,9 @@ def display_event(event: Event, *, session_id: str, codec: HostedCodec) -> Displ
             }
         )
     if isinstance(payload, RequiresActionPayload):
-        if not payload.actions or any(
-            action.kind != "tool_confirmation" for action in payload.actions
-        ):
+        # Self-hosted pauses on host tools' calls too; their results come from the turn.
+        allowed = ("tool_confirmation",) + (("function_result",) if codec is SELFHOSTED else ())
+        if not payload.actions or any(action.kind not in allowed for action in payload.actions):
             raise UnsupportedCapability(("host_required_action_executor",), codec.profile)
         if codec is OPENAI:
             for action in payload.actions:
@@ -315,4 +323,5 @@ def display_batch(event: Event, *, session_id: str, codec: HostedCodec) -> tuple
     payload = event.typed_payload()
     if not isinstance(payload, RequiresActionPayload):
         return (displayed,)
-    return (*(_approval_request(action, event, codec) for action in payload.actions), displayed)
+    asks = (action for action in payload.actions if action.kind == "tool_confirmation")
+    return (*(_approval_request(action, event, codec) for action in asks), displayed)
