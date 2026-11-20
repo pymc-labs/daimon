@@ -139,6 +139,11 @@ async def get_feature_value(
     return None if row is None else FeatureValueRow.model_validate(row)
 
 
+MODE_READS_KEY = "audience_mode_reads"
+"""`session.info` key of the per-transaction `audience_hold` reads (`channel_audience`); a write
+here drops them."""
+
+
 async def set_feature_value(
     session: AsyncSession,
     *,
@@ -153,6 +158,7 @@ async def set_feature_value(
 ) -> FeatureValueRow:
     """Upsert one tier's value and its pin; a thread row keeps its known channel when given
     none."""
+    session.info.pop(MODE_READS_KEY, None)
     agent, channel, thread, routine = _ids(target)
     stmt = pg_insert(FeatureValue).values(
         tenant_id=tenant_id,
@@ -206,6 +212,7 @@ async def clear_feature_value(
     session: AsyncSession, *, tenant_id: uuid.UUID, target: FeatureTarget, key: str
 ) -> bool:
     """Drop the tier's value so it inherits again. Returns whether a row existed."""
+    session.info.pop(MODE_READS_KEY, None)
     result = await session.execute(
         delete(FeatureValue).where(
             FeatureValue.tenant_id == tenant_id, FeatureValue.key == key, _match(target)

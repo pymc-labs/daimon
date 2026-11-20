@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.channel_directory import list_shared_channel_ids
+from daimon.core.stores.feature_values import MODE_READS_KEY
 from daimon.core.stores.shared_channels import is_channel_shared
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,9 +75,27 @@ def mode_of(value: str) -> AudienceMode:
 async def audience_mode(
     session: AsyncSession, place: FeaturePlace, *, settings: Settings | None = None
 ) -> AudienceMode:
-    """The server's `audience_hold` mode. A failed read raises: it never falls back to a mode."""
+    """The server's `audience_hold` mode. A failed read raises: it never falls back to a mode.
+
+    A transaction reads each server once: the policy load, the hold and the write guard share
+    the answer. A new transaction, or a feature write in this one, reads it again."""
+    # The setting has only deployment and workspace tiers: every room of a server shares it.
+    key = (place.tenant_id, place.platform, None if settings is None else id(settings))
+    held = cast(
+        "tuple[object, dict[object, AudienceMode]] | None", session.info.get(MODE_READS_KEY)
+    )
+    transaction = session.get_transaction()
+    if transaction is not None and held is not None and held[0] is transaction and key in held[1]:
+        return held[1][key]
     resolved = await feature_in(session, settings, place, "audience_hold")
-    return mode_of(resolved.value)
+    mode = mode_of(resolved.value)
+    transaction = session.get_transaction()  # the read itself may have begun it
+    if transaction is not None:
+        if held is None or held[0] is not transaction:
+            held = (transaction, dict[object, AudienceMode]())
+            session.info[MODE_READS_KEY] = held
+        held[1][key] = mode
+    return mode
 
 
 __all__ = [
