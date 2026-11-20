@@ -101,6 +101,21 @@ class World:
         )
         await runs.execute(self.sm, self.settings, fakes, claimed, clock=lambda: now)
 
+    async def park(self, run_id: uuid.UUID, key: str, now: datetime = NOW) -> uuid.UUID:
+        """Run an approval step with the real executor; returns the wait it opened."""
+        # Imported here: the waits module pulls in the whole run engine.
+        from daimon.core.stores import workflow_waits
+        from daimon.core.workflows.waits import ApprovalExecutor
+
+        claimed = await self.claim(run_id, key, now)
+        executors: dict[str, runs.StepExecutor] = {
+            "approval": ApprovalExecutor(self.sm, clock=lambda: now)
+        }
+        await runs.execute(self.sm, self.settings, executors, claimed, clock=lambda: now)
+        step = (await self.steps(run_id))[key]
+        async with self.sm() as s:
+            return (await workflow_waits.waits_of_step(s, step.id))[-1].id
+
     async def add_workflow(self, nodes: dict[str, Any], start: str) -> uuid.UUID:
         """Another published workflow of the owner's, with a call trigger."""
         spec = _spec(nodes, start) | {"triggers": [{"id": "call", "kind": "call"}]}
