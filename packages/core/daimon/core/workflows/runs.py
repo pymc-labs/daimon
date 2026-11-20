@@ -17,10 +17,16 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
-from daimon.core.stores import security_audit, workflow_runs, workflow_triggers, workflows
+from daimon.core.stores import (
+    security_audit,
+    workflow_runs,
+    workflow_triggers,
+    workflow_waits,
+    workflows,
+)
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
-from daimon.core.workflows import delivery, engine
+from daimon.core.workflows import callbacks, delivery, engine
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
@@ -43,6 +49,9 @@ Sessions = async_sessionmaker[AsyncSession]
 ENGINE: Final = "engine"
 READY_CHANNEL: Final = "workflow_ready"
 START_CHANNEL: Final = "workflow_start"
+WAITS_CHANNEL: Final = "workflow_waits"
+#: How long an event that no wait took yet is held for one that opens later.
+EVENT_BUFFER: Final = timedelta(hours=1)
 DEFAULT_DEADLINE: Final = timedelta(days=7)
 BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
@@ -100,8 +109,25 @@ class StepWork:
     place: Place | None = None
 
 
+@dataclass(frozen=True)
+class Park:
+    """The step waits instead of settling: on the open wait `wait` (a question its tool
+    opened), or on a new wait of `kind` that `execute` opens with the step."""
+
+    kind: Literal["approval", "question", "timer", "event", "blocked"]
+    wait: uuid.UUID | None = None
+    addressees: tuple[str, ...] = ()
+    deliver: str | None = None
+    min_approvals: int = 1
+    shown: dict[str, Any] | None = None
+    event_source: str | None = None
+    event_key: str | None = None
+    expires_at: datetime | None = None
+    remind_at: datetime | None = None
+
+
 class StepExecutor(Protocol):
-    async def __call__(self, work: StepWork, /) -> Outcome: ...
+    async def __call__(self, work: StepWork, /) -> Outcome | Park: ...
 
 
 @dataclass(frozen=True)
@@ -170,7 +196,13 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
     pinned = (run.test_options or {}).get("pinned", {})
     facts = RunFacts(
         inputs=run.inputs,
-        run={"id": str(run.id), "number": run.number, "mode": run.mode, "label": run.label},
+        run={
+            "id": str(run.id),
+            "number": run.number,
+            "mode": run.mode,
+            "label": run.label,
+            "callbacks": dict(callbacks.urls(settings, spec, run.id)),
+        },
         workflow={"id": str(workflow.id), "name": workflow.name},
         trigger={"kind": run.trigger_kind, "key": run.trigger_key},
         now=now,
@@ -334,11 +366,10 @@ async def _offer_finished(
     starts loop filters and maps it. A chain stops at `MAX_CHAIN_DEPTH`."""
     run = loaded.run
     depth = chain_depth(run) + 1
+    source = f"workflow:{run.workflow_id}"
     listeners = await workflow_triggers.event_triggers_for(
-        session, tenant_id=run.tenant_id, source=f"workflow:{run.workflow_id}"
+        session, tenant_id=run.tenant_id, source=source
     )
-    if not listeners or depth > MAX_CHAIN_DEPTH:
-        return
     finish = [r for r in rows if isinstance(loaded.spec.nodes.get(r.node_id), FinishNode)]
     output = max(finish, key=lambda r: r.visit).output if finish else None
     event: dict[str, Any] = {
@@ -352,6 +383,9 @@ async def _offer_finished(
         },
         "depth": depth,
     }
+    await offer_event(session, run.tenant_id, source, run.concurrency_key, event, now)
+    if not listeners or depth > MAX_CHAIN_DEPTH:
+        return
     for trigger in listeners:
         await workflow_triggers.record_event(
             session,
@@ -363,6 +397,27 @@ async def _offer_finished(
             payload=event,
         )
     await _notify(session, START_CHANNEL, str(run.id))
+
+
+async def offer_event(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    source: str,
+    key: str | None,
+    payload: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Hold an event for the event waits on `source` (and `key`); the waits loop matches it."""
+    await workflow_waits.buffer_event(
+        session,
+        tenant_id=tenant_id,
+        source=source,
+        event_key=key,
+        payload=payload,
+        now=now,
+        expires_at=now + EVENT_BUFFER,
+    )
+    await _notify(session, WAITS_CHANNEL, source)
 
 
 async def _notify(session: AsyncSession, channel: str, payload: str) -> None:
@@ -678,7 +733,7 @@ async def execute(
         budget_usd=loaded.run.budget_usd,
         cost_usd=loaded.run.cost_usd,
     )
-    outcome: Outcome
+    outcome: Outcome | Park
     if isinstance(refusal, Refusal):
         if refusal.gate:
             await _block(sm, settings, claimed, refusal, now=clock())
@@ -706,6 +761,9 @@ async def execute(
             outcome = await executor(work)
         except Exception as err:  # an executor bug fails its step, never the loop
             outcome = engine.Failed("fatal", _cut(f"{type(err).__name__}: {err}") or "")
+    if isinstance(outcome, Park):
+        await _park(sm, settings, claimed, outcome, now=clock())
+        return
     await settle(
         sm,
         settings,
@@ -814,48 +872,134 @@ async def _block(
     sm: Sessions, settings: Settings, claimed: Claimed, refusal: Refusal, *, now: datetime
 ) -> None:
     """A spend gate refused the step: it waits `blocked` and the waits loop rechecks it."""
+    park = Park(
+        "blocked",
+        expires_at=now + BLOCKED_FOR,
+        remind_at=now + BLOCKED_RECHECK,
+        shown={"reason": refusal.reason, "message": refusal.message},
+    )
+    await _park(sm, settings, claimed, park, now=now, blocked=refusal)
+
+
+async def _park(
+    sm: Sessions,
+    settings: Settings,
+    claimed: Claimed,
+    park: Park,
+    *,
+    now: datetime,
+    blocked: Refusal | None = None,
+) -> None:
+    """The step waits on `park`'s wait. Its attempt runs on (a question resumes it), except
+    a blocked step's, which a recheck runs again."""
     async with sm.begin() as session:
         held = await _locked_step(session, claimed.step.id, claimed.step.generation, "running")
         if held is None:
             return
         run, step = held
-        await workflow_runs.finish_attempt(
-            session,
-            step_id=step.id,
-            status="abandoned",
-            now=now,
-            error_class="gate",
-            error_message=refusal.message,
-        )
-        wait = await workflow_runs.open_wait(
-            session,
-            tenant_id=run.tenant_id,
-            run_id=run.id,
-            step_id=step.id,
-            kind="blocked",
-            expires_at=now + BLOCKED_FOR,
-            remind_at=now + BLOCKED_RECHECK,
-            shown={"reason": refusal.reason, "message": refusal.message},
-            now=now,
-        )
+        kind = park.kind
+        if blocked:
+            await workflow_runs.finish_attempt(
+                session,
+                step_id=step.id,
+                status="abandoned",
+                now=now,
+                error_class="gate",
+                error_message=blocked.message,
+            )
+        events: list[Event] = []
+        if park.wait is None:
+            wait = await workflow_runs.open_wait(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                step_id=step.id,
+                kind=kind,
+                expires_at=park.expires_at,
+                remind_at=park.remind_at,
+                shown=park.shown,
+                addressees=park.addressees,
+                deliver=park.deliver,
+                min_approvals=park.min_approvals,
+                event_source=park.event_source,
+                event_key=park.event_key,
+                now=now,
+            )
+            data: dict[str, JsonValue] = {
+                "id": str(wait.id),
+                "kind": kind,
+                "addressees": list(park.addressees),
+                "expires_at": park.expires_at.isoformat() if park.expires_at else None,
+            }
+            if blocked:
+                data["reason"] = blocked.reason
+            events.append(Event("wait.opened", _key(step), data))
+            if kind == "event":
+                await _notify(session, WAITS_CHANNEL, str(wait.id))  # a held event may match
         write: StepWrite = {
             "status": "waiting",
-            "waiting_reason": "blocked",
+            "waiting_reason": kind,
             "lease_owner": None,
             "lease_expires_at": None,
         }
-        event = Event(
-            "wait.opened",
-            _key(step),
-            {"wait": str(wait.id), "kind": "blocked", "reason": refusal.reason},
-        )
         await _apply(
             session,
             await _load(session, settings, run, now),
-            Transition((), (event,), None),
+            Transition((), tuple(events), None),
             now=now,
             writes={(step.node_id, step.visit): write},
         )
+
+
+async def resume(
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    run: RunRow,
+    step: StepRow,
+    outcome: Outcome | None,
+    before: Sequence[Event],
+    now: datetime,
+    actor: str = ENGINE,
+) -> None:
+    """A waiting step moves on, run and step locked by the caller: settled by `outcome`,
+    or ready again for its attempt to continue (an answered question) when it is None."""
+    loaded = await _load(session, settings, run, now)
+    if outcome is None:
+        write: StepWrite = {"status": "ready", "ready_at": now, "waiting_reason": None}
+        await _apply(
+            session,
+            loaded,
+            Transition((), (), None),
+            now=now,
+            actor=actor,
+            before=before,
+            writes={(step.node_id, step.visit): write},
+        )
+        return
+    failed = isinstance(outcome, engine.Failed)
+    await workflow_runs.finish_attempt(
+        session,
+        step_id=step.id,
+        status="failed" if failed else "succeeded",
+        now=now,
+        error_class=outcome.error_class if isinstance(outcome, engine.Failed) else None,
+        error_message=_cut(outcome.message) if isinstance(outcome, engine.Failed) else None,
+    )
+    transition = engine.resolve(
+        loaded.spec, loaded.views(), step.node_id, step.visit, outcome, loaded.facts
+    )
+    await _apply(session, loaded, transition, now=now, actor=actor, before=before)
+
+
+async def context_of(
+    session: AsyncSession, settings: Settings, run: RunRow, node_id: str, now: datetime
+) -> dict[str, JsonValue]:
+    """What a node's expressions see in this run now."""
+    loaded = await _load(session, settings, run, now)
+    return engine.expression_context(
+        loaded.spec, loaded.views(), node_id=node_id, facts=loaded.facts
+    )
 
 
 async def recheck_blocked(

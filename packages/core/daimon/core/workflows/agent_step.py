@@ -4,8 +4,10 @@ Flow: pick the lane (a busy one gets a lane of its own), continue its session or
 save the session on the attempt before the brief is sent, drive the turn through `LaneTurn`
 (the scheduler's headless runner), then settle from what `complete_step`, `fail_step` or
 `finish_early` recorded. No result earns one nudge, after preflight passes again; still
-none fails `no_result`. A lost worker's attempt keeps its session and reattaches to the
-turn in flight. A failed turn replaces its lane, so the retry starts fresh with the brief.
+none fails `no_result`. A question (`ask_human`) parks the step until a person answers;
+the answer is the session's next message. A lost worker's attempt keeps its session and
+reattaches to the turn in flight. A failed turn replaces its lane, so the retry starts fresh
+with the brief.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from daimon.core.config import Settings
 from daimon.core.headless_runner import StepTurn
 from daimon.core.stores import workflow_runs
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
+from daimon.core.stores.workflow_waits import Wait
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PROXY_TOOL_NAME,
@@ -37,12 +40,12 @@ from daimon.core.turn.unattended_capabilities import (
     ServerTool,
     StepTools,
 )
-from daimon.core.workflows import engine, step_tools
+from daimon.core.workflows import engine, step_tools, waits
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key
 from daimon.core.workflows.preflight import Refusal, check
-from daimon.core.workflows.runs import ENGINE, Sessions, StepWork
+from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork
 from daimon.core.workflows.spec import AgentNode
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -220,7 +223,7 @@ class AgentStepExecutor:
     propose: Propose | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
-    async def __call__(self, work: StepWork) -> engine.Outcome:
+    async def __call__(self, work: StepWork) -> engine.Outcome | Park:
         node = work.node
         assert isinstance(node, AgentNode), "the agent executor runs agent nodes"
         if node.session == OWNER_DM:
@@ -254,6 +257,10 @@ class AgentStepExecutor:
             untrusted_source=work.run.trigger_kind if work.run.untrusted_inputs else None,
         )
         resume = attempt.session_id is not None
+        asked = await self._asked(work, attempt.id) if resume else None
+        if asked is not None and asked.status == "waiting":
+            return Park("question", wait=asked.id)
+        message = brief if asked is None else await self._answered(work, key, attempt.id, asked)
 
         async def on_session(sid: str) -> None:
             async with self.sm.begin() as s:
@@ -289,13 +296,24 @@ class AgentStepExecutor:
             workflow_run_id=work.run.id,
             workflow_step_id=work.step.id,
             on_session=on_session,
-            resume=resume,
+            resume=resume and asked is None,
             on_render=_Activity(self.sm, work.run.tenant_id, work.step.id, self.clock, set()),
         )
-        failed = await self._drive(work, lane, brief, session_id, step, writes)
-        if failed is not None:
-            return failed
-        result = await self._recorded(work, attempt.id)
+        result: step_tools.Recorded | None = None
+        for _ in range(waits.MAX_QUESTIONS + 1):
+            failed = await self._drive(work, lane, message, session_id, step, writes)
+            if failed is not None:
+                return failed
+            result = await self._recorded(work, attempt.id)
+            asked = None if result else await self._asked(work, attempt.id)
+            if asked is None:
+                break
+            if asked.status == "waiting":
+                return Park("question", wait=asked.id)
+            message = await self._answered(work, key, attempt.id, asked)
+            async with self.sm() as s:
+                session_id = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
+            step = replace(step, resume=False)
         if result is None:
             refused = await self._recheck(work)
             if refused is not None:
@@ -351,6 +369,19 @@ class AgentStepExecutor:
         if isinstance(refusal, Refusal):
             return engine.Failed("gate", refusal.message, reason=refusal.reason)
         return None
+
+    async def _asked(self, work: StepWork, attempt_id: uuid.UUID) -> Wait | None:
+        async with self.sm() as s:
+            return await waits.pending_question(
+                s, run_id=work.run.id, step=work.step, attempt_id=attempt_id
+            )
+
+    async def _answered(self, work: StepWork, key: str, attempt_id: uuid.UUID, asked: Wait) -> str:
+        """The answer as the session's next message, marked sent so it goes once."""
+        async with self.sm.begin() as s:
+            data: dict[str, JsonValue] = {"attempt": str(attempt_id), "answer": str(asked.id)}
+            await self._event(s, work, key, step_tools.BRIEF_SENT, data)
+        return waits.answer_message(asked, attempt_id)
 
     async def _recorded(self, work: StepWork, attempt_id: uuid.UUID) -> step_tools.Recorded | None:
         async with self.sm() as s:

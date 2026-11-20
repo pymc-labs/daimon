@@ -29,7 +29,7 @@ from daimon.core.workflows.access import Rights, Who, holders, rights_of
 from daimon.core.workflows.expressions import ExpressionError, render
 from daimon.core.workflows.preflight import Refusal
 from daimon.core.workflows.runs import Sessions
-from daimon.core.workflows.spec import dump_spec, parse_spec, spec_hash
+from daimon.core.workflows.spec import dump_spec, node_hash, parse_spec, spec_hash
 from daimon.core.workflows.taint import Catalog
 from daimon.core.workflows.templates import load_template
 from daimon.core.workflows.validate import Validation, validate_document
@@ -507,6 +507,87 @@ async def request_publish(env: Env, workflow_id: uuid.UUID, note: str) -> views.
         )
         fresh, access, _ = await _load(session, env, workflow_id)
         return await views.workflow_view(session, fresh, env.who, now=env.now, access=access)
+
+
+async def decide_publish_request(
+    env: Env, request_id: uuid.UUID, *, approve: bool, comment: str | None
+) -> publish_requests.PublishRequestRow:
+    """A current human admin approves (publishing the requested spec with its grants, as
+    its requester) or rejects with a comment."""
+    if not env.who.admin or env.who.external:
+        raise Forbidden("Only an admin can approve this. Ask an admin.")
+    note = (comment or "").strip()[:500] or None
+    if not approve and note is None:
+        raise Invalid("Add a comment.")
+    async with env.sm.begin() as session:
+        request = await publish_requests.get_request(
+            session, tenant_id=env.who.tenant_id, request_id=request_id, lock=True
+        )
+        if request is None:
+            raise NotFound("This request is gone.")
+        if request.status != "pending":
+            raise Refused("This request was already decided.")
+        version = None
+        if approve:
+            workflow, _, _ = await _load(session, env, request.workflow_id, lock=True)
+            parsed = parse_spec(request.spec)
+            spec = dump_spec(parsed)
+            requester = request.requested_by_account_id or env.who.account_id
+            row = await store.publish_version(
+                session,
+                tenant_id=workflow.tenant_id,
+                workflow_id=workflow.id,
+                spec=spec,
+                spec_hash=spec_hash(parsed),
+                source="web",
+                published_by=requester,
+                note=request.note,
+                approved_by=env.who.account_id,
+                now=env.now,
+            )
+            version = row.number
+            grants = [
+                {
+                    "kind": g["kind"],
+                    "node_id": g.get("node"),
+                    "pins": {"node_hash": node_hash(parsed.nodes[g["node"]])}
+                    if g.get("node") in parsed.nodes
+                    else {},
+                }
+                for g in request.grants
+            ]
+            await publish_requests.add_grants(
+                session,
+                tenant_id=workflow.tenant_id,
+                workflow_id=workflow.id,
+                version=version,
+                grants=grants,
+                approved_by=env.who.account_id,
+                now=env.now,
+            )
+            changes = _sync(spec)
+            if workflow.status == "needs_owner":
+                changes["owner_account_id"] = requester
+                await store.set_status(
+                    session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, status="active"
+                )
+            await store.update_settings(
+                session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, **changes
+            )
+        await publish_requests.decide_request(
+            session,
+            request.id,
+            status="approved" if approve else "rejected",
+            by=env.who.account_id,
+            comment=note,
+            version=version,
+            now=env.now,
+        )
+        decided = await publish_requests.get_request(
+            session, tenant_id=env.who.tenant_id, request_id=request.id
+        )
+    assert decided is not None
+    return decided
 
 
 async def export(

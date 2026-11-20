@@ -15,9 +15,11 @@ from typing import Any, Literal
 
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
+from daimon.core.stores import workflow_waits as waits_store
 from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_run_events import EventRow, list_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
+from daimon.core.stores.workflow_waits import Wait
 from daimon.core.workflows import ledger
 from daimon.core.workflows.engine import RunFacts, StepView, expression_context, step_key
 from daimon.core.workflows.expressions import ExpressionError, Ref, render, template_refs
@@ -242,13 +244,38 @@ def _wanted_accounts(events: Sequence[EventRow]) -> set[uuid.UUID]:
 
 
 async def event_views(session: AsyncSession, run: RunRow, *, after_seq: int = 0) -> list[RunEvent]:
+    """Ledger rows for the page, with names, and answers read from their waits (the ledger
+    holds only the answer's hash)."""
     events = await list_events(session, run.id, after_seq=after_seq)
     names = await people_of(session, run.tenant_id, _wanted_accounts(events))
-    return [event_view(e, names) for e in events]
+    answered = [
+        uuid.UUID(str(e.data["id"]))
+        for e in events
+        if e.type == "wait.decided" and isinstance(e.data.get("answer"), dict)
+    ]
+    found = await waits_store.waits_by_id(session, answered)
+    return [event_view(e, names, found) for e in events]
 
 
-def event_view(e: EventRow, names: Mapping[uuid.UUID, Person]) -> RunEvent:
+def _answer(wait: Wait, at: str, names: Mapping[uuid.UUID, Person]) -> dict[str, Any]:
+    return {
+        "by": person(names, wait.decided_by_account_id).model_dump(),
+        "via": wait.decided_via or "web",
+        "text": wait.answer_text,
+        "values": wait.answer_values or {},
+        "files": wait.answer_files or [],
+        "at": at,
+    }
+
+
+def event_view(
+    e: EventRow, names: Mapping[uuid.UUID, Person], waits: Mapping[uuid.UUID, Wait] | None = None
+) -> RunEvent:
     data = dict(e.data)
+    answer = data.get("answer")
+    if e.type == "wait.decided" and isinstance(answer, dict):
+        wait = (waits or {}).get(uuid.UUID(str(data["id"])))
+        data["answer"] = _answer(wait, str(answer.get("at", "")), names) if wait else None  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     if "by" in data:
         data["by"] = _hydrate(data["by"], names)
     if isinstance(data.get("addressees"), list):

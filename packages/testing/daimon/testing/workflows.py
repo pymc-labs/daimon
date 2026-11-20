@@ -47,7 +47,8 @@ class World:
 
     def start(self, **kw: Any) -> Start:  # noqa: ANN401 - forwards Start fields
         kw.setdefault("run_as_account_id", self.owner)
-        return Start(self.workflow_id, triggered_by={"kind": "person"}, **kw)
+        kw.setdefault("triggered_by", {"kind": "person"})
+        return Start(self.workflow_id, **kw)
 
     async def run(self, **kw: Any) -> workflow_runs.RunRow:  # noqa: ANN401 - Start fields
         run = await runs.start_run(
