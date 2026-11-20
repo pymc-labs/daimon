@@ -226,7 +226,9 @@ async def test_a_billed_fallback_is_reread_after_a_restart_until_final(sm, monke
     async with sm() as db:
         newest = await mux_state.get_newest_usage_revision(db, row.binding_id, row.observation_id)
     assert newest is not None
-    final = row.observation.model_copy(update=_MEASURED | {"revision": newest + 1, "final": True})
+    # Twice the fallback's tokens, so a charge of the whole reading would show.
+    doubled = {"input_tokens": 2000, "output_tokens": 200, "revision": newest + 1, "final": True}
+    final = row.observation.model_copy(update=_MEASURED | doubled)
     read: list[str] = []
 
     async def reconcile_turn(self, scope, session, turn_id):
@@ -237,7 +239,7 @@ async def test_a_billed_fallback_is_reread_after_a_restart_until_final(sm, monke
     monkeypatch.setattr(OpenAIUsage, "reconcile_turn", reconcile_turn)
     now = datetime.now(UTC)
     assert await DurableRereads().run(sm, markup=Decimal(1), now=now) == 1, "read after restart"
-    assert await _debited(sm) == debited, "the final reading charges nothing twice"
+    assert await _debited(sm) == 2 * debited, "the final reading charges only what's new"
     assert await DurableRereads().run(sm, markup=Decimal(1), now=now) == 0, "final ends it"
     assert read == ["turn"], "read once more after the restart, then never"
 
